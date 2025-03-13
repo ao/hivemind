@@ -1,5 +1,7 @@
 # Project Hivemind
 
+<img src="./assets//logo1.png" width="100px">
+
 A self-organizing container orchestration system written in Rust. Hivemind provides a lightweight, distributed container management platform with built-in service discovery, health monitoring, and automatic scaling capabilities.
 
 ## Features
