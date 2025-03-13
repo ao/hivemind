@@ -1,0 +1,77 @@
+{% extends "base.html" %} {% block title %}Dashboard{% endblock %} {% block
+content %}
+<h1>Hivemind Dashboard</h1>
+
+<div class="card">
+    <h2>System Overview</h2>
+    <div style="display: flex; justify-content: space-between; flex-wrap: wrap">
+        <div style="text-align: center; min-width: 150px; margin: 10px">
+            <h3>Containers</h3>
+            <p style="font-size: 2em">{{ containers_count }}</p>
+        </div>
+        <div style="text-align: center; min-width: 150px; margin: 10px">
+            <h3>Running</h3>
+            <p style="font-size: 2em">{{ running_containers }}</p>
+        </div>
+        <div style="text-align: center; min-width: 150px; margin: 10px">
+            <h3>Nodes</h3>
+            <p style="font-size: 2em">{{ nodes_count }}</p>
+        </div>
+        <div style="text-align: center; min-width: 150px; margin: 10px">
+            <h3>Services</h3>
+            <p style="font-size: 2em">{{ services_count }}</p>
+        </div>
+    </div>
+</div>
+
+<div class="card">
+    <h2>Recent Containers</h2>
+    <table>
+        <thead>
+            <tr>
+                <th>Name</th>
+                <th>Image</th>
+                <th>Status</th>
+                <th>Node</th>
+            </tr>
+        </thead>
+        <tbody>
+            {% for container in recent_containers %}
+            <tr>
+                <td>{{ container.name }}</td>
+                <td>{{ container.image }}</td>
+                <td class="status-{{ container.status | lower }}">
+                    {{ container.status }}
+                </td>
+                <td>{{ container.node_id }}</td>
+            </tr>
+            {% endfor %}
+        </tbody>
+    </table>
+</div>
+
+<div class="card">
+    <h2>Services</h2>
+    <table>
+        <thead>
+            <tr>
+                <th>Name</th>
+                <th>Domain</th>
+                <th>Replicas</th>
+            </tr>
+        </thead>
+        <tbody>
+            {% for service in services %}
+            <tr>
+                <td>{{ service.name }}</td>
+                <td>{{ service.domain }}</td>
+                <td>
+                    {{ service.current_replicas }}/{{ service.desired_replicas
+                    }}
+                </td>
+            </tr>
+            {% endfor %}
+        </tbody>
+    </table>
+</div>
+{% endblock %}

@@ -1,10 +1,10 @@
-use crate::container_manager::{ContainerManager, Container, ContainerStatus};
+use crate::app::{AppManager, Container, ContainerStatus};
 use crate::node::{NodeManager, NodeResources};
 use anyhow::Result;
 use std::sync::Arc;
 
 pub struct ContainerScheduler {
-    container_manager: ContainerManager,
+    app_manager: AppManager,
     node_manager: Option<Arc<NodeManager>>,
     scheduling_interval: u64, // seconds
     rebalance_threshold: f64, // percentage difference to trigger rebalancing
@@ -20,9 +20,9 @@ struct NodeLoad {
 }
 
 impl ContainerScheduler {
-    pub fn new(container_manager: ContainerManager) -> Self {
+    pub fn new(app_manager: AppManager) -> Self {
         Self {
-            container_manager,
+            app_manager,
             node_manager: None,
             scheduling_interval: 30,
             rebalance_threshold: 20.0, // 20% difference in load will trigger rebalancing
@@ -71,7 +71,7 @@ impl ContainerScheduler {
         }
 
         // Get all containers
-        let containers = self.container_manager.get_container_details().await?;
+        let containers = self.app_manager.get_container_details().await?;
         
         // Calculate current load for each node
         let mut node_loads = self.calculate_node_loads(&node_details, &containers).await?;
