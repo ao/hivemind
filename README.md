@@ -215,7 +215,7 @@ Distributed operation for scaling and high availability:
 ### Build from source
 
 ```bash
-git clone https://github.com/YOUR-REPO/hivemind.git
+git clone https://github.com/ao/hivemind.git
 cd hivemind
 cargo build --release
 ```
