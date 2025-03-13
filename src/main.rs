@@ -5,6 +5,7 @@ use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 
 mod app;
+mod containerd_manager;
 mod node;
 mod scheduler;
 mod service_discovery;
@@ -103,20 +104,6 @@ pub struct AppState {
     pub node_manager: NodeManager,
     pub app_manager: AppManager,
     pub service_discovery: ServiceDiscovery,
-}
-
-async fn hello() -> &'static str {
-    "Hello from Hivemind!"
-}
-
-async fn list_containers(State(state): State<AppState>) -> Json<Vec<String>> {
-    Json(
-        state
-            .app_manager
-            .list_containers()
-            .await
-            .unwrap_or_default(),
-    )
 }
 
 async fn list_images(State(state): State<AppState>) -> Json<Vec<String>> {
@@ -229,15 +216,34 @@ async fn main() -> Result<()> {
 
     match cli.command {
         Commands::Daemon { web_port } => {
-            // Use a default web port value
-            // let web_port = 3000;
+            // Default containerd socket path
+            let containerd_socket = "/run/containerd/containerd.sock";
+            let containerd_namespace = "hivemind";
 
             let storage = StorageManager::new(&cli.data_dir).await?;
             let node_manager = NodeManager::with_storage(storage.clone()).await;
             let service_discovery = ServiceDiscovery::new();
-            let app_manager = AppManager::with_storage(storage)
-                .await?
-                .with_service_discovery(service_discovery.clone());
+
+            // Initialize AppManager with containerd
+            let app_manager = match AppManager::with_containerd(
+                storage.clone(),
+                containerd_socket,
+                containerd_namespace,
+            )
+            .await
+            {
+                Ok(manager) => {
+                    println!("Successfully connected to containerd");
+                    manager.with_service_discovery(service_discovery.clone())
+                }
+                Err(e) => {
+                    eprintln!("Failed to connect to containerd: {}", e);
+                    eprintln!("Falling back to mock implementation");
+                    AppManager::with_storage(storage)
+                        .await?
+                        .with_service_discovery(service_discovery.clone())
+                }
+            };
 
             // Create AppState for sharing between web and API
             let app_state = AppState {
