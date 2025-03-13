@@ -1,11 +1,11 @@
 use crate::app::ServiceConfig;
 use anyhow::Result;
+use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::sync::Arc;
 use tokio::net::UdpSocket;
 use tokio::sync::Mutex;
-use serde::{Serialize, Deserialize};
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct ServiceEndpoint {
@@ -60,8 +60,8 @@ impl ServiceDiscovery {
     pub fn new() -> Self {
         Self {
             services: Arc::new(Mutex::new(HashMap::new())),
-            dns_port: 53,  // Standard DNS port
-            proxy_port: 8080,  // Default proxy port
+            dns_port: 53,     // Standard DNS port
+            proxy_port: 8080, // Default proxy port
         }
     }
 
@@ -88,25 +88,27 @@ impl ServiceDiscovery {
         };
 
         let mut services = self.services.lock().await;
-        
+
         if let Some(endpoints) = services.get_mut(&service_config.name) {
             // Check if this endpoint already exists
-            let exists = endpoints.iter().any(|e| 
-                e.node_id == node_id && 
-                e.ip_address == ip_address && 
-                e.port == port
-            );
-            
+            let exists = endpoints
+                .iter()
+                .any(|e| e.node_id == node_id && e.ip_address == ip_address && e.port == port);
+
             if !exists {
                 endpoints.push(endpoint);
-                println!("Registered new endpoint for service {}: {}:{}", 
-                    service_config.name, ip_address, port);
+                println!(
+                    "Registered new endpoint for service {}: {}:{}",
+                    service_config.name, ip_address, port
+                );
             }
         } else {
             // First endpoint for this service
             services.insert(service_config.name.clone(), vec![endpoint]);
-            println!("Registered new service {} with endpoint {}:{}", 
-                service_config.name, ip_address, port);
+            println!(
+                "Registered new service {} with endpoint {}:{}",
+                service_config.name, ip_address, port
+            );
         }
 
         Ok(())
@@ -120,22 +122,22 @@ impl ServiceDiscovery {
         port: u16,
     ) -> Result<()> {
         let mut services = self.services.lock().await;
-        
+
         if let Some(endpoints) = services.get_mut(service_name) {
             // Remove matching endpoints
-            endpoints.retain(|e| 
-                !(e.node_id == node_id && 
-                  e.ip_address == ip_address && 
-                  e.port == port)
-            );
-            
+            endpoints.retain(|e| {
+                !(e.node_id == node_id && e.ip_address == ip_address && e.port == port)
+            });
+
             // If no endpoints left, remove the service
             if endpoints.is_empty() {
                 services.remove(service_name);
                 println!("Removed service {} as it has no endpoints", service_name);
             } else {
-                println!("Deregistered endpoint {}:{} for service {}", 
-                    ip_address, port, service_name);
+                println!(
+                    "Deregistered endpoint {}:{} for service {}",
+                    ip_address, port, service_name
+                );
             }
         }
 
@@ -147,16 +149,19 @@ impl ServiceDiscovery {
         services.get(service_name).cloned()
     }
 
-    pub async fn get_service_by_domain(&self, domain: &str) -> Option<(String, Vec<ServiceEndpoint>)> {
+    pub async fn get_service_by_domain(
+        &self,
+        domain: &str,
+    ) -> Option<(String, Vec<ServiceEndpoint>)> {
         let services = self.services.lock().await;
-        
+
         for (service_name, endpoints) in services.iter() {
             // Check if any endpoint matches this domain
             if let Some(_endpoint) = endpoints.iter().find(|e| e.domain == domain) {
                 return Some((service_name.clone(), endpoints.clone()));
             }
         }
-        
+
         None
     }
 
@@ -167,17 +172,17 @@ impl ServiceDiscovery {
 
     pub async fn start_dns_server(&self) -> Result<()> {
         println!("Starting DNS server on port {}", self.dns_port);
-        
+
         // Clone necessary data for the DNS server task
         let services = self.services.clone();
         let dns_port = self.dns_port;
-        
+
         tokio::spawn(async move {
             if let Err(e) = Self::run_dns_server(dns_port, services).await {
                 eprintln!("DNS server error: {}", e);
             }
         });
-        
+
         Ok(())
     }
 
@@ -191,19 +196,19 @@ impl ServiceDiscovery {
             dns_port,
         ))
         .await?;
-        
+
         println!("DNS server listening on port {}", dns_port);
-        
+
         // Create a buffer for receiving DNS queries
         let mut buf = [0u8; 512]; // Standard DNS message size
-        
+
         loop {
             match socket.recv_from(&mut buf).await {
                 Ok((_len, src)) => {
                     // In a real implementation, this would parse the DNS query
                     // and respond with the appropriate IP address
                     println!("Received DNS query from {}", src);
-                    
+
                     // Simple mock response for now
                     let response = [0u8; 32]; // Dummy response
                     if let Err(e) = socket.send_to(&response[..], src).await {
@@ -219,7 +224,10 @@ impl ServiceDiscovery {
         let services = self.services.lock().await;
         if let Some(endpoints) = services.get(service_name) {
             // Find a healthy endpoint
-            if let Some(endpoint) = endpoints.iter().find(|e| e.health_status == ServiceHealth::Healthy) {
+            if let Some(endpoint) = endpoints
+                .iter()
+                .find(|e| e.health_status == ServiceHealth::Healthy)
+            {
                 return Some(format!("http://{}:{}", endpoint.ip_address, endpoint.port));
             }
         }
@@ -228,17 +236,17 @@ impl ServiceDiscovery {
 
     pub async fn start_proxy_server(&self) -> Result<()> {
         println!("Starting proxy server on port {}", self.proxy_port);
-        
+
         // Clone necessary data for the proxy server task
         let services = self.services.clone();
         let proxy_port = self.proxy_port;
-        
+
         tokio::spawn(async move {
             if let Err(e) = Self::run_proxy_server(proxy_port, services).await {
                 eprintln!("Proxy server error: {}", e);
             }
         });
-        
+
         Ok(())
     }
 

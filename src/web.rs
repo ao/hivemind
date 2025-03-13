@@ -10,8 +10,6 @@ use std::sync::Arc;
 use tera::{Context, Tera};
 
 use crate::app::{Container, ContainerStatus};
-use crate::node::NodeManager;
-use crate::service_discovery::{ServiceDiscovery, ServiceEndpoint};
 
 // AppState is imported from main.rs
 use crate::AppState;
@@ -359,6 +357,11 @@ impl WebServer {
             .route("/api/scale", post(api_scale_handler))
             .route("/api/restart", post(api_restart_handler))
             .route("/api/service-url", post(api_service_url_handler))
+            // Volume management API routes
+            .route("/volumes", get(volumes_handler))
+            .route("/api/volumes", get(api_list_volumes))
+            .route("/api/volumes/create", post(api_create_volume))
+            .route("/api/volumes/delete", post(api_delete_volume))
             // Static assets
             .route("/assets/*path", get(static_handler))
             // With shared state
@@ -379,10 +382,115 @@ impl WebServer {
     }
 }
 
+#[derive(Serialize)]
+struct VolumeResponse {
+    name: String,
+    created_at: i64,
+    size: u64,
+}
+
 #[derive(Clone)]
 struct WebServerState {
     templates: Arc<Tera>,
     app_state: Arc<AppState>,
+}
+
+async fn api_list_volumes(State(state): State<WebServerState>) -> Response {
+    let app_state = &state.app_state;
+
+    match app_state.app_manager.list_volumes().await {
+        Ok(volumes) => {
+            let response: Vec<VolumeResponse> = volumes
+                .into_iter()
+                .map(|v| VolumeResponse {
+                    name: v.name,
+                    created_at: v.created_at,
+                    size: v.size,
+                })
+                .collect();
+
+            (StatusCode::OK, Json(response)).into_response()
+        }
+        Err(e) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!({
+                "error": format!("Failed to list volumes: {}", e)
+            })),
+        )
+            .into_response(),
+    }
+}
+
+#[derive(Deserialize)]
+struct CreateVolumeRequest {
+    name: String,
+}
+
+async fn api_create_volume(
+    State(state): State<WebServerState>,
+    Json(payload): Json<CreateVolumeRequest>,
+) -> impl IntoResponse {
+    let app_state = &state.app_state;
+
+    match app_state.app_manager.create_volume(&payload.name).await {
+        Ok(_) => (
+            StatusCode::CREATED,
+            Json(serde_json::json!({
+                "success": true,
+                "message": format!("Volume {} created", payload.name)
+            })),
+        ),
+        Err(e) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!({
+                "error": format!("Failed to create volume: {}", e)
+            })),
+        ),
+    }
+}
+
+#[derive(Deserialize)]
+struct DeleteVolumeRequest {
+    name: String,
+}
+
+async fn api_delete_volume(
+    State(state): State<WebServerState>,
+    Json(payload): Json<DeleteVolumeRequest>,
+) -> impl IntoResponse {
+    let app_state = &state.app_state;
+
+    match app_state.app_manager.delete_volume(&payload.name).await {
+        Ok(_) => (
+            StatusCode::OK,
+            Json(serde_json::json!({
+                "success": true,
+                "message": format!("Volume {} deleted", payload.name)
+            })),
+        ),
+        Err(e) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!({
+                "error": format!("Failed to delete volume: {}", e)
+            })),
+        ),
+    }
+}
+
+async fn volumes_handler(State(state): State<WebServerState>) -> impl IntoResponse {
+    let app_state = &state.app_state;
+
+    // Get volumes
+    let volumes = app_state
+        .app_manager
+        .list_volumes()
+        .await
+        .unwrap_or_default();
+
+    let mut context = Context::new();
+    context.insert("volumes", &volumes);
+
+    render_template(&state.templates, "volumes.html", &context)
 }
 
 // Static file handler
@@ -772,8 +880,16 @@ async fn deploy_form_handler(State(state): State<WebServerState>) -> impl IntoRe
         .await
         .unwrap_or_default();
 
+    // Get available volumes
+    let volumes = app_state
+        .app_manager
+        .list_volumes()
+        .await
+        .unwrap_or_default();
+
     let mut context = Context::new();
     context.insert("images", &images);
+    context.insert("volumes", &volumes);
 
     render_template(&state.templates, "deploy.html", &context)
 }
