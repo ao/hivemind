@@ -1,0 +1,54 @@
+{% extends "base.html" %} {% block title %}Volumes{% endblock %} {% block
+content %}
+<h1>Volumes</h1>
+
+<div class="card">
+    <h2>Create Volume</h2>
+    <form method="post" action="/api/volumes/create">
+        <div class="form-group">
+            <label for="name">Volume Name</label>
+            <input type="text" id="name" name="name" required />
+        </div>
+        <button type="submit" class="btn">Create Volume</button>
+    </form>
+</div>
+
+<div class="card">
+    <h2>Existing Volumes</h2>
+    <table>
+        <thead>
+            <tr>
+                <th>Name</th>
+                <th>Created At</th>
+                <th>Size</th>
+                <th>Actions</th>
+            </tr>
+        </thead>
+        <tbody>
+            {% for volume in volumes %}
+            <tr>
+                <td>{{ volume.name }}</td>
+                <td>{{ volume.created_at }}</td>
+                <td>{{ volume.size }} bytes</td>
+                <td>
+                    <form
+                        method="post"
+                        action="/api/volumes/delete"
+                        style="display: inline"
+                    >
+                        <input
+                            type="hidden"
+                            name="name"
+                            value="{{ volume.name }}"
+                        />
+                        <button type="submit" class="btn btn-danger">
+                            Delete
+                        </button>
+                    </form>
+                </td>
+            </tr>
+            {% endfor %}
+        </tbody>
+    </table>
+</div>
+{% endblock %}
