@@ -1,0 +1,40 @@
+{% extends "base.html" %} {% block title %}Deploy Application{% endblock %} {%
+block content %}
+<h1>Deploy Application</h1>
+
+<div class="card">
+    <form method="post" action="/deploy">
+        <div class="form-group">
+            <label for="name">Application Name</label>
+            <input type="text" id="name" name="name" required />
+        </div>
+
+        <div class="form-group">
+            <label for="image">Container Image</label>
+            <select id="image" name="image">
+                {% for image in images %}
+                <option value="{{ image }}">{{ image }}</option>
+                {% endfor %}
+            </select>
+        </div>
+
+        <div class="form-group">
+            <label for="service">Service Domain (optional)</label>
+            <input
+                type="text"
+                id="service"
+                name="service"
+                placeholder="example.com"
+            />
+            <small
+                >If provided, this application will be accessible at this
+                domain</small
+            >
+        </div>
+
+        <button type="submit" class="btn btn-success">
+            Deploy Application
+        </button>
+    </form>
+</div>
+{% endblock %}

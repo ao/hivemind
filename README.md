@@ -8,7 +8,7 @@ A self-organizing container orchestration system written in Rust. Hivemind provi
 
 - Pure Rust implementation for performance and safety
 - Distributed node architecture with peer-to-peer discovery
-- Automatic container scheduling and load balancing
+- Automatic application scheduling and load balancing
 - Built-in service discovery with DNS and proxy support
 - Health monitoring and automatic container recovery
 - Web interface for management and monitoring
@@ -97,16 +97,15 @@ Hivemind provides both a CLI interface and a web interface for managing your con
 
 # Scale an application
 ./hivemind app scale --name web-app --replicas 3
-```
 
-#### Container Management
-
-```bash
-# List all containers
-./hivemind container ls
+# List all containers for an application
+./hivemind app containers
 
 # Show detailed container information
-./hivemind container info
+./hivemind app container-info --container-id <container-id>
+
+# Restart an application
+./hivemind app restart --name web-app
 ```
 
 #### Health Checking
@@ -121,7 +120,7 @@ Hivemind provides both a CLI interface and a web interface for managing your con
 Access the web interface at `http://localhost:3000` to:
 
 1. View the dashboard with cluster overview
-2. Manage nodes and containers
+2. Manage nodes and applications
 3. Deploy and scale applications
 4. Monitor system health
 5. View logs and metrics
@@ -161,18 +160,17 @@ Hivemind is built with a modular architecture consisting of several key componen
 ### Core Components
 
 - **Node Manager**: Handles node discovery, health monitoring, and peer-to-peer communication
-- **Container Manager**: Interfaces with containerd to manage container lifecycle
-- **Scheduler**: Distributes containers across nodes based on resource availability
-- **Service Discovery**: Provides DNS and proxy services for accessing containers
+- **App Manager**: Manages application deployment, scaling, updates, and container lifecycle
+- **Scheduler**: Distributes applications across nodes based on resource availability
+- **Service Discovery**: Provides DNS and proxy services for accessing applications
 - **Storage Manager**: Persists state using SQLite
-- **App Manager**: Manages application deployment, scaling, and updates
 
 ### Communication Flow
 
 1. Nodes discover each other using UDP broadcasts
-2. Containers are scheduled based on node resource availability
-3. Service discovery maps domain names to container endpoints
-4. Health monitoring ensures containers and nodes remain available
+2. Applications are scheduled based on node resource availability
+3. Service discovery maps domain names to application endpoints
+4. Health monitoring ensures applications and nodes remain available
 5. State is persisted to SQLite for recovery after restarts
 
 ## Troubleshooting
@@ -184,7 +182,7 @@ Hivemind is built with a modular architecture consisting of several key componen
    - Ensure nodes are on the same network segment
    - Verify the correct IP address is being used
 
-2. **Container Deployment Fails**
+2. **Application Deployment Fails**
    - Check containerd service is running
    - Verify image name and availability
    - Check disk space and resource availability
@@ -192,7 +190,7 @@ Hivemind is built with a modular architecture consisting of several key componen
 3. **Service Discovery Issues**
    - Ensure DNS port (53) is available
    - Check service domain configuration
-   - Verify container health status
+   - Verify application health status
 
 ### Logs
 
@@ -202,8 +200,8 @@ Check logs for detailed error information:
 # View daemon logs
 tail -f ~/.hivemind/logs/daemon.log
 
-# View container logs
-./hivemind container logs --name <container-name>
+# View application logs
+./hivemind app container-info --container-id <container-id>
 ```
 
 ## Contributing

@@ -1,0 +1,37 @@
+{% extends "base.html" %} {% block title %}Containers{% endblock %} {% block
+content %}
+<h1>Containers</h1>
+
+<div class="card">
+    <table>
+        <thead>
+            <tr>
+                <th>ID</th>
+                <th>Name</th>
+                <th>Image</th>
+                <th>Status</th>
+                <th>Node</th>
+                <th>Stats</th>
+            </tr>
+        </thead>
+        <tbody>
+            {% for c in containers %}
+            <tr>
+                <td>{{ c.container.id }}</td>
+                <td>{{ c.container.name }}</td>
+                <td>{{ c.container.image }}</td>
+                <td class="status-{{ c.container.status | lower }}">
+                    {{ c.container.status }}
+                </td>
+                <td>{{ c.container.node_id }}</td>
+                <td>
+                    {% if c.stats %} CPU: {{ c.stats.cpu_usage }}%<br />
+                    Memory: {{ c.stats.memory_usage / 1048576 }} MB {% else %}
+                    No stats available {% endif %}
+                </td>
+            </tr>
+            {% endfor %}
+        </tbody>
+    </table>
+</div>
+{% endblock %}

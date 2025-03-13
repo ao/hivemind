@@ -1,0 +1,74 @@
+{% extends "base.html" %} {% block title %}Health{% endblock %} {% block content
+%}
+<h1>System Health</h1>
+
+<div class="card">
+    <div style="display: flex; align-items: center">
+        <div
+            style="width: 50px; height: 50px; border-radius: 50%; margin-right: 20px;
+                  {% if node_health %}
+                    background-color: #4CAF50;
+                  {% else %}
+                    background-color: #F44336;
+                  {% endif %}"
+        ></div>
+        <div>
+            <h2>Node Health</h2>
+            <p>{% if node_health %}Healthy{% else %}Unhealthy{% endif %}</p>
+        </div>
+    </div>
+</div>
+
+<div class="card">
+    <h2>Container Health</h2>
+    <table>
+        <thead>
+            <tr>
+                <th>Name</th>
+                <th>Status</th>
+                <th>Health</th>
+            </tr>
+        </thead>
+        <tbody>
+            {% for container in containers %}
+            <tr>
+                <td>{{ container.name }}</td>
+                <td class="status-{{ container.status | lower }}">
+                    {{ container.status }}
+                </td>
+                <td>
+                    {% if container.status == "Running" %}
+                    <span style="color: #4caf50">●</span> Healthy {% else %}
+                    <span style="color: #f44336">●</span> Unhealthy {% endif %}
+                </td>
+            </tr>
+            {% endfor %}
+        </tbody>
+    </table>
+</div>
+
+<div class="card">
+    <h2>Service Health</h2>
+    {% for service_name, endpoints in service_endpoints %}
+    <h3>{{ service_name }}</h3>
+    <table>
+        <thead>
+            <tr>
+                <th>Endpoint</th>
+                <th>Health Status</th>
+            </tr>
+        </thead>
+        <tbody>
+            {% for endpoint in endpoints %}
+            <tr>
+                <td>{{ endpoint.ip_address }}:{{ endpoint.port }}</td>
+                <td>{{ endpoint.health_status }}</td>
+            </tr>
+            {% endfor %}
+        </tbody>
+    </table>
+    {% else %}
+    <p>No services registered</p>
+    {% endfor %}
+</div>
+{% endblock %}

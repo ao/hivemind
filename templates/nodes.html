@@ -1,0 +1,48 @@
+{% extends "base.html" %} {% block title %}Nodes{% endblock %} {% block content
+%}
+<h1>Nodes</h1>
+
+{% for node in nodes %}
+<div class="card">
+    <h2>{{ node.id }}</h2>
+    <div style="display: flex; flex-wrap: wrap">
+        <div style="flex: 1; min-width: 200px; margin-right: 20px">
+            <h3>Address</h3>
+            <p>{{ node.address }}</p>
+
+            <h3>Resources</h3>
+            <p>CPU Available: {{ node.cpu_available }}%</p>
+            <p>Memory Available: {{ node.memory_available / 1048576 }} MB</p>
+            <p>Containers Running: {{ node.containers_running }}</p>
+        </div>
+
+        <div style="flex: 2; min-width: 300px">
+            <h3>Containers ({{ node.containers|length }})</h3>
+            {% if node.containers|length > 0 %}
+            <table>
+                <thead>
+                    <tr>
+                        <th>Name</th>
+                        <th>Image</th>
+                        <th>Status</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    {% for container in node.containers %}
+                    <tr>
+                        <td>{{ container.name }}</td>
+                        <td>{{ container.image }}</td>
+                        <td class="status-{{ container.status | lower }}">
+                            {{ container.status }}
+                        </td>
+                    </tr>
+                    {% endfor %}
+                </tbody>
+            </table>
+            {% else %}
+            <p>No containers on this node</p>
+            {% endif %}
+        </div>
+    </div>
+</div>
+{% endfor %} {% endblock %}

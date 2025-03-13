@@ -1,0 +1,68 @@
+{% extends "base.html" %} {% block title %}Applications{% endblock %} {% block
+content %}
+<h1>Applications</h1>
+
+<div class="card">
+    <a href="/deploy" class="btn btn-success">Deploy New Application</a>
+</div>
+
+{% for service in services %}
+<div class="card">
+    <div
+        style="
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+        "
+    >
+        <h2>{{ service.name }}</h2>
+        <div>
+            <a href="/scale/{{ service.name }}" class="btn">Scale</a>
+            <form
+                method="post"
+                action="/restart/{{ service.name }}"
+                style="display: inline"
+            >
+                <button type="submit" class="btn btn-danger">Restart</button>
+            </form>
+        </div>
+    </div>
+
+    <p><strong>Domain:</strong> {{ service.domain }}</p>
+    <p>
+        <strong>Replicas:</strong> {{ service.current_replicas }}/{{
+        service.desired_replicas }}
+    </p>
+
+    <h3>Containers</h3>
+    <table>
+        <thead>
+            <tr>
+                <th>ID</th>
+                <th>Name</th>
+                <th>Status</th>
+                <th>Node</th>
+            </tr>
+        </thead>
+        <tbody>
+            {% for container in service.containers %}
+            <tr>
+                <td>{{ container.id }}</td>
+                <td>{{ container.name }}</td>
+                <td class="status-{{ container.status | lower }}">
+                    {{ container.status }}
+                </td>
+                <td>{{ container.node_id }}</td>
+            </tr>
+            {% endfor %}
+        </tbody>
+    </table>
+</div>
+{% else %}
+<div class="card">
+    <p>
+        No applications deployed yet.
+        <a href="/deploy">Deploy your first application</a>.
+    </p>
+</div>
+{% endfor %} {% endblock %}

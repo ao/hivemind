@@ -1,0 +1,41 @@
+{% extends "base.html" %} {% block title %}Services{% endblock %} {% block
+content %}
+<h1>Services</h1>
+
+{% for service_name, endpoints in service_endpoints %}
+<div class="card">
+    <h2>{{ service_name }}</h2>
+
+    <p>
+        <strong>Service URL:</strong>
+        {% if endpoints|length > 0 %} http://{{ endpoints[0].domain }} {% else
+        %} No domain configured {% endif %}
+    </p>
+
+    <h3>Endpoints</h3>
+    <table>
+        <thead>
+            <tr>
+                <th>Node</th>
+                <th>IP Address</th>
+                <th>Port</th>
+                <th>Health</th>
+            </tr>
+        </thead>
+        <tbody>
+            {% for endpoint in endpoints %}
+            <tr>
+                <td>{{ endpoint.node_id }}</td>
+                <td>{{ endpoint.ip_address }}</td>
+                <td>{{ endpoint.port }}</td>
+                <td>{{ endpoint.health_status }}</td>
+            </tr>
+            {% endfor %}
+        </tbody>
+    </table>
+</div>
+{% else %}
+<div class="card">
+    <p>No services registered yet.</p>
+</div>
+{% endfor %} {% endblock %}

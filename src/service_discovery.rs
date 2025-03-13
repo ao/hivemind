@@ -152,7 +152,7 @@ impl ServiceDiscovery {
         
         for (service_name, endpoints) in services.iter() {
             // Check if any endpoint matches this domain
-            if let Some(endpoint) = endpoints.iter().find(|e| e.domain == domain) {
+            if let Some(_endpoint) = endpoints.iter().find(|e| e.domain == domain) {
                 return Some((service_name.clone(), endpoints.clone()));
             }
         }
@@ -199,7 +199,7 @@ impl ServiceDiscovery {
         
         loop {
             match socket.recv_from(&mut buf).await {
-                Ok((len, src)) => {
+                Ok((_len, src)) => {
                     // In a real implementation, this would parse the DNS query
                     // and respond with the appropriate IP address
                     println!("Received DNS query from {}", src);
@@ -243,8 +243,8 @@ impl ServiceDiscovery {
     }
 
     async fn run_proxy_server(
-        proxy_port: u16,
-        services: Arc<Mutex<HashMap<String, Vec<ServiceEndpoint>>>>,
+        _proxy_port: u16,
+        _services: Arc<Mutex<HashMap<String, Vec<ServiceEndpoint>>>>,
     ) -> Result<()> {
         // TODO: Implement proxy server logic
         Ok(())
