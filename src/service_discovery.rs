@@ -188,7 +188,7 @@ impl ServiceDiscovery {
 
     async fn run_dns_server(
         dns_port: u16,
-        services: Arc<Mutex<HashMap<String, Vec<ServiceEndpoint>>>>,
+        _services: Arc<Mutex<HashMap<String, Vec<ServiceEndpoint>>>>,
     ) -> Result<()> {
         // Bind to UDP socket for DNS
         let socket = UdpSocket::bind(SocketAddr::new(
