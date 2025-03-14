@@ -263,6 +263,9 @@ impl AppManager {
 
         // Deploy the container with volumes
         if let Some(containerd) = &self.containerd {
+            // Pull the image first
+            containerd.pull_image(image).await?;
+
             // Convert environment variables
             let env_vars = env_vars
                 .into_iter()
@@ -431,6 +434,9 @@ impl AppManager {
 
         // If we have containerd available, use it to deploy the container
         if let Some(containerd) = &self.containerd {
+            // Pull the image first
+            containerd.pull_image(image).await?;
+
             // Create and start container via containerd
             let real_container_id = containerd
                 .create_container(image, &container_id, env_vars.clone(), ports.clone())

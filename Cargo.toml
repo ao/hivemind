@@ -15,12 +15,38 @@ serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 rand = "0.8"
 clap = { version = "4.4", features = ["derive"] }
-containerd-client = "0.2"
+containerd-client = "0.8.0"
 tonic = "0.8"
 prost = "0.11"
 tokio-stream = "0.1"
 serde_qs = "0.12"
 prost-types = "0.11"
 regex = "1.5"
-
 hyper = { version = "0.14", features = ["full"] }
+base64 = "0.21.4"
+futures = "0.3"
+oci-spec = "0.6.0"
+derive-getters = "0.5.0"
+
+[features]
+default = ["containerd"]
+containerd = []
+test = []
+
+[dev-dependencies]
+tokio-test = "0.4"
+tempfile = "3.3"
+mockall = "0.11"
+proptest = "1.0"
+reqwest = { version = "0.11", features = ["json"] }
+chrono = "0.4"
+
+[[test]]
+name = "integration_tests"
+path = "tests/integration_tests.rs"
+harness = true
+
+[[test]]
+name = "e2e_tests"
+path = "tests/e2e_tests.rs"
+harness = true
