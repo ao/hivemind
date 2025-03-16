@@ -1,6 +1,6 @@
 // Remove the import for the non-existent container_manager module
 // use crate::container_manager::ContainerManager;
-use crate::containerd_manager::ContainerdManager;
+use crate::youki_manager::YoukiManager;
 use crate::service_discovery::ServiceDiscovery;
 use anyhow::Result;
 use serde::{Deserialize, Serialize};
@@ -96,7 +96,7 @@ pub struct AppManager {
     service_discovery: Option<ServiceDiscovery>,
     container_stats: Arc<Mutex<HashMap<String, ContainerStats>>>,
     storage: Option<crate::storage::StorageManager>,
-    containerd: Option<Arc<ContainerdManager>>,
+    youki: Option<Arc<YoukiManager>>,
     volumes: Arc<Mutex<HashMap<String, Volume>>>,
 }
 
@@ -118,7 +118,7 @@ impl AppManager {
             service_discovery: None,
             container_stats: Arc::new(Mutex::new(HashMap::new())),
             storage: None,
-            containerd: None,
+            youki: None,
             volumes: Arc::new(Mutex::new(HashMap::new())),
         })
     }
@@ -127,10 +127,10 @@ impl AppManager {
     pub async fn create_volume(&self, name: &str) -> Result<()> {
         println!("Creating volume {}", name);
 
-        // Check if containerd manager is available
-        if let Some(containerd) = &self.containerd {
-            // Create volume using containerd manager
-            containerd.create_volume(name).await?;
+        // Check if youki manager is available
+        if let Some(youki) = &self.youki {
+            // Create volume using youki manager
+            youki.create_volume(name).await?;
 
             // Add to in-memory state
             let mut volumes = self.volumes.lock().await;
@@ -176,10 +176,10 @@ impl AppManager {
     pub async fn delete_volume(&self, name: &str) -> Result<()> {
         println!("Deleting volume {}", name);
 
-        // Check if containerd manager is available
-        if let Some(containerd) = &self.containerd {
-            // Delete volume using containerd manager
-            containerd.delete_volume(name).await?;
+        // Check if youki manager is available
+        if let Some(youki) = &self.youki {
+            // Delete volume using youki manager
+            youki.delete_volume(name).await?;
 
             // Remove from in-memory state
             let mut volumes = self.volumes.lock().await;
@@ -201,10 +201,10 @@ impl AppManager {
     pub async fn list_volumes(&self) -> Result<Vec<Volume>> {
         println!("Listing volumes");
 
-        // Check if containerd manager is available
-        if let Some(containerd) = &self.containerd {
-            // Get volume names from containerd manager
-            let volume_names = containerd.list_volumes().await?;
+        // Check if youki manager is available
+        if let Some(youki) = &self.youki {
+            // Get volume names from youki manager
+            let volume_names = youki.list_volumes().await?;
 
             // Build volume objects
             let mut volumes = self.volumes.lock().await;
@@ -262,9 +262,9 @@ impl AppManager {
         }
 
         // Deploy the container with volumes
-        if let Some(containerd) = &self.containerd {
+        if let Some(youki) = &self.youki {
             // Pull the image first
-            containerd.pull_image(image).await?;
+            youki.pull_image(image).await?;
 
             // Convert environment variables
             let env_vars = env_vars
@@ -286,7 +286,7 @@ impl AppManager {
                 .collect();
 
             // Deploy container with volumes
-            let container_id = containerd
+            let container_id = youki
                 .create_container_with_volumes(image, name, env_vars, ports, volumes)
                 .await?;
 
@@ -309,15 +309,15 @@ impl AppManager {
         self
     }
 
-    pub async fn with_containerd(
+    pub async fn with_youki(
         storage: crate::storage::StorageManager,
-        containerd_socket: &str,
+        youki_socket: &str,
         namespace: &str,
     ) -> Result<Self> {
-        // Initialize containerd manager
-        let containerd = ContainerdManager::new(containerd_socket, namespace).await?;
+        // Initialize youki manager
+        let youki = YoukiManager::new(youki_socket, namespace).await?;
 
-        // Create app manager with storage and containerd
+        // Create app manager with storage and youki
         let manager = Self {
             containers: Arc::new(Mutex::new(Vec::new())),
             images: Arc::new(Mutex::new(Vec::new())),
@@ -325,15 +325,15 @@ impl AppManager {
             service_discovery: None,
             container_stats: Arc::new(Mutex::new(HashMap::new())),
             storage: Some(storage.clone()),
-            containerd: Some(Arc::new(containerd)),
+            youki: Some(Arc::new(youki)),
             volumes: Arc::new(Mutex::new(HashMap::new())),
         };
 
-        // Load existing containers from containerd
-        if let Some(containerd) = &manager.containerd {
-            let containerd_containers = containerd.list_containers().await?;
+        // Load existing containers from youki
+        if let Some(youki) = &manager.youki {
+            let youki_containers = youki.list_containers().await?;
             let mut containers = manager.containers.lock().await;
-            containers.extend(containerd_containers);
+            containers.extend(youki_containers);
         }
 
         // Initialize default images
@@ -357,7 +357,7 @@ impl AppManager {
             service_discovery: None,
             container_stats: Arc::new(Mutex::new(HashMap::new())),
             storage: Some(storage.clone()),
-            containerd: None,
+            youki: None,
             volumes: Arc::new(Mutex::new(HashMap::new())),
         };
 
@@ -396,7 +396,7 @@ impl AppManager {
         Ok(manager)
     }
 
-    // Update deploy_container to use containerd
+    // Update deploy_container to use youki
     pub async fn deploy_container(
         &self,
         image: &str,
@@ -432,13 +432,13 @@ impl AppManager {
         // Generate a unique container ID
         let container_id = format!("container-{}", Uuid::new_v4());
 
-        // If we have containerd available, use it to deploy the container
-        if let Some(containerd) = &self.containerd {
+        // If we have youki available, use it to deploy the container
+        if let Some(youki) = &self.youki {
             // Pull the image first
-            containerd.pull_image(image).await?;
+            youki.pull_image(image).await?;
 
-            // Create and start container via containerd
-            let real_container_id = containerd
+            // Create and start container via youki
+            let real_container_id = youki
                 .create_container(image, &container_id, env_vars.clone(), ports.clone())
                 .await?;
 
@@ -480,17 +480,17 @@ impl AppManager {
             return Ok(real_container_id);
         }
 
-        // Fallback to mock implementation if containerd is not available
+        // Fallback to mock implementation if youki is not available
         // ... [existing mock implementation code]
 
         Ok(container_id)
     }
 
-    // Update stop_container to use containerd
+    // Update stop_container to use youki
     pub async fn stop_container(&self, container_id: &str) -> Result<bool> {
-        if let Some(containerd) = &self.containerd {
-            // Stop container via containerd
-            containerd.stop_container(container_id).await?;
+        if let Some(youki) = &self.youki {
+            // Stop container via youki
+            youki.stop_container(container_id).await?;
 
             // Update container status in memory
             let mut containers = self.containers.lock().await;
@@ -520,9 +520,9 @@ impl AppManager {
         Ok(false)
     }
 
-    // Update restart_container to use containerd
+    // Update restart_container to use youki
     pub async fn restart_container(&self, container_id: &str) -> Result<bool> {
-        if let Some(containerd) = &self.containerd {
+        if let Some(youki) = &self.youki {
             // Get container info
             let container_opt = {
                 let containers = self.containers.lock().await;
@@ -552,7 +552,7 @@ impl AppManager {
                 }
 
                 // Stop the container
-                containerd.stop_container(container_id).await?;
+                youki.stop_container(container_id).await?;
 
                 // Start a new container with the same parameters
                 let env_vars: Vec<(&str, &str)> = container
@@ -593,22 +593,22 @@ impl AppManager {
         Ok(false)
     }
 
-    // Update monitor_containers to use containerd
+    // Update monitor_containers to use youki
     pub async fn monitor_containers(&self) -> Result<()> {
         println!("Monitoring containers...");
 
-        if let Some(containerd) = &self.containerd {
-            // Get all containers from containerd
-            let containerd_containers = containerd.list_containers().await?;
+        if let Some(youki) = &self.youki {
+            // Get all containers from youki
+            let youki_containers = youki.list_containers().await?;
 
             // Update container status in memory
             let mut containers = self.containers.lock().await;
 
-            // Track container IDs that exist in containerd
-            let mut containerd_ids = HashSet::new();
+            // Track container IDs that exist in youki
+            let mut youki_ids = HashSet::new();
 
-            for c in &containerd_containers {
-                containerd_ids.insert(c.id.clone());
+            for c in &youki_containers {
+                youki_ids.insert(c.id.clone());
 
                 // Find or add container in memory
                 if let Some(idx) = containers.iter().position(|existing| existing.id == c.id) {
@@ -645,10 +645,10 @@ impl AppManager {
                 self.update_container_stats(&c.id).await?;
             }
 
-            // Handle containers that no longer exist in containerd
+            // Handle containers that no longer exist in youki
             for idx in (0..containers.len()).rev() {
-                if !containerd_ids.contains(&containers[idx].id) {
-                    // Container no longer exists in containerd
+                if !youki_ids.contains(&containers[idx].id) {
+                    // Container no longer exists in youki
                     if containers[idx].status != ContainerStatus::Stopped {
                         containers[idx].status = ContainerStatus::Stopped;
 
@@ -677,11 +677,11 @@ impl AppManager {
         Ok(())
     }
 
-    // Update update_container_stats to use containerd
+    // Update update_container_stats to use youki
     async fn update_container_stats(&self, container_id: &str) -> Result<()> {
-        if let Some(containerd) = &self.containerd {
-            // Get container stats from containerd
-            match containerd.get_container_metrics(container_id).await {
+        if let Some(youki) = &self.youki {
+            // Get container stats from youki
+            match youki.get_container_metrics(container_id).await {
                 Ok(stats) => {
                     // Update stats in memory
                     let mut container_stats = self.container_stats.lock().await;

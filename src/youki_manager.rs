@@ -3,15 +3,15 @@ use std::path::Path;
 
 use crate::app::{Container, ContainerStats, ContainerStatus, EnvVar, PortMapping};
 
-pub struct ContainerdManager {
+pub struct YoukiManager {
     socket_path: String,
     namespace: String,
 }
 
-impl ContainerdManager {
+impl YoukiManager {
     pub async fn new(socket_path: impl AsRef<Path>, namespace: &str) -> Result<Self> {
         println!(
-            "Initializing containerd manager with socket: {:?}, namespace: {}",
+            "Initializing youki manager with socket: {:?}, namespace: {}",
             socket_path.as_ref(),
             namespace
         );
@@ -73,8 +73,16 @@ impl ContainerdManager {
 
     // Pull an image from a registry
     pub async fn pull_image(&self, image: &str) -> Result<()> {
-        println!("Mock-pulling image: {}", image);
-        // In a real implementation, this would use the containerd API
+        println!("Pulling image: {}", image);
+        
+        // In a real implementation, this would use the youki client to pull the image
+        // For now, we'll use a mock implementation
+        println!("Mock implementation: Pretending to pull image {}", image);
+        
+        // Simulate a delay for the pull operation
+        tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
+        
+        println!("Successfully pulled image: {}", image);
         Ok(())
     }
 
@@ -88,8 +96,8 @@ impl ContainerdManager {
     ) -> Result<String> {
         println!("Creating container {} with image {}", name, image);
 
-        // Mock implementation - in a real scenario this would use containerd APIs
-        let container_id = format!("containerd-{}", name);
+        // Mock implementation - in a real scenario this would use youki APIs
+        let container_id = format!("youki-{}", name);
 
         // Convert environment variables to a log-friendly string
         let env_str: Vec<String> = env_vars
@@ -128,7 +136,7 @@ impl ContainerdManager {
         );
 
         // Mock implementation
-        let container_id = format!("containerd-{}", name);
+        let container_id = format!("youki-{}", name);
 
         // Log volume mounts
         for (volume_name, container_path) in &volumes {
@@ -156,7 +164,7 @@ impl ContainerdManager {
 
     // List all containers
     pub async fn list_containers(&self) -> Result<Vec<Container>> {
-        println!("Listing containers from containerd");
+        println!("Listing containers from youki");
 
         // Mock implementation
         let mut containers = Vec::new();

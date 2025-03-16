@@ -15,7 +15,6 @@ serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 rand = "0.8"
 clap = { version = "4.4", features = ["derive"] }
-containerd-client = "0.8.0"
 tonic = "0.8"
 prost = "0.11"
 tokio-stream = "0.1"
@@ -27,10 +26,13 @@ base64 = "0.21.4"
 futures = "0.3"
 oci-spec = "0.6.0"
 derive-getters = "0.5.0"
+get_if_addrs = "0.5.3"
+trust-dns-server = "0.23.2"
+trust-dns-proto = "0.23.2"
 
 [features]
-default = ["containerd"]
-containerd = []
+default = ["youki"]
+youki = []
 test = []
 
 [dev-dependencies]

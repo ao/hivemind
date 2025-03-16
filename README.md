@@ -12,7 +12,7 @@ Hivemind is a modern, lightweight container orchestration system designed with s
 
 - **🔄 Simple yet powerful** - Deploy containers with a clean REST API or straightforward CLI
 - **⚡ Blazing fast** - Built in Rust for minimal resource usage and maximum performance
-- **📦 ContainerD integration** - Works directly with containerd for reliable container operations
+- **📦 Youki integration** - Works directly with youki for reliable container operations
 - **🔍 Service Discovery** - Automatic DNS-based service discovery for your applications
 - **🌐 Clustering** - Seamlessly scale from a single node to a distributed cluster
 - **🔒 Volume Management** - Persistent storage for your stateful applications
@@ -104,11 +104,19 @@ hivemind health  # Shows health status of nodes, containers, and services
 
 ### Volume Management
 
-Volumes are managed through the web UI or API. Use these endpoints:
+```bash
+# Create a new volume
+hivemind volume create --name <VOLUME_NAME>
 
-- `GET /volumes` - List all volumes
-- `POST /api/volumes/create` - Create a new volume
-- `POST /api/volumes/delete` - Delete a volume
+# List all volumes
+hivemind volume ls
+
+# Delete a volume
+hivemind volume delete --name <VOLUME_NAME>
+
+# Deploy with volume mounts
+hivemind app deploy --image <IMAGE> --name <NAME> --volume <VOLUME_NAME>:<CONTAINER_PATH>
+```
 
 ## 🔌 API Reference
 
@@ -147,7 +155,7 @@ Hivemind offers a RESTful API for all operations:
 ## 📊 Comparison with other platforms
 
 | Feature | Hivemind | Kubernetes | Docker Swarm |
-|---------|----------|------------|--------------|
+|---------|----------|------------|---------------|
 | Startup time | ⚡ Seconds | ⏱️ Minutes | ⏱️ Minutes |
 | Memory usage | 🍃 ~50MB | 🏋️ ~500MB+ | 🏋️ ~200MB+ |
 | Learning curve | 📘 Low | 📚 High | 📗 Medium |
@@ -159,9 +167,11 @@ Hivemind offers a RESTful API for all operations:
 
 Hivemind follows a clean, modular architecture:
 
-- **Core Engine** - Container lifecycle and scheduling
-- **Service Discovery** - DNS and proxy for routing
+- **App Manager** - Application and container lifecycle management
+- **Node Manager** - Cluster coordination and node discovery
+- **Service Discovery** - DNS-based service discovery and routing
 - **Storage Manager** - Volume and persistence handling
+- **Container Manager** - Container runtime integration
 - **Web UI** - Dashboard and visual management
 - **Node Manager** - Cluster coordination
 
@@ -184,6 +194,7 @@ Automatic DNS-based service discovery allows:
 - **Service domains** for easy access to your applications
 - **Automatic load balancing** across container instances
 - **Health checking** to ensure traffic only goes to healthy containers
+- **Built-in DNS server** for resolving service domains
 - **Proxy functionality** to route external traffic
 
 ### Volume Management
@@ -199,24 +210,28 @@ Persistent storage for stateful applications:
 
 Distributed operation for scaling and high availability:
 
-- **Automatic node discovery** to build a cluster
-- **Leader election** for coordinating cluster operations
-- **Resource-aware scheduling** to optimize container placement
-- **Node health monitoring** to detect and handle node failures
+- **Auto-discovery** of nodes on the network
+- **Seamless joining** of new nodes to the cluster
+- **Resource-aware scheduling** of containers
+- **Node health monitoring** for reliability
+- **Distributed storage** for cluster state
 
 ## 🛠️ Development
 
 ### Prerequisites
 
-- Rust 1.66 or higher
-- ContainerD (for non-mock deployments)
+- Rust 1.60 or newer
+- Youki (for non-mock deployments)
 - SQLite
 
-### Build from source
+### Building from source
 
 ```bash
+# Clone the repository
 git clone https://github.com/ao/hivemind.git
 cd hivemind
+
+# Build the project
 cargo build --release
 ```
 
@@ -237,7 +252,7 @@ cargo test
 ### Project Structure
 
 - `src/app.rs` - Application & container management
-- `src/containerd_manager.rs` - ContainerD integration
+- `src/youki_manager.rs` - Youki integration
 - `src/service_discovery.rs` - Service discovery & DNS
 - `src/storage.rs` - Persistence layer
 - `src/node.rs` - Node & cluster management

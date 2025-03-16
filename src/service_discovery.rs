@@ -3,9 +3,14 @@ use anyhow::Result;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
+use std::str::FromStr;
 use std::sync::Arc;
 use tokio::net::UdpSocket;
 use tokio::sync::Mutex;
+use trust_dns_proto::op::{Header, MessageType, OpCode, ResponseCode};
+use trust_dns_proto::rr::{Name, Record, RecordType, RData, DNSClass};
+use trust_dns_proto::serialize::binary::{BinDecodable, BinDecoder, BinEncodable, BinEncoder};
+use trust_dns_server::authority::MessageResponseBuilder;
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct ServiceEndpoint {
@@ -188,7 +193,7 @@ impl ServiceDiscovery {
 
     async fn run_dns_server(
         dns_port: u16,
-        _services: Arc<Mutex<HashMap<String, Vec<ServiceEndpoint>>>>,
+        services: Arc<Mutex<HashMap<String, Vec<ServiceEndpoint>>>>,
     ) -> Result<()> {
         // Bind to UDP socket for DNS
         let socket = UdpSocket::bind(SocketAddr::new(
@@ -200,24 +205,131 @@ impl ServiceDiscovery {
         println!("DNS server listening on port {}", dns_port);
 
         // Create a buffer for receiving DNS queries
-        let mut buf = [0u8; 512]; // Standard DNS message size
+        let mut query_buffer = [0u8; 512]; // Standard DNS message size
 
         loop {
-            match socket.recv_from(&mut buf).await {
-                Ok((_len, src)) => {
-                    // In a real implementation, this would parse the DNS query
-                    // and respond with the appropriate IP address
+            match socket.recv_from(&mut query_buffer).await {
+                Ok((len, src)) => {
                     println!("Received DNS query from {}", src);
-
-                    // Simple mock response for now
-                    let response = [0u8; 32]; // Dummy response
-                    if let Err(e) = socket.send_to(&response[..], src).await {
-                        eprintln!("Failed to send DNS response: {}", e);
+                    
+                    // Try to parse the DNS message
+                    match trust_dns_proto::op::Message::from_bytes(&query_buffer[..len]) {
+                        Ok(query) => {
+                            // Process the query and create a response
+                            let response = Self::process_dns_query(query, &services).await;
+                            
+                            // Encode the response
+                            let mut response_buffer = Vec::with_capacity(512);
+                            let mut encoder = BinEncoder::new(&mut response_buffer);
+                            if let Err(e) = response.emit(&mut encoder) {
+                                eprintln!("Failed to encode DNS response: {}", e);
+                                continue;
+                            }
+                            
+                            // Send the response
+                            if let Err(e) = socket.send_to(&response_buffer, src).await {
+                                eprintln!("Failed to send DNS response: {}", e);
+                            }
+                        }
+                        Err(e) => {
+                            eprintln!("Failed to parse DNS query: {}", e);
+                            // Send an error response
+                            let error_response = Self::create_error_response(ResponseCode::FormErr);
+                            let mut response_buffer = Vec::with_capacity(512);
+                            let mut encoder = BinEncoder::new(&mut response_buffer);
+                            if let Err(e) = error_response.emit(&mut encoder) {
+                                eprintln!("Failed to encode error response: {}", e);
+                                continue;
+                            }
+                            
+                            if let Err(e) = socket.send_to(&response_buffer, src).await {
+                                eprintln!("Failed to send error response: {}", e);
+                            }
+                        }
                     }
                 }
                 Err(e) => eprintln!("Failed to receive DNS query: {}", e),
             }
         }
+    }
+    
+    // Process a DNS query and create a response
+    async fn process_dns_query(
+        query: trust_dns_proto::op::Message,
+        services: &Arc<Mutex<HashMap<String, Vec<ServiceEndpoint>>>>,
+    ) -> trust_dns_proto::op::Message {
+        // Create a new response message directly
+        let mut response = trust_dns_proto::op::Message::new();
+        response.set_header(Header::response_from_request(query.header()));
+        
+        // Check if we have any queries
+        if query.query_count() == 0 {
+            return Self::create_error_response(ResponseCode::FormErr);
+        }
+        
+        // Get the first query
+        let query_question = &query.queries()[0];
+        let query_name = query_question.name().clone();
+        let query_type = query_question.query_type();
+        
+        // Convert the query name to a string
+        let domain = query_name.to_string();
+        // Remove the trailing dot if present
+        let domain = domain.trim_end_matches('.');
+        
+        println!("DNS query for domain: {} (type: {:?})", domain, query_type);
+        
+        // Only handle A record queries for now
+        if query_type != RecordType::A {
+            return Self::create_error_response(ResponseCode::NotImp);
+        }
+        
+        // Look up the domain in our services
+        let services_lock = services.lock().await;
+        let mut found_service = false;
+        
+        for (_, endpoints) in services_lock.iter() {
+            for endpoint in endpoints {
+                if endpoint.domain == domain {
+                    found_service = true;
+                    
+                    // Create an A record for this endpoint
+                    if let Ok(ip) = Ipv4Addr::from_str(&endpoint.ip_address) {
+                        let mut records = Vec::new();
+                        
+                        let rdata = RData::A(trust_dns_proto::rr::rdata::A(ip));
+                        let record = Record::from_rdata(query_name.clone(), 300, rdata);
+                        records.push(record);
+                        
+                        // Build the response with the records
+                        let mut response = trust_dns_proto::op::Message::new();
+                        response.set_header(Header::response_from_request(query.header()));
+                        response.add_answers(records);
+                        return response;
+                    }
+                }
+            }
+        }
+        
+        if !found_service {
+            // Domain not found
+            return Self::create_error_response(ResponseCode::NXDomain);
+        }
+        
+        // If we get here, we found the service but couldn't create a valid A record
+        Self::create_error_response(ResponseCode::ServFail)
+    }
+    
+    // Create an error response
+    fn create_error_response(code: ResponseCode) -> trust_dns_proto::op::Message {
+        let mut header = Header::new();
+        header.set_message_type(MessageType::Response);
+        header.set_op_code(OpCode::Query);
+        header.set_response_code(code);
+        
+        let mut message = trust_dns_proto::op::Message::new();
+        message.set_header(header);
+        message
     }
 
     pub async fn get_service_url(&self, service_name: &str) -> Option<String> {
