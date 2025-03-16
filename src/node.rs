@@ -93,13 +93,51 @@ impl NodeManager {
     }
 
     fn get_local_ip() -> Option<String> {
-        // In a real implementation, this would detect the actual local IP
-        // For now, we'll use a placeholder
+        // Try to find a non-loopback IP address
+        let interfaces = match get_if_addrs::get_if_addrs() {
+            Ok(ifaces) => ifaces,
+            Err(e) => {
+                eprintln!("Failed to get network interfaces: {}", e);
+                return Some("127.0.0.1".to_string());
+            }
+        };
+
+        // First try to find a non-loopback IPv4 address
+        for iface in &interfaces {
+            // Skip loopback interfaces
+            if iface.is_loopback() {
+                continue;
+            }
+
+            // Prefer IPv4 addresses
+            if let get_if_addrs::IfAddr::V4(addr) = &iface.addr {
+                return Some(addr.ip.to_string());
+            }
+        }
+
+        // If no IPv4 found, try IPv6 (excluding link-local addresses)
+        for iface in &interfaces {
+            if iface.is_loopback() {
+                continue;
+            }
+
+            if let get_if_addrs::IfAddr::V6(addr) = &iface.addr {
+                // Skip link-local addresses (fe80::)
+                if !addr.ip.to_string().starts_with("fe80:") {
+                    return Some(addr.ip.to_string());
+                }
+            }
+        }
+
+        // Fallback to loopback if no other interfaces found
         Some("127.0.0.1".to_string())
     }
 
     pub async fn start_discovery(&self) -> Result<()> {
-        println!("Starting node discovery on {}:{}", self.address, self.discovery_port);
+        println!(
+            "Starting node discovery on {}:{}",
+            self.address, self.discovery_port
+        );
 
         // Save the current node to storage if available
         if let Some(storage) = &self.storage {
@@ -119,7 +157,9 @@ impl NodeManager {
 
         // Start UDP discovery service
         tokio::spawn(async move {
-            if let Err(e) = Self::run_discovery_service(node_id, address, discovery_port, peers).await {
+            if let Err(e) =
+                Self::run_discovery_service(node_id, address, discovery_port, peers).await
+            {
                 eprintln!("Discovery service error: {}", e);
             }
         });
@@ -167,7 +207,7 @@ impl NodeManager {
                                     if parts.len() >= 3 {
                                         let peer_id = parts[1].to_string();
                                         let peer_addr = parts[2].to_string();
-                                        
+
                                         // Don't add self as a peer
                                         if peer_id != node_id {
                                             let mut peers_lock = peers.lock().await;
@@ -211,7 +251,11 @@ impl NodeManager {
         Ok(peers
             .iter()
             .map(|(_, info)| {
-                (info.id.clone(), info.address.clone(), info.resources.clone())
+                (
+                    info.id.clone(),
+                    info.address.clone(),
+                    info.resources.clone(),
+                )
             })
             .collect())
     }
@@ -225,10 +269,10 @@ impl NodeManager {
         // 1. Check system resources
         let cpu_usage = Self::get_cpu_usage().await;
         let memory_usage = Self::get_memory_usage().await;
-        
+
         // 2. Check if resources are within acceptable limits
         let is_healthy = cpu_usage < 90.0 && memory_usage < 90.0;
-        
+
         // Update health status
         if !is_healthy {
             health.failure_count += 1;
@@ -236,7 +280,7 @@ impl NodeManager {
             // Reset failure count if we're healthy
             health.failure_count = 0;
         }
-        
+
         // Update overall health status
         health.is_healthy = health.failure_count < health.max_failure_threshold;
 
@@ -244,7 +288,8 @@ impl NodeManager {
         let mut peers = self.peers.lock().await;
         if let Some(self_info) = peers.get_mut(&self.node_id) {
             self_info.resources.cpu_available = 100.0 - cpu_usage;
-            self_info.resources.memory_available = ((100.0 - memory_usage) / 100.0 * 1024.0 * 1024.0 * 1024.0) as u64;
+            self_info.resources.memory_available =
+                ((100.0 - memory_usage) / 100.0 * 1024.0 * 1024.0 * 1024.0) as u64;
         }
 
         Ok(health.is_healthy)
@@ -253,13 +298,21 @@ impl NodeManager {
     async fn get_cpu_usage() -> f64 {
         // In a real implementation, this would check actual CPU usage
         // For now, return a random value between 10 and 70
-        10.0 + (std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_secs() % 60) as f64
+        10.0 + (std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs()
+            % 60) as f64
     }
 
     async fn get_memory_usage() -> f64 {
         // In a real implementation, this would check actual memory usage
         // For now, return a random value between 20 and 80
-        20.0 + (std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_secs() % 60) as f64
+        20.0 + (std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs()
+            % 60) as f64
     }
 
     pub async fn remove_node(&self, node_id: &str) -> Result<bool> {
@@ -305,7 +358,9 @@ impl NodeManager {
         // Connect to the host node
         let socket = UdpSocket::bind(format!("0.0.0.0:{}", self.discovery_port)).await?;
         let msg = format!("HIVEMIND_JOIN:{}:{}", self.node_id, self.address);
-        socket.send_to(msg.as_bytes(), format!("{}{}", host, self.discovery_port)).await?;
+        socket
+            .send_to(msg.as_bytes(), format!("{}{}", host, self.discovery_port))
+            .await?;
 
         println!("Successfully joined cluster through {}", host);
         Ok(())

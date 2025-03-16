@@ -5,7 +5,7 @@ use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 
 mod app;
-mod containerd_manager;
+mod youki_manager;
 mod node;
 mod scheduler;
 mod service_discovery;
@@ -216,28 +216,28 @@ async fn main() -> Result<()> {
 
     match cli.command {
         Commands::Daemon { web_port } => {
-            // Default containerd socket path
-            let containerd_socket = "/run/containerd/containerd.sock";
-            let containerd_namespace = "hivemind";
+            // Default youki socket path
+            let youki_socket = "/run/youki/youki.sock";
+            let youki_namespace = "hivemind";
 
             let storage = StorageManager::new(&cli.data_dir).await?;
             let node_manager = NodeManager::with_storage(storage.clone()).await;
             let service_discovery = ServiceDiscovery::new();
 
-            // Initialize AppManager with containerd
-            let app_manager = match AppManager::with_containerd(
+            // Initialize AppManager with youki
+            let app_manager = match AppManager::with_youki(
                 storage.clone(),
-                containerd_socket,
-                containerd_namespace,
+                youki_socket,
+                youki_namespace,
             )
             .await
             {
                 Ok(manager) => {
-                    println!("Successfully connected to containerd");
+                    println!("Successfully connected to youki");
                     manager.with_service_discovery(service_discovery.clone())
                 }
                 Err(e) => {
-                    eprintln!("Failed to connect to containerd: {}", e);
+                    eprintln!("Failed to connect to youki: {}", e);
                     eprintln!("Falling back to mock implementation");
                     AppManager::with_storage(storage)
                         .await?

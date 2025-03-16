@@ -91,8 +91,8 @@ Response:
 ```json
 {
   "success": true,
-  "container_id": "containerd-your-app-name",
-  "message": "Deployed application your-app-name with container containerd-your-app-name"
+  "container_id": "your-app-name",
+  "message": "Deployed application your-app-name with container your-app-name"
 }
 ```
 
@@ -114,14 +114,14 @@ If your application needs persistent storage, you can create and use volumes:
 
 When you deploy an image:
 
-1. Hivemind checks if it can connect to containerd (the container runtime)
-2. If available, it uses containerd to pull and start your container
+1. Hivemind checks if it can connect to youki (the container runtime)
+2. If available, it uses youki to pull and start your container
 3. If not, it falls back to a mock implementation
 4. It registers your container in its internal database
 5. If you specified a service domain, it registers the service with the service discovery system
 6. Containers are monitored for health and status changes
 
-The connection between Hivemind and your container images happens in the `ContainerdManager` which:
+The connection between Hivemind and your container images happens in the `YoukiManager` which:
 - Pulls images from registries
 - Creates and manages containers
 - Maps ports and volumes
