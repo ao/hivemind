@@ -17,6 +17,7 @@ Hivemind is a modern, lightweight container orchestration system designed with s
 - **🌐 Clustering** - Seamlessly scale from a single node to a distributed cluster
 - **🔒 Volume Management** - Persistent storage for your stateful applications
 - **🖥️ Clean Web UI** - Monitor and manage everything through an intuitive dashboard
+- **🔌 Container Networking** - Seamless communication between containers across nodes
 
 ## 🔧 Quick Start
 
@@ -216,6 +217,16 @@ Distributed operation for scaling and high availability:
 - **Node health monitoring** for reliability
 - **Distributed storage** for cluster state
 
+### Container Networking
+
+Seamless communication between containers across nodes:
+
+- **Automatic IP allocation** - Each container gets a unique IP address
+- **Overlay networking** - VXLAN-based overlay for cross-node communication
+- **Network policies** - Control traffic flow between containers
+- **Service discovery integration** - Find services by name rather than IP
+- **Network health monitoring** - Track network status and connectivity
+
 ## 🛠️ Development
 
 ### Prerequisites
@@ -257,10 +268,12 @@ cargo test
 - `src/storage.rs` - Persistence layer
 - `src/node.rs` - Node & cluster management
 - `src/membership.rs` - SWIM-based node membership protocol
+- `src/network.rs` - Container networking & overlay network
 - `src/scheduler.rs` - Container scheduler
 - `src/web.rs` - Web UI & dashboard
 - `src/main.rs` - CLI & entry point
 - `docs/node_membership_protocol.md` - Documentation for the node membership protocol
+- `docs/container_networking.md` - Documentation for the container networking system
 
 ## 📜 License
 
