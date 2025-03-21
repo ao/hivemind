@@ -8,9 +8,11 @@ use hivemind::{AppState, DeployRequest, DeployResponse, ServiceUrlRequest, Servi
 use hivemind::app::{AppManager, ServiceConfig};
 use hivemind::youki_manager::Container;
 use hivemind::node::NodeManager;
+use hivemind::network::NetworkManager;
 use hivemind::service_discovery::{ServiceDiscovery, ServiceEndpoint};
 use hivemind::storage::StorageManager;
 use hivemind::web;
+use std::sync::Arc;
 
 #[derive(Parser)]
 #[command(author, version, about, long_about = None)]
@@ -208,13 +210,6 @@ async fn main() -> Result<()> {
                 }
             };
 
-            // Create AppState for sharing between web and API
-            let app_state = AppState {
-                node_manager: node_manager.clone(),
-                app_manager: app_manager.clone(),
-                service_discovery: service_discovery.clone(),
-            };
-
             // Initialize and start the membership protocol
             let mut node_manager_mut = node_manager.clone();
             if let Err(e) = node_manager_mut.init_membership_protocol().await {
@@ -228,6 +223,41 @@ async fn main() -> Result<()> {
 
             // Start service discovery
             service_discovery.start_dns_server().await?;
+            
+            // Initialize container networking
+            let network_manager = match NetworkManager::new(
+                Arc::new(node_manager.clone()),
+                Arc::new(service_discovery.clone()),
+                None, // Use default network config
+            ).await {
+                Ok(manager) => {
+                    // Initialize the network
+                    if let Err(e) = manager.initialize().await {
+                        eprintln!("Failed to initialize container networking: {}", e);
+                        None
+                    } else {
+                        println!("Container networking initialized successfully");
+                        let manager_arc = Arc::new(manager);
+                        
+                        // Connect network manager to node manager
+                        node_manager.set_network_manager(manager_arc.clone()).await;
+                        
+                        Some(manager_arc)
+                    }
+                }
+                Err(e) => {
+                    eprintln!("Failed to create network manager: {}", e);
+                    None
+                }
+            };
+            
+            // Create AppState for sharing between web and API
+            let app_state = AppState {
+                node_manager: node_manager.clone(),
+                app_manager: app_manager.clone(),
+                service_discovery: service_discovery.clone(),
+                network_manager,
+            };
 
             // Start the web interface in a separate task
             let web_state = app_state.clone();
@@ -268,6 +298,7 @@ async fn main() -> Result<()> {
                 node_manager,
                 app_manager,
                 service_discovery,
+                network_manager: None, // No network manager for web-only mode
             };
 
             // Start the web server
@@ -278,7 +309,8 @@ async fn main() -> Result<()> {
         }
         Commands::Join { host } => {
             let storage = StorageManager::new(&cli.data_dir).await?;
-            let mut node_manager = NodeManager::with_storage(storage).await;
+            let mut node_manager = NodeManager::with_storage(storage.clone()).await;
+            let service_discovery = ServiceDiscovery::new();
             
             println!("Joining cluster at {}", host);
             
@@ -291,11 +323,57 @@ async fn main() -> Result<()> {
             }
             
             // Join the cluster
-            node_manager.join_cluster(&host).await
+            let join_result = node_manager.join_cluster(&host).await;
+            
+            // Initialize container networking after joining
+            if join_result.is_ok() {
+                println!("Successfully joined cluster, initializing container networking...");
+                
+                // Initialize container networking
+                match NetworkManager::new(
+                    Arc::new(node_manager.clone()),
+                    Arc::new(service_discovery.clone()),
+                    None, // Use default network config
+                ).await {
+                    Ok(manager) => {
+                        // Initialize the network
+                        if let Err(e) = manager.initialize().await {
+                            eprintln!("Failed to initialize container networking: {}", e);
+                        } else {
+                            println!("Container networking initialized successfully");
+                            
+                            // Connect network manager to node manager
+                            let manager_arc = Arc::new(manager);
+                            node_manager.set_network_manager(manager_arc.clone()).await;
+                            
+                            // Create AppState for join command
+                            let _app_state = AppState {
+                                node_manager: node_manager.clone(),
+                                app_manager: AppManager::new().await?,
+                                service_discovery,
+                                network_manager: Some(manager_arc),
+                            };
+                        }
+                    }
+                    Err(e) => {
+                        eprintln!("Failed to create network manager: {}", e);
+                    }
+                }
+            }
+            
+            join_result
         }
         Commands::Node { command } => {
             let storage = StorageManager::new(&cli.data_dir).await?;
             let node_manager = NodeManager::with_storage(storage).await;
+            
+            // Create AppState for node commands
+            let _app_state = AppState {
+                node_manager: node_manager.clone(),
+                app_manager: AppManager::new().await?,
+                service_discovery: ServiceDiscovery::new(),
+                network_manager: None,
+            };
             match command {
                 NodeCommands::Ls => {
                     let nodes = node_manager.list_nodes().await?;
@@ -319,7 +397,15 @@ async fn main() -> Result<()> {
             let service_discovery = ServiceDiscovery::new();
             let app_manager = AppManager::with_storage(storage)
                 .await?
-                .with_service_discovery(service_discovery);
+                .with_service_discovery(service_discovery.clone());
+            
+            // Create AppState for app commands
+            let _app_state = AppState {
+                node_manager: NodeManager::new(),
+                app_manager: app_manager.clone(),
+                service_discovery,
+                network_manager: None,
+            };
 
             match command {
                 AppCommands::Ls => {
@@ -422,6 +508,30 @@ async fn main() -> Result<()> {
             let app_manager = AppManager::with_storage(storage)
                 .await?
                 .with_service_discovery(service_discovery.clone());
+            
+            // Initialize node manager
+            let node_manager = NodeManager::new();
+            
+            // Initialize network manager
+            let network_manager = match NetworkManager::new(
+                Arc::new(node_manager.clone()),
+                Arc::new(service_discovery.clone()),
+                None, // Use default network config
+            ).await {
+                Ok(manager) => Some(Arc::new(manager)),
+                Err(e) => {
+                    eprintln!("Failed to create network manager: {}", e);
+                    None
+                }
+            };
+            
+            // Create AppState for health check
+            let app_state = AppState {
+                node_manager: node_manager.clone(),
+                app_manager: app_manager.clone(),
+                service_discovery: service_discovery.clone(),
+                network_manager,
+            };
 
             println!("Checking system health...");
 
@@ -461,6 +571,51 @@ async fn main() -> Result<()> {
                         }
                     }
                 }
+            }
+            
+            // Check network health
+            if let Some(network_manager) = &app_state.network_manager {
+                println!("\nNetwork Health:");
+                
+                // Get node network information
+                let nodes = network_manager.get_nodes().await;
+                if nodes.is_empty() {
+                    println!("  No nodes in network");
+                } else {
+                    println!("  Nodes in network: {}", nodes.len());
+                    for (node_id, info) in nodes.iter() {
+                        println!("  Node: {}", node_id);
+                        println!("    Address: {}", info.address);
+                        println!("    Subnet: {}", info.subnet);
+                    }
+                }
+                
+                // Get overlay tunnels
+                let tunnels = network_manager.get_tunnels().await;
+                if tunnels.is_empty() {
+                    println!("  No overlay tunnels");
+                } else {
+                    println!("  Overlay tunnels: {}", tunnels.len());
+                    for (node_id, info) in tunnels.iter() {
+                        println!("    Tunnel to {}: {} -> {}", 
+                            node_id, info.local_ip, info.remote_ip);
+                    }
+                }
+                
+                // Get network policies
+                let policies = network_manager.get_policies().await;
+                if policies.is_empty() {
+                    println!("  No network policies");
+                } else {
+                    println!("  Network policies: {}", policies.len());
+                    for policy in policies {
+                        println!("    Policy: {}", policy.name);
+                        println!("      Ingress rules: {}", policy.ingress_rules.len());
+                        println!("      Egress rules: {}", policy.egress_rules.len());
+                    }
+                }
+            } else {
+                println!("\nNetwork: Not available");
             }
             Ok(())
         }

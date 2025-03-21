@@ -1,5 +1,6 @@
 pub mod app;
 pub mod membership;
+pub mod network;
 pub mod node;
 pub mod scheduler;
 pub mod service_discovery;
@@ -15,6 +16,7 @@ pub struct AppState {
     pub node_manager: node::NodeManager,
     pub app_manager: app::AppManager,
     pub service_discovery: service_discovery::ServiceDiscovery,
+    pub network_manager: Option<std::sync::Arc<network::NetworkManager>>,
 }
 
 #[derive(Deserialize)]

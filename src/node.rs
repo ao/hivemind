@@ -1,4 +1,5 @@
 use crate::membership::{MembershipConfig, MembershipEvent, MembershipProtocol};
+use crate::network::NetworkManager;
 use crate::storage::StorageManager;
 use anyhow::Result;
 use std::collections::HashMap;
@@ -18,6 +19,7 @@ pub struct NodeManager {
     address: String,
     discovery_port: u16,
     membership: Option<Arc<MembershipProtocol>>,
+    network_manager: Arc<Mutex<Option<Arc<NetworkManager>>>>,
 }
 
 #[derive(Clone, Debug)]
@@ -81,6 +83,7 @@ impl NodeManager {
             address,
             discovery_port: 8901,
             membership: None,
+            network_manager: Arc::new(Mutex::new(None)),
         }
     }
 
@@ -131,6 +134,7 @@ impl NodeManager {
             // Clone necessary data for the event handler task
             let peers = self.peers.clone();
             let storage = self.storage.clone();
+            let network_manager = self.network_manager.clone();
             
             // Start event handler task
             tokio::spawn(async move {
@@ -163,6 +167,15 @@ impl NodeManager {
                                     eprintln!("Failed to save node to storage: {}", e);
                                 }
                             }
+                            
+                            // Update network manager if available
+                            if let Some(network_mgr) = &*network_manager.lock().await {
+                                if let Err(e) = network_mgr.handle_node_joined(&member).await {
+                                    eprintln!("Failed to update network for joined node: {}", e);
+                                } else {
+                                    println!("Network updated for joined node: {}", member.id);
+                                }
+                            }
                         }
                         MembershipEvent::MemberSuspected(member) => {
                             println!("Member suspected: {}", member.id);
@@ -173,6 +186,15 @@ impl NodeManager {
                             // Remove from peers
                             let mut peers_lock = peers.lock().await;
                             peers_lock.remove(&member.id);
+                            
+                            // Update network manager if available
+                            if let Some(network_mgr) = &*network_manager.lock().await {
+                                if let Err(e) = network_mgr.handle_node_left(&member).await {
+                                    eprintln!("Failed to update network for dead node: {}", e);
+                                } else {
+                                    println!("Network updated for dead node: {}", member.id);
+                                }
+                            }
                         }
                         MembershipEvent::MemberLeft(member) => {
                             println!("Member left: {}", member.id);
@@ -180,6 +202,15 @@ impl NodeManager {
                             // Remove from peers
                             let mut peers_lock = peers.lock().await;
                             peers_lock.remove(&member.id);
+                            
+                            // Update network manager if available
+                            if let Some(network_mgr) = &*network_manager.lock().await {
+                                if let Err(e) = network_mgr.handle_node_left(&member).await {
+                                    eprintln!("Failed to update network for left node: {}", e);
+                                } else {
+                                    println!("Network updated for left node: {}", member.id);
+                                }
+                            }
                         }
                         MembershipEvent::MemberAlive(member) => {
                             println!("Member alive again: {}", member.id);
@@ -200,6 +231,15 @@ impl NodeManager {
                                         containers_running: 0,
                                     },
                                 });
+                                
+                                // Update network manager if available
+                                if let Some(network_mgr) = &*network_manager.lock().await {
+                                    if let Err(e) = network_mgr.handle_node_joined(&member).await {
+                                        eprintln!("Failed to update network for alive node: {}", e);
+                                    } else {
+                                        println!("Network updated for alive node: {}", member.id);
+                                    }
+                                }
                             }
                         }
                     }
@@ -510,5 +550,12 @@ impl NodeManager {
         }
         
         Ok(())
+    }
+    
+    // Set the network manager
+    pub async fn set_network_manager(&self, network_mgr: Arc<NetworkManager>) {
+        let mut network_manager = self.network_manager.lock().await;
+        *network_manager = Some(network_mgr);
+        println!("Network manager set for node {}", self.node_id);
     }
 }
