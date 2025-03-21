@@ -10,7 +10,7 @@ use tokio::sync::Mutex;
 use tokio::time;
 use uuid::Uuid;
 
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub struct NodeManager {
     node_id: String,
     peers: Arc<Mutex<HashMap<String, NodeInfo>>>,
@@ -39,6 +39,7 @@ pub struct NodeResources {
     pub containers_running: u32,
 }
 
+#[derive(Debug)]
 pub struct NodeHealth {
     is_healthy: bool,
     last_check: Instant,

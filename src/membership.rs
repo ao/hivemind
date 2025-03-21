@@ -67,7 +67,7 @@ pub enum MembershipEvent {
 }
 
 // MembershipConfig holds configuration for the membership protocol
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub struct MembershipConfig {
     pub bind_addr: String,
     pub bind_port: u16,
@@ -91,6 +91,7 @@ impl Default for MembershipConfig {
 }
 
 // MembershipProtocol implements the SWIM protocol for cluster membership
+#[derive(Debug)]
 pub struct MembershipProtocol {
     node_id: String,
     addr: String,
