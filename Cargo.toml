@@ -31,6 +31,7 @@ get_if_addrs = "0.5.3"
 trust-dns-server = "0.23.2"
 trust-dns-proto = "0.23.2"
 async-trait = "0.1"
+ipnetwork = "0.20.0"
 
 [features]
 default = ["youki"]
