@@ -215,8 +215,16 @@ async fn main() -> Result<()> {
                 service_discovery: service_discovery.clone(),
             };
 
-            // Start node discovery
-            node_manager.start_discovery().await?;
+            // Initialize and start the membership protocol
+            let mut node_manager_mut = node_manager.clone();
+            if let Err(e) = node_manager_mut.init_membership_protocol().await {
+                eprintln!("Failed to initialize membership protocol: {}", e);
+                eprintln!("Falling back to legacy discovery");
+                // Fall back to legacy discovery if membership protocol fails
+                node_manager.start_discovery().await?;
+            } else {
+                println!("Node membership protocol initialized successfully");
+            }
 
             // Start service discovery
             service_discovery.start_dns_server().await?;
@@ -270,9 +278,20 @@ async fn main() -> Result<()> {
         }
         Commands::Join { host } => {
             let storage = StorageManager::new(&cli.data_dir).await?;
-            let node_manager = NodeManager::with_storage(storage).await;
+            let mut node_manager = NodeManager::with_storage(storage).await;
+            
             println!("Joining cluster at {}", host);
-            node_manager.start_discovery().await
+            
+            // Initialize membership protocol
+            if let Err(e) = node_manager.init_membership_protocol().await {
+                eprintln!("Failed to initialize membership protocol: {}", e);
+                eprintln!("Falling back to legacy discovery");
+                // Fall back to legacy discovery
+                node_manager.start_discovery().await?;
+            }
+            
+            // Join the cluster
+            node_manager.join_cluster(&host).await
         }
         Commands::Node { command } => {
             let storage = StorageManager::new(&cli.data_dir).await?;

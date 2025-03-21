@@ -1,4 +1,5 @@
 pub mod app;
+pub mod membership;
 pub mod node;
 pub mod scheduler;
 pub mod service_discovery;
