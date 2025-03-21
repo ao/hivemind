@@ -190,13 +190,14 @@ Hivemind provides comprehensive container lifecycle management:
 
 ### Service Discovery
 
-Automatic DNS-based service discovery allows:
+Enhanced DNS-based service discovery allows:
 
 - **Service domains** for easy access to your applications
-- **Automatic load balancing** across container instances
-- **Health checking** to ensure traffic only goes to healthy containers
+- **Automatic load balancing** across container instances with multiple strategies
+- **Advanced health checking** with configurable protocols and parameters
 - **Built-in DNS server** for resolving service domains
-- **Proxy functionality** to route external traffic
+- **Network integration** for seamless cross-node communication
+- **Circuit breaking** to prevent routing traffic to unhealthy endpoints
 
 ### Volume Management
 
@@ -274,6 +275,7 @@ cargo test
 - `src/main.rs` - CLI & entry point
 - `docs/node_membership_protocol.md` - Documentation for the node membership protocol
 - `docs/container_networking.md` - Documentation for the container networking system
+- `docs/service_discovery.md` - Documentation for the service discovery mechanism
 
 ## 📜 License
 

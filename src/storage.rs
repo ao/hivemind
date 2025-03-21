@@ -4,7 +4,7 @@ use std::path::Path;
 use std::sync::Arc;
 use tokio::sync::Mutex;
 
-#[derive(Clone)] // Add Clone derivation
+#[derive(Clone, Debug)] // Add Clone and Debug derivation
 pub struct StorageManager {
     conn: Arc<Mutex<Connection>>,
 }

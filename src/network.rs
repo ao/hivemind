@@ -109,6 +109,7 @@ pub struct NetworkPeer {
     pub selector: Option<NetworkSelector>,
 }
 
+#[derive(Debug)]
 pub struct NetworkManager {
     ipam: Arc<Mutex<IpamManager>>,
     overlay: Arc<Mutex<OverlayNetwork>>,
@@ -620,6 +621,7 @@ impl NetworkManager {
     }
 }
 
+#[derive(Debug)]
 pub struct IpamManager {
     network_cidr: IpNetwork,
     node_subnet_size: u8,
@@ -747,6 +749,7 @@ impl IpamManager {
     }
 }
 
+#[derive(Debug)]
 pub struct OverlayNetwork {
     network_type: OverlayNetworkType,
     vxlan_id: u16,
@@ -991,6 +994,7 @@ impl OverlayNetwork {
     }
 }
 
+#[derive(Debug)]
 pub struct NetworkPolicyManager {
     policies: HashMap<String, NetworkPolicy>,
 }

@@ -221,9 +221,6 @@ async fn main() -> Result<()> {
                 println!("Node membership protocol initialized successfully");
             }
 
-            // Start service discovery
-            service_discovery.start_dns_server().await?;
-            
             // Initialize container networking
             let network_manager = match NetworkManager::new(
                 Arc::new(node_manager.clone()),
@@ -250,6 +247,20 @@ async fn main() -> Result<()> {
                     None
                 }
             };
+            
+            // Initialize service discovery with network manager
+            let service_discovery = if let Some(network_manager) = &network_manager {
+                service_discovery.with_network_manager(network_manager.clone())
+            } else {
+                service_discovery
+            };
+            
+            // Start service discovery system
+            if let Err(e) = service_discovery.initialize().await {
+                eprintln!("Failed to initialize service discovery: {}", e);
+            } else {
+                println!("Service discovery initialized successfully");
+            }
             
             // Create AppState for sharing between web and API
             let app_state = AppState {
@@ -345,6 +356,16 @@ async fn main() -> Result<()> {
                             // Connect network manager to node manager
                             let manager_arc = Arc::new(manager);
                             node_manager.set_network_manager(manager_arc.clone()).await;
+                            
+                            // Initialize service discovery with network manager
+                            let service_discovery = service_discovery.with_network_manager(manager_arc.clone());
+                            
+                            // Start service discovery system
+                            if let Err(e) = service_discovery.initialize().await {
+                                eprintln!("Failed to initialize service discovery: {}", e);
+                            } else {
+                                println!("Service discovery initialized successfully");
+                            }
                             
                             // Create AppState for join command
                             let _app_state = AppState {
