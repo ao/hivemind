@@ -1,6 +1,6 @@
-# Deploying Docker Images to Hivemind
+# Hivemind Developer Guide
 
-Based on the codebase review, I can confirm that developers can deploy their Docker images that are already pushed to a registry (like Docker Hub or ECR) to this Hivemind platform. Here's how it works and the commands they would need to use.
+This guide provides information for developers working with the Hivemind platform, including how to deploy applications and understand the container networking system.
 
 ## Deployment Options
 
@@ -159,4 +159,51 @@ Hivemind also provides these additional capabilities:
    hivemind join --host <any-node-address>
    ```
 
+5. **Container Networking**: Seamless communication between containers across nodes
+
 By following these instructions, a developer can successfully deploy their Docker images to the Hivemind platform and manage them effectively.
+
+## Container Networking
+
+Hivemind includes a robust container networking system that enables containers to communicate across nodes in a cluster. For detailed information, see the [Container Networking Documentation](docs/container_networking.md).
+
+### Key Features
+
+- **Automatic IP Address Management**: Each container gets a unique IP address
+- **Overlay Network**: Containers can communicate across nodes transparently
+- **Network Policies**: Control traffic flow between containers for security
+- **Service Discovery Integration**: Find services by name rather than IP address
+
+### How Container Networking Works
+
+When you deploy a container:
+
+1. The container is assigned an IP address from the node's subnet
+2. A virtual network interface is created in the container
+3. The container is connected to the node's bridge
+4. The bridge is connected to an overlay network that spans all nodes
+5. Containers can communicate with each other using their assigned IPs
+
+### Checking Network Health
+
+You can check the status of the container networking system using:
+
+```bash
+hivemind health
+```
+
+This will show information about:
+- Nodes in the network
+- Overlay tunnels between nodes
+- Network policies
+
+### Network Troubleshooting
+
+If containers are having trouble communicating:
+
+1. Check that the containers have valid IP addresses
+2. Verify that the overlay network is functioning
+3. Check for network policies that might be blocking traffic
+4. Ensure that the nodes can reach each other on the VXLAN port (default: 4789)
+
+For more detailed troubleshooting, refer to the [Container Networking Documentation](docs/container_networking.md).
