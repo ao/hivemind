@@ -227,6 +227,9 @@ Seamless communication between containers across nodes:
 - **Network policies** - Control traffic flow between containers
 - **Service discovery integration** - Find services by name rather than IP
 - **Network health monitoring** - Track network status and connectivity
+- **Network-aware scheduling** - Optimize container placement based on network topology
+- **Service affinity/anti-affinity** - Place related services together or apart based on rules
+- **Dynamic rebalancing** - Move containers to optimize network performance
 
 ## 🛠️ Development
 
@@ -275,6 +278,7 @@ cargo test
 - `src/main.rs` - CLI & entry point
 - `docs/node_membership_protocol.md` - Documentation for the node membership protocol
 - `docs/container_networking.md` - Documentation for the container networking system
+- `docs/container_networking_scheduler.md` - Documentation for the network-aware container scheduler
 - `docs/service_discovery.md` - Documentation for the service discovery mechanism
 
 ## 📜 License
