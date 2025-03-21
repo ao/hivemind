@@ -1,6 +1,4 @@
-// Remove the import for the non-existent container_manager module
-// use crate::container_manager::ContainerManager;
-use crate::youki_manager::YoukiManager;
+use crate::youki_manager::{YoukiManager, EnvVar, PortMapping, Volume};
 use crate::service_discovery::ServiceDiscovery;
 use anyhow::Result;
 use serde::{Deserialize, Serialize};
@@ -9,95 +7,63 @@ use std::sync::Arc;
 use tokio::sync::Mutex;
 use uuid::Uuid;
 
-#[derive(Clone, Serialize, Deserialize)]
-pub struct Container {
-    pub id: String,
-    pub name: String,
-    pub image: String,
-    pub status: ContainerStatus,
-    pub node_id: String,
-    pub created_at: i64,
-    pub ports: Vec<PortMapping>,
-    pub env_vars: Vec<EnvVar>,
-    pub service_domain: Option<String>,
+// Re-export types from youki_manager for backward compatibility
+pub use crate::youki_manager::{Container, ContainerStats, ContainerStatus};
+
+// Define the ContainerRuntime trait in the app module
+#[async_trait::async_trait]
+pub trait ContainerRuntime: Send + Sync + 'static {
+    /// Pull an image from a registry
+    async fn pull_image(&self, image: &str) -> Result<()>;
+    
+    /// Create and start a container
+    async fn create_container(
+        &self,
+        image: &str,
+        name: &str,
+        env_vars: Vec<EnvVar>,
+        ports: Vec<PortMapping>,
+    ) -> Result<String>;
+    
+    /// Create container with volumes
+    async fn create_container_with_volumes(
+        &self,
+        image: &str,
+        name: &str,
+        env_vars: Vec<EnvVar>,
+        ports: Vec<PortMapping>,
+        volumes: Vec<(String, String)>,
+    ) -> Result<String>;
+    
+    /// Stop and remove a container
+    async fn stop_container(&self, container_id: &str) -> Result<()>;
+    
+    /// List all containers
+    async fn list_containers(&self) -> Result<Vec<Container>>;
+    
+    /// Get container metrics
+    async fn get_container_metrics(&self, container_id: &str) -> Result<ContainerStats>;
+    
+    /// Create a volume
+    async fn create_volume(&self, name: &str) -> Result<()>;
+    
+    /// Delete a volume
+    async fn delete_volume(&self, name: &str) -> Result<()>;
+    
+    /// List volumes
+    async fn list_volumes(&self) -> Result<Vec<Volume>>;
 }
 
-#[derive(Clone, Serialize, Deserialize)]
-pub struct Volume {
-    pub name: String,
-    pub created_at: i64,
-    pub size: u64, // in bytes
-}
-
-#[derive(Clone, Serialize, Deserialize)]
-pub struct PortMapping {
-    pub container_port: u16,
-    pub host_port: u16,
-    pub protocol: String, // "tcp" or "udp"
-}
-
-#[derive(Clone, Serialize, Deserialize)]
-pub struct EnvVar {
-    pub key: String,
-    pub value: String,
-}
-
-#[derive(Clone, Serialize, Deserialize)]
-pub struct ContainerStats {
-    pub cpu_usage: f64,    // Percentage
-    pub memory_usage: u64, // Bytes
-    pub network_rx: u64,   // Bytes
-    pub network_tx: u64,   // Bytes
-    pub last_updated: i64, // Unix timestamp
-}
-
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
-pub enum ContainerStatus {
-    Running,
-    Stopped,
-    Failed,
-    Pending,
-    Restarting,
-}
-
-impl std::fmt::Display for ContainerStatus {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{}", self.as_str())
-    }
-}
-
-impl ContainerStatus {
-    pub fn as_str(&self) -> &'static str {
-        match self {
-            ContainerStatus::Running => "running",
-            ContainerStatus::Stopped => "stopped",
-            ContainerStatus::Failed => "failed",
-            ContainerStatus::Pending => "pending",
-            ContainerStatus::Restarting => "restarting",
-        }
-    }
-
-    pub fn from_str(s: &str) -> Self {
-        match s {
-            "running" => ContainerStatus::Running,
-            "stopped" => ContainerStatus::Stopped,
-            "failed" => ContainerStatus::Failed,
-            "restarting" => ContainerStatus::Restarting,
-            _ => ContainerStatus::Pending,
-        }
-    }
-}
-
+/// AppManager is responsible for managing applications and containers
 #[derive(Clone)]
 pub struct AppManager {
-    containers: Arc<Mutex<Vec<Container>>>,
     images: Arc<Mutex<Vec<String>>>,
     services: Arc<Mutex<HashMap<String, ServiceConfig>>>,
     service_discovery: Option<ServiceDiscovery>,
-    container_stats: Arc<Mutex<HashMap<String, ContainerStats>>>,
     storage: Option<crate::storage::StorageManager>,
-    youki: Option<Arc<YoukiManager>>,
-    volumes: Arc<Mutex<HashMap<String, Volume>>>,
+    container_runtime: Option<Arc<dyn ContainerRuntime + Send + Sync>>,
+    containers: Arc<Mutex<Vec<Container>>>,
+    container_stats: Arc<Mutex<HashMap<String, ContainerStats>>>,
 }
 
 #[derive(Clone, Serialize, Deserialize)]
@@ -111,126 +77,81 @@ pub struct ServiceConfig {
 
 impl AppManager {
     pub async fn new() -> Result<Self> {
-        Ok(Self {
-            containers: Arc::new(Mutex::new(Vec::new())),
+        let manager = Self {
             images: Arc::new(Mutex::new(Vec::new())),
             services: Arc::new(Mutex::new(HashMap::new())),
             service_discovery: None,
-            container_stats: Arc::new(Mutex::new(HashMap::new())),
             storage: None,
-            youki: None,
-            volumes: Arc::new(Mutex::new(HashMap::new())),
-        })
+            container_runtime: None,
+            containers: Arc::new(Mutex::new(Vec::new())),
+            container_stats: Arc::new(Mutex::new(HashMap::new())),
+        };
+        
+        // Initialize default images
+        {
+            let mut images = manager.images.lock().await;
+            images.push("nginx:latest".to_string());
+            images.push("redis:latest".to_string());
+            images.push("postgres:latest".to_string());
+            images.push("ubuntu:latest".to_string());
+        }
+        
+        Ok(manager)
+    }
+    
+    /// Set the container runtime implementation
+    #[cfg(test)]
+    pub fn with_container_runtime<T: ContainerRuntime + Send + Sync + 'static>(mut self, runtime: Arc<T>) -> Self {
+        self.container_runtime = Some(runtime);
+        self
     }
 
-    // Create a volume
+    // Create a volume - delegates to container runtime
     pub async fn create_volume(&self, name: &str) -> Result<()> {
         println!("Creating volume {}", name);
 
-        // Check if youki manager is available
-        if let Some(youki) = &self.youki {
-            // Create volume using youki manager
-            youki.create_volume(name).await?;
-
-            // Add to in-memory state
-            let mut volumes = self.volumes.lock().await;
-            let now = std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_secs() as i64;
-
-            volumes.insert(
-                name.to_string(),
-                Volume {
-                    name: name.to_string(),
-                    created_at: now,
-                    size: 0, // Size will be updated during monitoring
-                },
-            );
-
+        // Check if container runtime is available
+        if let Some(runtime) = &self.container_runtime {
+            // Create volume using container runtime
+            runtime.create_volume(name).await?;
             println!("Volume {} created", name);
             Ok(())
         } else {
-            // Mock implementation
-            let mut volumes = self.volumes.lock().await;
-            let now = std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_secs() as i64;
-
-            volumes.insert(
-                name.to_string(),
-                Volume {
-                    name: name.to_string(),
-                    created_at: now,
-                    size: 0,
-                },
-            );
-
-            println!("Volume {} created (mock)", name);
-            Ok(())
+            // Error if no container runtime
+            println!("No container runtime available to create volume");
+            Err(anyhow::anyhow!("No container runtime available"))
         }
     }
 
-    // Delete a volume
+    // Delete a volume - delegates to container runtime
     pub async fn delete_volume(&self, name: &str) -> Result<()> {
         println!("Deleting volume {}", name);
 
-        // Check if youki manager is available
-        if let Some(youki) = &self.youki {
-            // Delete volume using youki manager
-            youki.delete_volume(name).await?;
-
-            // Remove from in-memory state
-            let mut volumes = self.volumes.lock().await;
-            volumes.remove(name);
-
+        // Check if container runtime is available
+        if let Some(runtime) = &self.container_runtime {
+            // Delete volume using container runtime
+            runtime.delete_volume(name).await?;
             println!("Volume {} deleted", name);
             Ok(())
         } else {
-            // Mock implementation
-            let mut volumes = self.volumes.lock().await;
-            volumes.remove(name);
-
-            println!("Volume {} deleted (mock)", name);
-            Ok(())
+            // Error if no container runtime
+            println!("No container runtime available to delete volume");
+            Err(anyhow::anyhow!("No container runtime available"))
         }
     }
 
-    // List volumes
+    // List volumes - delegates to container runtime
     pub async fn list_volumes(&self) -> Result<Vec<Volume>> {
         println!("Listing volumes");
 
-        // Check if youki manager is available
-        if let Some(youki) = &self.youki {
-            // Get volume names from youki manager
-            let volume_names = youki.list_volumes().await?;
-
-            // Build volume objects
-            let mut volumes = self.volumes.lock().await;
-            let now = std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_secs() as i64;
-
-            let mut result = Vec::new();
-
-            for name in volume_names {
-                // Get or create volume object
-                let volume = volumes.entry(name.clone()).or_insert_with(|| Volume {
-                    name: name.clone(),
-                    created_at: now,
-                    size: 0,
-                });
-
-                result.push(volume.clone());
-            }
-
-            Ok(result)
+        // Check if container runtime is available
+        if let Some(runtime) = &self.container_runtime {
+            // Get volumes from container runtime
+            runtime.list_volumes().await
         } else {
-            // Mock implementation
-            let volumes = self.volumes.lock().await;
-            Ok(volumes.values().cloned().collect())
+            // Error if no container runtime
+            println!("No container runtime available to list volumes");
+            Err(anyhow::anyhow!("No container runtime available"))
         }
     }
 
@@ -253,18 +174,19 @@ impl AppManager {
         // Ensure all volumes exist
         for (volume_name, _) in &volumes {
             // Check if volume exists
-            let volumes = self.volumes.lock().await;
-            if !volumes.contains_key(volume_name) {
-                // Create volume if it doesn't exist
-                drop(volumes); // Release lock
-                self.create_volume(volume_name).await?;
+            if let Some(runtime) = &self.container_runtime {
+                let runtime_volumes = runtime.list_volumes().await?;
+                if !runtime_volumes.iter().any(|v| v.name == *volume_name) {
+                    // Create volume if it doesn't exist
+                    self.create_volume(volume_name).await?;
+                }
             }
         }
 
         // Deploy the container with volumes
-        if let Some(youki) = &self.youki {
+        if let Some(runtime) = &self.container_runtime {
             // Pull the image first
-            youki.pull_image(image).await?;
+            runtime.pull_image(image).await?;
 
             // Convert environment variables
             let env_vars = env_vars
@@ -286,26 +208,62 @@ impl AppManager {
                 .collect();
 
             // Deploy container with volumes
-            let container_id = youki
+            let container_id = runtime
                 .create_container_with_volumes(image, name, env_vars, ports, volumes)
                 .await?;
 
             // Set up service discovery if requested
             if let Some(domain) = service_domain {
                 // Register service
-                // ... [service registration code from deploy_app]
+                let service_config = ServiceConfig {
+                    name: name.to_string(),
+                    domain: domain.to_string(),
+                    container_ids: vec![container_id.clone()],
+                    desired_replicas: 1,
+                    current_replicas: 1,
+                };
+                
+                let mut services = self.services.lock().await;
+                services.insert(name.to_string(), service_config.clone());
+                
+                // Register with service discovery if available
+                if let Some(service_discovery) = &self.service_discovery {
+                    // Get container details to find IP and port
+                    if let Some(container) = self.get_container_by_id(&container_id).await {
+                        // Use the container's node IP instead of hardcoded value
+                        let ip_address = match container.node_id.as_str() {
+                            "local" => "127.0.0.1",
+                            _ => &container.node_id, // Use node_id as IP for now
+                        };
+
+                        // Find the mapped port (assuming the first port mapping is the service port)
+                        if let Some(port_mapping) = container.ports.first() {
+                            service_discovery
+                                .register_service(
+                                    &service_config,
+                                    &container.node_id,
+                                    ip_address,
+                                    port_mapping.host_port,
+                                )
+                                .await?;
+                        }
+                    }
+                }
             }
 
             Ok(container_id)
         } else {
-            // Fall back to regular deployment
-            self.deploy_app(image, name, service_domain, Some(env_vars), Some(ports))
-                .await
+            // Error if no container runtime
+            println!("No container runtime available to deploy app with volumes");
+            Err(anyhow::anyhow!("No container runtime available"))
         }
     }
 
-    pub fn with_service_discovery(mut self, service_discovery: ServiceDiscovery) -> Self {
-        self.service_discovery = Some(service_discovery);
+    pub fn with_service_discovery<T>(mut self, service_discovery: T) -> Self 
+    where
+        T: Into<Option<ServiceDiscovery>> + std::fmt::Debug,
+    {
+        self.service_discovery = service_discovery.into();
         self
     }
 
@@ -317,86 +275,23 @@ impl AppManager {
         // Initialize youki manager
         let youki = YoukiManager::new(youki_socket, namespace).await?;
 
-        // Create app manager with storage and youki
-        let manager = Self {
-            containers: Arc::new(Mutex::new(Vec::new())),
-            images: Arc::new(Mutex::new(Vec::new())),
-            services: Arc::new(Mutex::new(HashMap::new())),
-            service_discovery: None,
-            container_stats: Arc::new(Mutex::new(HashMap::new())),
-            storage: Some(storage.clone()),
-            youki: Some(Arc::new(youki)),
-            volumes: Arc::new(Mutex::new(HashMap::new())),
-        };
-
-        // Load existing containers from youki
-        if let Some(youki) = &manager.youki {
-            let youki_containers = youki.list_containers().await?;
-            let mut containers = manager.containers.lock().await;
-            containers.extend(youki_containers);
-        }
-
-        // Initialize default images
-        {
-            let mut images = manager.images.lock().await;
-            images.push("nginx:latest".to_string());
-            images.push("redis:latest".to_string());
-            images.push("postgres:latest".to_string());
-            images.push("ubuntu:latest".to_string());
-        }
+        // Create app manager with storage
+        let mut manager = Self::new().await?;
+        manager.storage = Some(storage);
+        manager.container_runtime = Some(Arc::new(youki));
 
         Ok(manager)
     }
 
     pub async fn with_storage(storage: crate::storage::StorageManager) -> Result<Self> {
         // Create an app manager with storage
-        let manager = Self {
-            containers: Arc::new(Mutex::new(Vec::new())),
-            images: Arc::new(Mutex::new(Vec::new())),
-            services: Arc::new(Mutex::new(HashMap::new())),
-            service_discovery: None,
-            container_stats: Arc::new(Mutex::new(HashMap::new())),
-            storage: Some(storage.clone()),
-            youki: None,
-            volumes: Arc::new(Mutex::new(HashMap::new())),
-        };
-
-        // Load containers from storage
-        if let Some(storage) = &manager.storage {
-            let container_data = storage.get_containers().await?;
-            let mut containers = manager.containers.lock().await;
-
-            for (id, name, image, status, node_id) in container_data {
-                containers.push(Container {
-                    id,
-                    name,
-                    image,
-                    status: ContainerStatus::from_str(&status),
-                    node_id,
-                    created_at: std::time::SystemTime::now()
-                        .duration_since(std::time::UNIX_EPOCH)
-                        .unwrap()
-                        .as_secs() as i64,
-                    ports: Vec::new(),
-                    env_vars: Vec::new(),
-                    service_domain: None,
-                });
-            }
-        }
-
-        // Load some default images
-        {
-            let mut images = manager.images.lock().await;
-            images.push("nginx:latest".to_string());
-            images.push("redis:latest".to_string());
-            images.push("postgres:latest".to_string());
-            images.push("ubuntu:latest".to_string());
-        } // Release the lock before returning manager
-
+        let mut manager = Self::new().await?;
+        manager.storage = Some(storage);
+        
         Ok(manager)
     }
 
-    // Update deploy_container to use youki
+    // Deploy a container using the container runtime
     pub async fn deploy_container(
         &self,
         image: &str,
@@ -429,17 +324,17 @@ impl AppManager {
             })
             .collect::<Vec<_>>();
 
-        // Generate a unique container ID
-        let container_id = format!("container-{}", Uuid::new_v4());
+        // Generate a unique container ID (unused since runtime provides the real ID)
+        let _container_id = format!("container-{}", Uuid::new_v4());
 
-        // If we have youki available, use it to deploy the container
-        if let Some(youki) = &self.youki {
+        // If we have a container runtime available, use it to deploy the container
+        if let Some(runtime) = &self.container_runtime {
             // Pull the image first
-            youki.pull_image(image).await?;
+            runtime.pull_image(image).await?;
 
-            // Create and start container via youki
-            let real_container_id = youki
-                .create_container(image, &container_id, env_vars.clone(), ports.clone())
+            // Create and start container via runtime
+            let real_container_id = runtime
+                .create_container(image, name, env_vars.clone(), ports.clone())
                 .await?;
 
             // Get current timestamp
@@ -480,17 +375,16 @@ impl AppManager {
             return Ok(real_container_id);
         }
 
-        // Fallback to mock implementation if youki is not available
-        // ... [existing mock implementation code]
-
-        Ok(container_id)
+        // No container runtime available
+        println!("No container runtime available to deploy container");
+        Err(anyhow::anyhow!("No container runtime available"))
     }
 
-    // Update stop_container to use youki
+    // Stop a container using the container runtime
     pub async fn stop_container(&self, container_id: &str) -> Result<bool> {
-        if let Some(youki) = &self.youki {
-            // Stop container via youki
-            youki.stop_container(container_id).await?;
+        if let Some(runtime) = &self.container_runtime {
+            // Stop container via runtime
+            runtime.stop_container(container_id).await?;
 
             // Update container status in memory
             let mut containers = self.containers.lock().await;
@@ -514,15 +408,14 @@ impl AppManager {
             return Ok(true);
         }
 
-        // Fallback to mock implementation
-        // ... [existing mock implementation code]
-
-        Ok(false)
+        // No container runtime available
+        println!("No container runtime available to stop container");
+        Err(anyhow::anyhow!("No container runtime available"))
     }
 
-    // Update restart_container to use youki
+    // Restart a container using the container runtime
     pub async fn restart_container(&self, container_id: &str) -> Result<bool> {
-        if let Some(youki) = &self.youki {
+        if let Some(runtime) = &self.container_runtime {
             // Get container info
             let container_opt = {
                 let containers = self.containers.lock().await;
@@ -552,7 +445,7 @@ impl AppManager {
                 }
 
                 // Stop the container
-                youki.stop_container(container_id).await?;
+                runtime.stop_container(container_id).await?;
 
                 // Start a new container with the same parameters
                 let env_vars: Vec<(&str, &str)> = container
@@ -587,28 +480,27 @@ impl AppManager {
             }
         }
 
-        // Fallback to mock implementation
-        // ... [existing mock implementation code]
-
-        Ok(false)
+        // No container runtime available
+        println!("No container runtime available to restart container");
+        Err(anyhow::anyhow!("No container runtime available"))
     }
 
-    // Update monitor_containers to use youki
+    // Monitor containers using the container runtime
     pub async fn monitor_containers(&self) -> Result<()> {
         println!("Monitoring containers...");
 
-        if let Some(youki) = &self.youki {
-            // Get all containers from youki
-            let youki_containers = youki.list_containers().await?;
+        if let Some(runtime) = &self.container_runtime {
+            // Get all containers from runtime
+            let runtime_containers = runtime.list_containers().await?;
 
             // Update container status in memory
             let mut containers = self.containers.lock().await;
 
-            // Track container IDs that exist in youki
-            let mut youki_ids = HashSet::new();
+            // Track container IDs that exist in runtime
+            let mut runtime_ids = HashSet::new();
 
-            for c in &youki_containers {
-                youki_ids.insert(c.id.clone());
+            for c in &runtime_containers {
+                runtime_ids.insert(c.id.clone());
 
                 // Find or add container in memory
                 if let Some(idx) = containers.iter().position(|existing| existing.id == c.id) {
@@ -645,10 +537,10 @@ impl AppManager {
                 self.update_container_stats(&c.id).await?;
             }
 
-            // Handle containers that no longer exist in youki
+            // Handle containers that no longer exist in runtime
             for idx in (0..containers.len()).rev() {
-                if !youki_ids.contains(&containers[idx].id) {
-                    // Container no longer exists in youki
+                if !runtime_ids.contains(&containers[idx].id) {
+                    // Container no longer exists in runtime
                     if containers[idx].status != ContainerStatus::Stopped {
                         containers[idx].status = ContainerStatus::Stopped;
 
@@ -671,17 +563,16 @@ impl AppManager {
             return Ok(());
         }
 
-        // Fallback to mock implementation
-        // ... [existing mock implementation code]
-
-        Ok(())
+        // No container runtime available
+        println!("No container runtime available to monitor containers");
+        Err(anyhow::anyhow!("No container runtime available"))
     }
 
-    // Update update_container_stats to use youki
+    // Update container stats using the container runtime
     async fn update_container_stats(&self, container_id: &str) -> Result<()> {
-        if let Some(youki) = &self.youki {
-            // Get container stats from youki
-            match youki.get_container_metrics(container_id).await {
+        if let Some(runtime) = &self.container_runtime {
+            // Get container stats from runtime
+            match runtime.get_container_metrics(container_id).await {
                 Ok(stats) => {
                     // Update stats in memory
                     let mut container_stats = self.container_stats.lock().await;
@@ -693,13 +584,9 @@ impl AppManager {
                         "Failed to get metrics for container {}: {}",
                         container_id, e
                     );
-                    // Continue with fallback
                 }
             }
         }
-
-        // Fallback to mock implementation
-        // ... [existing mock implementation code]
 
         Ok(())
     }
@@ -970,25 +857,33 @@ impl AppManager {
         None
     }
 
-    // Container management methods (moved from ContainerManager)
+    // Container management methods - delegate to container runtime
     pub async fn list_containers(&self) -> Result<Vec<String>> {
-        // If we have storage, use it to get the latest container list
-        if let Some(storage) = &self.storage {
+        if let Some(runtime) = &self.container_runtime {
+            // Get containers from container runtime
+            let containers = runtime.list_containers().await?;
+            Ok(containers.iter().map(|c| c.id.clone()).collect())
+        } else if let Some(storage) = &self.storage {
+            // Fall back to storage if available
             let container_data = storage.get_containers().await?;
-            return Ok(container_data
+            Ok(container_data
                 .into_iter()
                 .map(|(id, _, _, _, _)| id)
-                .collect());
+                .collect())
+        } else {
+            // No container runtime or storage available
+            Ok(Vec::new())
         }
-
-        // Otherwise, use in-memory data
-        let containers = self.containers.lock().await;
-        Ok(containers.iter().map(|c| c.id.clone()).collect())
     }
 
     pub async fn get_container_details(&self) -> Result<Vec<Container>> {
-        let containers = self.containers.lock().await;
-        Ok(containers.clone())
+        if let Some(runtime) = &self.container_runtime {
+            // Get containers from container runtime
+            runtime.list_containers().await
+        } else {
+            // No container runtime available
+            Ok(Vec::new())
+        }
     }
 
     pub async fn list_images(&self) -> Result<Vec<String>> {
@@ -997,21 +892,36 @@ impl AppManager {
     }
 
     pub async fn get_container_by_id(&self, container_id: &str) -> Option<Container> {
-        let containers = self.containers.lock().await;
-        containers.iter().find(|c| c.id == container_id).cloned()
+        if let Some(runtime) = &self.container_runtime {
+            // Try to find container in container runtime
+            if let Ok(containers) = runtime.list_containers().await {
+                return containers.iter().find(|c| c.id == container_id).cloned();
+            }
+        }
+        None
     }
 
     pub async fn get_containers_by_node(&self, node_id: &str) -> Vec<Container> {
-        let containers = self.containers.lock().await;
-        containers
-            .iter()
-            .filter(|c| c.node_id == node_id)
-            .cloned()
-            .collect()
+        if let Some(runtime) = &self.container_runtime {
+            // Try to find containers in container runtime
+            if let Ok(containers) = runtime.list_containers().await {
+                return containers
+                    .iter()
+                    .filter(|c| c.node_id == node_id)
+                    .cloned()
+                    .collect();
+            }
+        }
+        Vec::new()
     }
 
     pub async fn get_container_stats(&self, container_id: &str) -> Option<ContainerStats> {
-        let stats = self.container_stats.lock().await;
-        stats.get(container_id).cloned()
+        if let Some(runtime) = &self.container_runtime {
+            // Try to get stats from container runtime
+            if let Ok(stats) = runtime.get_container_metrics(container_id).await {
+                return Some(stats);
+            }
+        }
+        None
     }
 }

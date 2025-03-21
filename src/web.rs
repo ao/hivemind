@@ -9,7 +9,7 @@ use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 use tera::{Context, Tera};
 
-use crate::app::{Container, ContainerStatus};
+use crate::youki_manager::{Container, ContainerStatus};
 
 // AppState is imported from main.rs
 use crate::AppState;
@@ -831,7 +831,7 @@ async fn containers_handler(State(state): State<WebServerState>) -> impl IntoRes
 #[derive(Serialize)]
 struct ContainerWithStats {
     container: Container,
-    stats: Option<crate::app::ContainerStats>,
+    stats: Option<crate::youki_manager::ContainerStats>,
 }
 
 async fn services_handler(State(state): State<WebServerState>) -> impl IntoResponse {
