@@ -1,3 +1,4 @@
+use crate::membership::{MembershipConfig, MembershipEvent, MembershipProtocol};
 use crate::storage::StorageManager;
 use anyhow::Result;
 use std::collections::HashMap;
@@ -16,6 +17,7 @@ pub struct NodeManager {
     storage: Option<StorageManager>,
     address: String,
     discovery_port: u16,
+    membership: Option<Arc<MembershipProtocol>>,
 }
 
 #[derive(Clone, Debug)]
@@ -78,6 +80,7 @@ impl NodeManager {
             storage: None,
             address,
             discovery_port: 8901,
+            membership: None,
         }
     }
 
@@ -85,6 +88,126 @@ impl NodeManager {
         let mut manager = Self::new();
         manager.storage = Some(storage);
         manager
+    }
+    
+    // Initialize the membership protocol
+    pub async fn init_membership_protocol(&mut self) -> Result<()> {
+        // Create membership protocol configuration
+        let config = MembershipConfig {
+            bind_addr: "0.0.0.0".to_string(),
+            bind_port: 7946, // Default SWIM port
+            protocol_period: Duration::from_secs(1),
+            ping_timeout: Duration::from_millis(500),
+            suspicion_mult: 5,
+            indirect_checks: 3,
+        };
+        
+        // Initialize the membership protocol
+        let protocol = MembershipProtocol::new(
+            self.node_id.clone(),
+            self.address.clone(),
+            Some(config),
+        ).await?;
+        
+        // Start the protocol
+        protocol.start().await?;
+        
+        // Store the protocol
+        self.membership = Some(Arc::new(protocol));
+        
+        // Start the membership event handler
+        self.start_membership_event_handler().await?;
+        
+        println!("Membership protocol initialized");
+        Ok(())
+    }
+    
+    // Start handling membership events
+    async fn start_membership_event_handler(&self) -> Result<()> {
+        if let Some(membership) = &self.membership {
+            // Get event receiver
+            let mut event_rx = membership.get_event_receiver().await;
+            
+            // Clone necessary data for the event handler task
+            let peers = self.peers.clone();
+            let storage = self.storage.clone();
+            
+            // Start event handler task
+            tokio::spawn(async move {
+                while let Some(event) = event_rx.recv().await {
+                    match event {
+                        MembershipEvent::MemberJoined(member) => {
+                            println!("Member joined: {}", member.id);
+                            
+                            // Add to peers
+                            let mut peers_lock = peers.lock().await;
+                            peers_lock.insert(member.id.clone(), NodeInfo {
+                                id: member.id.clone(),
+                                address: member.address.clone(),
+                                last_seen: Instant::now(),
+                                resources: NodeResources {
+                                    cpu_available: 100.0,
+                                    memory_available: 1024 * 1024 * 1024,
+                                    containers_running: 0,
+                                },
+                            });
+                            
+                            // Save to storage if available
+                            if let Some(storage) = &storage {
+                                let now = std::time::SystemTime::now()
+                                    .duration_since(std::time::UNIX_EPOCH)
+                                    .unwrap()
+                                    .as_secs() as i64;
+                                
+                                if let Err(e) = storage.save_node(&member.id, &member.address, now).await {
+                                    eprintln!("Failed to save node to storage: {}", e);
+                                }
+                            }
+                        }
+                        MembershipEvent::MemberSuspected(member) => {
+                            println!("Member suspected: {}", member.id);
+                        }
+                        MembershipEvent::MemberDead(member) => {
+                            println!("Member dead: {}", member.id);
+                            
+                            // Remove from peers
+                            let mut peers_lock = peers.lock().await;
+                            peers_lock.remove(&member.id);
+                        }
+                        MembershipEvent::MemberLeft(member) => {
+                            println!("Member left: {}", member.id);
+                            
+                            // Remove from peers
+                            let mut peers_lock = peers.lock().await;
+                            peers_lock.remove(&member.id);
+                        }
+                        MembershipEvent::MemberAlive(member) => {
+                            println!("Member alive again: {}", member.id);
+                            
+                            // Update in peers
+                            let mut peers_lock = peers.lock().await;
+                            if let Some(info) = peers_lock.get_mut(&member.id) {
+                                info.last_seen = Instant::now();
+                            } else {
+                                // Add if not exists
+                                peers_lock.insert(member.id.clone(), NodeInfo {
+                                    id: member.id.clone(),
+                                    address: member.address.clone(),
+                                    last_seen: Instant::now(),
+                                    resources: NodeResources {
+                                        cpu_available: 100.0,
+                                        memory_available: 1024 * 1024 * 1024,
+                                        containers_running: 0,
+                                    },
+                                });
+                            }
+                        }
+                    }
+                }
+            });
+        }
+        
+        Ok(())
     }
 
     #[allow(dead_code)]
@@ -352,17 +475,40 @@ impl NodeManager {
             storage.save_node(&self.node_id, &self.address, now).await?
         }
 
-        // Start discovery service
-        self.start_discovery().await?;
+        // If membership protocol is enabled, use it for joining
+        if let Some(membership) = &self.membership {
+            // Join the cluster using the membership protocol
+            membership.join_cluster(host).await?;
+            println!("Successfully joined cluster through membership protocol");
+        } else {
+            // Fall back to legacy discovery method
+            // Start discovery service
+            self.start_discovery().await?;
 
-        // Connect to the host node
-        let socket = UdpSocket::bind(format!("0.0.0.0:{}", self.discovery_port)).await?;
-        let msg = format!("HIVEMIND_JOIN:{}:{}", self.node_id, self.address);
-        socket
-            .send_to(msg.as_bytes(), format!("{}{}", host, self.discovery_port))
-            .await?;
+            // Connect to the host node
+            let socket = UdpSocket::bind(format!("0.0.0.0:{}", self.discovery_port)).await?;
+            let msg = format!("HIVEMIND_JOIN:{}:{}", self.node_id, self.address);
+            socket
+                .send_to(msg.as_bytes(), format!("{}{}", host, self.discovery_port))
+                .await?;
 
-        println!("Successfully joined cluster through {}", host);
+            println!("Successfully joined cluster through legacy protocol");
+        }
+
+        Ok(())
+    }
+    
+    // Leave the cluster gracefully
+    pub async fn leave_cluster(&self) -> Result<()> {
+        println!("Leaving cluster");
+        
+        // If membership protocol is enabled, use it for leaving
+        if let Some(membership) = &self.membership {
+            // Leave the cluster using the membership protocol
+            membership.leave_cluster().await?;
+            println!("Successfully left cluster through membership protocol");
+        }
+        
         Ok(())
     }
 }

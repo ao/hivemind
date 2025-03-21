@@ -6,6 +6,7 @@ edition = "2021"
 [dependencies]
 anyhow = "1.0"
 axum = "0.7"
+bincode = "1.3"
 rusqlite = { version = "0.28", features = ["bundled"] }
 tera = "1.18"
 chrono = "0.4"

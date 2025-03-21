@@ -169,11 +169,11 @@ Hivemind follows a clean, modular architecture:
 
 - **App Manager** - Application and container lifecycle management
 - **Node Manager** - Cluster coordination and node discovery
+- **Node Membership Protocol** - SWIM-based cluster membership management
 - **Service Discovery** - DNS-based service discovery and routing
 - **Storage Manager** - Volume and persistence handling
 - **Container Manager** - Container runtime integration
 - **Web UI** - Dashboard and visual management
-- **Node Manager** - Cluster coordination
 
 ## 📦 Features in Detail
 
@@ -256,9 +256,11 @@ cargo test
 - `src/service_discovery.rs` - Service discovery & DNS
 - `src/storage.rs` - Persistence layer
 - `src/node.rs` - Node & cluster management
+- `src/membership.rs` - SWIM-based node membership protocol
 - `src/scheduler.rs` - Container scheduler
 - `src/web.rs` - Web UI & dashboard
 - `src/main.rs` - CLI & entry point
+- `docs/node_membership_protocol.md` - Documentation for the node membership protocol
 
 ## 📜 License
 
