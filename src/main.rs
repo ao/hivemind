@@ -1,21 +1,16 @@
 use anyhow::Result;
 use axum::{extract::State, Json};
 use clap::{Parser, Subcommand};
-use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 
-mod app;
-mod youki_manager;
-mod node;
-mod scheduler;
-mod service_discovery;
-mod storage;
-mod web;
-
-use app::{AppManager, Container, ServiceConfig};
-use node::NodeManager;
-use service_discovery::{ServiceDiscovery, ServiceEndpoint};
-use storage::StorageManager;
+// Use types from lib.rs
+use hivemind::{AppState, DeployRequest, DeployResponse, ServiceUrlRequest, ServiceUrlResponse};
+use hivemind::app::{AppManager, ServiceConfig};
+use hivemind::youki_manager::Container;
+use hivemind::node::NodeManager;
+use hivemind::service_discovery::{ServiceDiscovery, ServiceEndpoint};
+use hivemind::storage::StorageManager;
+use hivemind::web;
 
 #[derive(Parser)]
 #[command(author, version, about, long_about = None)]
@@ -99,12 +94,6 @@ enum AppCommands {
     },
 }
 
-#[derive(Clone)]
-pub struct AppState {
-    pub node_manager: NodeManager,
-    pub app_manager: AppManager,
-    pub service_discovery: ServiceDiscovery,
-}
 
 async fn list_images(State(state): State<AppState>) -> Json<Vec<String>> {
     Json(state.app_manager.list_images().await.unwrap_or_default())
@@ -156,18 +145,6 @@ async fn get_service_url(
     }
 }
 
-#[derive(Deserialize)]
-struct ServiceUrlRequest {
-    service_name: String,
-}
-
-#[derive(Serialize)]
-struct ServiceUrlResponse {
-    success: bool,
-    url: Option<String>,
-    error: Option<String>,
-}
-
 async fn deploy_container(
     State(state): State<AppState>,
     Json(payload): Json<DeployRequest>,
@@ -194,20 +171,6 @@ async fn deploy_container(
             error: Some(e.to_string()),
         }),
     }
-}
-
-#[derive(Deserialize)]
-struct DeployRequest {
-    image: String,
-    name: String,
-    service: Option<String>,
-}
-
-#[derive(Serialize)]
-struct DeployResponse {
-    success: bool,
-    container_id: Option<String>,
-    error: Option<String>,
 }
 
 #[tokio::main]

@@ -1,4 +1,5 @@
-use crate::app::{AppManager, Container, ContainerStatus};
+use crate::app::AppManager;
+use crate::youki_manager::{Container, ContainerStatus};
 use crate::node::{NodeManager, NodeResources};
 use anyhow::Result;
 use std::sync::Arc;

@@ -8,9 +8,8 @@ use std::sync::Arc;
 use tokio::net::UdpSocket;
 use tokio::sync::Mutex;
 use trust_dns_proto::op::{Header, MessageType, OpCode, ResponseCode};
-use trust_dns_proto::rr::{Name, Record, RecordType, RData, DNSClass};
-use trust_dns_proto::serialize::binary::{BinDecodable, BinDecoder, BinEncodable, BinEncoder};
-use trust_dns_server::authority::MessageResponseBuilder;
+use trust_dns_proto::rr::{Record, RecordType, RData};
+use trust_dns_proto::serialize::binary::{BinDecodable, BinEncodable, BinEncoder};
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct ServiceEndpoint {
@@ -54,7 +53,7 @@ impl ServiceHealth {
     }
 }
 
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub struct ServiceDiscovery {
     services: Arc<Mutex<HashMap<String, Vec<ServiceEndpoint>>>>,
     dns_port: u16,

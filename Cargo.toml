@@ -29,6 +29,7 @@ derive-getters = "0.5.0"
 get_if_addrs = "0.5.3"
 trust-dns-server = "0.23.2"
 trust-dns-proto = "0.23.2"
+async-trait = "0.1"
 
 [features]
 default = ["youki"]
@@ -42,6 +43,7 @@ mockall = "0.11"
 proptest = "1.0"
 reqwest = { version = "0.11", features = ["json"] }
 chrono = "0.4"
+async-trait = "0.1"
 
 [[test]]
 name = "integration_tests"

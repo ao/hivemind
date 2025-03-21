@@ -1,0 +1,55 @@
+name: Test
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v2
+
+      - name: Set up Rust
+        uses: actions-rs/toolchain@v1
+        with:
+          profile: minimal
+          toolchain: stable
+          override: true
+
+      - name: Cache dependencies
+        uses: actions/cache@v2
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+
+      - name: Run unit tests
+        uses: actions-rs/cargo@v1
+        with:
+          command: test
+          args: --lib
+
+      - name: Run integration tests
+        uses: actions-rs/cargo@v1
+        with:
+          command: test
+          args: --test integration_tests
+
+      - name: Run property tests
+        uses: actions-rs/cargo@v1
+        with:
+          command: test
+          args: --test property_tests
+
+      # Only run E2E tests on main branch to save time in PRs
+      - name: Run E2E tests
+        if: github.ref == 'refs/heads/main'
+        uses: actions-rs/cargo@v1
+        with:
+          command: test
+          args: --test e2e_tests
