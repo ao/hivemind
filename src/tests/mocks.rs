@@ -198,13 +198,14 @@ pub mod mocks {
     }
     
     /// MockServiceDiscovery provides a mock implementation of service discovery for testing
+    #[derive(Debug)]
     pub struct MockServiceDiscovery {
         services: Arc<Mutex<HashMap<String, Vec<crate::service_discovery::ServiceEndpoint>>>>,
     }
 
-    // Implement From<Arc<MockServiceDiscovery>> for Option<ServiceDiscovery>
-    impl From<Arc<MockServiceDiscovery>> for Option<ServiceDiscovery> {
-        fn from(_mock: Arc<MockServiceDiscovery>) -> Self {
+    // Mock conversion implementation
+    impl MockServiceDiscovery {
+        pub fn into_service_discovery(self) -> Option<ServiceDiscovery> {
             // In tests, we don't need to convert to a real ServiceDiscovery
             // The AppManager will use the mock directly through the trait object
             Some(ServiceDiscovery::new())

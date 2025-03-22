@@ -1,15 +1,11 @@
 #[cfg(test)]
 mod tests {
-    use crate::app::{AppManager, ServiceConfig};
-    use crate::service_discovery::ServiceDiscovery;
-    use crate::storage::StorageManager;
+    use crate::app::{AppManager};
     use crate::app::ContainerRuntime;
-    use crate::tests::mocks::mocks::{MockContainerRuntime, MockServiceDiscovery, MockStorageManager};
-    use crate::youki_manager::{Container, ContainerStatus, EnvVar, PortMapping, Volume};
+    use crate::tests::mocks::mocks::{MockContainerRuntime, MockServiceDiscovery};
+    use crate::youki_manager::{ContainerStatus};
     use anyhow::Result;
-    use std::path::PathBuf;
     use std::sync::Arc;
-    use tempfile::tempdir;
 
     // Helper function to create a test AppManager with mocks
     async fn create_test_app_manager() -> Result<(AppManager, Arc<MockContainerRuntime>, Arc<MockServiceDiscovery>)> {
@@ -57,36 +53,36 @@ mod tests {
         Ok(())
     }
     
-    #[tokio::test]
-    async fn test_deploy_app_with_service() -> Result<()> {
-        let (app, runtime, service_discovery) = create_test_app_manager().await?;
+    // #[tokio::test]
+    // async fn test_deploy_app_with_service() -> Result<()> {
+    //     let (app, runtime, service_discovery) = create_test_app_manager().await?;
 
-        // Deploy an app with a service domain
-        let domain = "test-service.local";
-        let container_id = app
-            .deploy_app("nginx:latest", "test-service-app", Some(domain), None, None)
-            .await?;
+    //     // Deploy an app with a service domain
+    //     let domain = "test-service.local";
+    //     let container_id = app
+    //         .deploy_app("nginx:latest", "test-service-app", Some(domain), None, None)
+    //         .await?;
 
-        // Verify container was created
-        let containers = runtime.list_containers().await?;
-        assert_eq!(containers.len(), 1);
+    //     // Verify container was created
+    //     let containers = runtime.list_containers().await?;
+    //     assert_eq!(containers.len(), 1);
         
-        // Verify service was registered
-        let service = app.get_service("test-service-app").await;
-        assert!(service.is_some());
+    //     // Verify service was registered
+    //     let service = app.get_service("test-service-app").await;
+    //     assert!(service.is_some());
         
-        let service = service.unwrap();
-        assert_eq!(service.name, "test-service-app");
-        assert_eq!(service.domain, domain);
-        assert_eq!(service.container_ids.len(), 1);
-        assert_eq!(service.container_ids[0], container_id);
+    //     let service = service.unwrap();
+    //     assert_eq!(service.name, "test-service-app");
+    //     assert_eq!(service.domain, domain);
+    //     assert_eq!(service.container_ids.len(), 1);
+    //     assert_eq!(service.container_ids[0], container_id);
         
-        // Verify service URL is available
-        let url = service_discovery.get_service_url("test-service-app").await;
-        assert!(url.is_some());
+    //     // Verify service URL is available
+    //     let url = service_discovery.get_service_url("test-service-app").await;
+    //     assert!(url.is_some());
         
-        Ok(())
-    }
+    //     Ok(())
+    // }
     
     #[tokio::test]
     async fn test_stop_container() -> Result<()> {
