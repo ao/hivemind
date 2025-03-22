@@ -1,6 +1,5 @@
 use hivemind::app::AppManager;
 use hivemind::storage::StorageManager;
-use std::path::Path;
 use tempfile::tempdir;
 
 #[tokio::test]

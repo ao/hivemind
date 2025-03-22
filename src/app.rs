@@ -261,9 +261,9 @@ impl AppManager {
 
     pub fn with_service_discovery<T>(mut self, service_discovery: T) -> Self 
     where
-        T: Into<Option<ServiceDiscovery>> + std::fmt::Debug,
+        T: std::fmt::Debug,
     {
-        self.service_discovery = service_discovery.into();
+        self.service_discovery = Some(ServiceDiscovery::new());
         self
     }
 

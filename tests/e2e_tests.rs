@@ -1,25 +1,25 @@
 use hivemind::app::AppManager;
 use hivemind::storage::StorageManager;
 use hivemind::service_discovery::ServiceDiscovery;
-use std::path::Path;
 use tempfile::tempdir;
 
 #[tokio::test]
-async fn test_deploy_and_scale_app() {
+async fn test_deploy_and_scale_app() -> anyhow::Result<()> {
     // Skip this test in CI environments
     if std::env::var("CI").is_ok() {
-        return;
+        return Ok(());
     }
 
     // Create a temporary directory for storage
-    let temp_dir = tempdir().unwrap();
-    let storage_path = temp_dir.path();
+    let _temp_dir = tempdir().unwrap();
+    let storage_path = _temp_dir.path();
     
     // Initialize storage manager
     let storage = StorageManager::new(storage_path).await.unwrap();
     
     // Initialize service discovery
-    let service_discovery = ServiceDiscovery::new(53053, "test-cluster").await.unwrap();
+    let service_discovery = ServiceDiscovery::new();
+    service_discovery.initialize().await?;
     
     // Initialize app manager with storage and service discovery
     let app_manager = AppManager::with_storage(storage)
@@ -46,4 +46,5 @@ async fn test_deploy_and_scale_app() {
     // 2. Scale the app
     // 3. Assert that the replicas were created
     // 4. Clean up
+    Ok(())
 }
