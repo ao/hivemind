@@ -1,14 +1,15 @@
-use crate::youki_manager::{YoukiManager, EnvVar, PortMapping, Volume};
+use crate::storage::StorageManager;
+use crate::containerd_manager::{ContainerdManager, Container, ContainerStats, ContainerStatus};
 use crate::service_discovery::ServiceDiscovery;
-use anyhow::Result;
-use serde::{Deserialize, Serialize};
+use anyhow::{Context, Result};
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use tokio::sync::Mutex;
 use uuid::Uuid;
+use serde::{Deserialize, Serialize};
 
-// Re-export types from youki_manager for backward compatibility
-pub use crate::youki_manager::{Container, ContainerStats, ContainerStatus};
+// Re-export types from containerd_manager for backward compatibility
+pub use crate::containerd_manager::{EnvVar, PortMapping, Volume};
 
 // Define the ContainerRuntime trait in the app module
 #[async_trait::async_trait]
@@ -57,11 +58,11 @@ pub trait ContainerRuntime: Send + Sync + 'static {
 /// AppManager is responsible for managing applications and containers
 #[derive(Clone)]
 pub struct AppManager {
+    storage: Option<StorageManager>,
+    container_runtime: Option<Arc<dyn ContainerRuntime>>,
     images: Arc<Mutex<Vec<String>>>,
     services: Arc<Mutex<HashMap<String, ServiceConfig>>>,
     service_discovery: Option<ServiceDiscovery>,
-    storage: Option<crate::storage::StorageManager>,
-    container_runtime: Option<Arc<dyn ContainerRuntime + Send + Sync>>,
     containers: Arc<Mutex<Vec<Container>>>,
     container_stats: Arc<Mutex<HashMap<String, ContainerStats>>>,
 }
@@ -102,7 +103,7 @@ impl AppManager {
     /// Set the container runtime implementation
     #[cfg(test)]
     pub fn with_container_runtime<T: ContainerRuntime + Send + Sync + 'static>(mut self, runtime: Arc<T>) -> Self {
-        self.container_runtime = Some(runtime);
+        self.container_runtime = Some(runtime as Arc<dyn ContainerRuntime>);
         self
     }
 
@@ -259,28 +260,29 @@ impl AppManager {
         }
     }
 
-    pub fn with_service_discovery<T>(mut self, service_discovery: T) -> Self 
-    where
-        T: std::fmt::Debug,
-    {
-        self.service_discovery = Some(ServiceDiscovery::new());
+    pub fn with_service_discovery<T>(self, _service_discovery: T) -> Self {
+        // Store service discovery instance if needed in the future
         self
     }
 
-    pub async fn with_youki(
-        storage: crate::storage::StorageManager,
-        youki_socket: &str,
+    pub async fn with_containerd(
+        storage: StorageManager,
+        socket_path: &str,
         namespace: &str,
     ) -> Result<Self> {
-        // Initialize youki manager
-        let youki = YoukiManager::new(youki_socket, namespace).await?;
-
-        // Create app manager with storage
-        let mut manager = Self::new().await?;
-        manager.storage = Some(storage);
-        manager.container_runtime = Some(Arc::new(youki));
-
-        Ok(manager)
+        let runtime = ContainerdManager::new(socket_path.to_string(), namespace.to_string())
+            .await
+            .context("Failed to initialize containerd manager")?;
+            
+        Ok(Self {
+            storage: Some(storage),
+            container_runtime: Some(Arc::new(runtime) as Arc<dyn ContainerRuntime>),
+            services: Arc::new(Mutex::new(HashMap::new())),
+            images: Arc::new(Mutex::new(Vec::new())),
+            service_discovery: None,
+            containers: Arc::new(Mutex::new(Vec::new())),
+            container_stats: Arc::new(Mutex::new(HashMap::new())),
+        })
     }
 
     pub async fn with_storage(storage: crate::storage::StorageManager) -> Result<Self> {
