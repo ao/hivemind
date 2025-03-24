@@ -12,7 +12,7 @@ Hivemind is a modern, lightweight container orchestration system designed with s
 
 - **🔄 Simple yet powerful** - Deploy containers with a clean REST API or straightforward CLI
 - **⚡ Blazing fast** - Built in Rust for minimal resource usage and maximum performance
-- **📦 Youki integration** - Works directly with youki for reliable container operations
+- **📦 Containerd integration** - Works directly with containerd for reliable container operations
 - **🔍 Service Discovery** - Automatic DNS-based service discovery for your applications
 - **🌐 Clustering** - Seamlessly scale from a single node to a distributed cluster
 - **🔒 Volume Management** - Persistent storage for your stateful applications
@@ -236,7 +236,7 @@ Seamless communication between containers across nodes:
 ### Prerequisites
 
 - Rust 1.60 or newer
-- Youki (for non-mock deployments)
+- containerd (for non-mock deployments)
 - SQLite
 
 ### Building from source
@@ -267,7 +267,6 @@ cargo test
 ### Project Structure
 
 - `src/app.rs` - Application & container management
-- `src/youki_manager.rs` - Youki integration
 - `src/service_discovery.rs` - Service discovery & DNS
 - `src/storage.rs` - Persistence layer
 - `src/node.rs` - Node & cluster management

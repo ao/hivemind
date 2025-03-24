@@ -1094,4 +1094,42 @@ impl MembershipProtocol {
         
         rx
     }
+
+    // Extract common event emission
+    async fn emit_member_event(&self, event: MembershipEvent) -> Result<()> {
+        self.event_tx.send(event).await.map_err(|e| anyhow::anyhow!(e))
+    }
+
+    async fn update_member_state(&self, member: &mut Member, new_state: NodeState) -> Result<()> {
+        let old_state = member.state.clone();
+        if old_state == new_state {
+            return Ok(());
+        }
+
+        member.state = new_state.clone();
+        member.last_state_change = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)?
+            .as_secs();
+
+        // Emit corresponding event
+        let event = match new_state {
+            NodeState::Alive => MembershipEvent::MemberAlive(member.clone()),
+            NodeState::Suspected => MembershipEvent::MemberSuspected(member.clone()),
+            NodeState::Dead => MembershipEvent::MemberDead(member.clone()),
+            NodeState::Left => MembershipEvent::MemberLeft(member.clone()),
+        };
+        self.emit_member_event(event).await
+    }
+
+    async fn manage_suspect_timer(&self, member_id: &str, is_suspected: bool) {
+        let mut timers = self.suspect_timers.lock().await;
+        if is_suspected {
+            timers.insert(
+                member_id.to_string(),
+                Instant::now() + self.config.protocol_period * self.config.suspicion_mult,
+            );
+        } else {
+            timers.remove(member_id);
+        }
+    }
 }

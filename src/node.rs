@@ -1,4 +1,4 @@
-use crate::membership::{MembershipConfig, MembershipEvent, MembershipProtocol};
+use crate::membership::{MembershipConfig, MembershipEvent, MembershipProtocol, Member, NodeState};
 use crate::network::NetworkManager;
 use crate::storage::StorageManager;
 use anyhow::Result;
@@ -558,5 +558,48 @@ impl NodeManager {
         let mut network_manager = self.network_manager.lock().await;
         *network_manager = Some(network_mgr);
         println!("Network manager set for node {}", self.node_id);
+    }
+
+    async fn handle_member_state_change(&self, member: Member, state: NodeState) -> Result<()> {
+        let mut peers = self.peers.lock().await;
+        match state {
+            NodeState::Dead | NodeState::Left => {
+                peers.remove(&member.id);
+                // Update network if available
+                if let Some(network_mgr) = &*self.network_manager.lock().await {
+                    network_mgr.handle_node_left(&member).await?;
+                }
+            },
+            NodeState::Alive => {
+                peers.insert(member.id.clone(), NodeInfo {
+                    id: member.id.clone(),
+                    address: member.address.clone(),
+                    last_seen: Instant::now(),
+                    resources: NodeResources::default(),
+                });
+            },
+            _ => {} // Other states don't require peer updates
+        }
+        Ok(())
+    }
+
+    // Replace duplicated resource tracking with a single implementation
+    async fn update_node_resources(&self, node_id: &str, update: impl FnOnce(&mut NodeResources)) -> Result<()> {
+        let mut peers = self.peers.lock().await;
+        if let Some(node) = peers.get_mut(node_id) {
+            update(&mut node.resources);
+        }
+        Ok(())
+    }
+}
+
+// Default implementation for NodeResources to avoid duplication
+impl Default for NodeResources {
+    fn default() -> Self {
+        Self {
+            cpu_available: 100.0,
+            memory_available: 1024 * 1024 * 1024, // 1GB
+            containers_running: 0,
+        }
     }
 }

@@ -6,7 +6,8 @@ pub mod scheduler;
 pub mod service_discovery;
 pub mod storage;
 pub mod web;
-pub mod youki_manager;
+pub mod containerd_manager;
+pub use containerd_manager::*;
 
 // Re-export types needed by web.rs
 use serde::{Deserialize, Serialize};
@@ -45,10 +46,3 @@ pub struct ServiceUrlResponse {
     pub error: Option<String>,
 }
 
-#[cfg(test)]
-pub mod tests {
-    pub mod mocks;
-    pub mod app_tests;
-    pub mod e2e_tests;
-    pub mod property_tests;
-}

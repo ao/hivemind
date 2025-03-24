@@ -1,5 +1,5 @@
 use crate::app::{AppManager, ServiceConfig};
-use crate::youki_manager::{Container, ContainerStatus};
+use crate::containerd_manager::{Container, ContainerStatus};
 use crate::node::{NodeManager, NodeResources};
 use crate::service_discovery::ServiceDiscovery;
 use crate::network::NetworkManager;

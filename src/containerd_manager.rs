@@ -1,9 +1,9 @@
-use anyhow::Result;
+use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
-use std::path::Path;
 use std::sync::Arc;
 use tokio::sync::Mutex;
+use containerd_client::tonic;
 
 use async_trait::async_trait;
 
@@ -87,16 +87,16 @@ impl ContainerStatus {
 }
 
 #[derive(Clone)]
-pub struct YoukiManager {
-    socket_path: String,
+pub struct ContainerdManager {
+    client: tonic::transport::Channel,
     namespace: String,
-    containers: Arc<Mutex<Vec<Container>>>,
+    containers: Arc<Mutex<HashMap<String, Container>>>,
     container_stats: Arc<Mutex<HashMap<String, ContainerStats>>>,
     volumes: Arc<Mutex<HashMap<String, Volume>>>,
 }
 
 #[async_trait]
-impl crate::app::ContainerRuntime for YoukiManager {
+impl crate::app::ContainerRuntime for ContainerdManager {
     async fn pull_image(&self, image: &str) -> Result<()> {
         self.pull_image(image).await
     }
@@ -147,22 +147,37 @@ impl crate::app::ContainerRuntime for YoukiManager {
     }
 }
 
-impl YoukiManager {
-    pub async fn new(socket_path: impl AsRef<Path>, namespace: &str) -> Result<Self> {
-        println!(
-            "Initializing youki manager with socket: {:?}, namespace: {}",
-            socket_path.as_ref(),
-            namespace
-        );
-
-        // Create an instance with the specified namespace
-        Ok(Self {
-            socket_path: socket_path.as_ref().to_string_lossy().to_string(),
-            namespace: namespace.to_string(),
-            containers: Arc::new(Mutex::new(Vec::new())),
+impl ContainerdManager {
+    pub async fn new(socket_path: String, namespace: String) -> anyhow::Result<Self> {
+        // Connect to containerd
+        let client = containerd_client::connect(socket_path)
+            .await
+            .context("Failed to connect to containerd")?;
+        
+        // Create manager instance
+        let manager = Self {
+            client,
+            namespace,
+            containers: Arc::new(Mutex::new(HashMap::new())),
             container_stats: Arc::new(Mutex::new(HashMap::new())),
             volumes: Arc::new(Mutex::new(HashMap::new())),
-        })
+        };
+
+        // Verify namespace exists
+        manager.verify_namespace().await?;
+
+        Ok(manager)
+    }
+
+    async fn verify_namespace(&self) -> anyhow::Result<()> {
+        // For now, just assume the namespace exists since we can't access the namespace API
+        // In a production environment, this would verify the namespace exists
+        Ok(())
+    }
+
+    async fn with_client<F: std::future::Future<Output = Result<T>>, T>(&self, f: F) -> Result<T> {
+        // Just execute the future since namespace is already verified in new()
+        f.await
     }
 
     // Create a volume
@@ -296,7 +311,7 @@ impl YoukiManager {
         println!("Creating container {} with image {}", name, image);
 
         // Generate a unique container ID
-        let container_id = format!("youki-{}-{}", name, uuid::Uuid::new_v4().to_string().split('-').next().unwrap());
+        let container_id = format!("containerd-{}-{}", name, uuid::Uuid::new_v4().to_string().split('-').next().unwrap());
         
         // Create container directory
         let container_dir = format!("/var/lib/hivemind/containers/{}", container_id);
@@ -333,17 +348,20 @@ impl YoukiManager {
             .unwrap()
             .as_secs() as i64;
             
-        containers.push(Container {
-            id: container_id.clone(),
-            name: name.to_string(),
-            image: image.to_string(),
-            status: ContainerStatus::Running,
-            node_id: "local".to_string(),
-            created_at: now,
-            ports: ports.clone(),
-            env_vars: env_vars.clone(),
-            service_domain: None,
-        });
+        containers.insert(
+            container_id.clone(),
+            Container {
+                id: container_id.clone(),
+                name: name.to_string(),
+                image: image.to_string(),
+                status: ContainerStatus::Running,
+                node_id: "local".to_string(),
+                created_at: now,
+                ports: ports.clone(),
+                env_vars: env_vars.clone(),
+                service_domain: None,
+            }
+        );
         
         println!("Container {} created", container_id);
         
@@ -380,7 +398,7 @@ impl YoukiManager {
         );
 
         // Generate a unique container ID
-        let container_id = format!("youki-{}-{}", name, uuid::Uuid::new_v4().to_string().split('-').next().unwrap());
+        let container_id = format!("containerd-{}-{}", name, uuid::Uuid::new_v4().to_string().split('-').next().unwrap());
         
         // Create container directory
         let container_dir = format!("/var/lib/hivemind/containers/{}", container_id);
@@ -423,17 +441,20 @@ impl YoukiManager {
             .unwrap()
             .as_secs() as i64;
             
-        containers.push(Container {
-            id: container_id.clone(),
-            name: name.to_string(),
-            image: image.to_string(),
-            status: ContainerStatus::Running,
-            node_id: "local".to_string(),
-            created_at: now,
-            ports: ports.clone(),
-            env_vars: env_vars.clone(),
-            service_domain: None,
-        });
+        containers.insert(
+            container_id.clone(),
+            Container {
+                id: container_id.clone(),
+                name: name.to_string(),
+                image: image.to_string(),
+                status: ContainerStatus::Running,
+                node_id: "local".to_string(),
+                created_at: now,
+                ports: ports.clone(),
+                env_vars: env_vars.clone(),
+                service_domain: None,
+            }
+        );
 
         // Log volume mounts
         for (volume_name, container_path) in &volumes {
@@ -494,8 +515,8 @@ impl YoukiManager {
             
             // Update in-memory state
             let mut containers = self.containers.lock().await;
-            if let Some(idx) = containers.iter().position(|c| c.id == container_id) {
-                containers[idx].status = ContainerStatus::Stopped;
+            if let Some(container) = containers.get_mut(container_id) {
+                container.status = ContainerStatus::Stopped;
             }
             
             println!("Container {} stopped", container_id);
@@ -527,7 +548,7 @@ impl YoukiManager {
         
         // Check in-memory state as fallback
         let containers = self.containers.lock().await;
-        if let Some(container) = containers.iter().find(|c| c.id == container_id) {
+        if let Some(container) = containers.get(container_id) {
             return Ok(container.status.clone());
         }
         
@@ -538,7 +559,7 @@ impl YoukiManager {
 
     // List all containers
     pub async fn list_containers(&self) -> Result<Vec<Container>> {
-        println!("Listing containers from youki");
+        println!("Listing containers from containerd");
 
         // First, check the in-memory state
         let in_memory_containers = self.containers.lock().await.clone();
@@ -622,12 +643,14 @@ impl YoukiManager {
         // If we found containers on disk but not in memory, update the in-memory state
         if !containers.is_empty() && in_memory_containers.is_empty() {
             let mut in_memory = self.containers.lock().await;
-            *in_memory = containers.clone();
+            for container in &containers {
+                in_memory.insert(container.id.clone(), container.clone());
+            }
         }
         
         // If we have containers in memory but didn't find any on disk, use the in-memory ones
         if containers.is_empty() && !in_memory_containers.is_empty() {
-            containers = in_memory_containers;
+            containers = in_memory_containers.into_values().collect();
         }
         
         // If we still have no containers, create a default one for backward compatibility

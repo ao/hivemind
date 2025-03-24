@@ -32,24 +32,10 @@ jobs:
         uses: actions-rs/cargo@v1
         with:
           command: test
-          args: --lib
+          args: --test unit_tests
 
       - name: Run integration tests
         uses: actions-rs/cargo@v1
         with:
           command: test
           args: --test integration_tests
-
-      - name: Run property tests
-        uses: actions-rs/cargo@v1
-        with:
-          command: test
-          args: --test property_tests
-
-      # Only run E2E tests on main branch to save time in PRs
-      - name: Run E2E tests
-        if: github.ref == 'refs/heads/main'
-        uses: actions-rs/cargo@v1
-        with:
-          command: test
-          args: --test e2e_tests

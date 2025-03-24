@@ -6,7 +6,7 @@ use std::path::PathBuf;
 // Use types from lib.rs
 use hivemind::{AppState, DeployRequest, DeployResponse, ServiceUrlRequest, ServiceUrlResponse};
 use hivemind::app::{AppManager, ServiceConfig};
-use hivemind::youki_manager::Container;
+use hivemind::containerd_manager::Container;
 use hivemind::node::NodeManager;
 use hivemind::network::NetworkManager;
 use hivemind::service_discovery::{ServiceDiscovery, ServiceEndpoint};
@@ -181,28 +181,28 @@ async fn main() -> Result<()> {
 
     match cli.command {
         Commands::Daemon { web_port } => {
-            // Default youki socket path
-            let youki_socket = "/run/youki/youki.sock";
-            let youki_namespace = "hivemind";
+            // Default containerd socket path
+            let containerd_socket = "/run/containerd/containerd.sock";
+            let containerd_namespace = "hivemind";
 
             let storage = StorageManager::new(&cli.data_dir).await?;
             let node_manager = NodeManager::with_storage(storage.clone()).await;
             let service_discovery = ServiceDiscovery::new();
 
-            // Initialize AppManager with youki
-            let app_manager = match AppManager::with_youki(
+            // Initialize AppManager with containerd
+            let app_manager = match AppManager::with_containerd(
                 storage.clone(),
-                youki_socket,
-                youki_namespace,
+                containerd_socket,
+                containerd_namespace,
             )
             .await
             {
                 Ok(manager) => {
-                    println!("Successfully connected to youki");
+                    println!("Successfully connected to containerd");
                     manager.with_service_discovery(service_discovery.clone())
                 }
                 Err(e) => {
-                    eprintln!("Failed to connect to youki: {}", e);
+                    eprintln!("Failed to connect to containerd: {}", e);
                     eprintln!("Falling back to mock implementation");
                     AppManager::with_storage(storage)
                         .await?
