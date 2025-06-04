@@ -1,4 +1,5 @@
 pub mod app;
+pub mod health_monitor;
 pub mod membership;
 pub mod network;
 pub mod node;
@@ -18,6 +19,7 @@ pub struct AppState {
     pub app_manager: app::AppManager,
     pub service_discovery: service_discovery::ServiceDiscovery,
     pub network_manager: Option<std::sync::Arc<network::NetworkManager>>,
+    pub health_monitor: Option<std::sync::Arc<health_monitor::HealthMonitor>>,
 }
 
 #[derive(Deserialize)]

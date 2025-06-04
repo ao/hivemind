@@ -7,6 +7,7 @@ use std::path::PathBuf;
 use hivemind::{AppState, DeployRequest, DeployResponse, ServiceUrlRequest, ServiceUrlResponse};
 use hivemind::app::{AppManager, ServiceConfig};
 use hivemind::containerd_manager::Container;
+use hivemind::health_monitor::HealthMonitor;
 use hivemind::node::NodeManager;
 use hivemind::network::NetworkManager;
 use hivemind::service_discovery::{ServiceDiscovery, ServiceEndpoint};
@@ -47,6 +48,11 @@ enum Commands {
     },
     /// Check system health
     Health,
+    /// Manage volumes
+    Volume {
+        #[command(subcommand)]
+        command: VolumeCommands,
+    },
     // Start only the web interface
     Web {
         #[arg(long, default_value = "3000")]
@@ -63,6 +69,22 @@ enum NodeCommands {
 }
 
 #[derive(Subcommand)]
+enum VolumeCommands {
+    /// Create a new volume
+    Create {
+        #[arg(long)]
+        name: String,
+    },
+    /// List all volumes
+    Ls,
+    /// Delete a volume
+    Delete {
+        #[arg(long)]
+        name: String,
+    },
+}
+
+#[derive(Subcommand)]
 enum AppCommands {
     /// List all applications
     Ls,
@@ -74,6 +96,8 @@ enum AppCommands {
         name: String,
         #[arg(long)]
         service: Option<String>,
+        #[arg(long)]
+        volume: Option<Vec<String>>,
     },
     /// Scale an application
     Scale {
@@ -262,12 +286,27 @@ async fn main() -> Result<()> {
                 println!("Service discovery initialized successfully");
             }
             
+            // Initialize health monitor
+            let health_monitor = Arc::new(HealthMonitor::new(
+                Arc::new(app_manager.clone()),
+                Arc::new(node_manager.clone()),
+                Arc::new(service_discovery.clone()),
+            ));
+
+            // Start health monitoring
+            if let Err(e) = health_monitor.start().await {
+                eprintln!("Failed to start health monitor: {}", e);
+            } else {
+                println!("Health monitor started successfully");
+            }
+
             // Create AppState for sharing between web and API
             let app_state = AppState {
                 node_manager: node_manager.clone(),
                 app_manager: app_manager.clone(),
                 service_discovery: service_discovery.clone(),
                 network_manager,
+                health_monitor: Some(health_monitor.clone()),
             };
 
             // Start the web interface in a separate task
@@ -310,6 +349,7 @@ async fn main() -> Result<()> {
                 app_manager,
                 service_discovery,
                 network_manager: None, // No network manager for web-only mode
+                health_monitor: None, // No health monitor for web-only mode
             };
 
             // Start the web server
@@ -373,6 +413,7 @@ async fn main() -> Result<()> {
                                 app_manager: AppManager::new().await?,
                                 service_discovery,
                                 network_manager: Some(manager_arc),
+                                health_monitor: None,
                             };
                         }
                     }
@@ -394,6 +435,7 @@ async fn main() -> Result<()> {
                 app_manager: AppManager::new().await?,
                 service_discovery: ServiceDiscovery::new(),
                 network_manager: None,
+                health_monitor: None,
             };
             match command {
                 NodeCommands::Ls => {
@@ -426,6 +468,7 @@ async fn main() -> Result<()> {
                 app_manager: app_manager.clone(),
                 service_discovery,
                 network_manager: None,
+                health_monitor: None,
             };
 
             match command {
@@ -448,14 +491,38 @@ async fn main() -> Result<()> {
                     image,
                     name,
                     service,
+                    volume,
                 } => {
-                    let container_id = app_manager
-                        .deploy_app(&image, &name, service.as_deref(), None, None)
-                        .await?;
-                    println!(
-                        "Deployed application {} with container {}",
-                        name, container_id
-                    );
+                    if let Some(volumes) = volume {
+                        // Parse volume mounts in format "volume_name:container_path"
+                        let mut volume_mounts = Vec::new();
+                        for vol in volumes {
+                            if let Some((vol_name, container_path)) = vol.split_once(':') {
+                                volume_mounts.push((vol_name.to_string(), container_path.to_string()));
+                            } else {
+                                eprintln!("Invalid volume format '{}'. Use 'volume_name:container_path'", vol);
+                                std::process::exit(1);
+                            }
+                        }
+                        
+                        // Deploy with volumes
+                        let container_id = app_manager
+                            .deploy_app_with_volumes(&image, &name, service.as_deref(), volume_mounts, None, None)
+                            .await?;
+                        println!(
+                            "Deployed application {} with container {} and volumes",
+                            name, container_id
+                        );
+                    } else {
+                        // Deploy without volumes
+                        let container_id = app_manager
+                            .deploy_app(&image, &name, service.as_deref(), None, None)
+                            .await?;
+                        println!(
+                            "Deployed application {} with container {}",
+                            name, container_id
+                        );
+                    }
                     Ok(())
                 }
                 AppCommands::Scale { name, replicas } => {
@@ -552,6 +619,7 @@ async fn main() -> Result<()> {
                 app_manager: app_manager.clone(),
                 service_discovery: service_discovery.clone(),
                 network_manager,
+                health_monitor: None,
             };
 
             println!("Checking system health...");
@@ -639,6 +707,63 @@ async fn main() -> Result<()> {
                 println!("\nNetwork: Not available");
             }
             Ok(())
+        }
+        Commands::Volume { command } => {
+            let storage = StorageManager::new(&cli.data_dir).await?;
+            let service_discovery = ServiceDiscovery::new();
+            let app_manager = AppManager::with_storage(storage)
+                .await?
+                .with_service_discovery(service_discovery.clone());
+
+            match command {
+                VolumeCommands::Create { name } => {
+                    match app_manager.create_volume(&name).await {
+                        Ok(_) => {
+                            println!("Volume '{}' created successfully", name);
+                        }
+                        Err(e) => {
+                            eprintln!("Failed to create volume '{}': {}", name, e);
+                            std::process::exit(1);
+                        }
+                    }
+                    Ok(())
+                }
+                VolumeCommands::Ls => {
+                    match app_manager.list_volumes().await {
+                        Ok(volumes) => {
+                            if volumes.is_empty() {
+                                println!("No volumes found");
+                            } else {
+                                println!("Volumes:");
+                                for volume in volumes {
+                                    let size_mb = volume.size / (1024 * 1024);
+                                    let created = chrono::DateTime::from_timestamp(volume.created_at, 0)
+                                        .map(|dt| dt.format("%Y-%m-%d %H:%M:%S").to_string())
+                                        .unwrap_or_else(|| "Unknown".to_string());
+                                    println!("  {} ({}MB) - Created: {}", volume.name, size_mb, created);
+                                }
+                            }
+                        }
+                        Err(e) => {
+                            eprintln!("Failed to list volumes: {}", e);
+                            std::process::exit(1);
+                        }
+                    }
+                    Ok(())
+                }
+                VolumeCommands::Delete { name } => {
+                    match app_manager.delete_volume(&name).await {
+                        Ok(_) => {
+                            println!("Volume '{}' deleted successfully", name);
+                        }
+                        Err(e) => {
+                            eprintln!("Failed to delete volume '{}': {}", name, e);
+                            std::process::exit(1);
+                        }
+                    }
+                    Ok(())
+                }
+            }
         }
     }
 }

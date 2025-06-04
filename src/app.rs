@@ -1,5 +1,7 @@
 use crate::storage::StorageManager;
-use crate::containerd_manager::{ContainerdManager, Container, ContainerStats, ContainerStatus};
+#[cfg(feature = "containerd")]
+use crate::containerd_manager::ContainerdManager;
+use crate::containerd_manager::{MockContainerManager, Container, ContainerStats, ContainerStatus};
 use crate::service_discovery::ServiceDiscovery;
 use anyhow::{Context, Result};
 use std::collections::{HashMap, HashSet};
@@ -101,7 +103,6 @@ impl AppManager {
     }
     
     /// Set the container runtime implementation
-    #[cfg(test)]
     pub fn with_container_runtime<T: ContainerRuntime + Send + Sync + 'static>(mut self, runtime: Arc<T>) -> Self {
         self.container_runtime = Some(runtime as Arc<dyn ContainerRuntime>);
         self
@@ -270,9 +271,16 @@ impl AppManager {
         socket_path: &str,
         namespace: &str,
     ) -> Result<Self> {
+        #[cfg(feature = "containerd")]
         let runtime = ContainerdManager::new(socket_path.to_string(), namespace.to_string())
             .await
             .context("Failed to initialize containerd manager")?;
+            
+        #[cfg(not(feature = "containerd"))]
+        let runtime = {
+            eprintln!("Containerd feature not enabled, using mock runtime");
+            MockContainerManager::new()
+        };
             
         Ok(Self {
             storage: Some(storage),
@@ -355,6 +363,7 @@ impl AppManager {
                 created_at: now,
                 ports,
                 env_vars,
+                volumes: Vec::new(),
                 service_domain: service_domain.map(|s| s.to_string()),
             };
 

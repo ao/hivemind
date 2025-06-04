@@ -849,23 +849,44 @@ async fn services_handler(State(state): State<WebServerState>) -> impl IntoRespo
 async fn health_handler(State(state): State<WebServerState>) -> impl IntoResponse {
     let app_state = &state.app_state;
 
-    // Check node health
-    let node_health = app_state.node_manager.check_health().await.unwrap_or(false);
+    // Get health summary from health monitor if available
+    let health_summary = if let Some(health_monitor) = &app_state.health_monitor {
+        Some(health_monitor.get_health_summary().await)
+    } else {
+        None
+    };
 
-    // Get containers and their health
+    // Get detailed container health if health monitor is available
+    let container_health = if let Some(health_monitor) = &app_state.health_monitor {
+        health_monitor.get_all_container_health().await
+    } else {
+        std::collections::HashMap::new()
+    };
+
+    // Get detailed node health if health monitor is available
+    let node_health = if let Some(health_monitor) = &app_state.health_monitor {
+        health_monitor.get_all_node_health().await
+    } else {
+        std::collections::HashMap::new()
+    };
+
+    // Fallback to basic health check
+    let basic_node_health = app_state.node_manager.check_health().await.unwrap_or(false);
+
+    // Get containers and their basic status
     let containers = app_state
         .app_manager
         .get_container_details()
         .await
         .unwrap_or_default();
 
-    // Get service endpoints
-    let service_endpoints = app_state.service_discovery.list_services().await;
-
     let mut context = Context::new();
+    context.insert("health_summary", &health_summary);
+    context.insert("container_health", &container_health);
     context.insert("node_health", &node_health);
+    context.insert("basic_node_health", &basic_node_health);
     context.insert("containers", &containers);
-    context.insert("service_endpoints", &service_endpoints);
+    context.insert("has_health_monitor", &app_state.health_monitor.is_some());
 
     render_template(&state.templates, "health.html", &context)
 }
@@ -1080,26 +1101,41 @@ async fn api_service_endpoints_handler(State(state): State<WebServerState>) -> i
 async fn api_health_handler(State(state): State<WebServerState>) -> impl IntoResponse {
     let app_state = &state.app_state;
 
-    // Check node health
-    let node_health = app_state.node_manager.check_health().await.unwrap_or(false);
+    // Get comprehensive health data from health monitor if available
+    if let Some(health_monitor) = &app_state.health_monitor {
+        let health_summary = health_monitor.get_health_summary().await;
+        let container_health = health_monitor.get_all_container_health().await;
+        let node_health = health_monitor.get_all_node_health().await;
 
-    // Get containers for health status
-    let containers = app_state
-        .app_manager
-        .get_container_details()
-        .await
-        .unwrap_or_default();
-    let container_health = containers
-        .iter()
-        .filter(|c| c.status == ContainerStatus::Running)
-        .count() as f64
-        / containers.len().max(1) as f64;
+        Json(serde_json::json!({
+            "status": "comprehensive",
+            "summary": health_summary,
+            "container_health": container_health,
+            "node_health": node_health,
+            "overall_health": health_summary.healthy_containers as f64 / health_summary.total_containers.max(1) as f64 > 0.8
+        }))
+    } else {
+        // Fallback to basic health check
+        let node_health = app_state.node_manager.check_health().await.unwrap_or(false);
+        
+        let containers = app_state
+            .app_manager
+            .get_container_details()
+            .await
+            .unwrap_or_default();
+        let container_health = containers
+            .iter()
+            .filter(|c| c.status == ContainerStatus::Running)
+            .count() as f64
+            / containers.len().max(1) as f64;
 
-    Json(serde_json::json!({
-        "node_health": node_health,
-        "container_health": container_health,
-        "overall_health": node_health && container_health > 0.8
-    }))
+        Json(serde_json::json!({
+            "status": "basic",
+            "node_health": node_health,
+            "container_health": container_health,
+            "overall_health": node_health && container_health > 0.8
+        }))
+    }
 }
 
 // Use DeployRequest from main.rs

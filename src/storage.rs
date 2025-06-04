@@ -151,4 +151,67 @@ impl StorageManager {
 
         Ok(())
     }
+
+    // Generic key-value storage methods for testing
+    pub async fn store(&self, key: &str, data: &[u8]) -> Result<()> {
+        let key = key.to_string();
+        let data = data.to_vec();
+        let conn = self.conn.clone();
+
+        tokio::task::spawn_blocking(move || -> Result<()> {
+            let conn = conn.blocking_lock();
+
+            // Create key-value table if it doesn't exist
+            conn.execute(
+                "CREATE TABLE IF NOT EXISTS key_value (
+                    key TEXT PRIMARY KEY,
+                    value BLOB NOT NULL
+                )",
+                [],
+            )?;
+
+            conn.execute(
+                "INSERT OR REPLACE INTO key_value (key, value) VALUES (?, ?)",
+                params![key, data],
+            )?;
+
+            Ok(())
+        })
+        .await??;
+
+        Ok(())
+    }
+
+    pub async fn get(&self, key: &str) -> Result<Option<Vec<u8>>> {
+        let key = key.to_string();
+        let conn = self.conn.clone();
+
+        let result = tokio::task::spawn_blocking(move || -> Result<Option<Vec<u8>>> {
+            let conn = conn.blocking_lock();
+
+            // Create key-value table if it doesn't exist
+            conn.execute(
+                "CREATE TABLE IF NOT EXISTS key_value (
+                    key TEXT PRIMARY KEY,
+                    value BLOB NOT NULL
+                )",
+                [],
+            )?;
+
+            let mut stmt = conn.prepare("SELECT value FROM key_value WHERE key = ?")?;
+            let mut rows = stmt.query_map(params![key], |row| {
+                let data: Vec<u8> = row.get(0)?;
+                Ok(data)
+            })?;
+
+            if let Some(row) = rows.next() {
+                Ok(Some(row?))
+            } else {
+                Ok(None)
+            }
+        })
+        .await??;
+
+        Ok(result)
+    }
 }
