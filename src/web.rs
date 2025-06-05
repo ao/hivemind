@@ -357,6 +357,10 @@ impl WebServer {
             .route("/api/scale", post(api_scale_handler))
             .route("/api/restart", post(api_restart_handler))
             .route("/api/service-url", post(api_service_url_handler))
+            // Zero-downtime deployment API routes
+            .route("/api/deployments/zero-downtime", post(api_zero_downtime_deploy_handler))
+            .route("/api/deployments/status/:id", get(api_deployment_status_handler))
+            .route("/api/deployments/rollback/:id", post(api_deployment_rollback_handler))
             // Volume management API routes
             .route("/volumes", get(volumes_handler))
             .route("/api/volumes", get(api_list_volumes))
@@ -1261,6 +1265,197 @@ async fn api_service_url_handler(
             Json(serde_json::json!({
                 "success": false,
                 "error": "Service not found or no healthy endpoints available"
+            })),
+        ),
+    }
+}
+
+// Zero-downtime deployment request structure
+#[derive(Deserialize)]
+struct ZeroDowntimeDeployRequest {
+    name: String,
+    image: String,
+    service: Option<String>,
+    batch_size: Option<u32>,
+    batch_delay: Option<u64>,
+    health_check_path: Option<String>,
+    health_check_port: Option<u16>,
+    health_check_timeout: Option<u64>,
+    drain_timeout: Option<u64>,
+}
+
+// Zero-downtime deployment response structure
+#[derive(Serialize)]
+struct ZeroDowntimeDeployResponse {
+    success: bool,
+    deployment_id: Option<String>,
+    error: Option<String>,
+}
+
+// Deployment status response structure
+#[derive(Serialize)]
+struct DeploymentStatusResponse {
+    id: String,
+    status: String,
+    progress: f32,
+    details: Option<String>,
+    created_at: String,
+    updated_at: String,
+    completed: bool,
+    success: Option<bool>,
+}
+
+// Handler for zero-downtime deployments
+async fn api_zero_downtime_deploy_handler(
+    State(state): State<WebServerState>,
+    Json(payload): Json<ZeroDowntimeDeployRequest>,
+) -> impl IntoResponse {
+    let app_state = &state.app_state;
+    
+    // Check if deployment manager is available
+    let deployment_manager = match &app_state.deployment_manager {
+        Some(manager) => manager,
+        None => {
+            return (
+                StatusCode::SERVICE_UNAVAILABLE,
+                Json(ZeroDowntimeDeployResponse {
+                    success: false,
+                    deployment_id: None,
+                    error: Some("Deployment manager is not available".to_string()),
+                }),
+            )
+        }
+    };
+    
+    // Create deployment strategy with zero-downtime parameters
+    let strategy = crate::deployment::DeploymentStrategy::RollingUpdate {
+        max_unavailable: 1,
+        max_surge: 1,
+        batch_size: payload.batch_size,
+        batch_delay: payload.batch_delay,
+        zero_downtime: Some(true),
+        health_check_path: payload.health_check_path,
+        health_check_port: payload.health_check_port,
+        health_check_timeout: payload.health_check_timeout,
+        drain_timeout: payload.drain_timeout,
+    };
+    
+    // Create deployment request
+    let result = deployment_manager
+        .create_deployment(
+            &payload.name,
+            &payload.image,
+            strategy,
+            payload.service.as_deref(),
+        )
+        .await;
+    
+    match result {
+        Ok(deployment_id) => (
+            StatusCode::ACCEPTED,
+            Json(ZeroDowntimeDeployResponse {
+                success: true,
+                deployment_id: Some(deployment_id),
+                error: None,
+            }),
+        ),
+        Err(e) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(ZeroDowntimeDeployResponse {
+                success: false,
+                deployment_id: None,
+                error: Some(e.to_string()),
+            }),
+        ),
+    }
+}
+
+// Handler for getting deployment status
+async fn api_deployment_status_handler(
+    State(state): State<WebServerState>,
+    Path(deployment_id): Path<String>,
+) -> impl IntoResponse {
+    let app_state = &state.app_state;
+    
+    // Check if deployment manager is available
+    let deployment_manager = match &app_state.deployment_manager {
+        Some(manager) => manager,
+        None => {
+            return (
+                StatusCode::SERVICE_UNAVAILABLE,
+                Json(serde_json::json!({
+                    "success": false,
+                    "error": "Deployment manager is not available"
+                })),
+            )
+        }
+    };
+    
+    // Get deployment status
+    let result = deployment_manager.get_deployment_status(&deployment_id).await;
+    
+    match result {
+        Ok(status) => {
+            let response = DeploymentStatusResponse {
+                id: deployment_id,
+                status: status.status.to_string(),
+                progress: status.progress,
+                details: status.details,
+                created_at: status.created_at.to_string(),
+                updated_at: status.updated_at.to_string(),
+                completed: status.completed,
+                success: status.success,
+            };
+            
+            (StatusCode::OK, Json(response))
+        },
+        Err(e) => (
+            StatusCode::NOT_FOUND,
+            Json(serde_json::json!({
+                "success": false,
+                "error": format!("Failed to get deployment status: {}", e)
+            })),
+        ),
+    }
+}
+
+// Handler for rolling back a deployment
+async fn api_deployment_rollback_handler(
+    State(state): State<WebServerState>,
+    Path(deployment_id): Path<String>,
+) -> impl IntoResponse {
+    let app_state = &state.app_state;
+    
+    // Check if deployment manager is available
+    let deployment_manager = match &app_state.deployment_manager {
+        Some(manager) => manager,
+        None => {
+            return (
+                StatusCode::SERVICE_UNAVAILABLE,
+                Json(serde_json::json!({
+                    "success": false,
+                    "error": "Deployment manager is not available"
+                })),
+            )
+        }
+    };
+    
+    // Rollback deployment
+    let result = deployment_manager.rollback_deployment(&deployment_id).await;
+    
+    match result {
+        Ok(_) => (
+            StatusCode::ACCEPTED,
+            Json(serde_json::json!({
+                "success": true,
+                "message": format!("Rollback of deployment {} initiated", deployment_id)
+            })),
+        ),
+        Err(e) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!({
+                "success": false,
+                "error": format!("Failed to rollback deployment: {}", e)
             })),
         ),
     }

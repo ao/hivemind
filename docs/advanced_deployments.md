@@ -53,20 +53,42 @@ The rolling update strategy updates containers in batches, ensuring that a minim
 
 #### Configuration
 
+Standard Rolling Update:
 ```bash
 hivemind app deploy --image nginx:latest --name web-app --strategy rolling-update --max-unavailable 1 --max-surge 1
+```
+
+Zero-Downtime Rolling Update:
+```bash
+hivemind app zero-downtime-deploy --image nginx:latest --name web-app --service web-service --batch-size 2 --batch-delay 30 --health-check-path /health --health-check-port 8080 --health-check-timeout 60 --drain-timeout 30
 ```
 
 Parameters:
 - `max-unavailable`: Maximum number of containers that can be unavailable during the update
 - `max-surge`: Maximum number of extra containers that can be created during the update
+- `batch-size`: Number of containers to update in each batch (zero-downtime only)
+- `batch-delay`: Delay in seconds between batches (zero-downtime only)
+- `health-check-path`: Path to use for health checks (zero-downtime only)
+- `health-check-port`: Port to use for health checks (zero-downtime only)
+- `health-check-timeout`: Timeout in seconds for health checks (zero-downtime only)
+- `drain-timeout`: Time in seconds to wait for connections to drain before removing old containers (zero-downtime only)
 
 #### Workflow
 
+Standard Rolling Update:
 1. Create new containers (up to max-surge)
 2. Wait for new containers to be ready
 3. Stop old containers (up to max-unavailable)
 4. Repeat until all containers are updated
+
+Zero-Downtime Rolling Update:
+1. Create new containers in batches (batch-size)
+2. Wait for new containers to be ready
+3. Perform health checks on new containers
+4. Gradually shift traffic to new containers
+5. Wait for connections to drain from old containers (drain-timeout)
+6. Remove old containers
+7. Repeat until all containers are updated
 
 #### Pros and Cons
 
@@ -74,11 +96,15 @@ Parameters:
 - Minimal or no downtime
 - Controlled rollout
 - Resource efficient
+- Health verification (zero-downtime)
+- Connection draining (zero-downtime)
+- Automated rollback on failure (zero-downtime)
 
 **Cons:**
 - Both old and new versions run simultaneously
-- No automated verification
+- Requires proper health checks for zero-downtime
 - Potential issues with mixed versions
+- More complex configuration for zero-downtime
 
 ### Blue-Green Deployment
 
@@ -98,6 +124,99 @@ Parameters:
 1. Create a complete new environment (green)
 2. Wait for the new environment to be ready
 3. Verify the new environment
+4. Switch traffic from blue to green
+5. Keep the blue environment as a backup for quick rollback
+
+#### Pros and Cons
+
+**Pros:**
+- Zero downtime
+- Complete isolation between versions
+- Easy and fast rollback
+- Full verification before traffic switch
+
+**Cons:**
+- Resource intensive (requires double the resources)
+- More complex setup
+- Longer deployment time
+
+## Monitoring and Managing Deployments
+
+Hivemind provides tools to monitor and manage your deployments, allowing you to track progress, check status, and perform rollbacks if necessary.
+
+### Checking Deployment Status
+
+You can check the status of a deployment using the following command:
+
+```bash
+hivemind app deployment-status --id <deployment-id>
+```
+
+This will show you:
+- Current status (pending, in progress, completed, failed)
+- Progress percentage
+- Details about the deployment
+- Creation and last update timestamps
+- Whether the deployment is completed
+- Whether the deployment was successful
+
+### Rolling Back Deployments
+
+If a deployment fails or you need to revert to a previous version, you can roll back a deployment using:
+
+```bash
+hivemind app rollback-deployment --id <deployment-id>
+```
+
+This will:
+1. Stop routing traffic to the new version
+2. Restore traffic to the previous version
+3. Remove the new version containers
+
+### API Access
+
+All deployment operations are also available through the API:
+
+- Create a zero-downtime deployment:
+  ```
+  POST /api/deployments/zero-downtime
+  ```
+
+- Get deployment status:
+  ```
+  GET /api/deployments/status/:id
+  ```
+
+- Rollback a deployment:
+  ```
+  POST /api/deployments/rollback/:id
+  ```
+
+## Best Practices
+
+### Health Checks
+
+For zero-downtime deployments, proper health checks are critical. Configure health checks that:
+
+1. Verify your application is truly ready to serve traffic
+2. Check both basic connectivity and application functionality
+3. Have appropriate timeouts and thresholds
+
+Example health check path: `/health` or `/status`
+
+### Connection Draining
+
+When using zero-downtime deployments, set an appropriate drain timeout to allow existing connections to complete before removing old containers. This prevents disruption to active users.
+
+Recommended drain timeout: 30-60 seconds for most web applications
+
+### Batch Sizing
+
+Choose appropriate batch sizes for rolling updates:
+- Smaller batches: Lower risk, longer deployment time
+- Larger batches: Higher risk, shorter deployment time
+
+For critical applications, start with small batches (1-2 containers) and increase as you gain confidence.
 4. Switch traffic from blue to green
 5. Terminate the old environment (blue)
 
