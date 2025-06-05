@@ -1,14 +1,19 @@
 pub mod app;
+pub mod cicd;
+pub mod cloud;
+pub mod containerd_manager;
+pub mod deployment;
 pub mod health_monitor;
+pub mod helm;
 pub mod membership;
 pub mod network;
 pub mod node;
+pub mod observability;
 pub mod scheduler;
 pub mod security;
 pub mod service_discovery;
 pub mod storage;
 pub mod web;
-pub mod containerd_manager;
 pub use containerd_manager::*;
 
 // Re-export types needed by web.rs
@@ -22,6 +27,11 @@ pub struct AppState {
     pub network_manager: Option<std::sync::Arc<network::NetworkManager>>,
     pub health_monitor: Option<std::sync::Arc<health_monitor::HealthMonitor>>,
     pub security_manager: Option<std::sync::Arc<security::SecurityManager>>,
+    pub cicd_manager: Option<std::sync::Arc<cicd::CicdManager>>,
+    pub cloud_manager: Option<std::sync::Arc<cloud::CloudManager>>,
+    pub deployment_manager: Option<std::sync::Arc<deployment::DeploymentManager>>,
+    pub helm_manager: Option<std::sync::Arc<helm::HelmManager>>,
+    pub observability_manager: Option<std::sync::Arc<observability::ObservabilityManager>>,
 }
 
 #[derive(Deserialize)]

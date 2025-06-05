@@ -74,6 +74,11 @@ The Hivemind codebase is organized into several key modules:
   - `secret_management.rs` - Secret management
 - `src/web.rs` - Web UI & dashboard
 - `src/main.rs` - CLI & entry point
+- `src/deployment.rs` - Advanced deployment strategies
+- `src/cicd.rs` - CI/CD pipeline integration
+- `src/cloud.rs` - Cloud provider integration
+- `src/helm.rs` - Helm chart support
+- `src/observability.rs` - Metrics, tracing, and logging
 
 ### Key Abstractions
 
@@ -86,6 +91,11 @@ The Hivemind codebase is organized into several key modules:
 7. **ContainerScheduler**: Schedules containers on nodes
 8. **HealthMonitor**: Monitors container and node health
 9. **SecurityManager**: Manages security features
+10. **DeploymentManager**: Manages advanced deployment strategies
+11. **CicdManager**: Manages CI/CD pipeline integration
+12. **CloudManager**: Manages cloud provider integration
+13. **HelmManager**: Manages Helm chart support
+14. **ObservabilityManager**: Manages metrics, tracing, and logging
 
 ## Development Workflow
 
@@ -458,6 +468,143 @@ We welcome contributions to Hivemind! Please follow these guidelines:
 6. Check for linting issues with `cargo clippy`
 7. Submit a pull request
 
+## Advanced Features
+
+### Working with Deployment Strategies
+
+Hivemind supports several advanced deployment strategies:
+
+1. **Simple Deployment**: Deploy all containers at once
+   ```bash
+   hivemind app deploy --image myapp:latest --name myapp --strategy simple
+   ```
+
+2. **Rolling Update**: Update containers in batches
+   ```bash
+   hivemind app deploy --image myapp:latest --name myapp --strategy rolling-update --max-unavailable 1 --max-surge 1
+   ```
+
+3. **Blue-Green Deployment**: Deploy a new version alongside the old one and switch traffic
+   ```bash
+   hivemind app deploy --image myapp:latest --name myapp --strategy blue-green --verification-timeout 60
+   ```
+
+4. **Canary Deployment**: Deploy a new version to a subset of users
+   ```bash
+   hivemind app deploy --image myapp:latest --name myapp --strategy canary --percentage 20 --steps 20,50,100 --interval 300
+   ```
+
+5. **A/B Testing**: Deploy multiple variants for testing
+   ```bash
+   hivemind app deploy --name myapp --strategy ab-testing --variant "name=v1,image=myapp:v1,percentage=50" --variant "name=v2,image=myapp:v2,percentage=50" --duration 86400
+   ```
+
+### Working with CI/CD Integration
+
+Hivemind provides built-in support for CI/CD pipelines:
+
+1. **Create a pipeline**:
+   ```bash
+   hivemind cicd create-pipeline --name my-pipeline --repository https://github.com/user/repo --branch main
+   ```
+
+2. **Configure a pipeline**:
+   ```bash
+   hivemind cicd configure-pipeline --name my-pipeline --build-command "npm run build" --test-command "npm test"
+   ```
+
+3. **Set deployment strategy**:
+   ```bash
+   hivemind cicd set-deployment-strategy --name my-pipeline --strategy blue-green --verification-timeout 60
+   ```
+
+4. **Trigger a pipeline**:
+   ```bash
+   hivemind cicd trigger-pipeline --name my-pipeline
+   ```
+
+5. **View pipeline status**:
+   ```bash
+   hivemind cicd get-pipeline-status --name my-pipeline
+   ```
+
+### Working with Cloud Integration
+
+Hivemind can integrate with major cloud providers:
+
+1. **Configure a cloud provider**:
+   ```bash
+   hivemind cloud configure --provider aws --access-key <ACCESS_KEY> --secret-key <SECRET_KEY> --region us-west-2
+   ```
+
+2. **Create a cloud instance**:
+   ```bash
+   hivemind cloud create-instance --name my-instance --provider aws --region us-west-2 --zone us-west-2a --instance-type t3.micro
+   ```
+
+3. **Create a cloud load balancer**:
+   ```bash
+   hivemind cloud create-load-balancer --name my-lb --provider aws --region us-west-2 --type application --scheme internet-facing
+   ```
+
+4. **Register instances with a load balancer**:
+   ```bash
+   hivemind cloud register-instances --lb-name my-lb --instance-ids my-instance-1,my-instance-2
+   ```
+
+### Working with Helm Charts
+
+Hivemind provides support for Helm charts:
+
+1. **Add a Helm repository**:
+   ```bash
+   hivemind helm repo add --name stable --url https://charts.helm.sh/stable
+   ```
+
+2. **Create a Helm chart**:
+   ```bash
+   hivemind helm create-chart --name my-chart --description "My application chart"
+   ```
+
+3. **Install a Helm chart**:
+   ```bash
+   hivemind helm install --name my-release --chart stable/nginx --namespace default
+   ```
+
+4. **Upgrade a Helm release**:
+   ```bash
+   hivemind helm upgrade --name my-release --chart stable/nginx --namespace default --version 1.2.3
+   ```
+
+5. **Uninstall a Helm release**:
+   ```bash
+   hivemind helm uninstall --name my-release --namespace default
+   ```
+
+### Working with Observability
+
+Hivemind provides comprehensive observability features:
+
+1. **Configure Prometheus metrics**:
+   ```bash
+   hivemind observability configure-metrics --port 9090 --path /metrics
+   ```
+
+2. **Configure OpenTelemetry tracing**:
+   ```bash
+   hivemind observability configure-tracing --service-name hivemind --endpoint http://jaeger:14268/api/traces
+   ```
+
+3. **Configure log aggregation**:
+   ```bash
+   hivemind observability configure-logging --endpoint http://elasticsearch:9200 --index hivemind-logs
+   ```
+
+4. **View metrics dashboard**:
+   ```bash
+   hivemind observability open-dashboard
+   ```
+
 ## Additional Resources
 
 - [API Documentation](docs/api_reference.md)
@@ -467,3 +614,8 @@ We welcome contributions to Hivemind! Please follow these guidelines:
 - [Service Discovery](docs/service_discovery.md)
 - [Security Features](docs/security_features.md)
 - [Node Membership Protocol](docs/node_membership_protocol.md)
+- [CI/CD Integration](docs/cicd_integration.md)
+- [Monitoring & Observability](docs/monitoring_observability.md)
+- [Cloud Integration](docs/cloud_integration.md)
+- [Advanced Deployments](docs/advanced_deployments.md)
+- [Helm Integration](docs/helm_integration.md)

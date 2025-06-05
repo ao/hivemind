@@ -23,6 +23,21 @@ Key interfaces:
 - `AppManager`: Main interface for application management
 - `ServiceConfig`: Configuration for services
 
+### Deployment Manager
+
+The Deployment Manager handles advanced deployment strategies:
+
+- **Strategy Selection**: Chooses the appropriate deployment strategy
+- **Blue-Green Deployments**: Manages blue-green deployments with zero downtime
+- **Canary Deployments**: Manages canary deployments with incremental rollout
+- **A/B Testing**: Manages A/B testing deployments with traffic splitting
+- **Rollback Management**: Handles rollbacks in case of deployment failures
+
+Key interfaces:
+- `DeploymentManager`: Main interface for deployment management
+- `DeploymentExecutor`: Executes deployment strategies
+- `DeploymentStrategy`: Defines deployment strategies
+
 ### Node Manager
 
 The Node Manager handles cluster coordination and node discovery:
@@ -147,6 +162,67 @@ Key interfaces:
 - `RbacManager`: Manages RBAC
 - `SecretManager`: Manages secrets
 
+### CI/CD Manager
+
+The CI/CD Manager provides integration with CI/CD pipelines:
+
+- **Pipeline Management**: Manages CI/CD pipelines
+- **GitHub Actions Integration**: Integrates with GitHub Actions
+- **Automated Testing**: Manages automated testing
+- **Automated Deployment**: Manages automated deployment
+- **Release Management**: Manages releases
+
+Key interfaces:
+- `CicdManager`: Main interface for CI/CD management
+- `CicdProvider`: Provider interface for CI/CD platforms
+- `PipelineConfig`: Configuration for CI/CD pipelines
+
+### Cloud Manager
+
+The Cloud Manager provides integration with cloud providers:
+
+- **Provider Management**: Manages cloud provider integrations
+- **Instance Management**: Manages cloud instances
+- **Load Balancer Management**: Manages cloud load balancers
+- **Storage Management**: Manages cloud storage
+- **Network Management**: Manages cloud networks
+
+Key interfaces:
+- `CloudManager`: Main interface for cloud management
+- `CloudProviderInterface`: Provider interface for cloud platforms
+- `CloudInstance`: Represents a cloud instance
+- `CloudLoadBalancer`: Represents a cloud load balancer
+
+### Helm Manager
+
+The Helm Manager provides support for Helm charts:
+
+- **Chart Management**: Manages Helm charts
+- **Repository Management**: Manages Helm repositories
+- **Release Management**: Manages Helm releases
+- **Chart Creation**: Creates Helm charts for Hivemind applications
+
+Key interfaces:
+- `HelmManager`: Main interface for Helm management
+- `HelmChart`: Represents a Helm chart
+- `HelmRelease`: Represents a Helm release
+- `HelmRepository`: Represents a Helm repository
+
+### Observability Manager
+
+The Observability Manager provides comprehensive observability features:
+
+- **Metrics Collection**: Collects metrics from various components
+- **Distributed Tracing**: Provides distributed tracing
+- **Log Aggregation**: Aggregates logs from various components
+- **Dashboard Integration**: Integrates with dashboards for visualization
+
+Key interfaces:
+- `ObservabilityManager`: Main interface for observability management
+- `MetricCollector`: Collects metrics
+- `OpenTelemetryTracer`: Provides distributed tracing
+- `LogAggregator`: Aggregates logs
+
 ### Web UI
 
 The Web UI provides a dashboard for monitoring and management:
@@ -155,6 +231,7 @@ The Web UI provides a dashboard for monitoring and management:
 - **Container Management**: Manages containers through the UI
 - **Node Management**: Manages nodes through the UI
 - **Monitoring**: Displays monitoring information
+- **Advanced Features**: Provides access to advanced features
 
 ## Data Flow
 
@@ -252,6 +329,9 @@ Hivemind is designed to be highly scalable and performant:
 - **Minimal Resource Usage**: Requires minimal resources compared to other orchestration platforms
 - **Network-Aware Scheduling**: Optimizes container placement for network performance
 - **Efficient Service Discovery**: Fast DNS-based service discovery
+- **Cloud Integration**: Seamless scaling to cloud environments
+- **Advanced Deployment Strategies**: Efficient deployment with minimal downtime
+- **Observability**: Comprehensive monitoring for performance optimization
 
 ## Fault Tolerance
 
@@ -282,6 +362,10 @@ Hivemind is designed to be extensible:
 - **API-First Design**: All functionality is available through APIs
 - **Custom Schedulers**: Supports custom scheduling algorithms
 - **Custom Health Checks**: Supports custom health checking logic
+- **CI/CD Integration**: Extensible CI/CD pipeline integration
+- **Cloud Provider Integration**: Extensible cloud provider integration
+- **Helm Chart Support**: Extensible Helm chart support
+- **Observability Integration**: Extensible observability integration
 
 ## Conclusion
 
