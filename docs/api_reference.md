@@ -2034,6 +2034,133 @@ Accept: application/json; version=1.0
 
 If no version is specified, the latest version is used.
 
+## Advanced API Features
+
+### Batch Operations
+
+Hivemind supports batch operations for improved efficiency:
+
+```
+POST /batch
+```
+
+**Request Body:**
+
+```json
+{
+  "operations": [
+    {
+      "method": "POST",
+      "path": "/deploy",
+      "body": {
+        "image": "nginx:latest",
+        "name": "web-server"
+      }
+    },
+    {
+      "method": "POST",
+      "path": "/volumes/create",
+      "body": {
+        "name": "data-volume"
+      }
+    }
+  ]
+}
+```
+
+**Response:**
+
+```json
+{
+  "success": true,
+  "data": {
+    "results": [
+      {
+        "success": true,
+        "data": {
+          "app_id": "web-server",
+          "container_ids": ["container-1"],
+          "message": "Application deployed successfully"
+        }
+      },
+      {
+        "success": true,
+        "data": {
+          "name": "data-volume",
+          "message": "Volume created successfully"
+        }
+      }
+    ]
+  }
+}
+```
+
+### Streaming API
+
+For real-time updates, Hivemind provides a streaming API using Server-Sent Events (SSE):
+
+```
+GET /stream/events
+```
+
+**Query Parameters:**
+
+| Parameter | Type | Description |
+|-----------|------|-------------|
+| `types` | string | Comma-separated list of event types to subscribe to |
+| `resources` | string | Comma-separated list of resources to monitor |
+
+**Response:**
+
+```
+event: container.created
+data: {"id":"container-1","name":"web-server","status":"created"}
+
+event: container.started
+data: {"id":"container-1","name":"web-server","status":"running"}
+```
+
+### GraphQL API
+
+Hivemind provides a GraphQL API for flexible querying:
+
+```
+POST /graphql
+```
+
+**Request Body:**
+
+```json
+{
+  "query": "query { containers(status: \"running\") { id name image status node { id name } metrics { cpu_usage memory_usage } } }"
+}
+```
+
+**Response:**
+
+```json
+{
+  "data": {
+    "containers": [
+      {
+        "id": "container-1",
+        "name": "web-server",
+        "image": "nginx:latest",
+        "status": "running",
+        "node": {
+          "id": "node-1",
+          "name": "worker-1"
+        },
+        "metrics": {
+          "cpu_usage": 0.5,
+          "memory_usage": 128000000
+        }
+      }
+    ]
+  }
+}
+```
+
 ## Conclusion
 
 This API reference covers the main endpoints and features of the Hivemind API. For more detailed information on specific endpoints or features, refer to the following resources:
@@ -2041,3 +2168,5 @@ This API reference covers the main endpoints and features of the Hivemind API. F
 - [User Guide](user_guide.md)
 - [Administration Guide](administration_guide.md)
 - [Troubleshooting Guide](troubleshooting_guide.md)
+- [Developer Guide](../developer_guide.md)
+- [Deployment Guide](deployment_guide.md)

@@ -118,6 +118,66 @@ pub struct TrafficSplit {
     pub weight: u32,
 }
 
+// Service mesh integration structs
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct ServiceMeshConfig {
+    pub enabled: bool,
+    pub mtls_enabled: bool,
+    pub tracing_enabled: bool,
+    pub retry_policy: Option<RetryPolicy>,
+    pub timeout_ms: Option<u64>,
+    pub circuit_breaker: Option<CircuitBreakerPolicy>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct RetryPolicy {
+    pub max_retries: u32,
+    pub retry_on: Vec<String>, // e.g., "5xx", "connect-failure"
+    pub timeout_ms: u64,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct CircuitBreakerPolicy {
+    pub max_connections: u32,
+    pub max_pending_requests: u32,
+    pub max_requests: u32,
+    pub max_retries: u32,
+    pub consecutive_errors_threshold: u32,
+    pub interval_ms: u64,
+    pub base_ejection_time_ms: u64,
+    pub state: CircuitBreakerState,
+    pub last_state_change: i64,
+    pub failure_count: u32,
+    pub success_count: u32,
+    pub half_open_allowed_calls: u32,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+pub enum CircuitBreakerState {
+    Closed,    // Normal operation, requests are allowed
+    Open,      // Circuit is open, requests are rejected
+    HalfOpen,  // Testing if the service is healthy again
+}
+
+impl Default for CircuitBreakerPolicy {
+    fn default() -> Self {
+        Self {
+            max_connections: 100,
+            max_pending_requests: 10,
+            max_requests: 1000,
+            max_retries: 3,
+            consecutive_errors_threshold: 5,
+            interval_ms: 10000,
+            base_ejection_time_ms: 30000,
+            state: CircuitBreakerState::Closed,
+            last_state_change: 0,
+            failure_count: 0,
+            success_count: 0,
+            half_open_allowed_calls: 5,
+        }
+    }
+}
+
 #[derive(Clone, Debug)]
 pub struct ServiceDiscovery {
     services: Arc<Mutex<HashMap<String, Vec<ServiceEndpoint>>>>,
@@ -629,17 +689,17 @@ impl ServiceDiscovery {
             },
             RecordType::TXT => {
                 // Create TXT record with service metadata
-                let mut txt_data = Vec::new();
+                let mut txt_data = Vec::<String>::new();
                 
                 // Add service name
-                txt_data.push(format!("service={}", service_name).into_bytes());
+                txt_data.push(format!("service={}", service_name));
                 
                 // Add endpoint count
-                txt_data.push(format!("endpoints={}", endpoints_to_use.len()).into_bytes());
+                txt_data.push(format!("endpoints={}", endpoints_to_use.len()));
                 
                 // Add health information
                 let healthy_count = healthy_endpoints.len();
-                txt_data.push(format!("healthy={}", healthy_count).into_bytes());
+                txt_data.push(format!("healthy={}", healthy_count));
                 
                 let rdata = RData::TXT(trust_dns_proto::rr::rdata::TXT::new(txt_data));
                 let record = Record::from_rdata(query_name.clone(), 300, rdata);
@@ -922,9 +982,105 @@ impl ServiceDiscovery {
                                     .map(|s| s.trim().trim_start_matches("session="))
                             });
                         
-                        // Simple round-robin selection for now
-                        // In a real implementation, this would use the load balancing strategies
-                        let selected = healthy_endpoints[now.subsec_nanos() as usize % healthy_endpoints.len()];
+                        // Get the load balancing strategy for this service
+                        let load_balancing_strategy = load_balancing_strategies.get(&service_name)
+                            .cloned()
+                            .unwrap_or(LoadBalancingStrategy::RoundRobin);
+                        
+                        // Select an endpoint based on the strategy
+                        let selected = match load_balancing_strategy {
+                            LoadBalancingStrategy::RoundRobin => {
+                                // Use round robin selection based on timestamp
+                                let index = now.subsec_nanos() as usize % healthy_endpoints.len();
+                                healthy_endpoints[index]
+                            },
+                            LoadBalancingStrategy::LeastConnections => {
+                                // Find endpoint with least active connections
+                                let mut min_connections = u32::MAX;
+                                let mut selected_index = 0;
+                                
+                                for (i, endpoint) in healthy_endpoints.iter().enumerate() {
+                                    let stats_key = format!("{}_{}", service_name, endpoint.ip_address);
+                                    let connections = endpoint_stats
+                                        .entry(stats_key.clone())
+                                        .or_insert(EndpointStats {
+                                            active_connections: 0,
+                                            total_requests: 0,
+                                            failed_requests: 0,
+                                            avg_response_time_ms: 0.0,
+                                            last_selected: 0,
+                                        })
+                                        .active_connections;
+                                    
+                                    if connections < min_connections {
+                                        min_connections = connections;
+                                        selected_index = i;
+                                    }
+                                }
+                                
+                                healthy_endpoints[selected_index]
+                            },
+                            LoadBalancingStrategy::Random => {
+                                // Simple random selection
+                                let index = (now.subsec_nanos() as usize) % healthy_endpoints.len();
+                                healthy_endpoints[index]
+                            },
+                            LoadBalancingStrategy::WeightedRoundRobin => {
+                                // Use weights if available
+                                let mut weights = Vec::with_capacity(healthy_endpoints.len());
+                                let mut total_weight = 0;
+                                
+                                for endpoint in &healthy_endpoints {
+                                    let weight = endpoint.weight.unwrap_or(10);
+                                    weights.push(weight);
+                                    total_weight += weight;
+                                }
+                                
+                                if total_weight == 0 {
+                                    // Fallback to simple round robin
+                                    let index = now.subsec_nanos() as usize % healthy_endpoints.len();
+                                    healthy_endpoints[index]
+                                } else {
+                                    // Select based on weight
+                                    let mut random_val = (now.subsec_nanos() as u32) % total_weight;
+                                    
+                                    for (i, weight) in weights.iter().enumerate() {
+                                        if random_val < *weight {
+                                            return healthy_endpoints[i];
+                                        }
+                                        random_val -= *weight;
+                                    }
+                                    
+                                    // Fallback
+                                    healthy_endpoints[0]
+                                }
+                            },
+                            LoadBalancingStrategy::IPHash => {
+                                if let Some(ip) = client_ip {
+                                    // Use client IP for consistent routing
+                                    let mut hash = 0u32;
+                                    for byte in ip.bytes() {
+                                        hash = hash.wrapping_mul(31).wrapping_add(byte as u32);
+                                    }
+                                    
+                                    let index = (hash as usize) % healthy_endpoints.len();
+                                    healthy_endpoints[index]
+                                } else if let Some(id) = session_id {
+                                    // Use session ID if available
+                                    let mut hash = 0u32;
+                                    for byte in id.bytes() {
+                                        hash = hash.wrapping_mul(31).wrapping_add(byte as u32);
+                                    }
+                                    
+                                    let index = (hash as usize) % healthy_endpoints.len();
+                                    healthy_endpoints[index]
+                                } else {
+                                    // Fallback to round robin
+                                    let index = now.subsec_nanos() as usize % healthy_endpoints.len();
+                                    healthy_endpoints[index]
+                                }
+                            }
+                        };
                         
                         // Create the forwarding URI
                         let uri = format!("http://{}:{}{}",
@@ -1111,11 +1267,20 @@ impl ServiceDiscovery {
     }
     
     // Make HTTP/HTTPS request
-    async fn make_http_request(_url: &str) -> Result<()> {
-        // In a real implementation, this would use a proper HTTP client
-        // For now, we'll just simulate a successful request
-        // This is a placeholder for actual HTTP client implementation
-        Ok(())
+    async fn make_http_request(url: &str) -> Result<()> {
+        // Use reqwest to make an actual HTTP request
+        let client = reqwest::Client::builder()
+            .timeout(Duration::from_secs(5))
+            .build()?;
+        
+        let response = client.get(url).send().await?;
+        
+        // Check if the response is successful (status code 2xx)
+        if response.status().is_success() {
+            Ok(())
+        } else {
+            Err(anyhow::anyhow!("Health check failed with status: {}", response.status()))
+        }
     }
     
     // Check TCP health
@@ -1298,36 +1463,23 @@ impl ServiceDiscovery {
         endpoints[index]
     }
     
-    // Service mesh integration
-    
-    #[derive(Clone, Debug, Serialize, Deserialize)]
-    pub struct ServiceMeshConfig {
-        pub enabled: bool,
-        pub mtls_enabled: bool,
-        pub tracing_enabled: bool,
-        pub retry_policy: Option<RetryPolicy>,
-        pub timeout_ms: Option<u64>,
-        pub circuit_breaker: Option<CircuitBreakerPolicy>,
-    }
-    
-    #[derive(Clone, Debug, Serialize, Deserialize)]
-    pub struct RetryPolicy {
-        pub max_retries: u32,
-        pub retry_on: Vec<String>, // e.g., "5xx", "connect-failure"
-        pub timeout_ms: u64,
-    }
-    
-    #[derive(Clone, Debug, Serialize, Deserialize)]
-    pub struct CircuitBreakerPolicy {
-        pub max_connections: u32,
-        pub max_pending_requests: u32,
-        pub max_requests: u32,
-        pub max_retries: u32,
-        pub consecutive_errors_threshold: u32,
-        pub interval_ms: u64,
-        pub base_ejection_time_ms: u64,
-    }
-    
+    // Configure service mesh for a service
+            Self {
+                max_connections: 100,
+                max_pending_requests: 10,
+                max_requests: 1000,
+                max_retries: 3,
+                consecutive_errors_threshold: 5,
+                interval_ms: 10000,
+                base_ejection_time_ms: 30000,
+                state: CircuitBreakerState::Closed,
+                last_state_change: 0,
+                failure_count: 0,
+                success_count: 0,
+                half_open_allowed_calls: 5,
+            }
+        }
+
     // Configure service mesh for a service
     pub async fn configure_service_mesh(&self, service_name: &str, config: ServiceMeshConfig) -> Result<()> {
         // In a real implementation, this would store the configuration and apply it
@@ -1620,6 +1772,28 @@ impl ServiceDiscovery {
                     endpoint.health_status = ServiceHealth::Unhealthy;
                     println!("Circuit breaker: Marked endpoint {}:{} as unhealthy due to high failure rate",
                         ip_address, endpoint.port);
+                    
+                    // Store circuit breaker state in metadata if it doesn't exist
+                    if endpoint.metadata.is_none() {
+                        let mut metadata = HashMap::new();
+                        metadata.insert("circuit_breaker_state".to_string(), "open".to_string());
+                        metadata.insert("circuit_breaker_opened_at".to_string(),
+                            SystemTime::now()
+                                .duration_since(UNIX_EPOCH)
+                                .unwrap()
+                                .as_secs()
+                                .to_string());
+                        endpoint.metadata = Some(metadata);
+                    } else if let Some(metadata) = &mut endpoint.metadata {
+                        metadata.insert("circuit_breaker_state".to_string(), "open".to_string());
+                        metadata.insert("circuit_breaker_opened_at".to_string(),
+                            SystemTime::now()
+                                .duration_since(UNIX_EPOCH)
+                                .unwrap()
+                                .as_secs()
+                                .to_string());
+                    }
+                    
                     break;
                 }
             }
@@ -1644,5 +1818,230 @@ impl ServiceDiscovery {
     async fn get_traffic_split_config_for_proxy(&self, service_name: &str) -> Option<TrafficSplitConfig> {
         let traffic_splits = self.traffic_splits.lock().await;
         traffic_splits.get(service_name).cloned()
+    }
+    
+    // Implement circuit breaker pattern for service resilience
+    pub async fn check_circuit_breaker(&self, service_name: &str, endpoint_ip: &str) -> Result<bool> {
+        let services = self.services.lock().await;
+        
+        if let Some(endpoints) = services.get(service_name) {
+            if let Some(endpoint) = endpoints.iter().find(|e| e.ip_address == endpoint_ip) {
+                // Check if this endpoint has circuit breaker metadata
+                if let Some(metadata) = &endpoint.metadata {
+                    if let Some(state) = metadata.get("circuit_breaker_state") {
+                        if state == "open" {
+                            // Check if it's time to try half-open state
+                            if let Some(opened_at_str) = metadata.get("circuit_breaker_opened_at") {
+                                if let Ok(opened_at) = opened_at_str.parse::<u64>() {
+                                    let now = SystemTime::now()
+                                        .duration_since(UNIX_EPOCH)
+                                        .unwrap()
+                                        .as_secs();
+                                    
+                                    // If circuit has been open for more than 30 seconds, try half-open
+                                    if now - opened_at > 30 {
+                                        return Ok(true); // Allow the request to test if service is healthy
+                                    }
+                                }
+                            }
+                            
+                            // Circuit is open, reject the request
+                            return Ok(false);
+                        } else if state == "half-open" {
+                            // In half-open state, allow limited requests
+                            if let Some(attempts_str) = metadata.get("half_open_attempts") {
+                                if let Ok(attempts) = attempts_str.parse::<u32>() {
+                                    if attempts < 5 { // Allow up to 5 test requests
+                                        return Ok(true);
+                                    } else {
+                                        return Ok(false);
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+                
+                // Default to allowing the request if no circuit breaker info or in closed state
+                return Ok(true);
+            }
+        }
+        
+        // If service or endpoint not found, allow the request
+        Ok(true)
+    }
+    
+    // Record circuit breaker result
+    pub async fn record_circuit_breaker_result(&self, service_name: &str, endpoint_ip: &str, success: bool) -> Result<()> {
+        let mut services = self.services.lock().await;
+        
+        if let Some(endpoints) = services.get_mut(service_name) {
+            if let Some(endpoint) = endpoints.iter_mut().find(|e| e.ip_address == endpoint_ip) {
+                let mut metadata = endpoint.metadata.clone().unwrap_or_default();
+                let state = metadata.get("circuit_breaker_state").cloned().unwrap_or_else(|| "closed".to_string());
+                
+                if state == "open" || state == "half-open" {
+                    if success {
+                        // Successful request in half-open state
+                        let success_count = metadata.get("success_count")
+                            .and_then(|s| s.parse::<u32>().ok())
+                            .unwrap_or(0) + 1;
+                        
+                        metadata.insert("success_count".to_string(), success_count.to_string());
+                        
+                        // If we've had enough successes, close the circuit
+                        if success_count >= 5 {
+                            metadata.insert("circuit_breaker_state".to_string(), "closed".to_string());
+                            metadata.remove("circuit_breaker_opened_at");
+                            metadata.remove("success_count");
+                            metadata.remove("failure_count");
+                            endpoint.health_status = ServiceHealth::Healthy;
+                            println!("Circuit breaker: Closed circuit for endpoint {}:{} after successful tests",
+                                endpoint_ip, endpoint.port);
+                        } else {
+                            // Still in testing phase
+                            metadata.insert("circuit_breaker_state".to_string(), "half-open".to_string());
+                        }
+                    } else {
+                        // Failed request in half-open state, reopen the circuit
+                        metadata.insert("circuit_breaker_state".to_string(), "open".to_string());
+                        metadata.insert("circuit_breaker_opened_at".to_string(),
+                            SystemTime::now()
+                                .duration_since(UNIX_EPOCH)
+                                .unwrap()
+                                .as_secs()
+                                .to_string());
+                        metadata.insert("failure_count".to_string(), "1".to_string());
+                        metadata.remove("success_count");
+                        endpoint.health_status = ServiceHealth::Unhealthy;
+                        println!("Circuit breaker: Reopened circuit for endpoint {}:{} after failed test",
+                            endpoint_ip, endpoint.port);
+                    }
+                } else if !success {
+                    // In closed state, count failures
+                    let failure_count = metadata.get("failure_count")
+                        .and_then(|s| s.parse::<u32>().ok())
+                        .unwrap_or(0) + 1;
+                    
+                    metadata.insert("failure_count".to_string(), failure_count.to_string());
+                    
+                    // If too many failures, open the circuit
+                    if failure_count >= 5 {
+                        metadata.insert("circuit_breaker_state".to_string(), "open".to_string());
+                        metadata.insert("circuit_breaker_opened_at".to_string(),
+                            SystemTime::now()
+                                .duration_since(UNIX_EPOCH)
+                                .unwrap()
+                                .as_secs()
+                                .to_string());
+                        endpoint.health_status = ServiceHealth::Unhealthy;
+                        println!("Circuit breaker: Opened circuit for endpoint {}:{} after {} consecutive failures",
+                            endpoint_ip, endpoint.port, failure_count);
+                    }
+                } else {
+                    // Successful request in closed state, reset failure count
+                    metadata.remove("failure_count");
+                }
+                
+                endpoint.metadata = Some(metadata);
+            }
+        }
+        
+        Ok(())
+    }
+    
+    // Enhanced DNS record handling with proper TTL and caching
+    pub async fn get_dns_records(&self, domain: &str, record_type: RecordType) -> Vec<Record> {
+        let services = self.services.lock().await;
+        let mut records = Vec::new();
+        let query_name = trust_dns_proto::rr::Name::from_str(domain).unwrap_or_default();
+        
+        // Find service by domain
+        for (service_name, endpoints) in services.iter() {
+            for endpoint in endpoints {
+                if endpoint.domain == domain && endpoint.health_status == ServiceHealth::Healthy {
+                    match record_type {
+                        RecordType::A => {
+                            if let Ok(ip) = Ipv4Addr::from_str(&endpoint.ip_address) {
+                                let rdata = RData::A(trust_dns_proto::rr::rdata::A(ip));
+                                let record = Record::from_rdata(query_name.clone(), 60, rdata); // 60 second TTL
+                                records.push(record);
+                            }
+                        },
+                        RecordType::AAAA => {
+                            // Support for IPv6 addresses
+                            if endpoint.ip_address.contains(':') {
+                                if let Ok(ip) = std::net::Ipv6Addr::from_str(&endpoint.ip_address) {
+                                    let rdata = RData::AAAA(trust_dns_proto::rr::rdata::AAAA(ip));
+                                    let record = Record::from_rdata(query_name.clone(), 60, rdata);
+                                    records.push(record);
+                                }
+                            }
+                        },
+                        RecordType::SRV => {
+                            // Create SRV record with proper weight and priority
+                            let weight = endpoint.weight.unwrap_or(10);
+                            let target_name = trust_dns_proto::rr::Name::from_str(
+                                &format!("{}.{}", endpoint.node_id, domain)
+                            ).unwrap_or_else(|_| query_name.clone());
+                            
+                            let rdata = RData::SRV(trust_dns_proto::rr::rdata::SRV::new(
+                                0, // priority
+                                weight, // weight from endpoint config
+                                endpoint.port,
+                                target_name,
+                            ));
+                            let record = Record::from_rdata(query_name.clone(), 60, rdata);
+                            records.push(record);
+                        },
+                        _ => {
+                            // Other record types can be added here
+                        }
+                    }
+                }
+            }
+        }
+        
+        records
+    }
+    
+    // Get a service endpoint using consistent hashing for better session affinity
+    pub async fn get_service_endpoint_consistent_hash(
+        &self,
+        service_name: &str,
+        key: &str,
+    ) -> Option<ServiceEndpoint> {
+        let services = self.services.lock().await;
+        
+        if let Some(endpoints) = services.get(service_name) {
+            // Filter to only healthy endpoints
+            let healthy_endpoints: Vec<&ServiceEndpoint> = endpoints
+                .iter()
+                .filter(|e| e.health_status == ServiceHealth::Healthy)
+                .collect();
+            
+            if healthy_endpoints.is_empty() {
+                return None;
+            }
+            
+            // Use consistent hashing to select an endpoint
+            let selected = Self::select_consistent_hash(&healthy_endpoints, key);
+            return Some(selected.clone());
+        }
+        
+        None
+    }
+    
+    // Consistent hashing implementation
+    fn select_consistent_hash<'a>(endpoints: &[&'a ServiceEndpoint], key: &str) -> &'a ServiceEndpoint {
+        // Simple hash function
+        let mut hash = 0u32;
+        for byte in key.bytes() {
+            hash = hash.wrapping_mul(31).wrapping_add(byte as u32);
+        }
+        
+        // Use the hash to select an endpoint
+        let index = (hash as usize) % endpoints.len();
+        endpoints[index]
     }
 }

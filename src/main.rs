@@ -90,6 +90,20 @@ enum VolumeCommands {
         #[arg(long)]
         name: String,
     },
+    /// Backup a volume to a file
+    Backup {
+        #[arg(long)]
+        name: String,
+        #[arg(long)]
+        output: String,
+    },
+    /// Restore a volume from a backup file
+    Restore {
+        #[arg(long)]
+        name: String,
+        #[arg(long)]
+        input: String,
+    },
 }
 
 #[derive(Subcommand)]
@@ -1040,6 +1054,30 @@ async fn main() -> Result<()> {
                         }
                         Err(e) => {
                             eprintln!("Failed to delete volume '{}': {}", name, e);
+                            std::process::exit(1);
+                        }
+                    }
+                    Ok(())
+                }
+                VolumeCommands::Backup { name, output } => {
+                    match app_manager.backup_volume(&name, &output).await {
+                        Ok(_) => {
+                            println!("Volume '{}' backed up to '{}' successfully", name, output);
+                        }
+                        Err(e) => {
+                            eprintln!("Failed to backup volume '{}': {}", name, e);
+                            std::process::exit(1);
+                        }
+                    }
+                    Ok(())
+                }
+                VolumeCommands::Restore { name, input } => {
+                    match app_manager.restore_volume(&name, &input).await {
+                        Ok(_) => {
+                            println!("Volume '{}' restored from '{}' successfully", name, input);
+                        }
+                        Err(e) => {
+                            eprintln!("Failed to restore volume '{}': {}", name, e);
                             std::process::exit(1);
                         }
                     }

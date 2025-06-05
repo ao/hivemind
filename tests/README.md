@@ -1,128 +1,142 @@
 # Hivemind Testing Framework
 
-This directory contains comprehensive tests for the Hivemind container orchestration platform. The tests are designed to verify the functionality, resilience, and performance of all components.
+This directory contains comprehensive tests for the Hivemind container orchestration system. The tests are organized into different categories to validate various aspects of the system.
 
 ## Test Categories
 
-### Unit Tests
-- **unit_tests.rs**: Tests for individual components and basic functionality
-- **scheduler_tests.rs**: Tests for the container scheduler component
-- **network_tests.rs**: Tests for the network management component
-- **membership_tests.rs**: Tests for the cluster membership component
-- **health_monitor_tests.rs**: Tests for the health monitoring component
+### 1. Unit Tests
+- `unit_tests.rs` - Basic unit tests for individual components
+- `scheduler_tests.rs` - Tests for the container scheduler
+- `network_tests.rs` - Tests for the networking subsystem
+- `membership_tests.rs` - Tests for the membership protocol
+- `health_monitor_tests.rs` - Tests for the health monitoring system
 
-### Integration Tests
-- **integration_tests.rs**: Tests for component interactions and workflows
+### 2. Integration Tests
+- `integration_tests.rs` - End-to-end integration tests for the entire system
+- `service_discovery_integration_tests.rs` - Integration tests for service discovery
+- `membership_integration_tests.rs` - Integration tests for membership functionality
+- `node_membership_integration_tests.rs` - Integration tests for node membership
 
-### Security Tests
-- **security_tests.rs**: Tests for security features including RBAC, network policies, and secret management
+### 3. Performance Tests
+- `performance_tests.rs` - Basic performance tests for various components
+- `cluster_performance_tests.rs` - Performance tests for cluster operations at scale
 
-### Chaos Tests
-- **chaos_tests.rs**: Tests for failure scenarios and recovery mechanisms
+### 4. Chaos Tests
+- `chaos_tests.rs` - Basic chaos tests for system resilience
+- `enhanced_chaos_tests.rs` - Advanced chaos tests for complex failure scenarios
 
-### Performance Tests
-- **performance_tests.rs**: Tests for system performance under load
+### 5. Security Tests
+- `security_tests.rs` - Tests for security features and vulnerabilities
+
+### 6. Test Infrastructure
+- `test_runner.rs` - Test runner for executing all tests
+- `coverage_reporter.rs` - Tool for generating test coverage reports
 
 ## Running Tests
 
 ### Running All Tests
-```bash
-cargo test
-```
 
-### Running Specific Test Categories
-```bash
-# Run unit tests
-cargo test --test unit_tests --test scheduler_tests --test network_tests --test membership_tests --test health_monitor_tests
-
-# Run integration tests
-cargo test --test integration_tests
-
-# Run security tests
-cargo test --test security_tests
-
-# Run chaos tests
-cargo test --test chaos_tests
-
-# Run performance tests
-cargo test --test performance_tests
-```
-
-### Running the Test Runner
-The test runner executes all tests and generates a coverage report:
+To run all tests with coverage reporting:
 
 ```bash
 cargo run --bin test_runner
 ```
 
-## Test Coverage
+### Running Specific Test Categories
 
-The testing framework aims to achieve at least 80% code coverage across all components. Coverage reports are generated using cargo-tarpaulin and can be viewed after running the test runner.
+To run specific test categories:
 
-### Installing cargo-tarpaulin
 ```bash
-cargo install cargo-tarpaulin
+# Run unit tests
+cargo test --test unit_tests --test scheduler_tests --test network_tests --test membership_tests --test health_monitor_tests
+
+# Run integration tests
+cargo test --test integration_tests --test service_discovery_integration_tests --test membership_integration_tests --test node_membership_integration_tests
+
+# Run performance tests
+cargo test --test performance_tests --test cluster_performance_tests
+
+# Run chaos tests
+cargo test --test chaos_tests --test enhanced_chaos_tests
+
+# Run security tests
+cargo test --test security_tests
 ```
 
-### Generating Coverage Reports Manually
+### Running Individual Tests
+
+To run a specific test:
+
 ```bash
-cargo tarpaulin --out Html
+cargo test --test integration_tests test_full_application_deployment_workflow
 ```
 
-## Test Structure
+## Coverage Reporting
 
-Each test file follows a consistent structure:
+To generate a test coverage report:
 
-1. **Setup**: Create necessary components and mock dependencies
-2. **Execution**: Run the functionality being tested
-3. **Verification**: Assert that the results match expected outcomes
-4. **Cleanup**: Clean up any resources created during the test
+```bash
+cargo run --bin coverage_reporter
+```
 
-## Mock Components
+This will generate coverage reports in the `test_results` directory:
+- `test_results/coverage_report.txt` - Text-based coverage report
+- `test_results/html/index.html` - HTML coverage report with visualizations
 
-Several mock components are provided to facilitate testing:
+## Test Features
 
-- **MockNodeManager**: Simulates a cluster of nodes
-- **MockContainerRuntime**: Simulates container operations
-- **MockNetworkManager**: Simulates network operations
+### End-to-End Integration Tests
 
-## Test Scenarios
+The integration tests validate the entire system working together, including:
+- Container lifecycle (create, run, network, volume mount, service discovery, health check, restart, delete)
+- Cluster management (node membership, leader election, distributed state)
+- Network policy application and enforcement
+- Service discovery and load balancing
+- Volume management and persistence
 
-### Unit Test Scenarios
-- Component initialization
-- Configuration validation
-- Basic operations
-- Edge cases and error handling
+### Performance Tests
 
-### Integration Test Scenarios
-- End-to-end workflows
-- Multi-component interactions
-- State persistence
+Performance tests ensure the system meets performance requirements:
+- Scheduler performance with different bin packing strategies
+- Service discovery performance under load
+- Network operations performance
+- Distributed state operations performance
+- Cluster scaling performance
 
-### Chaos Test Scenarios
+### Chaos Tests
+
+Chaos tests validate system resilience under various failure conditions:
 - Node failures and recovery
-- Container failures and recovery
-- Network partitions
-- Resource exhaustion
-- Leader failures
+- Container failures and auto-healing
+- Network partitions and recovery
+- Leader failures and re-election
+- Resource exhaustion and recovery
+- Random failures and system stability
 
-### Performance Test Scenarios
-- Large cluster operations
-- Concurrent operations
-- Resource utilization under load
-- Scaling performance
+### Regression Tests
+
+Regression tests prevent future regressions by validating core functionality:
+- Container lifecycle operations
+- Network policy application and enforcement
+- Health monitoring and auto-healing
+- Distributed state consistency
 
 ## Adding New Tests
 
-When adding new tests, follow these guidelines:
+When adding new tests:
 
 1. Place the test in the appropriate category file
-2. Follow the existing test structure
-3. Use descriptive test names
-4. Include comments explaining the test purpose
-5. Ensure tests are isolated and don't interfere with each other
-6. Clean up resources after tests complete
+2. Ensure the test is properly documented with comments
+3. Add any necessary helper functions
+4. Update this README if adding a new test category
+5. Run the coverage reporter to ensure adequate test coverage
+
+## Test Coverage Goals
+
+- Line coverage: ≥ 80%
+- Branch coverage: ≥ 75%
+- Function coverage: ≥ 85%
 
 ## Continuous Integration
 
-These tests are integrated into the CI pipeline and run automatically on each pull request. Tests must pass before code can be merged.
+These tests are automatically run in the CI pipeline on every pull request and merge to main. The coverage reports are published as artifacts and can be viewed in the CI dashboard.

@@ -499,6 +499,70 @@ Hivemind supports several advanced deployment strategies:
    hivemind app deploy --name myapp --strategy ab-testing --variant "name=v1,image=myapp:v1,percentage=50" --variant "name=v2,image=myapp:v2,percentage=50" --duration 86400
    ```
 
+For more details on implementing custom deployment strategies, see the [Deployment Manager](#deployment-manager) section.
+
+### Deployment Manager
+
+The Deployment Manager handles advanced deployment strategies:
+
+```rust
+// Example implementation of a custom deployment strategy
+pub struct MyCustomStrategy {
+    app_name: String,
+    image: String,
+    // Custom parameters
+}
+
+impl DeploymentStrategy for MyCustomStrategy {
+    fn execute(&self, app_manager: &dyn AppManager) -> Result<(), Error> {
+        // Implementation of the strategy
+    }
+    
+    fn rollback(&self, app_manager: &dyn AppManager) -> Result<(), Error> {
+        // Rollback implementation
+    }
+}
+```
+
+To register a custom strategy:
+
+```rust
+let mut deployment_manager = DeploymentManager::new(app_manager);
+deployment_manager.register_strategy("my-custom", Box::new(MyCustomStrategyFactory {}));
+```
+
+For more details on implementing custom deployment strategies, see the [Deployment Manager](#deployment-manager) section.
+
+### Deployment Manager
+
+The Deployment Manager handles advanced deployment strategies:
+
+```rust
+// Example implementation of a custom deployment strategy
+pub struct MyCustomStrategy {
+    app_name: String,
+    image: String,
+    // Custom parameters
+}
+
+impl DeploymentStrategy for MyCustomStrategy {
+    fn execute(&self, app_manager: &dyn AppManager) -> Result<(), Error> {
+        // Implementation of the strategy
+    }
+    
+    fn rollback(&self, app_manager: &dyn AppManager) -> Result<(), Error> {
+        // Rollback implementation
+    }
+}
+```
+
+To register a custom strategy:
+
+```rust
+let mut deployment_manager = DeploymentManager::new(app_manager);
+deployment_manager.register_strategy("my-custom", Box::new(MyCustomStrategyFactory {}));
+```
+
 ### Working with CI/CD Integration
 
 Hivemind provides built-in support for CI/CD pipelines:
@@ -605,6 +669,242 @@ Hivemind provides comprehensive observability features:
    hivemind observability open-dashboard
    ```
 
+## Architecture Deep Dive
+
+### Component Interactions
+
+The Hivemind architecture is built around clear component interactions:
+
+1. **App Manager and Scheduler**:
+   - App Manager receives deployment requests
+   - Scheduler selects optimal nodes based on resources and constraints
+   - App Manager deploys containers to selected nodes
+
+2. **Network Manager and Service Discovery**:
+   - Network Manager assigns IP addresses to containers
+   - Service Discovery registers services and provides DNS resolution
+   - Containers communicate using service names
+
+3. **Health Monitor and Container Manager**:
+   - Health Monitor continuously checks container health
+   - Container Manager restarts unhealthy containers
+   - Health status is reported to the dashboard
+
+4. **Security Manager and App Manager**:
+   - Security Manager scans images before deployment
+   - Network policies control traffic between containers
+   - RBAC controls access to resources
+
+### Data Flow
+
+Understanding the data flow in Hivemind is crucial for development:
+
+1. **Container Deployment Flow**:
+   ```
+   User Request → App Manager → Scheduler → Container Manager → Network Manager → Service Discovery → Health Monitor
+   ```
+
+2. **Service Discovery Flow**:
+   ```
+   Container DNS Query → Service Discovery → Endpoint Selection → Direct Connection
+   ```
+
+3. **Node Membership Flow**:
+   ```
+   Node Join → Membership Protocol → Periodic Health Checks → Gossip Dissemination
+   ```
+
+4. **Health Monitoring Flow**:
+   ```
+   Health Check → Status Evaluation → Auto-healing Actions → Metrics Collection
+   ```
+
+### Extension Points
+
+Hivemind provides several extension points for customization:
+
+1. **Custom Schedulers**:
+   ```rust
+   pub trait SchedulingStrategy {
+       fn select_node(&self, container: &Container, nodes: &[Node]) -> Option<Node>;
+   }
+   ```
+
+2. **Custom Health Checks**:
+   ```rust
+   pub trait HealthCheck {
+       fn check(&self, target: &HealthCheckTarget) -> HealthStatus;
+   }
+   ```
+
+3. **Custom Network Policies**:
+   ```rust
+   pub trait PolicyEvaluator {
+       fn evaluate(&self, source: &NetworkEndpoint, target: &NetworkEndpoint) -> bool;
+   }
+   ```
+
+4. **Custom Service Discovery Backends**:
+   ```rust
+   pub trait ServiceRegistry {
+       fn register(&self, service: &Service) -> Result<(), Error>;
+       fn lookup(&self, name: &str) -> Result<Vec<Endpoint>, Error>;
+   }
+   ```
+
+## Performance Optimization
+
+### Resource Efficiency
+
+Hivemind is designed to be resource-efficient:
+
+1. **Memory Usage**:
+   - Use Rust's ownership model to minimize memory overhead
+   - Implement custom allocators for performance-critical components
+   - Use arena allocation for frequently allocated/deallocated objects
+
+2. **CPU Optimization**:
+   - Use async/await for I/O-bound operations
+   - Implement work-stealing thread pools for CPU-bound tasks
+   - Profile and optimize hot paths
+
+3. **Network Efficiency**:
+   - Implement connection pooling
+   - Use binary protocols for internal communication
+   - Batch operations when possible
+
+### Benchmarking
+
+Benchmark your changes to ensure they don't negatively impact performance:
+
+```bash
+# Run performance benchmarks
+cargo bench
+
+# Run specific benchmark
+cargo bench --bench scheduler_bench
+```
+
+## Testing Strategies
+
+### Unit Testing
+
+Write comprehensive unit tests for all components:
+
+```rust
+#[cfg(test)]
+mod tests {
+    use super::*;
+    
+    #[test]
+    fn test_container_scheduling() {
+        let scheduler = ContainerScheduler::new();
+        let nodes = vec![
+            Node::new("node1", NodeResources::new(4, 8192)),
+            Node::new("node2", NodeResources::new(8, 16384)),
+        ];
+        let container = Container::new("test", "nginx:latest", ResourceRequirements::new(2, 4096));
+        
+        let selected = scheduler.schedule(&container, &nodes).unwrap();
+        assert_eq!(selected.name(), "node2");
+    }
+}
+```
+
+### Integration Testing
+
+Test components working together:
+
+```rust
+#[test]
+fn test_deployment_flow() {
+    let mut app_manager = AppManager::new();
+    let mut scheduler = ContainerScheduler::new();
+    let mut container_manager = ContainerdManager::new();
+    
+    // Set up test environment
+    
+    // Test the deployment flow
+    let result = app_manager.deploy("nginx:latest", "web", &scheduler, &container_manager);
+    assert!(result.is_ok());
+    
+    // Verify the container is running
+    let containers = app_manager.list_containers().unwrap();
+    assert_eq!(containers.len(), 1);
+    assert_eq!(containers[0].status(), ContainerStatus::Running);
+}
+```
+
+### Chaos Testing
+
+Test resilience under failure conditions:
+
+```bash
+# Run chaos tests
+cargo test --test chaos_tests
+
+# Run specific chaos test
+cargo test --test chaos_tests -- test_node_failure_recovery
+```
+
+## Documentation Standards
+
+### Code Documentation
+
+Follow these standards for code documentation:
+
+1. **Module Documentation**:
+   ```rust
+   //! # Network Manager
+   //!
+   //! The Network Manager handles container networking, including IP address
+   //! allocation, overlay networking, and network policy enforcement.
+   ```
+
+2. **Function Documentation**:
+   ```rust
+   /// Allocates an IP address for a container
+   ///
+   /// # Arguments
+   ///
+   /// * `container_id` - The ID of the container
+   /// * `subnet` - The subnet to allocate from
+   ///
+   /// # Returns
+   ///
+   /// The allocated IP address or an error
+   ///
+   /// # Errors
+   ///
+   /// Returns an error if no IP addresses are available
+   pub fn allocate_ip(&self, container_id: &str, subnet: &Subnet) -> Result<IpAddr, Error> {
+       // Implementation
+   }
+   ```
+
+3. **Example Usage**:
+   ```rust
+   /// # Examples
+   ///
+   /// ```
+   /// let network_manager = NetworkManager::new();
+   /// let subnet = Subnet::new("10.244.0.0/24");
+   /// let ip = network_manager.allocate_ip("container-1", &subnet).unwrap();
+   /// assert!(subnet.contains(ip));
+   /// ```
+   ```
+
+### Component Documentation
+
+Create comprehensive documentation for each component:
+
+1. **Overview**: High-level description of the component
+2. **Architecture**: How the component is structured
+3. **Interfaces**: Public APIs and their usage
+4. **Implementation Details**: Key algorithms and data structures
+5. **Configuration**: Available configuration options
+6. **Examples**: Example usage scenarios
+
 ## Additional Resources
 
 - [API Documentation](docs/api_reference.md)
@@ -616,6 +916,7 @@ Hivemind provides comprehensive observability features:
 - [Node Membership Protocol](docs/node_membership_protocol.md)
 - [CI/CD Integration](docs/cicd_integration.md)
 - [Monitoring & Observability](docs/monitoring_observability.md)
+- [Deployment Guide](docs/deployment_guide.md)
 - [Cloud Integration](docs/cloud_integration.md)
 - [Advanced Deployments](docs/advanced_deployments.md)
 - [Helm Integration](docs/helm_integration.md)

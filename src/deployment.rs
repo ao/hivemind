@@ -94,6 +94,8 @@ pub struct Deployment {
     pub labels: HashMap<String, String>,
     /// Annotations for the deployment
     pub annotations: HashMap<String, String>,
+    /// Volume mounts (volume_name -> container_path)
+    pub volumes: Vec<(String, String)>,
     /// Status of the deployment
     pub status: DeploymentStatus,
     /// Creation time
@@ -121,6 +123,7 @@ impl Deployment {
             environment: HashMap::new(),
             labels: HashMap::new(),
             annotations: HashMap::new(),
+            volumes: Vec::new(),
             status: DeploymentStatus {
                 status: "pending".to_string(),
                 progress: 0.0,
@@ -133,6 +136,18 @@ impl Deployment {
             created_at: chrono::Utc::now(),
             completed_at: None,
         }
+    }
+    
+    /// Add a volume mount to the deployment
+    pub fn with_volume(mut self, volume_name: String, container_path: String) -> Self {
+        self.volumes.push((volume_name, container_path));
+        self
+    }
+    
+    /// Add multiple volume mounts to the deployment
+    pub fn with_volumes(mut self, volumes: Vec<(String, String)>) -> Self {
+        self.volumes.extend(volumes);
+        self
     }
 }
 
@@ -228,13 +243,28 @@ impl DeploymentExecutor for SimpleDeploymentExecutor {
         // Deploy all replicas at once
         for i in 0..deployment.replicas {
             let container_name = format!("{}-{}", deployment.name, i);
-            self.app_manager.deploy_app(
-                &deployment.image,
-                &container_name,
-                deployment.service.as_deref(),
-                Some(&deployment.environment),
-                Some(&deployment.labels),
-            ).await?;
+            
+            // Check if deployment has volumes
+            if deployment.volumes.is_empty() {
+                // Deploy without volumes
+                self.app_manager.deploy_app(
+                    &deployment.image,
+                    &container_name,
+                    deployment.service.as_deref(),
+                    Some(&deployment.environment),
+                    Some(&deployment.labels),
+                ).await?;
+            } else {
+                // Deploy with volumes
+                self.app_manager.deploy_app_with_volumes(
+                    &deployment.image,
+                    &container_name,
+                    deployment.service.as_deref(),
+                    deployment.volumes.clone(),
+                    Some(deployment.environment.iter().map(|(k, v)| (k.as_str(), v.as_str())).collect()),
+                    None,
+                ).await?;
+            }
         }
         
         Ok(())
@@ -365,13 +395,26 @@ impl DeploymentExecutor for RollingUpdateDeploymentExecutor {
                 for i in start_idx..end_idx {
                     if i < target_count {
                         let container_name = format!("{}-{}-new", deployment.app_name, i);
-                        let container_id = self.app_manager.deploy_app(
-                            &deployment.image,
-                            &container_name,
-                            Some(&deployment.app_name),
-                            Some(&deployment.environment),
-                            Some(&deployment.labels),
-                        ).await?;
+                        let container_id = if deployment.volumes.is_empty() {
+                            // Deploy without volumes
+                            self.app_manager.deploy_app(
+                                &deployment.image,
+                                &container_name,
+                                Some(&deployment.app_name),
+                                Some(&deployment.environment),
+                                Some(&deployment.labels),
+                            ).await?
+                        } else {
+                            // Deploy with volumes
+                            self.app_manager.deploy_app_with_volumes(
+                                &deployment.image,
+                                &container_name,
+                                Some(&deployment.app_name),
+                                deployment.volumes.clone(),
+                                Some(deployment.environment.iter().map(|(k, v)| (k.as_str(), v.as_str())).collect()),
+                                None,
+                            ).await?
+                        };
                         new_container_ids.push(container_id);
                     }
                 }

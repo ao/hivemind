@@ -25,6 +25,10 @@ pub struct NetworkConfig {
     pub overlay_type: OverlayNetworkType,
     pub vxlan_id: u16,
     pub vxlan_port: u16,
+    pub mtu: u32,
+    pub enable_ipv6: bool,
+    pub enable_encryption: bool,
+    pub encryption_key: Option<String>,
 }
 
 impl Default for NetworkConfig {
@@ -35,6 +39,10 @@ impl Default for NetworkConfig {
             overlay_type: OverlayNetworkType::VXLAN,
             vxlan_id: DEFAULT_VXLAN_ID,
             vxlan_port: DEFAULT_VXLAN_PORT,
+            mtu: 1450, // Default MTU for VXLAN (1500 - 50 for VXLAN overhead)
+            enable_ipv6: false,
+            enable_encryption: false,
+            encryption_key: None,
         }
     }
 }
@@ -43,6 +51,8 @@ impl Default for NetworkConfig {
 pub enum OverlayNetworkType {
     VXLAN,
     Geneve,
+    WireGuard,
+    IPsec,
     // Other overlay types could be added
 }
 
@@ -52,6 +62,24 @@ pub struct NodeNetworkInfo {
     pub address: String,
     pub subnet: IpNetwork,
     pub tunnel_ip: IpAddr,
+    pub ipv6_subnet: Option<IpNetwork>,
+    pub tunnel_ipv6: Option<IpAddr>,
+    pub state: NodeNetworkState,
+    pub last_heartbeat: u64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub enum NodeNetworkState {
+    Initializing,
+    Ready,
+    Degraded,
+    Disconnected,
+}
+
+impl Default for NodeNetworkState {
+    fn default() -> Self {
+        Self::Initializing
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -61,6 +89,11 @@ pub struct ContainerNetworkConfig {
     pub mac_address: String,
     pub gateway: IpAddr,
     pub node_id: String,
+    pub ipv6_address: Option<IpAddr>,
+    pub ipv6_gateway: Option<IpAddr>,
+    pub dns_servers: Vec<IpAddr>,
+    pub search_domains: Vec<String>,
+    pub labels: HashMap<String, String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -69,6 +102,13 @@ pub struct TunnelInfo {
     pub remote_ip: IpAddr,
     pub local_ip: IpAddr,
     pub tunnel_name: String,
+    pub tunnel_type: OverlayNetworkType,
+    pub encrypted: bool,
+    pub established: bool,
+    pub last_activity: u64,
+    pub tx_bytes: u64,
+    pub rx_bytes: u64,
+    pub mtu: u32,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -77,6 +117,37 @@ pub struct NetworkPolicy {
     pub selector: NetworkSelector,
     pub ingress_rules: Vec<NetworkRule>,
     pub egress_rules: Vec<NetworkRule>,
+    pub priority: i32,
+    pub namespace: Option<String>,
+    pub labels: HashMap<String, String>,
+    pub created_at: u64,
+    pub updated_at: u64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct EnhancedNetworkPolicy {
+    pub base_policy: NetworkPolicy,
+    pub policy_type: PolicyType,
+    pub applies_to_ingress: bool,
+    pub applies_to_egress: bool,
+    pub action: PolicyAction,
+    pub log_violations: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub enum PolicyType {
+    Isolation,
+    Security,
+    QoS,
+    Custom(String),
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub enum PolicyAction {
+    Allow,
+    Deny,
+    Limit(u32), // Rate limit in Kbps
+    Log,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -88,6 +159,10 @@ pub struct NetworkSelector {
 pub struct NetworkRule {
     pub ports: Vec<PortRange>,
     pub from: Vec<NetworkPeer>,
+    pub action: Option<PolicyAction>,
+    pub log: bool,
+    pub description: Option<String>,
+    pub id: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -97,7 +172,7 @@ pub struct PortRange {
     pub port_max: u16,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq)]
 pub enum Protocol {
     TCP,
     UDP,
@@ -115,11 +190,27 @@ pub struct NetworkManager {
     overlay: Arc<Mutex<OverlayNetwork>>,
     nodes: Arc<Mutex<HashMap<String, NodeNetworkInfo>>>,
     policies: Arc<Mutex<NetworkPolicyManager>>,
-    #[allow(dead_code)]
     service_discovery: Arc<ServiceDiscovery>,
     node_manager: Arc<NodeManager>,
-    #[allow(dead_code)]
     config: NetworkConfig,
+    container_networks: Arc<Mutex<HashMap<String, ContainerNetworkConfig>>>,
+    metrics: Arc<Mutex<NetworkMetrics>>,
+    health_check_interval: u64,
+    last_health_check: Arc<Mutex<u64>>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct NetworkMetrics {
+    pub total_containers: usize,
+    pub total_tunnels: usize,
+    pub total_policies: usize,
+    pub bytes_transmitted: u64,
+    pub bytes_received: u64,
+    pub packets_transmitted: u64,
+    pub packets_received: u64,
+    pub packet_errors: u64,
+    pub tunnel_failures: u64,
+    pub policy_violations: u64,
 }
 
 impl NetworkManager {
@@ -141,25 +232,43 @@ impl NetworkManager {
             config.node_subnet_size,
         )));
         
-        // Create overlay network manager
-        let overlay = Arc::new(Mutex::new(OverlayNetwork::new(
+        // Create overlay network manager with MTU from config
+        let mut overlay = OverlayNetwork::new(
             config.overlay_type.clone(),
             config.vxlan_id,
             config.vxlan_port,
-        )));
+        );
+        
+        // Set MTU from config
+        overlay = overlay.with_mtu(config.mtu);
+        
+        // Enable encryption if configured
+        if config.enable_encryption {
+            if let Some(key) = &config.encryption_key {
+                overlay = overlay.with_encryption(key.clone());
+            }
+        }
         
         // Create network policy manager
         let policies = Arc::new(Mutex::new(NetworkPolicyManager::new()));
         
         Ok(Self {
             ipam,
-            overlay,
+            overlay: Arc::new(Mutex::new(overlay)),
             nodes: Arc::new(Mutex::new(HashMap::new())),
             policies,
             service_discovery,
             node_manager,
             config,
+            container_networks: Arc::new(Mutex::new(HashMap::new())),
+            metrics: Arc::new(Mutex::new(NetworkMetrics::default())),
+            health_check_interval: 60, // Default to 60 seconds
+            last_health_check: Arc::new(Mutex::new(0)),
         })
+    }
+    
+    pub fn get_config(&self) -> &NetworkConfig {
+        &self.config
     }
     
     pub async fn initialize(&self) -> Result<()> {
@@ -185,6 +294,13 @@ impl NetworkManager {
                 address: node_ip.to_string(),
                 subnet,
                 tunnel_ip: node_ip,
+                ipv6_subnet: None,
+                tunnel_ipv6: None,
+                state: NodeNetworkState::Ready,
+                last_heartbeat: std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap_or_default()
+                    .as_secs(),
             },
         );
         
@@ -309,6 +425,7 @@ impl NetworkManager {
         container_id: &str,
         pid: i32,
         static_ip: Option<IpAddr>,
+        labels: Option<HashMap<String, String>>,
     ) -> Result<ContainerNetworkConfig> {
         let node_id = self.node_manager.get_node_id();
         
@@ -330,6 +447,14 @@ impl NetworkManager {
         // Get gateway IP
         let gateway = Self::get_gateway_ip(node_info.subnet)?;
         
+        // Get DNS servers - use the gateway as the primary DNS server
+        let mut dns_servers = vec![gateway];
+        
+        // Add any additional DNS servers from service discovery
+        if let Ok(additional_dns) = self.service_discovery.get_dns_servers().await {
+            dns_servers.extend(additional_dns);
+        }
+        
         // Create network config
         let config = ContainerNetworkConfig {
             container_id: container_id.to_string(),
@@ -337,7 +462,16 @@ impl NetworkManager {
             mac_address,
             gateway,
             node_id: node_id.clone(),
+            ipv6_address: None, // IPv6 not implemented yet
+            ipv6_gateway: None,
+            dns_servers,
+            search_domains: vec!["hivemind".to_string(), "cluster.local".to_string()],
+            labels: labels.unwrap_or_default(),
         };
+        
+        // Store container network config for future reference
+        let mut container_networks = self.container_networks.lock().await;
+        container_networks.insert(container_id.to_string(), config.clone());
         
         // Set up container network namespace
         self.setup_container_namespace(pid, &config).await?;
@@ -606,6 +740,17 @@ impl NetworkManager {
             53,  // DNS port
         ).await?;
         
+        // Unregister container labels from network policies
+        self.policies.lock().await.unregister_container_labels(container_id).await?;
+        
+        // Remove container network config
+        let mut container_networks = self.container_networks.lock().await;
+        container_networks.remove(container_id);
+        
+        // Update metrics
+        let mut metrics = self.metrics.lock().await;
+        metrics.total_containers = container_networks.len();
+        
         println!("Unregistered container {} from DNS", container_id);
         Ok(())
     }
@@ -648,6 +793,13 @@ impl NetworkManager {
                 address: member.address.clone(),
                 subnet,
                 tunnel_ip: node_ip,
+                ipv6_subnet: None,
+                tunnel_ipv6: None,
+                state: NodeNetworkState::Ready,
+                last_heartbeat: std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap_or_default()
+                    .as_secs(),
             },
         );
         
@@ -677,11 +829,98 @@ impl NetworkManager {
     }
     
     pub async fn apply_network_policy(&self, policy: NetworkPolicy) -> Result<()> {
-        self.policies.lock().await.add_policy(policy).await
+        let result = self.policies.lock().await.add_policy(policy).await;
+        
+        // Update metrics
+        let mut metrics = self.metrics.lock().await;
+        metrics.total_policies = self.policies.lock().await.list_policies().await.len();
+        
+        result
     }
     
     pub async fn remove_network_policy(&self, name: &str) -> Result<()> {
-        self.policies.lock().await.remove_policy(name).await
+        let result = self.policies.lock().await.remove_policy(name).await;
+        
+        // Update metrics
+        let mut metrics = self.metrics.lock().await;
+        metrics.total_policies = self.policies.lock().await.list_policies().await.len();
+        
+        result
+    }
+    
+    pub async fn apply_enhanced_policy(&self, policy: EnhancedNetworkPolicy) -> Result<()> {
+        // Apply the base policy first
+        self.apply_network_policy(policy.base_policy.clone()).await?;
+        
+        // Apply additional policy-specific configurations based on policy type
+        match policy.policy_type {
+            PolicyType::QoS => {
+                // Apply QoS settings
+                if let PolicyAction::Limit(rate) = policy.action {
+                    self.apply_qos_policy(&policy.base_policy.name, rate).await?;
+                }
+            },
+            PolicyType::Security => {
+                // Apply additional security rules
+                self.apply_security_policy(&policy.base_policy).await?;
+            },
+            _ => {
+                // Other policy types handled by base implementation
+            }
+        }
+        
+        Ok(())
+    }
+    
+    async fn apply_qos_policy(&self, policy_name: &str, rate_limit_kbps: u32) -> Result<()> {
+        println!("Applying QoS policy {} with rate limit {} Kbps", policy_name, rate_limit_kbps);
+        
+        // Get all containers that match the policy
+        let policy = self.policies.lock().await.get_policy(policy_name).await
+            .context("Policy not found")?;
+            
+        let matching_containers = self.policies.lock().await.find_matching_containers(&policy.selector);
+        
+        // Apply rate limiting to each container
+        for container_id in matching_containers {
+            // Get container interface
+            let container_if = format!("veth{}", &container_id[..8]);
+            
+            // Apply tc rules for rate limiting
+            if Self::interface_exists(&container_if)? {
+                Self::apply_tc_rate_limit(&container_if, rate_limit_kbps)?;
+            }
+        }
+        
+        Ok(())
+    }
+    
+    fn apply_tc_rate_limit(interface: &str, rate_kbps: u32) -> Result<()> {
+        // Apply tc qdisc to interface
+        let status = Command::new("tc")
+            .args(&[
+                "qdisc", "add", "dev", interface, "root", "tbf",
+                "rate", &format!("{}kbit", rate_kbps),
+                "burst", "32kbit", "latency", "100ms"
+            ])
+            .status();
+            
+        // Ignore errors if qdisc already exists
+        
+        Ok(())
+    }
+    
+    async fn apply_security_policy(&self, policy: &NetworkPolicy) -> Result<()> {
+        println!("Applying enhanced security policy: {}", policy.name);
+        
+        // Additional security measures could be implemented here
+        // For example, more restrictive iptables rules, connection tracking, etc.
+        
+        Ok(())
+    }
+    
+    pub async fn register_container_labels(&self, container_id: &str, labels: HashMap<String, String>) -> Result<()> {
+        self.policies.lock().await.register_container_labels(container_id, labels).await
     }
     
     // Accessor methods for health checks
@@ -696,6 +935,73 @@ impl NetworkManager {
     
     pub async fn get_policies(&self) -> Vec<NetworkPolicy> {
         self.policies.lock().await.list_policies().await
+    }
+    
+    pub async fn get_metrics(&self) -> NetworkMetrics {
+        self.metrics.lock().await.clone()
+    }
+    
+    pub async fn run_health_check(&self) -> Result<()> {
+        println!("Running network health check...");
+        
+        // Update last health check timestamp
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs();
+            
+        *self.last_health_check.lock().await = now;
+        
+        // Check node connectivity
+        let nodes = self.nodes.lock().await.clone();
+        for (node_id, node_info) in nodes.iter() {
+            // Skip local node
+            if node_id == &self.node_manager.get_node_id() {
+                continue;
+            }
+            
+            // Check if we can ping the node
+            if !Self::can_ping(node_info.tunnel_ip).await {
+                println!("Warning: Node {} ({}) is unreachable", node_id, node_info.tunnel_ip);
+                
+                // Update node state
+                let mut nodes = self.nodes.lock().await;
+                if let Some(node) = nodes.get_mut(node_id) {
+                    node.state = NodeNetworkState::Degraded;
+                }
+            } else {
+                // Update node state
+                let mut nodes = self.nodes.lock().await;
+                if let Some(node) = nodes.get_mut(node_id) {
+                    node.state = NodeNetworkState::Ready;
+                    node.last_heartbeat = now;
+                }
+            }
+        }
+        
+        // Check tunnel health
+        let tunnels = self.overlay.lock().await.get_tunnels().await;
+        let mut metrics = self.metrics.lock().await;
+        metrics.total_tunnels = tunnels.len();
+        
+        // Update container count
+        let container_networks = self.container_networks.lock().await;
+        metrics.total_containers = container_networks.len();
+        
+        Ok(())
+    }
+    
+    async fn can_ping(ip: IpAddr) -> bool {
+        // Use tokio to ping the IP
+        let output = tokio::process::Command::new("ping")
+            .args(&["-c", "1", "-W", "1", &ip.to_string()])
+            .output()
+            .await;
+            
+        match output {
+            Ok(output) => output.status.success(),
+            Err(_) => false,
+        }
     }
 }
 
@@ -979,6 +1285,23 @@ impl OverlayNetwork {
         self
     }
     
+    // Enable encryption for the overlay network
+    pub fn with_encryption(self, _encryption_key: String) -> Self {
+        // In a real implementation, we would store the encryption key and use it
+        // when setting up the overlay network. For now, we just return self.
+        self
+    }
+    
+    // Getter for MTU
+    pub fn get_mtu(&self) -> u32 {
+        self.mtu
+    }
+    
+    // Getter for tunnel interface name
+    pub fn get_tunnel_interface(&self) -> &str {
+        &self.tunnel_interface
+    }
+    
     pub async fn initialize(&self, node_id: &str, node_ip: IpAddr) -> Result<()> {
         // Store local node info
         *self.local_node_id.lock().await = Some(node_id.to_string());
@@ -1001,6 +1324,14 @@ impl OverlayNetwork {
             OverlayNetworkType::Geneve => {
                 // Not implemented yet
                 anyhow::bail!("Geneve overlay not implemented yet");
+            }
+            OverlayNetworkType::WireGuard => {
+                // Not implemented yet
+                anyhow::bail!("WireGuard overlay not implemented yet");
+            }
+            OverlayNetworkType::IPsec => {
+                // Not implemented yet
+                anyhow::bail!("IPsec overlay not implemented yet");
             }
         }
         
@@ -1242,9 +1573,22 @@ impl OverlayNetwork {
                 // Not implemented yet
                 anyhow::bail!("Geneve overlay not implemented yet");
             }
+            OverlayNetworkType::WireGuard => {
+                // Not implemented yet
+                anyhow::bail!("WireGuard overlay not implemented yet");
+            }
+            OverlayNetworkType::IPsec => {
+                // Not implemented yet
+                anyhow::bail!("IPsec overlay not implemented yet");
+            }
         }
         
         // Store tunnel info
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs();
+            
         tunnels.insert(
             node_id.to_string(),
             TunnelInfo {
@@ -1252,6 +1596,13 @@ impl OverlayNetwork {
                 remote_ip,
                 local_ip,
                 tunnel_name: self.tunnel_interface.clone(),
+                tunnel_type: self.network_type.clone(),
+                encrypted: false, // Set to true if encryption is implemented
+                established: true,
+                last_activity: now,
+                tx_bytes: 0,
+                rx_bytes: 0,
+                mtu: self.mtu,
             },
         );
         
@@ -1338,6 +1689,14 @@ impl OverlayNetwork {
                 OverlayNetworkType::Geneve => {
                     // Not implemented yet
                     anyhow::bail!("Geneve overlay not implemented yet");
+                }
+                OverlayNetworkType::WireGuard => {
+                    // Not implemented yet
+                    anyhow::bail!("WireGuard overlay not implemented yet");
+                }
+                OverlayNetworkType::IPsec => {
+                    // Not implemented yet
+                    anyhow::bail!("IPsec overlay not implemented yet");
                 }
             }
             

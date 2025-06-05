@@ -340,6 +340,9 @@ For more details, see [developer_guide.md](developer_guide.md).
 - [Troubleshooting Guide](docs/troubleshooting_guide.md) - How to troubleshoot issues
 - [Architecture](ARCHITECTURE.md) - System design and components
 - [Developer Guide](developer_guide.md) - How to develop for Hivemind
+- [Deployment Guide](docs/deployment_guide.md) - How to deploy Hivemind in production
+- [API Reference](docs/api_reference.md) - REST API documentation
+- [CLI Reference](docs/cli_reference.md) - Command-line interface documentation
 - [Component Documentation](docs/) - Documentation for individual components
 - [CI/CD Integration](docs/cicd_integration.md) - CI/CD pipeline integration
 - [Monitoring & Observability](docs/monitoring_observability.md) - Metrics, tracing, and logging
@@ -347,6 +350,7 @@ For more details, see [developer_guide.md](developer_guide.md).
 - [Advanced Deployments](docs/advanced_deployments.md) - Advanced deployment strategies
 - [Helm Integration](docs/helm_integration.md) - Helm chart support
 - [Project Summary](docs/project_summary.md) - Overview of all implemented features
+- [Security Features](docs/security_features.md) - Security features documentation
 
 ## 📜 License
 
