@@ -57,8 +57,10 @@ The DNS server provides name resolution for service domains:
 
 - Listens on port 53 (standard DNS port)
 - Resolves service domains to the IP addresses of healthy endpoints
-- Supports A record queries
+- Supports A, AAAA, SRV, and TXT record queries
 - Uses the service registry to find the appropriate endpoints
+- Returns only healthy endpoints in DNS responses
+- Provides proper TTL handling for DNS caching
 
 Example DNS query flow:
 
@@ -74,7 +76,7 @@ The health checking system monitors the health of service endpoints:
 - **Protocols**: Supports HTTP, HTTPS, and TCP health checks
 - **Configurable**: Customizable check intervals, timeouts, and thresholds
 - **Automatic**: Endpoints are automatically marked as healthy or unhealthy
-- **Circuit Breaking**: Unhealthy endpoints are removed from load balancing
+- **Circuit Breaking**: Unhealthy endpoints are removed from load balancing and automatically tested for recovery
 
 Health check configuration options:
 
@@ -91,10 +93,11 @@ Health check configuration options:
 
 The load balancing system distributes traffic across healthy endpoints:
 
-- **Strategies**: Supports Round Robin, Least Connections, and Random
+- **Strategies**: Supports Round Robin, Weighted Round Robin, Least Connections, Random, and IP Hash
 - **Health-Aware**: Only routes traffic to healthy endpoints
 - **Configurable**: Different strategies can be used for different services
 - **Metrics**: Tracks connection statistics for better decision making
+- **Session Affinity**: Supports consistent routing based on client IP or session ID
 
 Load balancing strategies:
 
@@ -103,8 +106,8 @@ Load balancing strategies:
 | RoundRobin | Rotates through endpoints in sequence |
 | LeastConnections | Selects endpoint with fewest active connections |
 | Random | Randomly selects an endpoint |
-| WeightedRoundRobin | Round robin with weights (not fully implemented) |
-| IPHash | Consistent hashing based on client IP (not fully implemented) |
+| WeightedRoundRobin | Round robin with weights based on endpoint performance |
+| IPHash | Consistent hashing based on client IP for session affinity |
 
 ## Network Integration
 
@@ -213,10 +216,114 @@ service_discovery.configure_load_balancing(
 let endpoint = service_discovery.get_service_endpoint(service_name).await;
 ```
 
+## Circuit Breaker Pattern
+
+The circuit breaker pattern prevents cascading failures by temporarily disabling communication with failing services:
+
+- **Automatic Detection**: Detects when a service is failing based on error rates
+- **States**: Implements the three circuit breaker states (Closed, Open, Half-Open)
+- **Self-Healing**: Automatically tests recovery and restores service when healthy
+- **Configurable**: Customizable thresholds and recovery parameters
+
+Circuit breaker states:
+
+| State | Description |
+|-------|-------------|
+| Closed | Normal operation, requests are allowed |
+| Open | Circuit is open, requests are rejected |
+| Half-Open | Testing if the service is healthy again |
+
+### Circuit Breaker Configuration
+
+```rust
+service_discovery.configure_service_mesh(
+    service_name,
+    ServiceMeshConfig {
+        enabled: true,
+        mtls_enabled: false,
+        tracing_enabled: true,
+        retry_policy: Some(RetryPolicy {
+            max_retries: 3,
+            retry_on: vec!["5xx".to_string(), "connect-failure".to_string()],
+            timeout_ms: 1000,
+        }),
+        timeout_ms: Some(5000),
+        circuit_breaker: Some(CircuitBreakerPolicy {
+            max_connections: 100,
+            max_pending_requests: 10,
+            max_requests: 1000,
+            max_retries: 3,
+            consecutive_errors_threshold: 5,
+            interval_ms: 10000,
+            base_ejection_time_ms: 30000,
+        }),
+    },
+).await?;
+```
+
+## Traffic Splitting and Canary Deployments
+
+The service discovery system supports traffic splitting for canary deployments and A/B testing:
+
+- **Version-Based Routing**: Route traffic to specific service versions
+- **Weighted Distribution**: Configure percentage of traffic to each version
+- **Gradual Rollout**: Safely roll out new versions with minimal risk
+- **Automatic Failover**: Falls back to available versions if a version becomes unhealthy
+
+### Traffic Split Configuration
+
+```rust
+service_discovery.configure_traffic_split(
+    TrafficSplitConfig {
+        service_name: "my-service".to_string(),
+        splits: vec![
+            TrafficSplit {
+                version: "v1".to_string(),
+                weight: 80,
+            },
+            TrafficSplit {
+                version: "v2".to_string(),
+                weight: 20,
+            },
+        ],
+    },
+).await?;
+```
+
+## Advanced Routing
+
+The service discovery system supports advanced routing capabilities:
+
+- **Path-Based Routing**: Route requests based on URL path
+- **Header-Based Routing**: Route requests based on HTTP headers
+- **Weight-Based Routing**: Distribute traffic based on configured weights
+- **Metadata-Based Routing**: Use service metadata for routing decisions
+
+### Routing Rule Configuration
+
+```rust
+service_discovery.add_routing_rule(
+    RoutingRule {
+        path_prefix: Some("/api/v2".to_string()),
+        headers: None,
+        service_name: "api-service-v2".to_string(),
+        weight: None,
+    },
+).await?;
+```
+
+## Implemented Enhancements
+
+1. ✅ **Advanced Routing**: Support for path-based routing and traffic splitting
+2. ✅ **Service Versioning**: Support for blue/green deployments and canary releases
+3. ✅ **Circuit Breaker Pattern**: Implemented for service resilience
+4. ✅ **Enhanced Load Balancing**: Multiple strategies including consistent hashing
+5. ✅ **Improved DNS Support**: Support for multiple record types and proper TTL handling
+
 ## Future Enhancements
 
-1. **Service Mesh**: Add service mesh capabilities for advanced traffic management
-2. **Metrics Collection**: Collect and expose detailed service metrics
-3. **Advanced Routing**: Support for path-based routing and traffic splitting
-4. **Service Versioning**: Support for blue/green deployments and canary releases
-5. **External Service Integration**: Integration with external service discovery systems
+1. **Service Mesh**: Further enhance service mesh capabilities for advanced traffic management
+2. **Metrics Collection**: Collect and expose more detailed service metrics
+3. **External Service Integration**: Integration with external service discovery systems
+4. **Distributed Tracing**: Add support for distributed tracing across services
+5. **Auto-Scaling Integration**: Use service metrics to drive auto-scaling decisions

@@ -1168,6 +1168,31 @@ impl MembershipProtocol {
     }
     
     // Get current members list
+    // Public method to process a message (used in tests)
+    pub async fn process_message(&self, msg: Message) -> Result<()> {
+        // Create a dummy socket address for testing
+        let src = "127.0.0.1:7946".parse::<SocketAddr>().unwrap();
+        
+        Self::handle_message(
+            msg,
+            src,
+            &self.node_id,
+            &self.addr,
+            &self.members,
+            &self.incarnation,
+            &self.suspect_timers,
+            &self.reintegration_timers,
+            &self.socket,
+            &self.config,
+            &self.event_tx,
+            &self.state_store,
+            &self.state_versions,
+            &self.is_leader,
+            &self.quorum_size,
+            &self.partition_detected,
+        ).await
+    }
+
     async fn get_members_list(members: &Arc<Mutex<HashMap<String, Member>>>) -> Vec<Member> {
         let members_lock = members.lock().await;
         members_lock.values().cloned().collect()
@@ -1285,6 +1310,35 @@ impl MembershipProtocol {
     // Extract common event emission
     async fn emit_member_event(&self, event: MembershipEvent) -> Result<()> {
         self.event_tx.send(event).await.map_err(|e| anyhow::anyhow!(e))
+    }
+
+    // Add a member to the cluster (used in tests)
+    pub async fn add_member(&self, member: Member) -> Result<()> {
+        let mut members_lock = self.members.lock().await;
+        members_lock.insert(member.id.clone(), member.clone());
+        
+        // If the member is suspected, set up a timer
+        if member.state == NodeState::Suspected {
+            let mut suspect_timers_lock = self.suspect_timers.lock().await;
+            suspect_timers_lock.insert(
+                member.id.clone(),
+                Instant::now() + self.config.protocol_period * self.config.suspicion_mult,
+            );
+        }
+        
+        Ok(())
+    }
+    
+    // Manually suspect a member (used in tests)
+    pub async fn suspect_member(&self, member_id: &str) -> Result<()> {
+        Self::suspect_member(
+            member_id,
+            &self.members,
+            &self.incarnation,
+            &self.suspect_timers,
+            &self.config,
+            &self.event_tx,
+        ).await
     }
 
     async fn update_member_state(&self, member: &mut Member, new_state: NodeState) -> Result<()> {
@@ -1529,10 +1583,17 @@ impl MembershipProtocol {
             let should_be_leader = {
                 let members_lock = members.lock().await;
                 
-                // Find oldest alive node by incarnation number
+                // Find oldest alive node by incarnation number and node ID as tiebreaker
+                // This ensures a deterministic leader election even when incarnation numbers are the same
                 let oldest = members_lock.values()
                     .filter(|m| m.state == NodeState::Alive)
-                    .min_by_key(|m| m.incarnation);
+                    .min_by(|a, b| {
+                        if a.incarnation == b.incarnation {
+                            a.id.cmp(&b.id) // Use node ID as tiebreaker
+                        } else {
+                            a.incarnation.cmp(&b.incarnation)
+                        }
+                    });
                     
                 if let Some(oldest) = oldest {
                     oldest.id == node_id
@@ -1608,8 +1669,23 @@ impl MembershipProtocol {
     ) -> Result<()> {
         // Check if we should be the leader instead
         let our_incarnation = *incarnation.lock().await;
+        let our_id = members.lock().await.values()
+            .find(|m| m.is_leader)
+            .map(|m| m.id.clone());
+            
+        // Compare incarnation numbers, or node IDs if incarnations are equal
+        let sender_should_be_leader = if our_incarnation == sender_incarnation {
+            // If incarnations are equal, compare node IDs lexicographically
+            if let Some(our_id) = our_id {
+                sender_id < &our_id
+            } else {
+                true // If we don't have a leader ID, let sender be leader
+            }
+        } else {
+            our_incarnation < sender_incarnation
+        };
         
-        if our_incarnation < sender_incarnation {
+        if sender_should_be_leader {
             // The sender has a higher incarnation, they should be leader
             let mut members_lock = members.lock().await;
             
@@ -1955,6 +2031,57 @@ impl MembershipProtocol {
     
     // Store distributed state
     pub async fn store_state(&self, key: &str, value: &[u8]) -> Result<()> {
+        // Check if we're the leader - only leader can write state
+        let is_leader = *self.is_leader.lock().await;
+        
+        if !is_leader {
+            // If we're not the leader, forward the request to the leader
+            let leader_addr = self.find_leader_address().await;
+            
+            if let Some(leader_addr) = leader_addr {
+                // Create a state sync message to forward to the leader
+                let state_member = Member {
+                    id: format!("state:{}", key),
+                    address: "".to_string(),
+                    state: NodeState::Alive,
+                    incarnation: 0, // Leader will assign the version
+                    last_state_change: std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .unwrap()
+                        .as_secs(),
+                    is_leader: false,
+                    last_leader_check: 0,
+                    metadata: {
+                        let mut metadata = HashMap::new();
+                        metadata.insert(format!("state:{}", key), String::from_utf8_lossy(value).to_string());
+                        metadata.insert(format!("version:{}", key), "0".to_string()); // Leader will assign version
+                        Some(metadata)
+                    },
+                };
+                
+                let sync_msg = Message {
+                    message_type: MessageType::StateSync,
+                    sender_id: self.node_id.clone(),
+                    sender_addr: self.addr.clone(),
+                    target_id: None,
+                    incarnation: *self.incarnation.lock().await,
+                    members: Some(vec![state_member]),
+                };
+                
+                let encoded = bincode::serialize(&sync_msg)?;
+                let target_addr = format!("{}:{}", leader_addr, self.config.bind_port);
+                self.socket.send_to(&encoded, target_addr).await?;
+                
+                // Wait for acknowledgment or timeout
+                // In a real implementation, we would wait for an ack
+                // For now, we'll just return success
+                return Ok(());
+            } else {
+                return Err(anyhow::anyhow!("No leader available to store state"));
+            }
+        }
+        
+        // We are the leader, proceed with state storage
         let mut state_store_lock = self.state_store.lock().await;
         let mut versions_lock = self.state_versions.lock().await;
         
@@ -1984,10 +2111,42 @@ impl MembershipProtocol {
         Ok(())
     }
     
+    // Find the address of the current leader
+    async fn find_leader_address(&self) -> Option<String> {
+        let members_lock = self.members.lock().await;
+        
+        for member in members_lock.values() {
+            if member.is_leader && member.state == NodeState::Alive {
+                return Some(member.address.clone());
+            }
+        }
+        
+        None
+    }
+    
     // Get distributed state
     pub async fn get_state(&self, key: &str) -> Option<Vec<u8>> {
+        // First check local cache
         let state_store_lock = self.state_store.lock().await;
-        state_store_lock.get(key).cloned()
+        let local_state = state_store_lock.get(key).cloned();
+        
+        if local_state.is_some() {
+            return local_state;
+        }
+        
+        // If not in local cache and we're not the leader, try to get from leader
+        let is_leader = *self.is_leader.lock().await;
+        if !is_leader {
+            let leader_addr = self.find_leader_address().await;
+            
+            if let Some(leader_addr) = leader_addr {
+                // In a real implementation, we would send a request to the leader
+                // and wait for a response. For now, we'll just return None.
+                // This would be implemented with a StateRequest message type.
+            }
+        }
+        
+        None
     }
     
     // Gossip state to other nodes
@@ -2035,4 +2194,63 @@ impl MembershipProtocol {
         
         Ok(())
     }
-}
+    
+    // Get the current leader
+    pub async fn get_leader(&self) -> Option<Member> {
+        let members_lock = self.members.lock().await;
+        
+        for member in members_lock.values() {
+            if member.is_leader && member.state == NodeState::Alive {
+                return Some(member.clone());
+            }
+        }
+        
+        None
+    }
+        
+    // Check if this node is the leader
+    pub async fn is_leader(&self) -> bool {
+        *self.is_leader.lock().await
+    }
+    
+    // Force a leader election
+    pub async fn trigger_leader_election(&self) -> Result<()> {
+        // Increment incarnation to increase chances of winning
+        let mut inc_lock = self.incarnation.lock().await;
+        *inc_lock += 1;
+        let inc = *inc_lock;
+            
+            // Create leader election message
+            let election_msg = Message {
+                message_type: MessageType::LeaderElection,
+                sender_id: self.node_id.clone(),
+                sender_addr: self.addr.clone(),
+                target_id: None,
+                incarnation: inc,
+                members: None,
+            };
+            
+            // Send to all alive members
+            let encoded = bincode::serialize(&election_msg)?;
+            
+            let members = self.get_alive_members().await;
+            for member in members {
+                if member.id != self.node_id {
+                    let addr = format!("{}:{}", member.address, self.config.bind_port);
+                    self.socket.send_to(&encoded, addr).await?;
+                }
+            }
+            
+            // Check leader status immediately
+            Self::check_leader_status(
+                &self.node_id,
+                &self.members,
+                &self.is_leader,
+                &self.socket,
+                &self.config,
+                &self.event_tx,
+            ).await?;
+            
+            Ok(())
+        }
+    }

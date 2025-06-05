@@ -21,6 +21,32 @@ pub struct HealthCheckConfig {
     pub custom_health_check_command: Option<String>,
     pub node_check_interval_seconds: u64,
     pub node_failure_threshold: u32,
+    pub restart_policy: RestartPolicy,
+    pub resource_thresholds: ResourceThresholds,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct ResourceThresholds {
+    pub cpu_warning_percent: f64,
+    pub cpu_critical_percent: f64,
+    pub memory_warning_percent: f64,
+    pub memory_critical_percent: f64,
+    pub disk_warning_percent: f64,
+    pub disk_critical_percent: f64,
+    pub network_warning_mbps: f64,
+    pub network_critical_mbps: f64,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+pub enum RestartPolicy {
+    /// Never restart containers automatically
+    Never,
+    /// Always restart containers regardless of exit status
+    Always,
+    /// Only restart containers if they exit with a non-zero status
+    OnFailure,
+    /// Always restart containers unless they were explicitly stopped
+    UnlessStopped,
 }
 
 impl Default for HealthCheckConfig {
@@ -34,6 +60,23 @@ impl Default for HealthCheckConfig {
             custom_health_check_command: None,
             node_check_interval_seconds: 60,
             node_failure_threshold: 3,
+            restart_policy: RestartPolicy::OnFailure,
+            resource_thresholds: ResourceThresholds::default(),
+        }
+    }
+}
+
+impl Default for ResourceThresholds {
+    fn default() -> Self {
+        Self {
+            cpu_warning_percent: 80.0,
+            cpu_critical_percent: 90.0,
+            memory_warning_percent: 80.0,
+            memory_critical_percent: 90.0,
+            disk_warning_percent: 85.0,
+            disk_critical_percent: 95.0,
+            network_warning_mbps: 800.0,
+            network_critical_mbps: 950.0,
         }
     }
 }
@@ -48,6 +91,40 @@ pub struct ContainerHealth {
     pub last_restart: Option<i64>,
     pub health_history: Vec<HealthHistoryEntry>,
     pub custom_check_result: Option<CustomHealthCheckResult>,
+    pub restart_policy: RestartPolicy,
+    pub resource_usage: ResourceUsage,
+    pub should_restart: bool,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct ResourceUsage {
+    pub cpu_percent: f64,
+    pub memory_bytes: u64,
+    pub memory_percent: f64,
+    pub disk_bytes: u64,
+    pub disk_percent: f64,
+    pub network_rx_bytes: u64,
+    pub network_tx_bytes: u64,
+    pub network_rx_mbps: f64,
+    pub network_tx_mbps: f64,
+    pub last_updated: i64,
+}
+
+impl Default for ResourceUsage {
+    fn default() -> Self {
+        Self {
+            cpu_percent: 0.0,
+            memory_bytes: 0,
+            memory_percent: 0.0,
+            disk_bytes: 0,
+            disk_percent: 0.0,
+            network_rx_bytes: 0,
+            network_tx_bytes: 0,
+            network_rx_mbps: 0.0,
+            network_tx_mbps: 0.0,
+            last_updated: 0,
+        }
+    }
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -99,6 +176,61 @@ pub struct NodeHealth {
     pub consecutive_failures: u32,
     pub is_healthy: bool,
     pub last_failure: Option<i64>,
+    pub resource_usage: NodeResourceUsage,
+    pub services_status: HashMap<String, ServiceStatus>,
+    pub recovery_attempts: u32,
+    pub last_recovery_attempt: Option<i64>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct NodeResourceUsage {
+    pub cpu_cores: u32,
+    pub cpu_percent: f64,
+    pub memory_total_bytes: u64,
+    pub memory_used_bytes: u64,
+    pub memory_percent: f64,
+    pub disk_total_bytes: u64,
+    pub disk_used_bytes: u64,
+    pub disk_percent: f64,
+    pub network_rx_bytes: u64,
+    pub network_tx_bytes: u64,
+    pub network_rx_mbps: f64,
+    pub network_tx_mbps: f64,
+    pub load_1m: f64,
+    pub load_5m: f64,
+    pub load_15m: f64,
+    pub last_updated: i64,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+pub enum ServiceStatus {
+    Running,
+    Degraded,
+    Stopped,
+    Unknown,
+}
+
+impl Default for NodeResourceUsage {
+    fn default() -> Self {
+        Self {
+            cpu_cores: 1,
+            cpu_percent: 0.0,
+            memory_total_bytes: 0,
+            memory_used_bytes: 0,
+            memory_percent: 0.0,
+            disk_total_bytes: 0,
+            disk_used_bytes: 0,
+            disk_percent: 0.0,
+            network_rx_bytes: 0,
+            network_tx_bytes: 0,
+            network_rx_mbps: 0.0,
+            network_tx_mbps: 0.0,
+            load_1m: 0.0,
+            load_5m: 0.0,
+            load_15m: 0.0,
+            last_updated: 0,
+        }
+    }
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -139,6 +271,41 @@ pub struct HealthMonitor {
     is_running: Arc<Mutex<bool>>,
     alerts: Arc<RwLock<Vec<Alert>>>,
     metrics_history: Arc<RwLock<HashMap<String, Vec<MetricDataPoint>>>>,
+    alert_history: Arc<RwLock<Vec<Alert>>>,
+    resource_usage_history: Arc<RwLock<HashMap<String, Vec<ResourceUsageDataPoint>>>>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct ResourceUsageDataPoint {
+    pub timestamp: i64,
+    pub entity_id: String,
+    pub entity_type: EntityType,
+    pub resource_type: ResourceType,
+    pub value: f64,
+    pub total: Option<f64>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq, Hash)]
+pub enum EntityType {
+    Container,
+    Node,
+    Cluster,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq, Hash)]
+pub enum ResourceType {
+    CpuPercent,
+    MemoryBytes,
+    MemoryPercent,
+    DiskBytes,
+    DiskPercent,
+    NetworkRxBytes,
+    NetworkTxBytes,
+    NetworkRxMbps,
+    NetworkTxMbps,
+    Load1m,
+    Load5m,
+    Load15m,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -220,7 +387,13 @@ impl HealthMonitor {
             is_running: Arc::new(Mutex::new(false)),
             alerts: Arc::new(RwLock::new(Vec::new())),
             metrics_history: Arc::new(RwLock::new(HashMap::new())),
+            alert_history: Arc::new(RwLock::new(Vec::new())),
+            resource_usage_history: Arc::new(RwLock::new(HashMap::new())),
         }
+    }
+    
+    pub fn get_config(&self) -> HealthCheckConfig {
+        self.config.clone()
     }
 
     pub async fn start(&self) -> Result<()> {
@@ -250,7 +423,323 @@ impl HealthMonitor {
         tokio::spawn(async move {
             restart_processor.restart_processor_loop().await;
         });
+        
+        // Start resource usage monitoring task
+        let resource_monitor = self.clone();
+        tokio::spawn(async move {
+            resource_monitor.resource_monitoring_loop().await;
+        });
 
+        Ok(())
+    }
+    
+    async fn resource_monitoring_loop(&self) {
+        let mut interval = interval(Duration::from_secs(30)); // Monitor resources every 30 seconds
+        
+        loop {
+            {
+                let is_running = self.is_running.lock().await;
+                if !*is_running {
+                    break;
+                }
+            }
+            
+            interval.tick().await;
+            
+            // Monitor container resources
+            if let Ok(containers) = self.app_manager.get_container_details().await {
+                for container in containers {
+                    if let Some(stats) = self.app_manager.get_container_stats(&container.id).await {
+                        self.update_container_resource_usage(&container.id, &stats).await;
+                    }
+                }
+            }
+            
+            // Monitor node resources
+            if let Ok(nodes) = self.node_manager.list_nodes().await {
+                for node_id in nodes {
+                    self.update_node_resource_usage(&node_id).await;
+                }
+            }
+        }
+    }
+    
+    async fn update_container_resource_usage(&self, container_id: &str, stats: &crate::containerd_manager::ContainerStats) -> Result<()> {
+        let now = SystemTime::now().duration_since(UNIX_EPOCH)?.as_secs() as i64;
+        let mut health_map = self.container_health.write().await;
+        
+        if let Some(health) = health_map.get_mut(container_id) {
+            // Update resource usage
+            health.resource_usage = ResourceUsage {
+                cpu_percent: stats.cpu_usage,
+                memory_bytes: stats.memory_usage,
+                memory_percent: stats.memory_percent,
+                disk_bytes: stats.disk_usage,
+                disk_percent: stats.disk_percent,
+                network_rx_bytes: stats.network_rx,
+                network_tx_bytes: stats.network_tx,
+                network_rx_mbps: stats.network_rx_mbps,
+                network_tx_mbps: stats.network_tx_mbps,
+                last_updated: now,
+            };
+            
+            // Store resource usage data points
+            let mut resource_history = self.resource_usage_history.write().await;
+            
+            // CPU usage
+            let cpu_point = ResourceUsageDataPoint {
+                timestamp: now,
+                entity_id: container_id.to_string(),
+                entity_type: EntityType::Container,
+                resource_type: ResourceType::CpuPercent,
+                value: stats.cpu_usage,
+                total: None,
+            };
+            
+            let key = format!("container:{}.cpu", container_id);
+            resource_history.entry(key).or_insert_with(Vec::new).push(cpu_point);
+            
+            // Memory usage
+            let memory_point = ResourceUsageDataPoint {
+                timestamp: now,
+                entity_id: container_id.to_string(),
+                entity_type: EntityType::Container,
+                resource_type: ResourceType::MemoryPercent,
+                value: stats.memory_percent,
+                total: Some(stats.memory_usage as f64),
+            };
+            
+            let key = format!("container:{}.memory", container_id);
+            resource_history.entry(key).or_insert_with(Vec::new).push(memory_point);
+            
+            // Check thresholds and create alerts if needed
+            self.check_container_resource_thresholds(container_id, &health.resource_usage).await?;
+        }
+        
+        Ok(())
+    }
+    
+    async fn check_container_resource_thresholds(&self, container_id: &str, usage: &ResourceUsage) -> Result<()> {
+        // Get thresholds from config
+        let thresholds = &self.config.resource_thresholds;
+        
+        // Check CPU usage
+        if usage.cpu_percent >= thresholds.cpu_critical_percent {
+            self.create_alert(
+                AlertSeverity::Critical,
+                AlertSource::Container(container_id.to_string()),
+                format!("Container {} CPU usage critical: {:.1}% (threshold: {:.1}%)",
+                    container_id, usage.cpu_percent, thresholds.cpu_critical_percent),
+            ).await;
+        } else if usage.cpu_percent >= thresholds.cpu_warning_percent {
+            self.create_alert(
+                AlertSeverity::Warning,
+                AlertSource::Container(container_id.to_string()),
+                format!("Container {} CPU usage high: {:.1}% (threshold: {:.1}%)",
+                    container_id, usage.cpu_percent, thresholds.cpu_warning_percent),
+            ).await;
+        }
+        
+        // Check memory usage
+        if usage.memory_percent >= thresholds.memory_critical_percent {
+            self.create_alert(
+                AlertSeverity::Critical,
+                AlertSource::Container(container_id.to_string()),
+                format!("Container {} memory usage critical: {:.1}% (threshold: {:.1}%)",
+                    container_id, usage.memory_percent, thresholds.memory_critical_percent),
+            ).await;
+        } else if usage.memory_percent >= thresholds.memory_warning_percent {
+            self.create_alert(
+                AlertSeverity::Warning,
+                AlertSource::Container(container_id.to_string()),
+                format!("Container {} memory usage high: {:.1}% (threshold: {:.1}%)",
+                    container_id, usage.memory_percent, thresholds.memory_warning_percent),
+            ).await;
+        }
+        
+        // Check disk usage
+        if usage.disk_percent >= thresholds.disk_critical_percent {
+            self.create_alert(
+                AlertSeverity::Critical,
+                AlertSource::Container(container_id.to_string()),
+                format!("Container {} disk usage critical: {:.1}% (threshold: {:.1}%)",
+                    container_id, usage.disk_percent, thresholds.disk_critical_percent),
+            ).await;
+        } else if usage.disk_percent >= thresholds.disk_warning_percent {
+            self.create_alert(
+                AlertSeverity::Warning,
+                AlertSource::Container(container_id.to_string()),
+                format!("Container {} disk usage high: {:.1}% (threshold: {:.1}%)",
+                    container_id, usage.disk_percent, thresholds.disk_warning_percent),
+            ).await;
+        }
+        
+        // Check network usage (combined rx+tx)
+        let network_mbps = usage.network_rx_mbps + usage.network_tx_mbps;
+        if network_mbps >= thresholds.network_critical_mbps {
+            self.create_alert(
+                AlertSeverity::Critical,
+                AlertSource::Container(container_id.to_string()),
+                format!("Container {} network usage critical: {:.1} Mbps (threshold: {:.1} Mbps)",
+                    container_id, network_mbps, thresholds.network_critical_mbps),
+            ).await;
+        } else if network_mbps >= thresholds.network_warning_mbps {
+            self.create_alert(
+                AlertSeverity::Warning,
+                AlertSource::Container(container_id.to_string()),
+                format!("Container {} network usage high: {:.1} Mbps (threshold: {:.1} Mbps)",
+                    container_id, network_mbps, thresholds.network_warning_mbps),
+            ).await;
+        }
+        
+        Ok(())
+    }
+    
+    async fn update_node_resource_usage(&self, node_id: &str) -> Result<()> {
+        let now = SystemTime::now().duration_since(UNIX_EPOCH)?.as_secs() as i64;
+        let mut health_map = self.node_health.write().await;
+        
+        if let Some(node_health) = health_map.get_mut(node_id) {
+            // In a real implementation, we would get actual metrics from the node
+            // For now, we'll use the existing node_health data and add some details
+            
+            // Create a more detailed resource usage object
+            let resource_usage = NodeResourceUsage {
+                cpu_cores: 8, // Mock value
+                cpu_percent: node_health.cpu_usage,
+                memory_total_bytes: 16 * 1024 * 1024 * 1024, // 16GB mock value
+                memory_used_bytes: (node_health.memory_usage / 100.0 * 16.0 * 1024.0 * 1024.0 * 1024.0) as u64,
+                memory_percent: node_health.memory_usage,
+                disk_total_bytes: 500 * 1024 * 1024 * 1024, // 500GB mock value
+                disk_used_bytes: (node_health.disk_usage / 100.0 * 500.0 * 1024.0 * 1024.0 * 1024.0) as u64,
+                disk_percent: node_health.disk_usage,
+                network_rx_bytes: 1024 * 1024 * 10, // Mock value
+                network_tx_bytes: 1024 * 1024 * 5,  // Mock value
+                network_rx_mbps: 10.0, // Mock value
+                network_tx_mbps: 5.0,  // Mock value
+                load_1m: node_health.cpu_usage / 10.0,
+                load_5m: node_health.cpu_usage / 12.0,
+                load_15m: node_health.cpu_usage / 15.0,
+                last_updated: now,
+            };
+            
+            // Update node health with detailed resource usage
+            node_health.resource_usage = resource_usage.clone();
+            
+            // Store resource usage data points
+            let mut resource_history = self.resource_usage_history.write().await;
+            
+            // CPU usage
+            let cpu_point = ResourceUsageDataPoint {
+                timestamp: now,
+                entity_id: node_id.to_string(),
+                entity_type: EntityType::Node,
+                resource_type: ResourceType::CpuPercent,
+                value: resource_usage.cpu_percent,
+                total: Some(resource_usage.cpu_cores as f64),
+            };
+            
+            let key = format!("node:{}.cpu", node_id);
+            resource_history.entry(key).or_insert_with(Vec::new).push(cpu_point);
+            
+            // Memory usage
+            let memory_point = ResourceUsageDataPoint {
+                timestamp: now,
+                entity_id: node_id.to_string(),
+                entity_type: EntityType::Node,
+                resource_type: ResourceType::MemoryPercent,
+                value: resource_usage.memory_percent,
+                total: Some(resource_usage.memory_total_bytes as f64),
+            };
+            
+            let key = format!("node:{}.memory", node_id);
+            resource_history.entry(key).or_insert_with(Vec::new).push(memory_point);
+            
+            // Disk usage
+            let disk_point = ResourceUsageDataPoint {
+                timestamp: now,
+                entity_id: node_id.to_string(),
+                entity_type: EntityType::Node,
+                resource_type: ResourceType::DiskPercent,
+                value: resource_usage.disk_percent,
+                total: Some(resource_usage.disk_total_bytes as f64),
+            };
+            
+            let key = format!("node:{}.disk", node_id);
+            resource_history.entry(key).or_insert_with(Vec::new).push(disk_point);
+            
+            // Check thresholds and create alerts if needed
+            self.check_node_resource_thresholds(node_id, &resource_usage).await?;
+        }
+        
+        Ok(())
+    }
+    
+    async fn check_node_resource_thresholds(&self, node_id: &str, usage: &NodeResourceUsage) -> Result<()> {
+        // Get thresholds from config
+        let thresholds = &self.config.resource_thresholds;
+        
+        // Check CPU usage
+        if usage.cpu_percent >= thresholds.cpu_critical_percent {
+            self.create_alert(
+                AlertSeverity::Critical,
+                AlertSource::Node(node_id.to_string()),
+                format!("Node {} CPU usage critical: {:.1}% (threshold: {:.1}%)",
+                    node_id, usage.cpu_percent, thresholds.cpu_critical_percent),
+            ).await;
+        } else if usage.cpu_percent >= thresholds.cpu_warning_percent {
+            self.create_alert(
+                AlertSeverity::Warning,
+                AlertSource::Node(node_id.to_string()),
+                format!("Node {} CPU usage high: {:.1}% (threshold: {:.1}%)",
+                    node_id, usage.cpu_percent, thresholds.cpu_warning_percent),
+            ).await;
+        }
+        
+        // Check memory usage
+        if usage.memory_percent >= thresholds.memory_critical_percent {
+            self.create_alert(
+                AlertSeverity::Critical,
+                AlertSource::Node(node_id.to_string()),
+                format!("Node {} memory usage critical: {:.1}% (threshold: {:.1}%)",
+                    node_id, usage.memory_percent, thresholds.memory_critical_percent),
+            ).await;
+        } else if usage.memory_percent >= thresholds.memory_warning_percent {
+            self.create_alert(
+                AlertSeverity::Warning,
+                AlertSource::Node(node_id.to_string()),
+                format!("Node {} memory usage high: {:.1}% (threshold: {:.1}%)",
+                    node_id, usage.memory_percent, thresholds.memory_warning_percent),
+            ).await;
+        }
+        
+        // Check disk usage
+        if usage.disk_percent >= thresholds.disk_critical_percent {
+            self.create_alert(
+                AlertSeverity::Critical,
+                AlertSource::Node(node_id.to_string()),
+                format!("Node {} disk usage critical: {:.1}% (threshold: {:.1}%)",
+                    node_id, usage.disk_percent, thresholds.disk_critical_percent),
+            ).await;
+        } else if usage.disk_percent >= thresholds.disk_warning_percent {
+            self.create_alert(
+                AlertSeverity::Warning,
+                AlertSource::Node(node_id.to_string()),
+                format!("Node {} disk usage high: {:.1}% (threshold: {:.1}%)",
+                    node_id, usage.disk_percent, thresholds.disk_warning_percent),
+            ).await;
+        }
+        
+        // Check load averages
+        if usage.load_1m / usage.cpu_cores as f64 > 1.5 {
+            self.create_alert(
+                AlertSeverity::Warning,
+                AlertSource::Node(node_id.to_string()),
+                format!("Node {} load average high: {:.2} (cores: {})",
+                    node_id, usage.load_1m, usage.cpu_cores),
+            ).await;
+        }
+        
         Ok(())
     }
 
@@ -341,6 +830,9 @@ impl HealthMonitor {
                     last_restart: None,
                     health_history: Vec::new(),
                     custom_check_result: None,
+                    restart_policy: self.config.restart_policy.clone(),
+                    resource_usage: ResourceUsage::default(),
+                    should_restart: false,
                 }
             });
 
@@ -383,15 +875,19 @@ impl HealthMonitor {
                 health.consecutive_failures += 1;
                 
                 if health.consecutive_failures >= self.config.failure_threshold {
-                    if health.restart_count < self.config.max_restart_attempts {
-                        health.status = HealthStatus::Failed;
-                        
+                    health.status = HealthStatus::Failed;
+                    
+                    // Check if container should be restarted based on restart policy
+                    let should_restart = self.should_restart_container(&container, health.restart_count).await;
+                    health.should_restart = should_restart;
+                    
+                    if should_restart && health.restart_count < self.config.max_restart_attempts {
                         // Add to restart queue
                         let mut restart_queue = self.restart_queue.lock().await;
                         if !restart_queue.contains(&container.id) {
                             restart_queue.push(container.id.clone());
-                            println!("Container {} marked for restart (failure #{}/{})",
-                                container.id, health.consecutive_failures, self.config.failure_threshold);
+                            println!("Container {} marked for restart (failure #{}/{}, policy: {:?})",
+                                container.id, health.consecutive_failures, self.config.failure_threshold, health.restart_policy);
                             
                             // Create alert for container failure
                             self.create_alert(
@@ -422,6 +918,42 @@ impl HealthMonitor {
         Ok(())
     }
 
+    async fn should_restart_container(&self, container: &Container, restart_count: u32) -> bool {
+        // Get the container's health info
+        let health_map = self.container_health.read().await;
+        let restart_policy = if let Some(health) = health_map.get(&container.id) {
+            health.restart_policy.clone()
+        } else {
+            // Default to the global restart policy if no container-specific policy is set
+            self.config.restart_policy.clone()
+        };
+        
+        // Check if we've exceeded max restart attempts
+        if restart_count >= self.config.max_restart_attempts {
+            return false;
+        }
+        
+        // Apply restart policy
+        match restart_policy {
+            RestartPolicy::Always => true,
+            RestartPolicy::Never => false,
+            RestartPolicy::OnFailure => {
+                // Only restart if the container has failed (non-zero exit code)
+                match container.status {
+                    ContainerStatus::Failed => true,
+                    _ => false,
+                }
+            },
+            RestartPolicy::UnlessStopped => {
+                // Restart unless the container was explicitly stopped
+                match container.status {
+                    ContainerStatus::Stopped => false,
+                    _ => true,
+                }
+            }
+        }
+    }
+    
     async fn check_container_status(&self, container: &Container) -> (bool, Option<CustomHealthCheckResult>) {
         // Check if container is running
         match container.status {
@@ -506,6 +1038,10 @@ impl HealthMonitor {
                     consecutive_failures: 0,
                     is_healthy: true,
                     last_failure: None,
+                    resource_usage: node_info.resource_usage.clone(),
+                    services_status: node_info.services_status.clone(),
+                    recovery_attempts: 0,
+                    last_recovery_attempt: None,
                 }
             });
             
@@ -646,6 +1182,31 @@ impl HealthMonitor {
         // Container count based on node_id
         let container_count = (seed % 10) as u32;
         
+        // Create resource usage
+        let resource_usage = NodeResourceUsage {
+            cpu_cores: 8, // Mock value
+            cpu_percent: cpu_usage,
+            memory_total_bytes: 16 * 1024 * 1024 * 1024, // 16GB mock value
+            memory_used_bytes: (memory_usage / 100.0 * 16.0 * 1024.0 * 1024.0 * 1024.0) as u64,
+            memory_percent: memory_usage,
+            disk_total_bytes: 500 * 1024 * 1024 * 1024, // 500GB mock value
+            disk_used_bytes: (disk_usage / 100.0 * 500.0 * 1024.0 * 1024.0 * 1024.0) as u64,
+            disk_percent: disk_usage,
+            network_rx_bytes: 1024 * 1024 * 10, // Mock value
+            network_tx_bytes: 1024 * 1024 * 5,  // Mock value
+            network_rx_mbps: 10.0, // Mock value
+            network_tx_mbps: 5.0,  // Mock value
+            load_1m: cpu_usage / 10.0,
+            load_5m: cpu_usage / 12.0,
+            load_15m: cpu_usage / 15.0,
+            last_updated: SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs() as i64,
+        };
+        
+        // Create services status
+        let mut services_status = HashMap::new();
+        services_status.insert("kubelet".to_string(), ServiceStatus::Running);
+        services_status.insert("containerd".to_string(), ServiceStatus::Running);
+        
         NodeHealth {
             node_id: node_id.to_string(),
             last_seen: SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs() as i64,
@@ -658,6 +1219,10 @@ impl HealthMonitor {
             consecutive_failures: 0,
             is_healthy: true,
             last_failure: None,
+            resource_usage,
+            services_status,
+            recovery_attempts: 0,
+            last_recovery_attempt: None,
         }
     }
 
@@ -1070,6 +1635,8 @@ impl Clone for HealthMonitor {
             is_running: Arc::clone(&self.is_running),
             alerts: Arc::clone(&self.alerts),
             metrics_history: Arc::clone(&self.metrics_history),
+            alert_history: Arc::clone(&self.alert_history),
+            resource_usage_history: Arc::clone(&self.resource_usage_history),
         }
     }
 }

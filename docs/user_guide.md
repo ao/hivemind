@@ -540,6 +540,226 @@ hivemind app deploy --image ubuntu:latest --name task \
   --args "-c,echo Hello World"
 ```
 
+### Advanced Deployment Strategies
+
+Hivemind supports several advanced deployment strategies for zero-downtime updates and testing:
+
+#### Blue-Green Deployment
+
+Deploy a new version alongside the old one and switch traffic when ready:
+
+```bash
+hivemind app deploy --image myapp:v2 --name myapp \
+  --strategy blue-green \
+  --verification-timeout 60
+```
+
+#### Canary Deployment
+
+Gradually roll out a new version to a subset of users:
+
+```bash
+hivemind app deploy --image myapp:v2 --name myapp \
+  --strategy canary \
+  --percentage 20 \
+  --steps 20,50,100 \
+  --interval 300
+```
+
+#### A/B Testing
+
+Deploy multiple variants for testing:
+
+```bash
+hivemind app deploy --name myapp \
+  --strategy ab-testing \
+  --variant "name=v1,image=myapp:v1,percentage=50" \
+  --variant "name=v2,image=myapp:v2,percentage=50" \
+  --duration 86400
+```
+
+### CI/CD Integration
+
+Hivemind integrates with CI/CD pipelines for automated deployments:
+
+#### GitHub Actions Integration
+
+```yaml
+name: Deploy to Hivemind
+
+on:
+  push:
+    branches: [ main ]
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+    - uses: actions/checkout@v2
+    - name: Build and push Docker image
+      uses: docker/build-push-action@v2
+      with:
+        push: true
+        tags: myapp:latest
+    - name: Deploy to Hivemind
+      run: |
+        curl -X POST http://hivemind-server:3000/api/deploy \
+          -H "Content-Type: application/json" \
+          -d '{
+            "image": "myapp:latest",
+            "name": "myapp",
+            "service": "myapp.local"
+          }'
+```
+
+#### Pipeline Management
+
+Create and manage CI/CD pipelines:
+
+```bash
+# Create a pipeline
+hivemind cicd create-pipeline --name build-deploy \
+  --source github \
+  --repository myuser/myapp \
+  --branch main \
+  --trigger push \
+  --action "build,test,deploy"
+
+# Trigger a pipeline
+hivemind cicd trigger-pipeline --name build-deploy
+```
+
+### Cloud Provider Integration
+
+Hivemind integrates with major cloud providers:
+
+#### AWS Integration
+
+```bash
+# Configure AWS provider
+hivemind cloud configure --provider aws \
+  --region us-east-1 \
+  --access-key $AWS_ACCESS_KEY \
+  --secret-key $AWS_SECRET_KEY
+
+# Create an AWS instance
+hivemind cloud create-instance --provider aws \
+  --type t3.medium \
+  --name hivemind-node-1 \
+  --join-cluster
+```
+
+#### Azure Integration
+
+```bash
+# Configure Azure provider
+hivemind cloud configure --provider azure \
+  --subscription-id $AZURE_SUBSCRIPTION_ID \
+  --tenant-id $AZURE_TENANT_ID \
+  --client-id $AZURE_CLIENT_ID \
+  --client-secret $AZURE_CLIENT_SECRET
+
+# Create an Azure instance
+hivemind cloud create-instance --provider azure \
+  --size Standard_D2s_v3 \
+  --name hivemind-node-1 \
+  --join-cluster
+```
+
+#### GCP Integration
+
+```bash
+# Configure GCP provider
+hivemind cloud configure --provider gcp \
+  --project-id $GCP_PROJECT_ID \
+  --credentials-file $GCP_CREDENTIALS_FILE
+
+# Create a GCP instance
+hivemind cloud create-instance --provider gcp \
+  --machine-type n1-standard-2 \
+  --name hivemind-node-1 \
+  --join-cluster
+```
+
+### Helm Chart Support
+
+Hivemind supports deploying applications using Helm charts:
+
+#### Adding Helm Repositories
+
+```bash
+hivemind helm repo add --name stable --url https://charts.helm.sh/stable
+```
+
+#### Listing Available Charts
+
+```bash
+hivemind helm search --repo stable
+```
+
+#### Installing Charts
+
+```bash
+hivemind helm install --name my-release \
+  --chart stable/nginx \
+  --set service.type=ClusterIP
+```
+
+#### Managing Releases
+
+```bash
+# List releases
+hivemind helm list
+
+# Upgrade a release
+hivemind helm upgrade --name my-release \
+  --chart stable/nginx \
+  --set replicaCount=3
+
+# Rollback a release
+hivemind helm rollback --name my-release --revision 1
+```
+
+### Observability Features
+
+Hivemind includes comprehensive observability features:
+
+#### Metrics
+
+View system metrics:
+
+```bash
+hivemind metrics
+```
+
+Configure Prometheus integration:
+
+```bash
+hivemind observability configure-metrics \
+  --prometheus-endpoint /metrics \
+  --scrape-interval 15s
+```
+
+#### Distributed Tracing
+
+Configure OpenTelemetry tracing:
+
+```bash
+hivemind observability configure-tracing \
+  --provider jaeger \
+  --endpoint http://jaeger:14268/api/traces
+```
+
+#### Log Aggregation
+
+Configure log aggregation:
+
+```bash
+hivemind observability configure-logging \
+  --provider elasticsearch \
+  --endpoint http://elasticsearch:9200
+```
+
 ## Conclusion
 
 This guide covers the basic and advanced usage of Hivemind. For more detailed information on specific topics, refer to the following resources:
@@ -549,5 +769,6 @@ This guide covers the basic and advanced usage of Hivemind. For more detailed in
 - [Troubleshooting Guide](troubleshooting_guide.md)
 - [API Reference](api_reference.md)
 - [CLI Reference](cli_reference.md)
+- [Deployment Guide](deployment_guide.md)
 
 If you encounter any issues or have questions, please refer to the [Troubleshooting Guide](troubleshooting_guide.md) or visit the [GitHub repository](https://github.com/ao/hivemind) for support.

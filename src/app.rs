@@ -56,6 +56,12 @@ pub trait ContainerRuntime: Send + Sync + 'static {
     /// List volumes
     async fn list_volumes(&self) -> Result<Vec<Volume>>;
     
+    /// Backup a volume to a file
+    async fn backup_volume(&self, name: &str, output_path: &str) -> Result<()>;
+    
+    /// Restore a volume from a backup file
+    async fn restore_volume(&self, name: &str, input_path: &str) -> Result<()>;
+    
     /// Get as Any for downcasting
     fn as_any(&self) -> &dyn std::any::Any;
 }
@@ -298,6 +304,65 @@ impl AppManager {
         }
     }
 
+    // Backup a volume to a file - delegates to container runtime
+    pub async fn backup_volume(&self, name: &str, output_path: &str) -> Result<()> {
+        println!("Backing up volume {} to {}", name, output_path);
+
+        // Validate volume name
+        self.validate_volume_name(name)?;
+
+        // Check if volume exists
+        if let Some(runtime) = &self.container_runtime {
+            let existing_volumes = runtime.list_volumes().await?;
+            if !existing_volumes.iter().any(|v| v.name == name) {
+                return Err(anyhow::anyhow!("Volume '{}' not found", name));
+            }
+        }
+
+        // Check if container runtime is available
+        if let Some(runtime) = &self.container_runtime {
+            // Backup volume using container runtime
+            runtime.backup_volume(name, output_path).await?;
+            
+            println!("Volume {} backed up to {}", name, output_path);
+            Ok(())
+        } else {
+            // Error if no container runtime
+            println!("No container runtime available to backup volume");
+            Err(anyhow::anyhow!("No container runtime available"))
+        }
+    }
+
+    // Restore a volume from a backup file - delegates to container runtime
+    pub async fn restore_volume(&self, name: &str, input_path: &str) -> Result<()> {
+        println!("Restoring volume {} from {}", name, input_path);
+
+        // Validate volume name
+        self.validate_volume_name(name)?;
+
+        // Check if container runtime is available
+        if let Some(runtime) = &self.container_runtime {
+            // Restore volume using container runtime
+            runtime.restore_volume(name, input_path).await?;
+            
+            // If we have storage, update the volume info
+            if let Some(storage) = &self.storage {
+                // Get the volume details from the runtime
+                let volumes = runtime.list_volumes().await?;
+                if let Some(volume) = volumes.iter().find(|v| v.name == name) {
+                    storage.save_volume(&volume.name, &volume.path, volume.size, volume.created_at).await?;
+                }
+            }
+            
+            println!("Volume {} restored from {}", name, input_path);
+            Ok(())
+        } else {
+            // Error if no container runtime
+            println!("No container runtime available to restore volume");
+            Err(anyhow::anyhow!("No container runtime available"))
+        }
+    }
+
     // Deploy container with volumes
     pub async fn deploy_app_with_volumes(
         &self,
@@ -429,6 +494,56 @@ impl AppManager {
         } else {
             // Error if no container runtime
             println!("No container runtime available to deploy app with volumes");
+            Err(anyhow::anyhow!("No container runtime available"))
+        }
+    }
+
+    // Stop a container
+    pub async fn stop_container(&self, container_id: &str) -> Result<()> {
+        println!("Stopping container {}", container_id);
+
+        // Check if container runtime is available
+        if let Some(runtime) = &self.container_runtime {
+            // Stop container using container runtime
+            runtime.stop_container(container_id).await?;
+            
+            println!("Container {} stopped", container_id);
+            Ok(())
+        } else {
+            // Error if no container runtime
+            println!("No container runtime available to stop container");
+            Err(anyhow::anyhow!("No container runtime available"))
+        }
+    }
+
+    // Get container by ID
+    pub async fn get_container_by_id(&self, container_id: &str) -> Option<Container> {
+        println!("Getting container {}", container_id);
+
+        // Check if container runtime is available
+        if let Some(runtime) = &self.container_runtime {
+            // Get containers from runtime
+            if let Ok(containers) = runtime.list_containers().await {
+                // Find container by ID
+                return containers.into_iter().find(|c| c.id == container_id);
+            }
+        }
+        
+        None
+    }
+
+    // Get container details
+    pub async fn get_container_details(&self) -> Result<Vec<Container>> {
+        println!("Getting container details");
+
+        // Check if container runtime is available
+        if let Some(runtime) = &self.container_runtime {
+            // Get containers from runtime
+            let containers = runtime.list_containers().await?;
+            Ok(containers)
+        } else {
+            // Error if no container runtime
+            println!("No container runtime available to get container details");
             Err(anyhow::anyhow!("No container runtime available"))
         }
     }

@@ -37,6 +37,7 @@ pub struct NodeResources {
     pub memory_available: u64,
     #[allow(dead_code)]
     pub containers_running: u32,
+    pub is_leader: bool,
 }
 
 #[derive(Debug)]
@@ -66,6 +67,7 @@ impl NodeManager {
                     cpu_available: 100.0,
                     memory_available: 1024 * 1024 * 1024, // 1GB
                     containers_running: 0,
+                    is_leader: false,
                 },
             },
         );
@@ -242,6 +244,30 @@ impl NodeManager {
                                     }
                                 }
                             }
+                        }
+                        MembershipEvent::LeaderElected(member) => {
+                            println!("Leader elected: {}", member.id);
+                            
+                            // Update leader status in peers
+                            let mut peers_lock = peers.lock().await;
+                            for (id, info) in peers_lock.iter_mut() {
+                                info.resources.is_leader = id == &member.id;
+                            }
+                        }
+                        MembershipEvent::QuorumLost => {
+                            println!("Quorum lost - cluster may be partitioned");
+                        }
+                        MembershipEvent::QuorumRestored => {
+                            println!("Quorum restored - cluster is healthy");
+                        }
+                        MembershipEvent::NetworkPartitionDetected => {
+                            println!("Network partition detected");
+                        }
+                        MembershipEvent::NetworkPartitionResolved => {
+                            println!("Network partition resolved");
+                        }
+                        MembershipEvent::MemberMaintenance(member) => {
+                            println!("Member in maintenance mode: {}", member.id);
                         }
                     }
                 }
@@ -521,6 +547,17 @@ impl NodeManager {
             // Join the cluster using the membership protocol
             membership.join_cluster(host).await?;
             println!("Successfully joined cluster through membership protocol");
+            
+            // Wait a bit for cluster state to stabilize
+            tokio::time::sleep(Duration::from_millis(500)).await;
+            
+            // Trigger leader election if needed
+            if let Ok(leader) = membership.get_leader().await {
+                println!("Current leader is: {}", leader.id);
+            } else {
+                println!("No leader found, triggering election");
+                membership.trigger_leader_election().await?;
+            }
         } else {
             // Fall back to legacy discovery method
             // Start discovery service
@@ -591,6 +628,45 @@ impl NodeManager {
         }
         Ok(())
     }
+    // Get the current cluster leader
+    pub async fn get_cluster_leader(&self) -> Option<NodeInfo> {
+        if let Some(membership) = &self.membership {
+            if let Some(leader) = membership.get_leader().await {
+                let peers = self.peers.lock().await;
+                return peers.get(&leader.id).cloned();
+            }
+        }
+        
+        None
+    }
+    
+    // Check if this node is the cluster leader
+    pub async fn is_cluster_leader(&self) -> bool {
+        if let Some(membership) = &self.membership {
+            return membership.is_leader().await;
+        }
+        
+        false
+    }
+    
+    // Store distributed state
+    pub async fn store_distributed_state(&self, key: &str, value: &[u8]) -> Result<()> {
+        if let Some(membership) = &self.membership {
+            membership.store_state(key, value).await?;
+            Ok(())
+        } else {
+            Err(anyhow::anyhow!("Membership protocol not initialized"))
+        }
+    }
+    
+    // Get distributed state
+    pub async fn get_distributed_state(&self, key: &str) -> Option<Vec<u8>> {
+        if let Some(membership) = &self.membership {
+            membership.get_state(key).await
+        } else {
+            None
+        }
+    }
 }
 
 // Default implementation for NodeResources to avoid duplication
@@ -600,6 +676,7 @@ impl Default for NodeResources {
             cpu_available: 100.0,
             memory_available: 1024 * 1024 * 1024, // 1GB
             containers_running: 0,
+            is_leader: false,
         }
     }
 }
