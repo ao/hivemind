@@ -308,12 +308,18 @@ impl NetworkManager {
         &self,
         container_id: &str,
         pid: i32,
+        static_ip: Option<IpAddr>,
     ) -> Result<ContainerNetworkConfig> {
         let node_id = self.node_manager.get_node_id();
         
         // Get node subnet
         let nodes = self.nodes.lock().await;
         let node_info = nodes.get(&node_id).context("Node network info not found")?;
+        
+        // Handle static IP assignment if provided
+        if let Some(ip) = static_ip {
+            self.ipam.lock().await.assign_static_ip(container_id, ip)?;
+        }
         
         // Allocate IP for container
         let ip = self.ipam.lock().await.allocate_container_ip(&node_id, container_id)?;
@@ -336,7 +342,37 @@ impl NetworkManager {
         // Set up container network namespace
         self.setup_container_namespace(pid, &config).await?;
         
+        // Register container in service discovery for DNS resolution
+        self.register_container_dns(container_id, ip).await?;
+        
         Ok(config)
+    }
+    
+    // Register container in service discovery for DNS resolution
+    async fn register_container_dns(&self, container_id: &str, ip: IpAddr) -> Result<()> {
+        // Create a DNS record for the container
+        // Format: container-{id}.hivemind
+        let dns_name = format!("container-{}.hivemind", &container_id[..8]);
+        
+        // Create a simple service config for DNS registration
+        let service_config = crate::app::ServiceConfig {
+            name: dns_name.clone(),
+            domain: "hivemind".to_string(),
+            container_ids: vec![container_id.to_string()],
+            desired_replicas: 1,
+            current_replicas: 1,
+        };
+        
+        // Register with service discovery
+        self.service_discovery.register_service(
+            &service_config,
+            &self.node_manager.get_node_id(),
+            &ip.to_string(),
+            53, // DNS port
+        ).await?;
+        
+        println!("Registered container {} with DNS name {}", container_id, dns_name);
+        Ok(())
     }
     
     async fn setup_container_namespace(
@@ -369,6 +405,38 @@ impl NetworkManager {
         
         // Add default route in container
         Self::add_container_default_route(pid, config.gateway)?;
+        
+        // Configure DNS resolution in container
+        Self::configure_container_dns(pid, config.gateway)?;
+        
+        Ok(())
+    }
+    
+    // Configure DNS resolution in container
+    fn configure_container_dns(pid: i32, dns_server: IpAddr) -> Result<()> {
+        // Create resolv.conf content
+        let resolv_conf = format!("nameserver {}\nsearch hivemind\n", dns_server);
+        
+        // Create a temporary file with the content
+        let temp_file = std::env::temp_dir().join("resolv.conf.tmp");
+        std::fs::write(&temp_file, resolv_conf)?;
+        
+        // Copy the file to the container's /etc/resolv.conf
+        let status = Command::new("nsenter")
+            .args(&[
+                "-t", &pid.to_string(),
+                "-m", // Mount namespace
+                "cp", temp_file.to_str().unwrap(), "/etc/resolv.conf",
+            ])
+            .status()?;
+            
+        if !status.success() {
+            println!("Warning: Failed to configure DNS in container");
+            // Don't fail the whole setup for this
+        }
+        
+        // Clean up the temporary file
+        let _ = std::fs::remove_file(temp_file);
         
         Ok(())
     }
@@ -529,6 +597,16 @@ impl NetworkManager {
             Self::delete_interface(&host_if)?;
         }
         
+        // Unregister container from service discovery
+        let dns_name = format!("container-{}.hivemind", &container_id[..8]);
+        self.service_discovery.deregister_service(
+            &dns_name,
+            &node_id,
+            "", // We don't need the IP address as we're using the service name
+            53,  // DNS port
+        ).await?;
+        
+        println!("Unregistered container {} from DNS", container_id);
         Ok(())
     }
     
@@ -627,6 +705,8 @@ pub struct IpamManager {
     node_subnet_size: u8,
     allocated_subnets: HashMap<String, IpNetwork>,
     allocated_ips: HashMap<String, HashMap<String, IpAddr>>,
+    static_ip_assignments: HashMap<String, IpAddr>,
+    recycled_ips: HashMap<String, Vec<IpAddr>>,
 }
 
 impl IpamManager {
@@ -636,6 +716,37 @@ impl IpamManager {
             node_subnet_size,
             allocated_subnets: HashMap::new(),
             allocated_ips: HashMap::new(),
+            static_ip_assignments: HashMap::new(),
+            recycled_ips: HashMap::new(),
+        }
+    }
+    
+    // Assign a static IP to a container
+    pub fn assign_static_ip(&mut self, container_id: &str, ip: IpAddr) -> Result<()> {
+        // Validate that the IP is within the network CIDR
+        if !self.is_ip_in_network(ip) {
+            anyhow::bail!("IP {} is not within the network CIDR {}", ip, self.network_cidr);
+        }
+        
+        // Check if the IP is already assigned
+        for (_, ips) in &self.allocated_ips {
+            if ips.values().any(|&assigned_ip| assigned_ip == ip) {
+                anyhow::bail!("IP {} is already assigned to another container", ip);
+            }
+        }
+        
+        // Store the static IP assignment
+        self.static_ip_assignments.insert(container_id.to_string(), ip);
+        
+        Ok(())
+    }
+    
+    // Check if an IP is within the network CIDR
+    fn is_ip_in_network(&self, ip: IpAddr) -> bool {
+        match (ip, self.network_cidr) {
+            (IpAddr::V4(ipv4), IpNetwork::V4(network)) => network.contains(ipv4),
+            (IpAddr::V6(ipv6), IpNetwork::V6(network)) => network.contains(ipv6),
+            _ => false,
         }
     }
     
@@ -696,6 +807,29 @@ impl IpamManager {
     }
     
     pub fn allocate_container_ip(&mut self, node_id: &str, container_id: &str) -> Result<IpAddr> {
+        // Check if this container has a static IP assignment
+        if let Some(&ip) = self.static_ip_assignments.get(container_id) {
+            // Validate that the static IP is within the node's subnet
+            let subnet = self.allocated_subnets.get(node_id)
+                .context("Node subnet not found")?;
+                
+            if !self.is_ip_in_subnet(ip, *subnet) {
+                anyhow::bail!("Static IP {} is not within node {}'s subnet {}", ip, node_id, subnet);
+            }
+            
+            // Get or create the node's IP allocations
+            let node_ips = self.allocated_ips.entry(node_id.to_string())
+                .or_insert_with(HashMap::new);
+                
+            // Assign the static IP
+            node_ips.insert(container_id.to_string(), ip);
+            
+            // Remove from static assignments as it's now allocated
+            self.static_ip_assignments.remove(container_id);
+            
+            return Ok(ip);
+        }
+        
         // Get the node's subnet
         let subnet = self.allocated_subnets.get(node_id)
             .context("Node subnet not found")?;
@@ -707,6 +841,22 @@ impl IpamManager {
         // Check if this container already has an IP
         if let Some(ip) = node_ips.get(container_id) {
             return Ok(*ip);
+        }
+        
+        // Check if there are any recycled IPs for this node
+        if let Some(recycled) = self.recycled_ips.get_mut(node_id) {
+            if let Some(ip) = recycled.pop() {
+                // Reuse a recycled IP
+                node_ips.insert(container_id.to_string(), ip);
+                
+                // If the recycled list is now empty, remove it
+                if recycled.is_empty() {
+                    self.recycled_ips.remove(node_id);
+                }
+                
+                println!("Reusing recycled IP {} for container {}", ip, container_id);
+                return Ok(ip);
+            }
         }
         
         // Allocate a new IP from the subnet
@@ -726,6 +876,7 @@ impl IpamManager {
                     if !node_ips.values().any(|i| *i == ip_addr) {
                         // Allocate this IP
                         node_ips.insert(container_id.to_string(), ip_addr);
+                        println!("Allocated new IP {} for container {}", ip_addr, container_id);
                         return Ok(ip_addr);
                     }
                 }
@@ -738,14 +889,50 @@ impl IpamManager {
         }
     }
     
+    // Check if an IP is within a subnet
+    fn is_ip_in_subnet(&self, ip: IpAddr, subnet: IpNetwork) -> bool {
+        match (ip, subnet) {
+            (IpAddr::V4(ipv4), IpNetwork::V4(network)) => network.contains(ipv4),
+            (IpAddr::V6(ipv6), IpNetwork::V6(network)) => network.contains(ipv6),
+            _ => false,
+        }
+    }
+    
     pub fn release_container_ip(&mut self, node_id: &str, container_id: &str) -> Result<()> {
         // Get the node's IP allocations
         if let Some(node_ips) = self.allocated_ips.get_mut(node_id) {
-            // Remove the container's IP allocation
-            node_ips.remove(container_id);
+            // Get the container's IP allocation
+            if let Some(ip) = node_ips.remove(container_id) {
+                // Add the IP to the recycled list for this node
+                let recycled = self.recycled_ips.entry(node_id.to_string())
+                    .or_insert_with(Vec::new);
+                    
+                recycled.push(ip);
+                println!("Recycled IP {} from container {}", ip, container_id);
+            }
         }
         
         Ok(())
+    }
+    
+    // Get all allocated IPs for a node
+    pub fn get_node_allocated_ips(&self, node_id: &str) -> Vec<(String, IpAddr)> {
+        if let Some(node_ips) = self.allocated_ips.get(node_id) {
+            node_ips.iter()
+                .map(|(container_id, ip)| (container_id.clone(), *ip))
+                .collect()
+        } else {
+            Vec::new()
+        }
+    }
+    
+    // Get all recycled IPs for a node
+    pub fn get_node_recycled_ips(&self, node_id: &str) -> Vec<IpAddr> {
+        if let Some(recycled) = self.recycled_ips.get(node_id) {
+            recycled.clone()
+        } else {
+            Vec::new()
+        }
     }
 }
 
@@ -754,9 +941,11 @@ pub struct OverlayNetwork {
     network_type: OverlayNetworkType,
     vxlan_id: u16,
     vxlan_port: u16,
+    mtu: u32,
     tunnels: Arc<Mutex<HashMap<String, TunnelInfo>>>,
     local_node_id: Arc<Mutex<Option<String>>>,
     local_ip: Arc<Mutex<Option<IpAddr>>>,
+    tunnel_interface: String,
 }
 
 impl OverlayNetwork {
@@ -765,14 +954,29 @@ impl OverlayNetwork {
         vxlan_id: u16,
         vxlan_port: u16,
     ) -> Self {
+        // Default MTU is 1450 to accommodate VXLAN overhead (1500 - 50)
         Self {
             network_type,
             vxlan_id,
             vxlan_port,
+            mtu: 1450,
             tunnels: Arc::new(Mutex::new(HashMap::new())),
             local_node_id: Arc::new(Mutex::new(None)),
             local_ip: Arc::new(Mutex::new(None)),
+            tunnel_interface: "vxlan0".to_string(),
         }
+    }
+    
+    // Set custom MTU for the overlay network
+    pub fn with_mtu(mut self, mtu: u32) -> Self {
+        self.mtu = mtu;
+        self
+    }
+    
+    // Set custom tunnel interface name
+    pub fn with_tunnel_interface(mut self, interface_name: String) -> Self {
+        self.tunnel_interface = interface_name;
+        self
     }
     
     pub async fn initialize(&self, node_id: &str, node_ip: IpAddr) -> Result<()> {
@@ -805,13 +1009,15 @@ impl OverlayNetwork {
     
     async fn setup_vxlan(
         &self,
-        _node_id: &str,
+        node_id: &str,
         node_ip: IpAddr,
-        _subnet: IpNetwork,
+        subnet: IpNetwork,
         bridge_name: &str,
     ) -> Result<()> {
         // Create VXLAN interface
-        let vxlan_name = "vxlan0";
+        let vxlan_name = &self.tunnel_interface;
+        
+        println!("Setting up VXLAN overlay for node {} with subnet {}", node_id, subnet);
         
         // Check if VXLAN interface already exists
         if !Self::interface_exists(vxlan_name)? {
@@ -823,12 +1029,24 @@ impl OverlayNetwork {
                 node_ip,
             )?;
             
+            // Set MTU on VXLAN interface
+            Self::set_interface_mtu(vxlan_name, self.mtu)?;
+            
             // Connect VXLAN to bridge
             Self::connect_to_bridge(vxlan_name, bridge_name)?;
             
             // Enable VXLAN interface
             Self::enable_interface(vxlan_name)?;
+            
+            // Enable IP forwarding for cross-node routing
+            Self::enable_ip_forwarding()?;
         }
+        
+        // Set up ARP proxy for container subnet
+        Self::setup_arp_proxy(vxlan_name, subnet)?;
+        
+        // Set up masquerading for external traffic
+        Self::setup_masquerading(subnet)?;
         
         Ok(())
     }
@@ -847,18 +1065,120 @@ impl OverlayNetwork {
         port: u16,
         local_ip: IpAddr,
     ) -> Result<()> {
+        // Get the main interface name
+        let main_interface = Self::get_main_interface()?;
+        
         let status = Command::new("ip")
             .args(&[
                 "link", "add", name, "type", "vxlan",
                 "id", &vxlan_id.to_string(),
                 "dstport", &port.to_string(),
                 "local", &local_ip.to_string(),
-                "dev", "eth0",
+                "dev", &main_interface,
+                "nolearning", // Disable MAC learning, we'll manage FDB entries manually
+                "ttl", "64", // Set TTL for VXLAN packets
             ])
             .status()?;
             
         if !status.success() {
             anyhow::bail!("Failed to create VXLAN interface {}", name);
+        }
+        
+        Ok(())
+    }
+    
+    // Get the main network interface
+    fn get_main_interface() -> Result<String> {
+        // Try to get the default route interface
+        let output = Command::new("ip")
+            .args(&["route", "get", "8.8.8.8"])
+            .output()?;
+            
+        if output.status.success() {
+            let output_str = String::from_utf8_lossy(&output.stdout);
+            // Parse the output to find the interface name
+            for part in output_str.split_whitespace() {
+                if part == "dev" {
+                    if let Some(interface) = output_str.split_whitespace().skip_while(|&p| p != "dev").nth(1) {
+                        return Ok(interface.to_string());
+                    }
+                }
+            }
+        }
+        
+        // Fallback to eth0 if we can't determine the interface
+        Ok("eth0".to_string())
+    }
+    
+    // Set MTU on an interface
+    fn set_interface_mtu(interface: &str, mtu: u32) -> Result<()> {
+        let status = Command::new("ip")
+            .args(&["link", "set", "dev", interface, "mtu", &mtu.to_string()])
+            .status()?;
+            
+        if !status.success() {
+            anyhow::bail!("Failed to set MTU on interface {}", interface);
+        }
+        
+        Ok(())
+    }
+    
+    // Enable IP forwarding
+    fn enable_ip_forwarding() -> Result<()> {
+        // Enable IPv4 forwarding
+        let status = Command::new("sysctl")
+            .args(&["-w", "net.ipv4.ip_forward=1"])
+            .status()?;
+            
+        if !status.success() {
+            anyhow::bail!("Failed to enable IP forwarding");
+        }
+        
+        Ok(())
+    }
+    
+    // Set up ARP proxy for a subnet
+    fn setup_arp_proxy(interface: &str, subnet: IpNetwork) -> Result<()> {
+        // Enable proxy ARP on the interface
+        let status = Command::new("sysctl")
+            .args(&["-w", &format!("net.ipv4.conf.{}.proxy_arp=1", interface)])
+            .status()?;
+            
+        if !status.success() {
+            anyhow::bail!("Failed to enable proxy ARP on {}", interface);
+        }
+        
+        // Add proxy ARP entry for the subnet
+        let status = Command::new("ip")
+            .args(&["neigh", "add", "proxy", &subnet.to_string(), "dev", interface])
+            .status()?;
+            
+        // Ignore errors as this might fail if the entry already exists
+        
+        Ok(())
+    }
+    
+    // Set up masquerading for external traffic
+    fn setup_masquerading(subnet: IpNetwork) -> Result<()> {
+        // Check if iptables is available
+        let iptables_check = Command::new("which")
+            .arg("iptables")
+            .output()?;
+            
+        if !iptables_check.status.success() {
+            println!("Warning: iptables not found, skipping masquerading setup");
+            return Ok(());
+        }
+        
+        // Add masquerading rule
+        let status = Command::new("iptables")
+            .args(&["-t", "nat", "-A", "POSTROUTING", "-s", &subnet.to_string(),
+                   "-j", "MASQUERADE"])
+            .status()?;
+            
+        if !status.success() {
+            println!("Warning: Failed to set up masquerading for {}", subnet);
+            // Don't fail the whole setup for this
         }
         
         Ok(())
@@ -905,11 +1225,18 @@ impl OverlayNetwork {
             return Ok(());
         }
         
+        println!("Creating tunnel to node {} at {}", node_id, remote_ip);
+        
         // Create tunnel
         match self.network_type {
             OverlayNetworkType::VXLAN => {
-                // For VXLAN, we just need to add the remote node to the FDB
-                Self::add_vxlan_fdb_entry("vxlan0", remote_ip)?;
+                // For VXLAN, we need to add the remote node to the FDB
+                Self::add_vxlan_fdb_entry(&self.tunnel_interface, remote_ip)?;
+                
+                // Add route to remote subnet via VXLAN
+                if let Some(remote_subnet) = self.get_remote_subnet(node_id).await {
+                    Self::add_route_to_subnet(remote_subnet, remote_ip, &self.tunnel_interface)?;
+                }
             }
             OverlayNetworkType::Geneve => {
                 // Not implemented yet
@@ -924,11 +1251,41 @@ impl OverlayNetwork {
                 node_id: node_id.to_string(),
                 remote_ip,
                 local_ip,
-                tunnel_name: "vxlan0".to_string(),
+                tunnel_name: self.tunnel_interface.clone(),
             },
         );
         
         println!("Added tunnel to node {}", node_id);
+        Ok(())
+    }
+    
+    // Get the subnet allocated to a remote node
+    async fn get_remote_subnet(&self, node_id: &str) -> Option<IpNetwork> {
+        // This would typically come from a distributed store
+        // For now, we'll use a simple heuristic based on node ID
+        
+        // Parse the node ID as a number if possible
+        if let Ok(node_num) = node_id.parse::<u8>() {
+            // Create a subnet based on node number
+            if let Ok(network) = IpNetwork::from_str(&format!("10.244.{}.0/24", node_num)) {
+                return Some(network);
+            }
+        }
+        
+        // If we can't determine the subnet, return None
+        None
+    }
+    
+    // Add a route to a remote subnet
+    fn add_route_to_subnet(subnet: IpNetwork, via: IpAddr, dev: &str) -> Result<()> {
+        let status = Command::new("ip")
+            .args(&["route", "replace", &subnet.to_string(), "via", &via.to_string(), "dev", dev])
+            .status()?;
+            
+        if !status.success() {
+            anyhow::bail!("Failed to add route to subnet {}", subnet);
+        }
+        
         Ok(())
     }
     
@@ -945,6 +1302,17 @@ impl OverlayNetwork {
             anyhow::bail!("Failed to add FDB entry for {}", remote_ip);
         }
         
+        // Also add a permanent ARP entry for the remote node
+        // This helps with faster packet forwarding
+        let status = Command::new("ip")
+            .args(&[
+                "neigh", "add", &remote_ip.to_string(), "lladdr", "00:00:00:00:00:00",
+                "dev", vxlan_if, "nud", "permanent",
+            ])
+            .status()?;
+        
+        // Ignore errors for the ARP entry as it's not critical
+        
         Ok(())
     }
     
@@ -954,11 +1322,18 @@ impl OverlayNetwork {
         let tunnel = tunnels.remove(node_id);
         
         if let Some(tunnel) = tunnel {
+            println!("Removing tunnel to node {} at {}", node_id, tunnel.remote_ip);
+            
             // Remove tunnel
             match self.network_type {
                 OverlayNetworkType::VXLAN => {
-                    // For VXLAN, we just need to remove the remote node from the FDB
+                    // For VXLAN, we need to remove the remote node from the FDB
                     Self::remove_vxlan_fdb_entry(&tunnel.tunnel_name, tunnel.remote_ip)?;
+                    
+                    // Remove route to remote subnet
+                    if let Some(remote_subnet) = self.get_remote_subnet(node_id).await {
+                        Self::remove_route_to_subnet(remote_subnet)?;
+                    }
                 }
                 OverlayNetworkType::Geneve => {
                     // Not implemented yet
@@ -967,6 +1342,20 @@ impl OverlayNetwork {
             }
             
             println!("Removed tunnel to node {}", node_id);
+        }
+        
+        Ok(())
+    }
+    
+    // Remove a route to a remote subnet
+    fn remove_route_to_subnet(subnet: IpNetwork) -> Result<()> {
+        let status = Command::new("ip")
+            .args(&["route", "del", &subnet.to_string()])
+            .status()?;
+            
+        if !status.success() {
+            // Don't fail if the route doesn't exist
+            println!("Warning: Failed to remove route to subnet {}", subnet);
         }
         
         Ok(())
@@ -997,20 +1386,50 @@ impl OverlayNetwork {
 #[derive(Debug)]
 pub struct NetworkPolicyManager {
     policies: HashMap<String, NetworkPolicy>,
+    container_labels: HashMap<String, HashMap<String, String>>,
+    chain_prefix: String,
 }
 
 impl NetworkPolicyManager {
     pub fn new() -> Self {
         Self {
             policies: HashMap::new(),
+            container_labels: HashMap::new(),
+            chain_prefix: "HIVEMIND".to_string(),
         }
     }
     
+    // Set custom chain prefix for iptables rules
+    pub fn with_chain_prefix(mut self, prefix: String) -> Self {
+        self.chain_prefix = prefix;
+        self
+    }
+    
+    // Register container labels for policy matching
+    pub async fn register_container_labels(&mut self, container_id: &str, labels: HashMap<String, String>) -> Result<()> {
+        self.container_labels.insert(container_id.to_string(), labels);
+        
+        // Apply all existing policies to this container
+        for policy in self.policies.values() {
+            self.apply_policy_to_container(policy, container_id).await?;
+        }
+        
+        Ok(())
+    }
+    
+    // Unregister container labels when container is removed
+    pub async fn unregister_container_labels(&mut self, container_id: &str) -> Result<()> {
+        self.container_labels.remove(container_id);
+        Ok(())
+    }
+    
     pub async fn add_policy(&mut self, policy: NetworkPolicy) -> Result<()> {
+        println!("Adding network policy: {}", policy.name);
+        
         // Store policy
         self.policies.insert(policy.name.clone(), policy.clone());
         
-        // Apply policy rules
+        // Apply policy rules to all matching containers
         self.apply_policy_rules(&policy).await?;
         
         Ok(())
@@ -1021,6 +1440,8 @@ impl NetworkPolicyManager {
         let policy = self.policies.remove(name);
         
         if let Some(policy) = policy {
+            println!("Removing network policy: {}", policy.name);
+            
             // Remove policy rules
             self.remove_policy_rules(&policy).await?;
         }
@@ -1029,19 +1450,311 @@ impl NetworkPolicyManager {
     }
     
     async fn apply_policy_rules(&self, policy: &NetworkPolicy) -> Result<()> {
-        // In a real implementation, this would apply iptables/nftables rules
-        // For now, just log the policy
-        println!("Applying network policy: {}", policy.name);
+        // Find all containers that match the policy selector
+        let matching_containers = self.find_matching_containers(&policy.selector);
+        
+        println!("Applying policy {} to {} matching containers", policy.name, matching_containers.len());
+        
+        // Apply policy to each matching container
+        for container_id in matching_containers {
+            self.apply_policy_to_container(policy, &container_id).await?;
+        }
+        
+        Ok(())
+    }
+    
+    async fn apply_policy_to_container(&self, policy: &NetworkPolicy, container_id: &str) -> Result<()> {
+        // Create iptables chains for this policy and container
+        self.create_policy_chains(policy, container_id)?;
+        
+        // Apply ingress rules
+        for rule in &policy.ingress_rules {
+            self.apply_ingress_rule(policy, container_id, rule)?;
+        }
+        
+        // Apply egress rules
+        for rule in &policy.egress_rules {
+            self.apply_egress_rule(policy, container_id, rule)?;
+        }
+        
+        Ok(())
+    }
+    
+    fn create_policy_chains(&self, policy: &NetworkPolicy, container_id: &str) -> Result<()> {
+        // Create chain names
+        let ingress_chain = self.get_ingress_chain_name(policy, container_id);
+        let egress_chain = self.get_egress_chain_name(policy, container_id);
+        
+        // Create ingress chain
+        let status = Command::new("iptables")
+            .args(&["-N", &ingress_chain])
+            .status();
+            
+        // Ignore errors if chain already exists
+        
+        // Create egress chain
+        let status = Command::new("iptables")
+            .args(&["-N", &egress_chain])
+            .status();
+            
+        // Ignore errors if chain already exists
+        
+        // Add jumps to the chains
+        // For ingress: FORWARD -> HIVEMIND-IN-<policy>-<container>
+        let status = Command::new("iptables")
+            .args(&[
+                "-I", "FORWARD", "1",
+                "-m", "comment", "--comment", &format!("Hivemind policy: {}", policy.name),
+                "-j", &ingress_chain
+            ])
+            .status();
+            
+        // Ignore errors
+        
+        // For egress: FORWARD -> HIVEMIND-OUT-<policy>-<container>
+        let status = Command::new("iptables")
+            .args(&[
+                "-I", "FORWARD", "1",
+                "-m", "comment", "--comment", &format!("Hivemind policy: {}", policy.name),
+                "-j", &egress_chain
+            ])
+            .status();
+            
+        // Ignore errors
+        
+        Ok(())
+    }
+    
+    fn apply_ingress_rule(&self, policy: &NetworkPolicy, container_id: &str, rule: &NetworkRule) -> Result<()> {
+        let chain = self.get_ingress_chain_name(policy, container_id);
+        
+        // Get container's interface
+        let container_if = format!("veth{}", &container_id[..8]);
+        
+        // Apply rules for each port range
+        for port_range in &rule.ports {
+            // Apply rules for each peer
+            for peer in &rule.from {
+                // Handle IP block peers
+                if let Some(ip_block) = &peer.ip_block {
+                    self.add_cidr_rule(&chain, &container_if, ip_block, port_range, true)?;
+                }
+                
+                // Handle selector peers
+                if let Some(selector) = &peer.selector {
+                    // Find containers matching the selector
+                    let peer_containers = self.find_matching_containers(selector);
+                    
+                    // Add rule for each matching container
+                    for peer_id in peer_containers {
+                        // Skip if this is the same container
+                        if peer_id == container_id {
+                            continue;
+                        }
+                        
+                        // Get peer container's interface
+                        let peer_if = format!("veth{}", &peer_id[..8]);
+                        
+                        // Add rule
+                        self.add_interface_rule(&chain, &container_if, &peer_if, port_range, true)?;
+                    }
+                }
+            }
+        }
+        
+        Ok(())
+    }
+    
+    fn apply_egress_rule(&self, policy: &NetworkPolicy, container_id: &str, rule: &NetworkRule) -> Result<()> {
+        let chain = self.get_egress_chain_name(policy, container_id);
+        
+        // Get container's interface
+        let container_if = format!("veth{}", &container_id[..8]);
+        
+        // Apply rules for each port range
+        for port_range in &rule.ports {
+            // Apply rules for each peer
+            for peer in &rule.from {
+                // Handle IP block peers
+                if let Some(ip_block) = &peer.ip_block {
+                    self.add_cidr_rule(&chain, &container_if, ip_block, port_range, false)?;
+                }
+                
+                // Handle selector peers
+                if let Some(selector) = &peer.selector {
+                    // Find containers matching the selector
+                    let peer_containers = self.find_matching_containers(selector);
+                    
+                    // Add rule for each matching container
+                    for peer_id in peer_containers {
+                        // Skip if this is the same container
+                        if peer_id == container_id {
+                            continue;
+                        }
+                        
+                        // Get peer container's interface
+                        let peer_if = format!("veth{}", &peer_id[..8]);
+                        
+                        // Add rule
+                        self.add_interface_rule(&chain, &container_if, &peer_if, port_range, false)?;
+                    }
+                }
+            }
+        }
+        
+        Ok(())
+    }
+    
+    fn add_cidr_rule(&self, chain: &str, interface: &str, cidr: &IpNetwork, port_range: &PortRange, ingress: bool) -> Result<()> {
+        // Determine source and destination for the rule
+        let (src, dst) = if ingress {
+            (format!("{}", cidr), interface)
+        } else {
+            (interface, format!("{}", cidr))
+        };
+        
+        // Add rule
+        let status = Command::new("iptables")
+            .args(&[
+                "-A", chain,
+                "-p", &format!("{:?}", port_range.protocol).to_lowercase(),
+                "-s", &src,
+                "-d", &dst,
+                "--dport", &format!("{}:{}", port_range.port_min, port_range.port_max),
+                "-j", "ACCEPT"
+            ])
+            .status();
+            
+        // Ignore errors
+        
+        Ok(())
+    }
+    
+    fn add_interface_rule(&self, chain: &str, interface1: &str, interface2: &str, port_range: &PortRange, ingress: bool) -> Result<()> {
+        // Determine source and destination interfaces
+        let (src_if, dst_if) = if ingress {
+            (interface2, interface1)
+        } else {
+            (interface1, interface2)
+        };
+        
+        // Add rule
+        let status = Command::new("iptables")
+            .args(&[
+                "-A", chain,
+                "-p", &format!("{:?}", port_range.protocol).to_lowercase(),
+                "-i", src_if,
+                "-o", dst_if,
+                "--dport", &format!("{}:{}", port_range.port_min, port_range.port_max),
+                "-j", "ACCEPT"
+            ])
+            .status();
+            
+        // Ignore errors
         
         Ok(())
     }
     
     async fn remove_policy_rules(&self, policy: &NetworkPolicy) -> Result<()> {
-        // In a real implementation, this would remove iptables/nftables rules
-        // For now, just log the policy
-        println!("Removing network policy: {}", policy.name);
+        // Find all containers that match the policy selector
+        let matching_containers = self.find_matching_containers(&policy.selector);
+        
+        // Remove policy from each matching container
+        for container_id in matching_containers {
+            self.remove_policy_from_container(policy, &container_id)?;
+        }
         
         Ok(())
+    }
+    
+    fn remove_policy_from_container(&self, policy: &NetworkPolicy, container_id: &str) -> Result<()> {
+        // Get chain names
+        let ingress_chain = self.get_ingress_chain_name(policy, container_id);
+        let egress_chain = self.get_egress_chain_name(policy, container_id);
+        
+        // Remove jumps to the chains
+        let status = Command::new("iptables")
+            .args(&[
+                "-D", "FORWARD",
+                "-m", "comment", "--comment", &format!("Hivemind policy: {}", policy.name),
+                "-j", &ingress_chain
+            ])
+            .status();
+            
+        // Ignore errors
+        
+        let status = Command::new("iptables")
+            .args(&[
+                "-D", "FORWARD",
+                "-m", "comment", "--comment", &format!("Hivemind policy: {}", policy.name),
+                "-j", &egress_chain
+            ])
+            .status();
+            
+        // Ignore errors
+        
+        // Flush and delete chains
+        let status = Command::new("iptables")
+            .args(&["-F", &ingress_chain])
+            .status();
+            
+        // Ignore errors
+        
+        let status = Command::new("iptables")
+            .args(&["-X", &ingress_chain])
+            .status();
+            
+        // Ignore errors
+        
+        let status = Command::new("iptables")
+            .args(&["-F", &egress_chain])
+            .status();
+            
+        // Ignore errors
+        
+        let status = Command::new("iptables")
+            .args(&["-X", &egress_chain])
+            .status();
+            
+        // Ignore errors
+        
+        Ok(())
+    }
+    
+    // Find containers that match a selector
+    fn find_matching_containers(&self, selector: &NetworkSelector) -> Vec<String> {
+        let mut matching = Vec::new();
+        
+        // Check each container's labels against the selector
+        for (container_id, labels) in &self.container_labels {
+            if self.labels_match_selector(labels, &selector.labels) {
+                matching.push(container_id.clone());
+            }
+        }
+        
+        matching
+    }
+    
+    // Check if container labels match a selector
+    fn labels_match_selector(&self, container_labels: &HashMap<String, String>, selector_labels: &HashMap<String, String>) -> bool {
+        // All selector labels must be present in the container labels with matching values
+        for (key, value) in selector_labels {
+            if !container_labels.contains_key(key) || container_labels.get(key) != Some(value) {
+                return false;
+            }
+        }
+        
+        true
+    }
+    
+    // Generate ingress chain name for a policy and container
+    fn get_ingress_chain_name(&self, policy: &NetworkPolicy, container_id: &str) -> String {
+        format!("{}-IN-{}-{}", self.chain_prefix, policy.name, &container_id[..8])
+    }
+    
+    // Generate egress chain name for a policy and container
+    fn get_egress_chain_name(&self, policy: &NetworkPolicy, container_id: &str) -> String {
+        format!("{}-OUT-{}-{}", self.chain_prefix, policy.name, &container_id[..8])
     }
     
     pub async fn get_policy(&self, name: &str) -> Option<NetworkPolicy> {

@@ -18,6 +18,10 @@ Hivemind is a modern, lightweight container orchestration system designed with s
 - **🔒 Volume Management** - Persistent storage for your stateful applications
 - **🖥️ Clean Web UI** - Monitor and manage everything through an intuitive dashboard
 - **🔌 Container Networking** - Seamless communication between containers across nodes
+- **🔐 Security Features** - Container scanning, network policies, RBAC, and secret management
+- **🩺 Health Monitoring** - Comprehensive health checking and auto-healing capabilities
+- **📊 Network-Aware Scheduling** - Intelligent container placement based on network topology
+- **🔄 Node Membership Protocol** - SWIM-based cluster membership management
 
 ## 🔧 Quick Start
 
@@ -119,6 +123,22 @@ hivemind volume delete --name <VOLUME_NAME>
 hivemind app deploy --image <IMAGE> --name <NAME> --volume <VOLUME_NAME>:<CONTAINER_PATH>
 ```
 
+### Security Management
+
+```bash
+# Scan a container image for vulnerabilities
+hivemind security scan-image --image <IMAGE>
+
+# List security policies
+hivemind security list-policies
+
+# Create a new secret
+hivemind security create-secret --name <NAME> --file <FILE_PATH>
+
+# Mount a secret to a container
+hivemind app deploy --image <IMAGE> --name <NAME> --secret <SECRET_NAME>:<CONTAINER_PATH>
+```
+
 ## 🔌 API Reference
 
 Hivemind offers a RESTful API for all operations:
@@ -138,6 +158,10 @@ Hivemind offers a RESTful API for all operations:
 | `/api/volumes` | GET | List all volumes |
 | `/api/volumes/create` | POST | Create a new volume |
 | `/api/volumes/delete` | POST | Delete a volume |
+| `/api/security/scan` | POST | Scan a container image |
+| `/api/security/policies` | GET | List security policies |
+| `/api/security/secrets` | GET | List secrets (metadata only) |
+| `/api/security/secrets/create` | POST | Create a new secret |
 
 ## 🌟 Why Hivemind?
 
@@ -146,12 +170,14 @@ Hivemind offers a RESTful API for all operations:
 - **Resource-efficient** - Runs well even on lower-powered hardware
 - **Predictable** - Designed to be stable and behave consistently
 - **Self-contained** - Minimal dependencies means fewer things to break
+- **Secure by default** - Built-in security features protect your workloads
 
 ### For Developers
 - **Clean codebase** - Well-structured Rust code that's a joy to work with
 - **Modular architecture** - Easy to extend with new features
 - **API-first design** - Build tools and integrations with our comprehensive API
 - **Fast compile-test cycle** - Quick iteration for development
+- **Comprehensive security** - Security features built into the core platform
 
 ## 📊 Comparison with other platforms
 
@@ -163,6 +189,8 @@ Hivemind offers a RESTful API for all operations:
 | Scaling | ✅ Yes | ✅ Yes | ✅ Yes |
 | Auto-healing | ✅ Yes | ✅ Yes | ✅ Yes |
 | Cloud native | ✅ Yes | ✅ Yes | ⚠️ Partial |
+| Security features | ✅ Comprehensive | ✅ Extensive | ⚠️ Basic |
+| Network-aware scheduling | ✅ Yes | ✅ Yes | ❌ No |
 
 ## 🧩 Architecture
 
@@ -174,7 +202,13 @@ Hivemind follows a clean, modular architecture:
 - **Service Discovery** - DNS-based service discovery and routing
 - **Storage Manager** - Volume and persistence handling
 - **Container Manager** - Container runtime integration
+- **Network Manager** - Container networking and overlay network
+- **Scheduler** - Network-aware container placement
+- **Health Monitor** - Container and node health monitoring
+- **Security Manager** - Security features including scanning, RBAC, and secrets
 - **Web UI** - Dashboard and visual management
+
+For more details, see [ARCHITECTURE.md](ARCHITECTURE.md).
 
 ## 📦 Features in Detail
 
@@ -231,6 +265,28 @@ Seamless communication between containers across nodes:
 - **Service affinity/anti-affinity** - Place related services together or apart based on rules
 - **Dynamic rebalancing** - Move containers to optimize network performance
 
+### Health Monitoring
+
+Comprehensive health monitoring and auto-healing:
+
+- **Container health checks** - Monitor container health with customizable checks
+- **Node health monitoring** - Track node health and resource usage
+- **Automatic container restart** - Restart unhealthy containers
+- **Failure detection** - Detect and respond to node failures
+- **Health metrics** - Track health metrics over time
+- **Alerting** - Generate alerts for health issues
+
+### Security Features
+
+Comprehensive security features to protect your workloads:
+
+- **Container scanning** - Scan container images for vulnerabilities
+- **Network policies** - Control traffic flow between containers
+- **Role-Based Access Control (RBAC)** - Control access to resources
+- **Secret management** - Securely store and distribute sensitive information
+- **Audit logging** - Track all security-related events
+- **Encryption** - Encrypt sensitive data and network traffic
+
 ## 🛠️ Development
 
 ### Prerequisites
@@ -264,21 +320,17 @@ cargo run -- web --port 3000
 cargo test
 ```
 
-### Project Structure
+For more details, see [developer_guide.md](developer_guide.md).
 
-- `src/app.rs` - Application & container management
-- `src/service_discovery.rs` - Service discovery & DNS
-- `src/storage.rs` - Persistence layer
-- `src/node.rs` - Node & cluster management
-- `src/membership.rs` - SWIM-based node membership protocol
-- `src/network.rs` - Container networking & overlay network
-- `src/scheduler.rs` - Container scheduler
-- `src/web.rs` - Web UI & dashboard
-- `src/main.rs` - CLI & entry point
-- `docs/node_membership_protocol.md` - Documentation for the node membership protocol
-- `docs/container_networking.md` - Documentation for the container networking system
-- `docs/container_networking_scheduler.md` - Documentation for the network-aware container scheduler
-- `docs/service_discovery.md` - Documentation for the service discovery mechanism
+## 📚 Documentation
+
+- [Installation Guide](docs/installation_guide.md) - How to install Hivemind
+- [User Guide](docs/user_guide.md) - How to use Hivemind
+- [Administration Guide](docs/administration_guide.md) - How to administer Hivemind
+- [Troubleshooting Guide](docs/troubleshooting_guide.md) - How to troubleshoot issues
+- [Architecture](ARCHITECTURE.md) - System design and components
+- [Developer Guide](developer_guide.md) - How to develop for Hivemind
+- [Component Documentation](docs/) - Documentation for individual components
 
 ## 📜 License
 

@@ -22,6 +22,9 @@ pub struct ServiceEndpoint {
     pub node_id: String,
     pub health_status: ServiceHealth,
     pub last_health_check: i64,
+    pub version: Option<String>,
+    pub weight: Option<u32>,
+    pub metadata: Option<HashMap<String, String>>,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -95,6 +98,26 @@ pub enum LoadBalancingStrategy {
     IPHash,
 }
 
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct RoutingRule {
+    pub path_prefix: Option<String>,
+    pub headers: Option<HashMap<String, String>>,
+    pub service_name: String,
+    pub weight: Option<u32>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct TrafficSplitConfig {
+    pub service_name: String,
+    pub splits: Vec<TrafficSplit>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct TrafficSplit {
+    pub version: String,
+    pub weight: u32,
+}
+
 #[derive(Clone, Debug)]
 pub struct ServiceDiscovery {
     services: Arc<Mutex<HashMap<String, Vec<ServiceEndpoint>>>>,
@@ -104,6 +127,8 @@ pub struct ServiceDiscovery {
     load_balancing_strategy: Arc<Mutex<HashMap<String, LoadBalancingStrategy>>>,
     endpoint_stats: Arc<Mutex<HashMap<String, EndpointStats>>>,
     network_manager: Option<Arc<NetworkManager>>,
+    routing_rules: Arc<Mutex<Vec<RoutingRule>>>,
+    traffic_splits: Arc<Mutex<HashMap<String, TrafficSplitConfig>>>,
 }
 
 #[derive(Clone, Debug)]
@@ -125,6 +150,8 @@ impl ServiceDiscovery {
             load_balancing_strategy: Arc::new(Mutex::new(HashMap::new())),
             endpoint_stats: Arc::new(Mutex::new(HashMap::new())),
             network_manager: None,
+            routing_rules: Arc::new(Mutex::new(Vec::new())),
+            traffic_splits: Arc::new(Mutex::new(HashMap::new())),
         }
     }
     
@@ -329,6 +356,9 @@ impl ServiceDiscovery {
             node_id: node_id.to_string(),
             health_status: ServiceHealth::Unknown,
             last_health_check: now,
+            version: None,
+            weight: None,
+            metadata: None,
         };
 
         let mut services = self.services.lock().await;
@@ -518,35 +548,26 @@ impl ServiceDiscovery {
         
         println!("DNS query for domain: {} (type: {:?})", domain, query_type);
         
-        // Only handle A record queries for now
-        if query_type != RecordType::A {
-            return Self::create_error_response(ResponseCode::NotImp);
-        }
-        
         // Look up the domain in our services
         let services_lock = services.lock().await;
         let mut found_service = false;
+        let mut records = Vec::new();
         
-        for (_, endpoints) in services_lock.iter() {
+        // Find service by domain
+        let mut service_name = String::new();
+        let mut service_endpoints = Vec::new();
+        
+        for (name, endpoints) in services_lock.iter() {
             for endpoint in endpoints {
                 if endpoint.domain == domain {
                     found_service = true;
-                    
-                    // Create an A record for this endpoint
-                    if let Ok(ip) = Ipv4Addr::from_str(&endpoint.ip_address) {
-                        let mut records = Vec::new();
-                        
-                        let rdata = RData::A(trust_dns_proto::rr::rdata::A(ip));
-                        let record = Record::from_rdata(query_name.clone(), 300, rdata);
-                        records.push(record);
-                        
-                        // Build the response with the records
-                        let mut response = trust_dns_proto::op::Message::new();
-                        response.set_header(Header::response_from_request(query.header()));
-                        response.add_answers(records);
-                        return response;
-                    }
+                    service_name = name.clone();
+                    service_endpoints = endpoints.clone();
+                    break;
                 }
+            }
+            if found_service {
+                break;
             }
         }
         
@@ -555,8 +576,89 @@ impl ServiceDiscovery {
             return Self::create_error_response(ResponseCode::NXDomain);
         }
         
-        // If we get here, we found the service but couldn't create a valid A record
-        Self::create_error_response(ResponseCode::ServFail)
+        // Filter to only healthy endpoints if we have any
+        let healthy_endpoints: Vec<&ServiceEndpoint> = service_endpoints
+            .iter()
+            .filter(|e| e.health_status == ServiceHealth::Healthy)
+            .collect();
+        
+        // If no healthy endpoints, use all endpoints
+        let endpoints_to_use = if healthy_endpoints.is_empty() {
+            service_endpoints.iter().collect::<Vec<&ServiceEndpoint>>()
+        } else {
+            healthy_endpoints
+        };
+        
+        // Handle different record types
+        match query_type {
+            RecordType::A => {
+                // Create A records for all endpoints
+                for endpoint in endpoints_to_use {
+                    if let Ok(ip) = Ipv4Addr::from_str(&endpoint.ip_address) {
+                        let rdata = RData::A(trust_dns_proto::rr::rdata::A(ip));
+                        let record = Record::from_rdata(query_name.clone(), 300, rdata);
+                        records.push(record);
+                    }
+                }
+            },
+            RecordType::SRV => {
+                // Create SRV records for all endpoints
+                for (i, endpoint) in endpoints_to_use.iter().enumerate() {
+                    if let Ok(ip) = Ipv4Addr::from_str(&endpoint.ip_address) {
+                        // Create a target name for this endpoint
+                        let target_name = trust_dns_proto::rr::Name::from_str(
+                            &format!("{}-{}.{}", service_name, i, domain)
+                        ).unwrap_or_else(|_| query_name.clone());
+                        
+                        // Create the SRV record
+                        let rdata = RData::SRV(trust_dns_proto::rr::rdata::SRV::new(
+                            0, // priority
+                            10, // weight
+                            endpoint.port,
+                            target_name.clone(),
+                        ));
+                        let srv_record = Record::from_rdata(query_name.clone(), 300, rdata);
+                        records.push(srv_record);
+                        
+                        // Also add an A record for the target
+                        let a_rdata = RData::A(trust_dns_proto::rr::rdata::A(ip));
+                        let a_record = Record::from_rdata(target_name, 300, a_rdata);
+                        records.push(a_record);
+                    }
+                }
+            },
+            RecordType::TXT => {
+                // Create TXT record with service metadata
+                let mut txt_data = Vec::new();
+                
+                // Add service name
+                txt_data.push(format!("service={}", service_name).into_bytes());
+                
+                // Add endpoint count
+                txt_data.push(format!("endpoints={}", endpoints_to_use.len()).into_bytes());
+                
+                // Add health information
+                let healthy_count = healthy_endpoints.len();
+                txt_data.push(format!("healthy={}", healthy_count).into_bytes());
+                
+                let rdata = RData::TXT(trust_dns_proto::rr::rdata::TXT::new(txt_data));
+                let record = Record::from_rdata(query_name.clone(), 300, rdata);
+                records.push(record);
+            },
+            _ => {
+                // Unsupported record type
+                return Self::create_error_response(ResponseCode::NotImp);
+            }
+        }
+        
+        if records.is_empty() {
+            // No valid records could be created
+            return Self::create_error_response(ResponseCode::ServFail);
+        }
+        
+        // Build the response with the records
+        response.add_answers(records);
+        response
     }
     
     // Create an error response
@@ -591,9 +693,11 @@ impl ServiceDiscovery {
         // Clone necessary data for the proxy server task
         let services = self.services.clone();
         let proxy_port = self.proxy_port;
+        let routing_rules = self.routing_rules.clone();
+        let traffic_splits = self.traffic_splits.clone();
 
         tokio::spawn(async move {
-            if let Err(e) = Self::run_proxy_server(proxy_port, services).await {
+            if let Err(e) = Self::run_proxy_server(proxy_port, services, routing_rules, traffic_splits).await {
                 eprintln!("Proxy server error: {}", e);
             }
         });
@@ -602,10 +706,289 @@ impl ServiceDiscovery {
     }
 
     async fn run_proxy_server(
-        _proxy_port: u16,
-        _services: Arc<Mutex<HashMap<String, Vec<ServiceEndpoint>>>>,
+        proxy_port: u16,
+        services: Arc<Mutex<HashMap<String, Vec<ServiceEndpoint>>>>,
+        routing_rules: Arc<Mutex<Vec<RoutingRule>>>,
+        traffic_splits: Arc<Mutex<HashMap<String, TrafficSplitConfig>>>,
     ) -> Result<()> {
-        // TODO: Implement proxy server logic
+        use hyper::service::{make_service_fn, service_fn};
+        use hyper::{Body, Client, Request, Response, Server, StatusCode};
+        use std::convert::Infallible;
+        use std::net::SocketAddr;
+        use std::sync::Arc as StdArc;
+        
+        // Create a client for forwarding requests
+        let client = Client::new();
+        let services_arc = StdArc::new(services);
+        
+        // Create a service function that will handle incoming requests
+        let make_svc = make_service_fn(move |_conn| {
+            let services = services_arc.clone();
+            let client = client.clone();
+            
+            async move {
+                Ok::<_, Infallible>(service_fn(move |req: Request<Body>| {
+                    let services = services.clone();
+                    let client = client.clone();
+                    
+                    async move {
+                        // Extract the host from the request
+                        let host = match req.headers().get(hyper::header::HOST) {
+                            Some(host) => match host.to_str() {
+                                Ok(host) => host.split(':').next().unwrap_or("").to_string(),
+                                Err(_) => return Ok(Response::builder()
+                                    .status(StatusCode::BAD_REQUEST)
+                                    .body(Body::from("Invalid Host header"))
+                                    .unwrap()),
+                            },
+                            None => return Ok(Response::builder()
+                                .status(StatusCode::BAD_REQUEST)
+                                .body(Body::from("Missing Host header"))
+                                .unwrap()),
+                        };
+                        
+                        // Get the path for path-based routing
+                        let path = req.uri().path();
+                        
+                        // Look up the service by domain
+                        let services_lock = services.lock().await;
+                        let routing_rules_lock = routing_rules.lock().await;
+                        let traffic_splits_lock = traffic_splits.lock().await;
+                        
+                        // Get the routing rules and traffic splits
+                        let routing_rules_vec = routing_rules_lock.clone();
+                        let traffic_splits_map = traffic_splits_lock.clone();
+                        
+                        let mut found_service = false;
+                        let mut service_name = String::new();
+                        let mut service_endpoints = Vec::new();
+                        
+                        // First, try to find a service by domain
+                        for (name, endpoints) in services_lock.iter() {
+                            for endpoint in endpoints {
+                                if endpoint.domain == host {
+                                    found_service = true;
+                                    service_name = name.clone();
+                                    service_endpoints = endpoints.clone();
+                                    break;
+                                }
+                            }
+                            if found_service {
+                                break;
+                            }
+                        }
+                        
+                        // If no service found by domain, try path-based routing
+                        if !found_service {
+                            for rule in routing_rules_lock.iter() {
+                                if let Some(path_prefix) = &rule.path_prefix {
+                                    if path.starts_with(path_prefix) {
+                                        // Found a matching path-based rule
+                                        if let Some(endpoints) = services_lock.get(&rule.service_name) {
+                                            found_service = true;
+                                            service_name = rule.service_name.clone();
+                                            service_endpoints = endpoints.clone();
+                                            break;
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                        
+                        // If still no service found, try header-based routing
+                        if !found_service {
+                            for rule in routing_rules_lock.iter() {
+                                if let Some(headers) = &rule.headers {
+                                    let mut headers_match = true;
+                                    
+                                    for (header_name, header_value) in headers {
+                                        if let Some(req_header) = req.headers().get(header_name) {
+                                            if let Ok(req_value) = req_header.to_str() {
+                                                if req_value != header_value {
+                                                    headers_match = false;
+                                                    break;
+                                                }
+                                            } else {
+                                                headers_match = false;
+                                                break;
+                                            }
+                                        } else {
+                                            headers_match = false;
+                                            break;
+                                        }
+                                    }
+                                    
+                                    if headers_match {
+                                        // Found a matching header-based rule
+                                        if let Some(endpoints) = services_lock.get(&rule.service_name) {
+                                            found_service = true;
+                                            service_name = rule.service_name.clone();
+                                            service_endpoints = endpoints.clone();
+                                            break;
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                        
+                        if !found_service || service_endpoints.is_empty() {
+                            return Ok(Response::builder()
+                                .status(StatusCode::NOT_FOUND)
+                                .body(Body::from("Service not found"))
+                                .unwrap());
+                        }
+                        
+                        // Filter to only healthy endpoints
+                        let mut healthy_endpoints: Vec<&ServiceEndpoint> = service_endpoints
+                            .iter()
+                            .filter(|e| e.health_status == ServiceHealth::Healthy)
+                            .collect();
+                        
+                        // If no healthy endpoints, return error
+                        if healthy_endpoints.is_empty() {
+                            return Ok(Response::builder()
+                                .status(StatusCode::SERVICE_UNAVAILABLE)
+                                .body(Body::from("No healthy endpoints available"))
+                                .unwrap());
+                        }
+                        
+                        // Check for traffic splitting configuration
+                        let mut selected_version: Option<String> = None;
+                        
+                        // Apply traffic splitting if configured
+                        if let Some(traffic_split_config) = traffic_splits_map.get(&service_name) {
+                            // Get a random number for weighted selection
+                            let now = SystemTime::now()
+                                .duration_since(UNIX_EPOCH)
+                                .unwrap()
+                                .subsec_nanos();
+                            
+                            // Calculate total weight
+                            let total_weight: u32 = traffic_split_config.splits.iter()
+                                .map(|s| s.weight)
+                                .sum();
+                            
+                            if total_weight > 0 {
+                                let mut random_val = (now as u32) % total_weight;
+                                
+                                // Select version based on weight
+                                for split in &traffic_split_config.splits {
+                                    if random_val < split.weight {
+                                        selected_version = Some(split.version.clone());
+                                        break;
+                                    }
+                                    random_val -= split.weight;
+                                }
+                                
+                                // Filter endpoints by selected version
+                                if let Some(version) = &selected_version {
+                                    let version_filtered: Vec<&ServiceEndpoint> = healthy_endpoints
+                                        .iter()
+                                        .filter(|e| e.version.as_ref().map_or(false, |v| v == version))
+                                        .cloned()
+                                        .collect();
+                                    
+                                    // Only use version filtered endpoints if we found some
+                                    if !version_filtered.is_empty() {
+                                        healthy_endpoints = version_filtered;
+                                    }
+                                }
+                            }
+                        }
+                        
+                        // Use load balancing to select an endpoint
+                        let now = SystemTime::now()
+                            .duration_since(UNIX_EPOCH)
+                            .unwrap();
+                        
+                        // Get client IP for IP hash if available
+                        let client_ip = req.headers()
+                            .get("X-Forwarded-For")
+                            .and_then(|h| h.to_str().ok())
+                            .or_else(|| {
+                                req.extensions()
+                                    .get::<std::net::SocketAddr>()
+                                    .map(|addr| addr.ip().to_string().as_str())
+                                    .ok()
+                            });
+                        
+                        // Get session ID for session affinity if available
+                        let session_id = req.headers()
+                            .get("Cookie")
+                            .and_then(|c| c.to_str().ok())
+                            .and_then(|cookie| {
+                                cookie.split(';')
+                                    .find(|part| part.trim().starts_with("session="))
+                                    .map(|s| s.trim().trim_start_matches("session="))
+                            });
+                        
+                        // Simple round-robin selection for now
+                        // In a real implementation, this would use the load balancing strategies
+                        let selected = healthy_endpoints[now.subsec_nanos() as usize % healthy_endpoints.len()];
+                        
+                        // Create the forwarding URI
+                        let uri = format!("http://{}:{}{}",
+                            selected.ip_address,
+                            selected.port,
+                            req.uri().path_and_query().map_or("", |p| p.as_str())
+                        );
+                        
+                        // Create a new request with the same body but new URI
+                        let mut new_req = Request::builder()
+                            .method(req.method().clone())
+                            .uri(uri);
+                        
+                        // Copy headers
+                        for (name, value) in req.headers() {
+                            if name != hyper::header::HOST {
+                                new_req = new_req.header(name, value);
+                            }
+                        }
+                        
+                        // Add routing metadata headers
+                        if let Some(version) = &selected_version {
+                            new_req = new_req.header("X-Service-Version", version);
+                        }
+                        
+                        // Add tracing headers if available
+                        if let Some(trace_id) = req.headers().get("X-Trace-ID") {
+                            new_req = new_req.header("X-Trace-ID", trace_id);
+                        }
+                        
+                        // Add service mesh headers if needed
+                        new_req = new_req.header("X-Forwarded-For", host);
+                        new_req = new_req.header("X-Forwarded-Proto", "http");
+                        
+                        // Forward the request
+                        match new_req.body(req.into_body()) {
+                            Ok(new_req) => match client.request(new_req).await {
+                                Ok(res) => Ok(res),
+                                Err(_) => Ok(Response::builder()
+                                    .status(StatusCode::BAD_GATEWAY)
+                                    .body(Body::from("Error forwarding request"))
+                                    .unwrap()),
+                            },
+                            Err(_) => Ok(Response::builder()
+                                .status(StatusCode::INTERNAL_SERVER_ERROR)
+                                .body(Body::from("Error creating request"))
+                                .unwrap()),
+                        }
+                    }
+                }))
+            }
+        });
+        
+        // Create the server
+        let addr = SocketAddr::from(([0, 0, 0, 0], proxy_port));
+        let server = Server::bind(&addr).serve(make_svc);
+        
+        println!("Proxy server listening on http://{}", addr);
+        
+        // Run the server
+        if let Err(e) = server.await {
+            eprintln!("Proxy server error: {}", e);
+        }
+        
         Ok(())
     }
 
@@ -749,6 +1132,15 @@ impl ServiceDiscovery {
     
     // Get a service endpoint using the configured load balancing strategy
     pub async fn get_service_endpoint(&self, service_name: &str) -> Option<ServiceEndpoint> {
+        self.get_service_endpoint_with_options(service_name, None, None).await
+    }
+    
+    pub async fn get_service_endpoint_with_options(
+        &self,
+        service_name: &str,
+        client_ip: Option<&str>,
+        session_id: Option<&str>
+    ) -> Option<ServiceEndpoint> {
         let services = self.services.lock().await;
         let load_balancing_strategies = self.load_balancing_strategy.lock().await;
         let mut endpoint_stats = self.endpoint_stats.lock().await;
@@ -761,6 +1153,7 @@ impl ServiceDiscovery {
                 .collect();
             
             if healthy_endpoints.is_empty() {
+                // Circuit breaker pattern - if no healthy endpoints, return None
                 return None;
             }
             
@@ -782,14 +1175,31 @@ impl ServiceDiscovery {
                     Self::select_random(&healthy_endpoints)
                 }
                 LoadBalancingStrategy::WeightedRoundRobin => {
-                    // For now, fall back to regular round robin
-                    Self::select_round_robin(&healthy_endpoints, service_name, &mut endpoint_stats)
+                    Self::select_weighted_round_robin(&healthy_endpoints, service_name, &mut endpoint_stats)
                 }
                 LoadBalancingStrategy::IPHash => {
-                    // For now, fall back to regular round robin
-                    Self::select_round_robin(&healthy_endpoints, service_name, &mut endpoint_stats)
+                    if let Some(ip) = client_ip {
+                        Self::select_ip_hash(&healthy_endpoints, ip)
+                    } else if let Some(session) = session_id {
+                        // Fall back to session-based hashing if IP not available
+                        Self::select_session_affinity(&healthy_endpoints, session)
+                    } else {
+                        // Fall back to round robin if no IP or session ID
+                        Self::select_round_robin(&healthy_endpoints, service_name, &mut endpoint_stats)
+                    }
                 }
             };
+            
+            // Update stats for the selected endpoint
+            let stats_key = format!("{}_{}", service_name, selected_endpoint.ip_address);
+            if let Some(stats) = endpoint_stats.get_mut(&stats_key) {
+                stats.active_connections += 1;
+                stats.total_requests += 1;
+                stats.last_selected = SystemTime::now()
+                    .duration_since(UNIX_EPOCH)
+                    .unwrap()
+                    .as_secs() as i64;
+            }
             
             return Some(selected_endpoint.clone());
         }
@@ -803,7 +1213,7 @@ impl ServiceDiscovery {
         service_name: &str,
         endpoint_stats: &mut HashMap<String, EndpointStats>,
     ) -> &'a ServiceEndpoint {
-        let _now = SystemTime::now()
+        let now = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .unwrap()
             .as_secs() as i64;
@@ -828,6 +1238,7 @@ impl ServiceDiscovery {
         if let Some(stats) = endpoint_stats.get_mut(&stats_key) {
             stats.last_selected = next_index as i64;
             stats.total_requests += 1;
+            stats.last_selected = now;
         }
         
         endpoints[next_index]
@@ -887,6 +1298,280 @@ impl ServiceDiscovery {
         endpoints[index]
     }
     
+    // Service mesh integration
+    
+    #[derive(Clone, Debug, Serialize, Deserialize)]
+    pub struct ServiceMeshConfig {
+        pub enabled: bool,
+        pub mtls_enabled: bool,
+        pub tracing_enabled: bool,
+        pub retry_policy: Option<RetryPolicy>,
+        pub timeout_ms: Option<u64>,
+        pub circuit_breaker: Option<CircuitBreakerPolicy>,
+    }
+    
+    #[derive(Clone, Debug, Serialize, Deserialize)]
+    pub struct RetryPolicy {
+        pub max_retries: u32,
+        pub retry_on: Vec<String>, // e.g., "5xx", "connect-failure"
+        pub timeout_ms: u64,
+    }
+    
+    #[derive(Clone, Debug, Serialize, Deserialize)]
+    pub struct CircuitBreakerPolicy {
+        pub max_connections: u32,
+        pub max_pending_requests: u32,
+        pub max_requests: u32,
+        pub max_retries: u32,
+        pub consecutive_errors_threshold: u32,
+        pub interval_ms: u64,
+        pub base_ejection_time_ms: u64,
+    }
+    
+    // Configure service mesh for a service
+    pub async fn configure_service_mesh(&self, service_name: &str, config: ServiceMeshConfig) -> Result<()> {
+        // In a real implementation, this would store the configuration and apply it
+        // For now, we'll just log that we're configuring the service mesh
+        println!("Configuring service mesh for service {}: {:?}", service_name, config);
+        
+        // If we have a network manager, update the network configuration
+        if let Some(network_manager) = &self.network_manager {
+            if config.enabled {
+                println!("Enabling service mesh for service {} with network integration", service_name);
+                // In a real implementation, this would configure the network for service mesh
+            }
+        }
+        
+        Ok(())
+    }
+    
+    // Get service mesh metrics
+    pub async fn get_service_mesh_metrics(&self, service_name: &str) -> Result<HashMap<String, f64>> {
+        // In a real implementation, this would collect metrics from the service mesh
+        // For now, we'll just return some mock metrics
+        let mut metrics = HashMap::new();
+        metrics.insert("request_count".to_string(), 100.0);
+        metrics.insert("error_rate".to_string(), 0.02);
+        metrics.insert("latency_p50_ms".to_string(), 10.0);
+        metrics.insert("latency_p90_ms".to_string(), 25.0);
+        metrics.insert("latency_p99_ms".to_string(), 50.0);
+        
+        println!("Retrieved service mesh metrics for service {}", service_name);
+        Ok(metrics)
+    }
+    
+    // Add a routing rule
+    pub async fn add_routing_rule(&self, rule: RoutingRule) -> Result<()> {
+        let mut routing_rules = self.routing_rules.lock().await;
+        routing_rules.push(rule.clone());
+        println!("Added routing rule for service {}", rule.service_name);
+        Ok(())
+    }
+    
+    // Remove a routing rule
+    pub async fn remove_routing_rule(&self, service_name: &str, path_prefix: Option<&str>) -> Result<()> {
+        let mut routing_rules = self.routing_rules.lock().await;
+        
+        let initial_len = routing_rules.len();
+        
+        routing_rules.retain(|rule| {
+            if rule.service_name != service_name {
+                return true;
+            }
+            
+            if let Some(prefix) = path_prefix {
+                if let Some(rule_prefix) = &rule.path_prefix {
+                    return rule_prefix != prefix;
+                }
+            }
+            
+            false
+        });
+        
+        let removed = initial_len - routing_rules.len();
+        println!("Removed {} routing rules for service {}", removed, service_name);
+        
+        Ok(())
+    }
+    
+    // List all routing rules
+    pub async fn list_routing_rules(&self) -> Vec<RoutingRule> {
+        let routing_rules = self.routing_rules.lock().await;
+        routing_rules.clone()
+    }
+    
+    // Configure traffic splitting for canary deployments
+    pub async fn configure_traffic_split(&self, config: TrafficSplitConfig) -> Result<()> {
+        // Validate that weights sum to 100
+        let total_weight: u32 = config.splits.iter().map(|s| s.weight).sum();
+        if total_weight != 100 {
+            return Err(anyhow::anyhow!("Traffic split weights must sum to 100, got {}", total_weight));
+        }
+        
+        // Store the configuration
+        let mut traffic_splits = self.traffic_splits.lock().await;
+        traffic_splits.insert(config.service_name.clone(), config.clone());
+        
+        println!("Configured traffic split for service {}", config.service_name);
+        Ok(())
+    }
+    
+    // Remove traffic splitting configuration
+    pub async fn remove_traffic_split(&self, service_name: &str) -> Result<()> {
+        let mut traffic_splits = self.traffic_splits.lock().await;
+        if traffic_splits.remove(service_name).is_some() {
+            println!("Removed traffic split for service {}", service_name);
+        }
+        Ok(())
+    }
+    
+    // Get traffic split configuration
+    pub async fn get_traffic_split(&self, service_name: &str) -> Option<TrafficSplitConfig> {
+        let traffic_splits = self.traffic_splits.lock().await;
+        traffic_splits.get(service_name).cloned()
+    }
+    
+    // Register a service endpoint with version information
+    pub async fn register_service_with_version(
+        &self,
+        service_config: &ServiceConfig,
+        node_id: &str,
+        ip_address: &str,
+        port: u16,
+        version: &str,
+        metadata: Option<HashMap<String, String>>,
+    ) -> Result<()> {
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs() as i64;
+
+        let endpoint = ServiceEndpoint {
+            service_name: service_config.name.clone(),
+            domain: service_config.domain.clone(),
+            ip_address: ip_address.to_string(),
+            port,
+            node_id: node_id.to_string(),
+            health_status: ServiceHealth::Unknown,
+            last_health_check: now,
+            version: Some(version.to_string()),
+            weight: None,
+            metadata,
+        };
+
+        let mut services = self.services.lock().await;
+
+        if let Some(endpoints) = services.get_mut(&service_config.name) {
+            // Check if this endpoint already exists
+            let exists = endpoints
+                .iter()
+                .any(|e| e.node_id == node_id && e.ip_address == ip_address && e.port == port);
+
+            if !exists {
+                endpoints.push(endpoint);
+                println!(
+                    "Registered new endpoint for service {} (version {}): {}:{}",
+                    service_config.name, version, ip_address, port
+                );
+            }
+        } else {
+            // First endpoint for this service
+            services.insert(service_config.name.clone(), vec![endpoint]);
+            println!(
+                "Registered new service {} (version {}) with endpoint {}:{}",
+                service_config.name, version, ip_address, port
+            );
+        }
+
+        Ok(())
+    }
+    // Weighted round robin selection based on container metrics
+    fn select_weighted_round_robin<'a>(
+        endpoints: &[&'a ServiceEndpoint],
+        service_name: &str,
+        endpoint_stats: &mut HashMap<String, EndpointStats>,
+    ) -> &'a ServiceEndpoint {
+        // If we have fewer than 2 endpoints, just use the first one
+        if endpoints.len() < 2 {
+            return endpoints[0];
+        }
+        
+        // Calculate weights based on response time (lower is better)
+        let mut weights = Vec::with_capacity(endpoints.len());
+        let mut total_weight = 0;
+        
+        for endpoint in endpoints {
+            let stats_key = format!("{}_{}", service_name, endpoint.ip_address);
+            let avg_response_time = endpoint_stats
+                .entry(stats_key.clone())
+                .or_insert(EndpointStats {
+                    active_connections: 0,
+                    total_requests: 0,
+                    failed_requests: 0,
+                    avg_response_time_ms: 100.0, // Default response time
+                    last_selected: 0,
+                })
+                .avg_response_time_ms;
+            
+            // Calculate weight - inverse of response time (faster gets higher weight)
+            // Add 1 to avoid division by zero and cap at 1000ms for very slow endpoints
+            let response_time = avg_response_time.min(1000.0).max(1.0);
+            let weight = (1000.0 / response_time) as u32;
+            
+            weights.push(weight);
+            total_weight += weight;
+        }
+        
+        // If all weights are 0, fall back to random selection
+        if total_weight == 0 {
+            return Self::select_random(endpoints);
+        }
+        
+        // Get a random value between 0 and total_weight
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .subsec_nanos();
+        let mut random_val = (now as u32) % total_weight;
+        
+        // Find the endpoint that corresponds to this value
+        for (i, weight) in weights.iter().enumerate() {
+            if random_val < *weight {
+                return endpoints[i];
+            }
+            random_val -= *weight;
+        }
+        
+        // Fallback (should never happen)
+        endpoints[0]
+    }
+    
+    // IP hash selection for session affinity
+    fn select_ip_hash<'a>(endpoints: &[&'a ServiceEndpoint], client_ip: &str) -> &'a ServiceEndpoint {
+        // Simple hash function for the IP address
+        let mut hash = 0u32;
+        for byte in client_ip.bytes() {
+            hash = hash.wrapping_mul(31).wrapping_add(byte as u32);
+        }
+        
+        // Use the hash to select an endpoint
+        let index = (hash as usize) % endpoints.len();
+        endpoints[index]
+    }
+    
+    // Session affinity based on session ID
+    fn select_session_affinity<'a>(endpoints: &[&'a ServiceEndpoint], session_id: &str) -> &'a ServiceEndpoint {
+        // Simple hash function for the session ID
+        let mut hash = 0u32;
+        for byte in session_id.bytes() {
+            hash = hash.wrapping_mul(31).wrapping_add(byte as u32);
+        }
+        
+        // Use the hash to select an endpoint
+        let index = (hash as usize) % endpoints.len();
+        endpoints[index]
+    }
+    
     // Record connection completion
     pub async fn record_connection_completion(
         &self,
@@ -907,12 +1592,37 @@ impl ServiceDiscovery {
             // Update failed requests if needed
             if !success {
                 stats.failed_requests += 1;
+                
+                // Check if we need to implement circuit breaker
+                let failure_rate = stats.failed_requests as f64 / stats.total_requests as f64;
+                if failure_rate > 0.5 && stats.total_requests > 10 {
+                    // Mark this endpoint as unhealthy in the service registry
+                    self.mark_endpoint_unhealthy(service_name, ip_address).await?;
+                }
             }
             
             // Update average response time
             let total_requests = stats.total_requests as f64;
-            stats.avg_response_time_ms = 
+            stats.avg_response_time_ms =
                 (stats.avg_response_time_ms * (total_requests - 1.0) + response_time_ms) / total_requests;
+        }
+        
+        Ok(())
+    }
+    
+    // Mark an endpoint as unhealthy (circuit breaker implementation)
+    async fn mark_endpoint_unhealthy(&self, service_name: &str, ip_address: &str) -> Result<()> {
+        let mut services = self.services.lock().await;
+        
+        if let Some(endpoints) = services.get_mut(service_name) {
+            for endpoint in endpoints.iter_mut() {
+                if endpoint.ip_address == ip_address {
+                    endpoint.health_status = ServiceHealth::Unhealthy;
+                    println!("Circuit breaker: Marked endpoint {}:{} as unhealthy due to high failure rate",
+                        ip_address, endpoint.port);
+                    break;
+                }
+            }
         }
         
         Ok(())
@@ -922,5 +1632,17 @@ impl ServiceDiscovery {
     pub async fn health_check_services(&self) -> Result<()> {
         // This now just delegates to the more sophisticated health check system
         Self::run_health_checks(&self.services, &self.health_check_config).await
+    }
+    
+    // Helper method to get routing rules for the proxy server
+    async fn get_routing_rules_for_proxy(&self) -> Vec<RoutingRule> {
+        let routing_rules = self.routing_rules.lock().await;
+        routing_rules.clone()
+    }
+    
+    // Helper method to get traffic split config for the proxy server
+    async fn get_traffic_split_config_for_proxy(&self, service_name: &str) -> Option<TrafficSplitConfig> {
+        let traffic_splits = self.traffic_splits.lock().await;
+        traffic_splits.get(service_name).cloned()
     }
 }

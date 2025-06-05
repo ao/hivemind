@@ -10,6 +10,7 @@ use hivemind::containerd_manager::Container;
 use hivemind::health_monitor::HealthMonitor;
 use hivemind::node::NodeManager;
 use hivemind::network::NetworkManager;
+use hivemind::security::SecurityManager;
 use hivemind::service_discovery::{ServiceDiscovery, ServiceEndpoint};
 use hivemind::storage::StorageManager;
 use hivemind::web;
@@ -300,6 +301,16 @@ async fn main() -> Result<()> {
                 println!("Health monitor started successfully");
             }
 
+            // Initialize security manager
+            let security_manager = Arc::new(SecurityManager::new());
+            
+            // Initialize security components
+            if let Err(e) = security_manager.initialize().await {
+                eprintln!("Failed to initialize security manager: {}", e);
+            } else {
+                println!("Security manager initialized successfully");
+            }
+
             // Create AppState for sharing between web and API
             let app_state = AppState {
                 node_manager: node_manager.clone(),
@@ -307,6 +318,7 @@ async fn main() -> Result<()> {
                 service_discovery: service_discovery.clone(),
                 network_manager,
                 health_monitor: Some(health_monitor.clone()),
+                security_manager: Some(security_manager.clone()),
             };
 
             // Start the web interface in a separate task
@@ -350,6 +362,7 @@ async fn main() -> Result<()> {
                 service_discovery,
                 network_manager: None, // No network manager for web-only mode
                 health_monitor: None, // No health monitor for web-only mode
+                security_manager: None, // No security manager for web-only mode
             };
 
             // Start the web server
@@ -414,6 +427,7 @@ async fn main() -> Result<()> {
                                 service_discovery,
                                 network_manager: Some(manager_arc),
                                 health_monitor: None,
+                                security_manager: None,
                             };
                         }
                     }
@@ -436,6 +450,7 @@ async fn main() -> Result<()> {
                 service_discovery: ServiceDiscovery::new(),
                 network_manager: None,
                 health_monitor: None,
+                security_manager: None,
             };
             match command {
                 NodeCommands::Ls => {
@@ -469,6 +484,7 @@ async fn main() -> Result<()> {
                 service_discovery,
                 network_manager: None,
                 health_monitor: None,
+                security_manager: None,
             };
 
             match command {
@@ -620,6 +636,7 @@ async fn main() -> Result<()> {
                 service_discovery: service_discovery.clone(),
                 network_manager,
                 health_monitor: None,
+                security_manager: None,
             };
 
             println!("Checking system health...");
