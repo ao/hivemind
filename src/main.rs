@@ -15,6 +15,7 @@ use hivemind::cloud::CloudManager;
 use hivemind::deployment::DeploymentManager;
 use hivemind::helm::HelmManager;
 use hivemind::observability::ObservabilityManager;
+use hivemind::scheduler::ContainerScheduler;
 use hivemind::security::SecurityManager;
 use hivemind::service_discovery::{ServiceDiscovery, ServiceEndpoint};
 use hivemind::storage::StorageManager;
@@ -105,6 +106,37 @@ enum AppCommands {
         service: Option<String>,
         #[arg(long)]
         volume: Option<Vec<String>>,
+    },
+    /// Deploy a new application with zero-downtime
+    ZeroDowntimeDeploy {
+        #[arg(long)]
+        image: String,
+        #[arg(long)]
+        name: String,
+        #[arg(long)]
+        service: Option<String>,
+        #[arg(long)]
+        batch_size: Option<u32>,
+        #[arg(long)]
+        batch_delay: Option<u64>,
+        #[arg(long)]
+        health_check_path: Option<String>,
+        #[arg(long)]
+        health_check_port: Option<u16>,
+        #[arg(long)]
+        health_check_timeout: Option<u64>,
+        #[arg(long)]
+        drain_timeout: Option<u64>,
+    },
+    /// Get the status of a deployment
+    DeploymentStatus {
+        #[arg(long)]
+        id: String,
+    },
+    /// Rollback a deployment
+    RollbackDeployment {
+        #[arg(long)]
+        id: String,
     },
     /// Scale an application
     Scale {
@@ -341,8 +373,31 @@ async fn main() -> Result<()> {
                 println!("Cloud manager initialized successfully");
             }
             
+            // Initialize container scheduler
+            let mut scheduler_instance = ContainerScheduler::new(app_manager.clone())
+                .with_node_manager(Arc::new(node_manager.clone()))
+                .with_service_discovery(Arc::new(service_discovery.clone()));
+            
+            if let Some(network_manager_ref) = &network_manager {
+                scheduler_instance = scheduler_instance.with_network_manager(network_manager_ref.clone());
+            }
+            
+            let scheduler = Arc::new(scheduler_instance);
+            
             // Initialize deployment manager
-            let deployment_manager = DeploymentManager::new();
+            let mut deployment_manager = DeploymentManager::new();
+            
+            // Initialize the deployment manager with required dependencies
+            if let Err(e) = deployment_manager.initialize(
+                Arc::new(app_manager.clone()),
+                scheduler.clone(),
+                health_monitor.clone(),
+                Arc::new(service_discovery.clone()),
+            ).await {
+                eprintln!("Failed to initialize deployment manager: {}", e);
+            } else {
+                println!("Deployment manager initialized successfully with zero-downtime support");
+            }
             
             // Initialize Helm manager
             let helm_base_dir = cli.data_dir.join("helm");
@@ -577,17 +632,43 @@ async fn main() -> Result<()> {
                 .await?
                 .with_service_discovery(service_discovery.clone());
             
+            // Initialize health monitor for zero-downtime deployments
+            let health_monitor = Arc::new(HealthMonitor::new(
+                Arc::new(app_manager.clone()),
+                Arc::new(NodeManager::new()),
+                Arc::new(service_discovery.clone()),
+            ));
+            
+            // Initialize container scheduler
+            let scheduler = Arc::new(
+                ContainerScheduler::new(app_manager.clone())
+                    .with_service_discovery(Arc::new(service_discovery.clone()))
+            );
+            
+            // Initialize deployment manager
+            let mut deployment_manager = DeploymentManager::new();
+            
+            // Initialize the deployment manager with required dependencies
+            if let Err(e) = deployment_manager.initialize(
+                Arc::new(app_manager.clone()),
+                scheduler.clone(),
+                health_monitor.clone(),
+                Arc::new(service_discovery.clone()),
+            ).await {
+                eprintln!("Failed to initialize deployment manager: {}", e);
+            }
+            
             // Create AppState for app commands
             let _app_state = AppState {
                 node_manager: NodeManager::new(),
                 app_manager: app_manager.clone(),
-                service_discovery,
+                service_discovery: service_discovery.clone(),
                 network_manager: None,
-                health_monitor: None,
+                health_monitor: Some(health_monitor.clone()),
                 security_manager: None,
                 cicd_manager: None,
                 cloud_manager: None,
-                deployment_manager: None,
+                deployment_manager: Some(Arc::new(deployment_manager)),
                 helm_manager: None,
                 observability_manager: None,
             };
@@ -709,6 +790,80 @@ async fn main() -> Result<()> {
                     println!("Restarted app {}", name);
                     Ok(())
                 }
+                AppCommands::ZeroDowntimeDeploy {
+                    image,
+                    name,
+                    service,
+                    batch_size,
+                    batch_delay,
+                    health_check_path,
+                    health_check_port,
+                    health_check_timeout,
+                    drain_timeout,
+                } => {
+                    // Get the deployment manager
+                    let deployment_manager = _app_state.deployment_manager.as_ref()
+                        .ok_or_else(|| anyhow::anyhow!("Deployment manager not available"))?;
+                    
+                    // Create deployment strategy
+                    let strategy = deployment::DeploymentStrategy::RollingUpdate {
+                        max_unavailable: 1,
+                        max_surge: 1,
+                        batch_size,
+                        batch_delay,
+                        zero_downtime: Some(true),
+                        health_check_path,
+                        health_check_port,
+                        health_check_timeout,
+                        drain_timeout,
+                    };
+                    
+                    // Create deployment
+                    let deployment_id = deployment_manager
+                        .create_deployment(&name, &image, strategy, service.as_deref())
+                        .await?;
+                    
+                    println!("Started zero-downtime deployment for {} with ID: {}", name, deployment_id);
+                    println!("Use 'hivemind app deployment-status --id {}' to check status", deployment_id);
+                    
+                    Ok(())
+                }
+                AppCommands::DeploymentStatus { id } => {
+                    // Get the deployment manager
+                    let deployment_manager = _app_state.deployment_manager.as_ref()
+                        .ok_or_else(|| anyhow::anyhow!("Deployment manager not available"))?;
+                    
+                    // Get deployment status
+                    let status = deployment_manager.get_deployment_status(&id).await?;
+                    
+                    println!("Deployment ID: {}", id);
+                    println!("Status: {}", status.status);
+                    println!("Progress: {:.1}%", status.progress * 100.0);
+                    if let Some(details) = &status.details {
+                        println!("Details: {}", details);
+                    }
+                    println!("Created: {}", status.created_at);
+                    println!("Last updated: {}", status.updated_at);
+                    println!("Completed: {}", if status.completed { "Yes" } else { "No" });
+                    if let Some(success) = status.success {
+                        println!("Success: {}", if success { "Yes" } else { "No" });
+                    }
+                    
+                    Ok(())
+                }
+                AppCommands::RollbackDeployment { id } => {
+                    // Get the deployment manager
+                    let deployment_manager = _app_state.deployment_manager.as_ref()
+                        .ok_or_else(|| anyhow::anyhow!("Deployment manager not available"))?;
+                    
+                    // Rollback deployment
+                    deployment_manager.rollback_deployment(&id).await?;
+                    
+                    println!("Rollback initiated for deployment {}", id);
+                    println!("Use 'hivemind app deployment-status --id {}' to check status", id);
+                    
+                    Ok(())
+                }
             }
         }
         Commands::Health => {
@@ -742,6 +897,11 @@ async fn main() -> Result<()> {
                 network_manager,
                 health_monitor: None,
                 security_manager: None,
+                cicd_manager: None,
+                cloud_manager: None,
+                deployment_manager: None,
+                helm_manager: None,
+                observability_manager: None,
             };
 
             println!("Checking system health...");
