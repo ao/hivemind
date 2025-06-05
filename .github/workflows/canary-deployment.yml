@@ -1,0 +1,247 @@
+name: Hivemind Canary Deployment
+
+on:
+  workflow_dispatch:
+    inputs:
+      environment:
+        description: 'Environment to deploy to'
+        required: true
+        default: 'staging'
+        type: choice
+        options:
+          - staging
+          - production
+      version:
+        description: 'Version to deploy'
+        required: true
+        default: 'latest'
+      initial_percentage:
+        description: 'Initial traffic percentage for canary'
+        required: true
+        default: '10'
+        type: choice
+        options:
+          - '5'
+          - '10'
+          - '20'
+      step_percentage:
+        description: 'Percentage increase per step'
+        required: true
+        default: '10'
+        type: choice
+        options:
+          - '5'
+          - '10'
+          - '20'
+          - '25'
+      step_interval:
+        description: 'Minutes between steps'
+        required: true
+        default: '15'
+        type: choice
+        options:
+          - '5'
+          - '10'
+          - '15'
+          - '30'
+          - '60'
+
+jobs:
+  prepare:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v3
+      
+      - name: Set up environment variables
+        id: vars
+        run: |
+          echo "ENVIRONMENT=${{ github.event.inputs.environment }}" >> $GITHUB_ENV
+          echo "VERSION=${{ github.event.inputs.version }}" >> $GITHUB_ENV
+          echo "INITIAL_PERCENTAGE=${{ github.event.inputs.initial_percentage }}" >> $GITHUB_ENV
+          echo "STEP_PERCENTAGE=${{ github.event.inputs.step_percentage }}" >> $GITHUB_ENV
+          echo "STEP_INTERVAL=${{ github.event.inputs.step_interval }}" >> $GITHUB_ENV
+          echo "TIMESTAMP=$(date +%s)" >> $GITHUB_ENV
+          echo "DEPLOYMENT_ID=canary-${{ github.event.inputs.environment }}-${{ github.event.inputs.version }}-$(date +%s)" >> $GITHUB_ENV
+      
+      - name: Validate inputs
+        run: |
+          echo "Deploying version ${{ env.VERSION }} to ${{ env.ENVIRONMENT }}"
+          echo "Initial percentage: ${{ env.INITIAL_PERCENTAGE }}%"
+          echo "Step percentage: ${{ env.STEP_PERCENTAGE }}%"
+          echo "Step interval: ${{ env.STEP_INTERVAL }} minutes"
+          echo "Deployment ID: ${{ env.DEPLOYMENT_ID }}"
+
+  deploy-canary:
+    needs: prepare
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v3
+      
+      - name: Set up environment
+        run: |
+          echo "Setting up ${{ env.ENVIRONMENT }} environment"
+      
+      - name: Deploy canary
+        run: |
+          echo "Deploying version ${{ env.VERSION }} as canary"
+          # Add deployment commands here
+          # For example:
+          # - Create new infrastructure for canary
+          # - Deploy new version of the application
+          # - Configure load balancer to route initial traffic percentage to canary
+      
+      - name: Configure initial traffic percentage
+        run: |
+          echo "Configuring initial traffic percentage: ${{ env.INITIAL_PERCENTAGE }}%"
+          # Add traffic configuration commands here
+          # For example:
+          # - Update load balancer configuration
+          # - Update service mesh configuration
+          # - Update traffic splitting rules
+      
+      - name: Verify canary deployment
+        run: |
+          echo "Verifying canary deployment"
+          # Add verification commands here
+          # For example:
+          # - Run health checks
+          # - Run smoke tests
+          # - Verify metrics
+
+  monitor-initial:
+    needs: deploy-canary
+    runs-on: ubuntu-latest
+    steps:
+      - name: Monitor initial canary deployment
+        run: |
+          echo "Monitoring initial canary deployment"
+          # Add monitoring commands here
+          # For example:
+          # - Check metrics for anomalies
+          # - Check logs for errors
+          # - Check alerts
+      
+      - name: Validate canary health
+        run: |
+          echo "Validating canary health"
+          # Add validation commands here
+          # For example:
+          # - Check health metrics
+          # - Check error rates
+          # - Check response times
+          # - Compare with baseline
+
+  increase-traffic:
+    needs: monitor-initial
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        step: [1, 2, 3, 4] # This will create 4 steps, adjust as needed
+    steps:
+      - name: Calculate traffic percentage
+        id: calculate
+        run: |
+          CURRENT_PERCENTAGE=$(( ${{ env.INITIAL_PERCENTAGE }} + ${{ env.STEP_PERCENTAGE }} * ${{ matrix.step }} ))
+          if [ $CURRENT_PERCENTAGE -gt 100 ]; then
+            CURRENT_PERCENTAGE=100
+          fi
+          echo "CURRENT_PERCENTAGE=$CURRENT_PERCENTAGE" >> $GITHUB_ENV
+      
+      - name: Wait for interval
+        run: |
+          echo "Waiting for ${{ env.STEP_INTERVAL }} minutes before increasing traffic to ${{ env.CURRENT_PERCENTAGE }}%"
+          sleep $(( ${{ env.STEP_INTERVAL }} * 60 ))
+      
+      - name: Increase traffic percentage
+        run: |
+          echo "Increasing traffic percentage to ${{ env.CURRENT_PERCENTAGE }}%"
+          # Add traffic configuration commands here
+          # For example:
+          # - Update load balancer configuration
+          # - Update service mesh configuration
+          # - Update traffic splitting rules
+      
+      - name: Monitor after traffic increase
+        run: |
+          echo "Monitoring after traffic increase to ${{ env.CURRENT_PERCENTAGE }}%"
+          # Add monitoring commands here
+          # For example:
+          # - Check metrics for anomalies
+          # - Check logs for errors
+          # - Check alerts
+      
+      - name: Validate canary health after traffic increase
+        run: |
+          echo "Validating canary health after traffic increase to ${{ env.CURRENT_PERCENTAGE }}%"
+          # Add validation commands here
+          # For example:
+          # - Check health metrics
+          # - Check error rates
+          # - Check response times
+          # - Compare with baseline
+          # - Check for regression
+
+  finalize:
+    needs: increase-traffic
+    runs-on: ubuntu-latest
+    steps:
+      - name: Promote canary to stable
+        run: |
+          echo "Promoting canary to stable"
+          # Add promotion commands here
+          # For example:
+          # - Update all instances to new version
+          # - Remove traffic splitting
+          # - Update configuration
+      
+      - name: Verify full deployment
+        run: |
+          echo "Verifying full deployment"
+          # Add verification commands here
+          # For example:
+          # - Run health checks
+          # - Run smoke tests
+          # - Verify metrics
+      
+      - name: Cleanup canary resources
+        run: |
+          echo "Cleaning up canary resources"
+          # Add cleanup commands here
+          # For example:
+          # - Remove canary-specific resources
+          # - Archive logs and metrics
+          # - Update documentation
+
+  rollback:
+    if: failure()
+    needs: [deploy-canary, monitor-initial, increase-traffic, finalize]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Rollback to previous version
+        run: |
+          echo "Rolling back to previous version"
+          # Add rollback commands here
+          # For example:
+          # - Revert traffic to previous version
+          # - Scale down canary
+          # - Notify stakeholders
+      
+      - name: Verify rollback
+        run: |
+          echo "Verifying rollback"
+          # Add verification commands here
+          # For example:
+          # - Check traffic metrics
+          # - Check error rates
+          # - Check response times
+      
+      - name: Notify rollback
+        run: |
+          echo "Notifying rollback"
+          # Add notification commands here
+          # For example:
+          # - Send email
+          # - Send Slack message
+          # - Create incident

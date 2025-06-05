@@ -446,6 +446,763 @@ Deletes an application.
 }
 ```
 
+### Deployments
+
+#### List Deployments
+
+```
+GET /deployments
+```
+
+Lists all deployments.
+
+**Query Parameters:**
+
+| Parameter | Type | Description |
+|-----------|------|-------------|
+| `status` | string | Filter by deployment status |
+| `app_name` | string | Filter by application name |
+| `limit` | integer | Maximum number of deployments to return |
+| `offset` | integer | Offset for pagination |
+
+**Response:**
+
+```json
+{
+  "success": true,
+  "data": {
+    "deployments": [
+      {
+        "id": "deployment-1",
+        "app_name": "web-server",
+        "image": "nginx:latest",
+        "replicas": 3,
+        "strategy": "blue-green",
+        "status": "completed",
+        "created_at": "2025-06-01T12:00:00Z",
+        "completed_at": "2025-06-01T12:05:00Z"
+      },
+      ...
+    ],
+    "total": 10
+  }
+}
+```
+
+#### Create Deployment
+
+```
+POST /deployments
+```
+
+Creates a new deployment.
+
+**Request Body:**
+
+```json
+{
+  "app_name": "web-server",
+  "image": "nginx:latest",
+  "replicas": 3,
+  "strategy": {
+    "type": "blue-green",
+    "verification_timeout": 60
+  },
+  "environment": {
+    "ENV_VAR1": "value1",
+    "ENV_VAR2": "value2"
+  },
+  "labels": {
+    "app": "web",
+    "environment": "production"
+  }
+}
+```
+
+**Response:**
+
+```json
+{
+  "success": true,
+  "data": {
+    "id": "deployment-1",
+    "app_name": "web-server",
+    "message": "Deployment created successfully"
+  }
+}
+```
+
+#### Get Deployment
+
+```
+GET /deployments/{id}
+```
+
+Gets detailed information about a specific deployment.
+
+**Response:**
+
+```json
+{
+  "success": true,
+  "data": {
+    "id": "deployment-1",
+    "app_name": "web-server",
+    "image": "nginx:latest",
+    "replicas": 3,
+    "strategy": {
+      "type": "blue-green",
+      "verification_timeout": 60
+    },
+    "environment": {
+      "ENV_VAR1": "value1",
+      "ENV_VAR2": "value2"
+    },
+    "labels": {
+      "app": "web",
+      "environment": "production"
+    },
+    "status": "completed",
+    "created_at": "2025-06-01T12:00:00Z",
+    "completed_at": "2025-06-01T12:05:00Z"
+  }
+}
+```
+
+#### Execute Deployment
+
+```
+POST /deployments/{id}/execute
+```
+
+Executes a deployment.
+
+**Response:**
+
+```json
+{
+  "success": true,
+  "data": {
+    "id": "deployment-1",
+    "message": "Deployment execution started"
+  }
+}
+```
+
+#### Rollback Deployment
+
+```
+POST /deployments/{id}/rollback
+```
+
+Rolls back a deployment.
+
+**Response:**
+
+```json
+{
+  "success": true,
+  "data": {
+    "id": "deployment-1",
+    "message": "Deployment rollback started"
+  }
+}
+```
+
+#### Get Deployment Status
+
+```
+GET /deployments/{id}/status
+```
+
+Gets the status of a deployment.
+
+**Response:**
+
+```json
+{
+  "success": true,
+  "data": {
+    "id": "deployment-1",
+    "status": "in_progress",
+    "current_step": 2,
+    "total_steps": 5,
+    "current_replicas": 2,
+    "target_replicas": 3,
+    "message": "Deploying new containers"
+  }
+}
+```
+
+### CI/CD
+
+#### List Pipelines
+
+```
+GET /cicd/pipelines
+```
+
+Lists all CI/CD pipelines.
+
+**Response:**
+
+```json
+{
+  "success": true,
+  "data": {
+    "pipelines": [
+      {
+        "id": "pipeline-1",
+        "name": "web-pipeline",
+        "repository_url": "https://github.com/user/repo",
+        "branch": "main",
+        "created_at": "2025-06-01T12:00:00Z",
+        "updated_at": "2025-06-01T12:05:00Z"
+      },
+      ...
+    ]
+  }
+}
+```
+
+#### Create Pipeline
+
+```
+POST /cicd/pipelines
+```
+
+Creates a new CI/CD pipeline.
+
+**Request Body:**
+
+```json
+{
+  "name": "web-pipeline",
+  "repository_url": "https://github.com/user/repo",
+  "branch": "main",
+  "build_config": {
+    "build_command": "npm ci && npm run build",
+    "docker_image": "node:16",
+    "build_args": {
+      "NODE_ENV": "production"
+    }
+  },
+  "deployment_config": {
+    "strategy": {
+      "type": "blue-green",
+      "verification_timeout": 60
+    },
+    "environment": "production",
+    "replicas": 3
+  },
+  "test_config": {
+    "test_command": "npm test",
+    "reports_path": "reports",
+    "timeout_seconds": 300
+  },
+  "webhook_url": "https://example.com/webhook"
+}
+```
+
+**Response:**
+
+```json
+{
+  "success": true,
+  "data": {
+    "id": "pipeline-1",
+    "name": "web-pipeline",
+    "message": "Pipeline created successfully"
+  }
+}
+```
+
+#### Get Pipeline
+
+```
+GET /cicd/pipelines/{id}
+```
+
+Gets detailed information about a specific pipeline.
+
+**Response:**
+
+```json
+{
+  "success": true,
+  "data": {
+    "id": "pipeline-1",
+    "name": "web-pipeline",
+    "repository_url": "https://github.com/user/repo",
+    "branch": "main",
+    "build_config": {
+      "build_command": "npm ci && npm run build",
+      "docker_image": "node:16",
+      "build_args": {
+        "NODE_ENV": "production"
+      }
+    },
+    "deployment_config": {
+      "strategy": {
+        "type": "blue-green",
+        "verification_timeout": 60
+      },
+      "environment": "production",
+      "replicas": 3
+    },
+    "test_config": {
+      "test_command": "npm test",
+      "reports_path": "reports",
+      "timeout_seconds": 300
+    },
+    "webhook_url": "https://example.com/webhook",
+    "created_at": "2025-06-01T12:00:00Z",
+    "updated_at": "2025-06-01T12:05:00Z"
+  }
+}
+```
+
+#### Trigger Pipeline
+
+```
+POST /cicd/pipelines/{id}/trigger
+```
+
+Triggers a pipeline run.
+
+**Response:**
+
+```json
+{
+  "success": true,
+  "data": {
+    "pipeline_id": "pipeline-1",
+    "run_id": "run-1",
+    "message": "Pipeline triggered successfully"
+  }
+}
+```
+
+#### List Pipeline Runs
+
+```
+GET /cicd/pipelines/{id}/runs
+```
+
+Lists all runs for a specific pipeline.
+
+**Response:**
+
+```json
+{
+  "success": true,
+  "data": {
+    "runs": [
+      {
+        "id": "run-1",
+        "pipeline_id": "pipeline-1",
+        "commit_hash": "abc123",
+        "commit_message": "Fix bug",
+        "author": "John Doe",
+        "status": "success",
+        "start_time": "2025-06-01T12:00:00Z",
+        "end_time": "2025-06-01T12:05:00Z",
+        "duration_seconds": 300
+      },
+      ...
+    ]
+  }
+}
+```
+
+### Cloud
+
+#### List Cloud Providers
+
+```
+GET /cloud/providers
+```
+
+Lists all configured cloud providers.
+
+**Response:**
+
+```json
+{
+  "success": true,
+  "data": {
+    "providers": [
+      {
+        "name": "AWS",
+        "provider_type": "aws",
+        "region": "us-west-2"
+      },
+      {
+        "name": "Azure",
+        "provider_type": "azure",
+        "region": "eastus"
+      },
+      {
+        "name": "GCP",
+        "provider_type": "gcp",
+        "region": "us-central1"
+      }
+    ]
+  }
+}
+```
+
+#### List Cloud Instances
+
+```
+GET /cloud/instances
+```
+
+Lists all cloud instances.
+
+**Query Parameters:**
+
+| Parameter | Type | Description |
+|-----------|------|-------------|
+| `provider` | string | Filter by provider |
+| `region` | string | Filter by region |
+| `state` | string | Filter by instance state |
+
+**Response:**
+
+```json
+{
+  "success": true,
+  "data": {
+    "instances": [
+      {
+        "id": "i-12345",
+        "name": "web-server",
+        "provider": "aws",
+        "region": "us-west-2",
+        "zone": "us-west-2a",
+        "instance_type": "t3.micro",
+        "public_ip": "54.123.45.67",
+        "private_ip": "10.0.1.2",
+        "state": "running",
+        "created_at": "2025-06-01T12:00:00Z"
+      },
+      ...
+    ]
+  }
+}
+```
+
+#### Create Cloud Instance
+
+```
+POST /cloud/instances
+```
+
+Creates a new cloud instance.
+
+**Request Body:**
+
+```json
+{
+  "name": "web-server",
+  "provider": "aws",
+  "region": "us-west-2",
+  "zone": "us-west-2a",
+  "instance_type": "t3.micro",
+  "disk_size_gb": 20,
+  "tags": {
+    "Environment": "Production",
+    "Project": "Website"
+  }
+}
+```
+
+**Response:**
+
+```json
+{
+  "success": true,
+  "data": {
+    "id": "i-12345",
+    "name": "web-server",
+    "provider": "aws",
+    "region": "us-west-2",
+    "zone": "us-west-2a",
+    "instance_type": "t3.micro",
+    "public_ip": "54.123.45.67",
+    "private_ip": "10.0.1.2",
+    "state": "pending",
+    "created_at": "2025-06-01T12:00:00Z"
+  }
+}
+```
+
+### Helm
+
+#### List Helm Repositories
+
+```
+GET /helm/repositories
+```
+
+Lists all Helm repositories.
+
+**Response:**
+
+```json
+{
+  "success": true,
+  "data": {
+    "repositories": [
+      {
+        "name": "stable",
+        "url": "https://charts.helm.sh/stable",
+        "is_oci": false
+      },
+      {
+        "name": "bitnami",
+        "url": "https://charts.bitnami.com/bitnami",
+        "is_oci": false
+      }
+    ]
+  }
+}
+```
+
+#### Add Helm Repository
+
+```
+POST /helm/repositories
+```
+
+Adds a new Helm repository.
+
+**Request Body:**
+
+```json
+{
+  "name": "bitnami",
+  "url": "https://charts.bitnami.com/bitnami",
+  "username": "user",
+  "password": "password",
+  "is_oci": false
+}
+```
+
+**Response:**
+
+```json
+{
+  "success": true,
+  "data": {
+    "name": "bitnami",
+    "url": "https://charts.bitnami.com/bitnami",
+    "is_oci": false,
+    "message": "Repository added successfully"
+  }
+}
+```
+
+#### List Helm Releases
+
+```
+GET /helm/releases
+```
+
+Lists all Helm releases.
+
+**Query Parameters:**
+
+| Parameter | Type | Description |
+|-----------|------|-------------|
+| `namespace` | string | Filter by namespace |
+| `status` | string | Filter by release status |
+
+**Response:**
+
+```json
+{
+  "success": true,
+  "data": {
+    "releases": [
+      {
+        "name": "my-release",
+        "namespace": "default",
+        "chart": "bitnami/nginx",
+        "version": "9.5.0",
+        "status": "deployed",
+        "revision": 1,
+        "updated": "2025-06-01T12:00:00Z"
+      },
+      ...
+    ]
+  }
+}
+```
+
+#### Install Helm Chart
+
+```
+POST /helm/releases
+```
+
+Installs a new Helm chart.
+
+**Request Body:**
+
+```json
+{
+  "name": "my-release",
+  "chart": "bitnami/nginx",
+  "namespace": "default",
+  "values": {
+    "replicaCount": 3,
+    "service": {
+      "type": "LoadBalancer"
+    }
+  }
+}
+```
+
+**Response:**
+
+```json
+{
+  "success": true,
+  "data": {
+    "name": "my-release",
+    "namespace": "default",
+    "chart": "bitnami/nginx",
+    "version": "9.5.0",
+    "message": "Chart installed successfully"
+  }
+}
+```
+
+### Observability
+
+#### Get Metrics
+
+```
+GET /metrics
+```
+
+Gets metrics in Prometheus format.
+
+**Response:**
+
+```
+# HELP hivemind_node_count Number of nodes in the cluster
+# TYPE hivemind_node_count gauge
+hivemind_node_count 3 1622548800000
+
+# HELP hivemind_container_count Number of containers managed by Hivemind
+# TYPE hivemind_container_count gauge
+hivemind_container_count 10 1622548800000
+
+# HELP hivemind_container_status_count Number of containers by status
+# TYPE hivemind_container_status_count gauge
+hivemind_container_status_count{status="running"} 8 1622548800000
+hivemind_container_status_count{status="stopped"} 2 1622548800000
+```
+
+#### Configure Metrics
+
+```
+POST /observability/metrics/configure
+```
+
+Configures metrics collection.
+
+**Request Body:**
+
+```json
+{
+  "port": 9090,
+  "path": "/metrics",
+  "collectors": ["node", "container", "health", "network", "scheduler"]
+}
+```
+
+**Response:**
+
+```json
+{
+  "success": true,
+  "data": {
+    "port": 9090,
+    "path": "/metrics",
+    "collectors": ["node", "container", "health", "network", "scheduler"],
+    "message": "Metrics configured successfully"
+  }
+}
+```
+
+#### Configure Tracing
+
+```
+POST /observability/tracing/configure
+```
+
+Configures distributed tracing.
+
+**Request Body:**
+
+```json
+{
+  "service_name": "hivemind",
+  "endpoint": "http://jaeger:14268/api/traces",
+  "sample_rate": 0.1
+}
+```
+
+**Response:**
+
+```json
+{
+  "success": true,
+  "data": {
+    "service_name": "hivemind",
+    "endpoint": "http://jaeger:14268/api/traces",
+    "sample_rate": 0.1,
+    "message": "Tracing configured successfully"
+  }
+}
+```
+
+#### Configure Logging
+
+```
+POST /observability/logging/configure
+```
+
+Configures log aggregation.
+
+**Request Body:**
+
+```json
+{
+  "endpoint": "http://elasticsearch:9200",
+  "index": "hivemind-logs",
+  "level": "info"
+}
+```
+
+**Response:**
+
+```json
+{
+  "success": true,
+  "data": {
+    "endpoint": "http://elasticsearch:9200",
+    "index": "hivemind-logs",
+    "level": "info",
+    "message": "Logging configured successfully"
+  }
+}
+```
+
 ### Services
 
 #### List Services

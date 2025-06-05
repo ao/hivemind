@@ -1085,6 +1085,507 @@ hivemind completion zsh > ~/.zshrc.d/_hivemind
 hivemind completion fish > ~/.config/fish/completions/hivemind.fish
 ```
 
+## Advanced Features Commands
+
+### Deployment Commands
+
+#### `hivemind deployment create`
+
+Create a new deployment.
+
+```bash
+hivemind deployment create --name <NAME> --app-name <APP_NAME> --image <IMAGE> --replicas <COUNT> --strategy <STRATEGY> [options]
+```
+
+Options:
+- `--name`: Deployment name
+- `--app-name`: Application name
+- `--image`: Container image
+- `--replicas`: Number of replicas
+- `--strategy`: Deployment strategy (simple, rolling-update, blue-green, canary, ab-testing)
+- `--max-unavailable`: Maximum number of unavailable replicas (for rolling-update)
+- `--max-surge`: Maximum number of surge replicas (for rolling-update)
+- `--verification-timeout`: Verification timeout in seconds (for blue-green)
+- `--percentage`: Initial percentage of traffic (for canary)
+- `--steps`: Percentage steps for incremental rollout (for canary)
+- `--interval`: Interval between steps in seconds (for canary)
+- `--variant`: Variant configuration (for ab-testing, can be specified multiple times)
+- `--duration`: Test duration in seconds (for ab-testing)
+- `--pre-hook`: Command to run before deployment
+- `--post-hook`: Command to run after deployment
+- `--rollback-hook`: Command to run on rollback
+- `--health-check-path`: Path for health check
+- `--health-check-port`: Port for health check
+- `--cpu`: CPU request
+- `--memory`: Memory request
+- `--env`: Environment variables (can be specified multiple times)
+- `--volume`: Volume mounts (can be specified multiple times)
+
+#### `hivemind deployment list`
+
+List all deployments.
+
+```bash
+hivemind deployment list [--output <format>]
+```
+
+Options:
+- `--output`: Output format (table, json, yaml)
+
+Output:
+```
+ID            APP NAME     STRATEGY    REPLICAS  STATUS     CREATED
+deployment-1  web-server   blue-green  3/3       Completed  2025-06-01 12:00:00
+deployment-2  api-service  canary      5/5       Completed  2025-06-01 12:05:00
+```
+
+#### `hivemind deployment get`
+
+Get details about a specific deployment.
+
+```bash
+hivemind deployment get --id <DEPLOYMENT_ID> [--output <format>]
+```
+
+Options:
+- `--id`: Deployment ID
+- `--output`: Output format (table, json, yaml)
+
+Output:
+```
+Deployment: deployment-1
+App Name: web-server
+Image: nginx:latest
+Replicas: 3/3
+Strategy: blue-green
+Status: Completed
+Created: 2025-06-01 12:00:00
+Completed: 2025-06-01 12:05:00
+
+Strategy Details:
+  Type: blue-green
+  Verification Timeout: 60s
+
+Environment:
+  ENV_VAR1: value1
+  ENV_VAR2: value2
+```
+
+#### `hivemind deployment execute`
+
+Execute a deployment.
+
+```bash
+hivemind deployment execute --id <DEPLOYMENT_ID>
+```
+
+Options:
+- `--id`: Deployment ID
+
+#### `hivemind deployment rollback`
+
+Roll back a deployment.
+
+```bash
+hivemind deployment rollback --id <DEPLOYMENT_ID>
+```
+
+Options:
+- `--id`: Deployment ID
+
+#### `hivemind deployment status`
+
+Get the status of a deployment.
+
+```bash
+hivemind deployment status --id <DEPLOYMENT_ID> [--output <format>]
+```
+
+Options:
+- `--id`: Deployment ID
+- `--output`: Output format (table, json, yaml)
+
+Output:
+```
+Deployment: deployment-1
+Status: In Progress
+Current Step: 2/5
+Current Replicas: 2/3
+Message: Deploying new containers
+```
+
+### CI/CD Commands
+
+#### `hivemind cicd configure-provider`
+
+Configure a CI/CD provider.
+
+```bash
+hivemind cicd configure-provider --type <TYPE> [options]
+```
+
+Options:
+- `--type`: Provider type (github-actions, gitlab-ci, jenkins)
+- `--token`: Authentication token
+- `--owner`: Repository owner (for GitHub)
+- `--repo`: Repository name (for GitHub)
+- `--url`: Server URL (for Jenkins)
+
+#### `hivemind cicd create-pipeline`
+
+Create a new CI/CD pipeline.
+
+```bash
+hivemind cicd create-pipeline --name <NAME> --repository <REPOSITORY_URL> --branch <BRANCH>
+```
+
+Options:
+- `--name`: Pipeline name
+- `--repository`: Repository URL
+- `--branch`: Branch to monitor
+
+#### `hivemind cicd configure-build`
+
+Configure build settings for a pipeline.
+
+```bash
+hivemind cicd configure-build --pipeline <PIPELINE_NAME> --command "<BUILD_COMMAND>" [options]
+```
+
+Options:
+- `--pipeline`: Pipeline name
+- `--command`: Build command
+- `--docker-image`: Docker image for building
+- `--dockerfile-path`: Path to Dockerfile
+- `--cache-paths`: Paths to cache (comma-separated)
+- `--cache-key`: Cache key
+
+#### `hivemind cicd configure-tests`
+
+Configure test settings for a pipeline.
+
+```bash
+hivemind cicd configure-tests --pipeline <PIPELINE_NAME> --command "<TEST_COMMAND>" [options]
+```
+
+Options:
+- `--pipeline`: Pipeline name
+- `--command`: Test command
+- `--reports-path`: Path for test reports
+- `--timeout`: Timeout in seconds
+- `--fail-on-test-failure`: Whether to fail the pipeline on test failure
+
+#### `hivemind cicd configure-deployment`
+
+Configure deployment settings for a pipeline.
+
+```bash
+hivemind cicd configure-deployment --pipeline <PIPELINE_NAME> --strategy <STRATEGY> --environment <ENV> [options]
+```
+
+Options:
+- `--pipeline`: Pipeline name
+- `--strategy`: Deployment strategy
+- `--environment`: Target environment
+- `--replicas`: Number of replicas
+- `--max-unavailable`: Maximum number of unavailable replicas (for rolling-update)
+- `--max-surge`: Maximum number of surge replicas (for rolling-update)
+- `--verification-timeout`: Verification timeout in seconds (for blue-green)
+- `--percentage`: Initial percentage of traffic (for canary)
+- `--steps`: Percentage steps for incremental rollout (for canary)
+- `--interval`: Interval between steps in seconds (for canary)
+
+#### `hivemind cicd generate-workflow`
+
+Generate a workflow file for a pipeline.
+
+```bash
+hivemind cicd generate-workflow --pipeline <PIPELINE_NAME> --output <OUTPUT_PATH>
+```
+
+Options:
+- `--pipeline`: Pipeline name
+- `--output`: Output path for the workflow file
+
+#### `hivemind cicd trigger-pipeline`
+
+Trigger a pipeline run.
+
+```bash
+hivemind cicd trigger-pipeline --name <PIPELINE_NAME>
+```
+
+Options:
+- `--name`: Pipeline name
+
+#### `hivemind cicd get-pipeline-status`
+
+Get the status of a pipeline.
+
+```bash
+hivemind cicd get-pipeline-status --name <PIPELINE_NAME> [--output <format>]
+```
+
+Options:
+- `--name`: Pipeline name
+- `--output`: Output format (table, json, yaml)
+
+Output:
+```
+Pipeline: my-pipeline
+Status: Success
+Commit: abc123
+Author: John Doe
+Message: Fix bug
+Started: 2025-06-01 12:00:00
+Completed: 2025-06-01 12:05:00
+Duration: 5m
+
+Stages:
+  Build: Success (2m)
+  Test: Success (2m)
+  Deploy: Success (1m)
+```
+
+### Cloud Commands
+
+#### `hivemind cloud configure`
+
+Configure a cloud provider.
+
+```bash
+hivemind cloud configure --provider <PROVIDER> [options]
+```
+
+Options:
+- `--provider`: Cloud provider (aws, azure, gcp)
+- `--access-key`: AWS access key
+- `--secret-key`: AWS secret key
+- `--client-id`: Azure client ID
+- `--client-secret`: Azure client secret
+- `--tenant-id`: Azure tenant ID
+- `--subscription-id`: Azure subscription ID
+- `--service-account-key`: GCP service account key path
+- `--region`: Default region
+
+#### `hivemind cloud list-providers`
+
+List configured cloud providers.
+
+```bash
+hivemind cloud list-providers [--output <format>]
+```
+
+Options:
+- `--output`: Output format (table, json, yaml)
+
+Output:
+```
+NAME  PROVIDER  REGION
+AWS   aws       us-west-2
+Azure azure     eastus
+GCP   gcp       us-central1
+```
+
+#### `hivemind cloud create-instance`
+
+Create a new cloud instance.
+
+```bash
+hivemind cloud create-instance --name <NAME> --provider <PROVIDER> --region <REGION> --zone <ZONE> --instance-type <TYPE> [options]
+```
+
+Options:
+- `--name`: Instance name
+- `--provider`: Cloud provider
+- `--region`: Region
+- `--zone`: Zone
+- `--instance-type`: Instance type
+- `--disk-size`: Disk size in GB
+- `--subnet-id`: Subnet ID
+- `--security-group-id`: Security group ID
+- `--tags`: Tags (key=value,key=value)
+
+#### `hivemind cloud list-instances`
+
+List cloud instances.
+
+```bash
+hivemind cloud list-instances [--provider <PROVIDER>] [--output <format>]
+```
+
+Options:
+- `--provider`: Filter by provider
+- `--output`: Output format (table, json, yaml)
+
+Output:
+```
+ID       NAME        PROVIDER  REGION     ZONE        TYPE      STATUS   IP
+i-12345  web-server  aws       us-west-2  us-west-2a  t3.micro  running  54.123.45.67
+```
+
+#### `hivemind cloud create-load-balancer`
+
+Create a new cloud load balancer.
+
+```bash
+hivemind cloud create-load-balancer --name <NAME> --provider <PROVIDER> --region <REGION> --type <TYPE> [options]
+```
+
+Options:
+- `--name`: Load balancer name
+- `--provider`: Cloud provider
+- `--region`: Region
+- `--type`: Load balancer type (application, network)
+- `--scheme`: Load balancer scheme (internet-facing, internal)
+- `--subnet-ids`: Subnet IDs (comma-separated)
+- `--security-group-ids`: Security group IDs (comma-separated)
+- `--tags`: Tags (key=value,key=value)
+
+#### `hivemind cloud register-instances`
+
+Register instances with a load balancer.
+
+```bash
+hivemind cloud register-instances --lb-id <LOAD_BALANCER_ID> --instance-ids <INSTANCE_IDS>
+```
+
+Options:
+- `--lb-id`: Load balancer ID
+- `--instance-ids`: Instance IDs (comma-separated)
+
+### Helm Commands
+
+#### `hivemind helm repo add`
+
+Add a Helm repository.
+
+```bash
+hivemind helm repo add --name <NAME> --url <URL> [options]
+```
+
+Options:
+- `--name`: Repository name
+- `--url`: Repository URL
+- `--username`: Username for authentication
+- `--password`: Password for authentication
+- `--oci`: Whether the repository is OCI-based
+
+#### `hivemind helm repo list`
+
+List Helm repositories.
+
+```bash
+hivemind helm repo list [--output <format>]
+```
+
+Options:
+- `--output`: Output format (table, json, yaml)
+
+Output:
+```
+NAME     URL                           OCI
+stable   https://charts.helm.sh/stable  false
+bitnami  https://charts.bitnami.com/bitnami  false
+```
+
+#### `hivemind helm create-chart`
+
+Create a new Helm chart.
+
+```bash
+hivemind helm create-chart --name <NAME> --description <DESCRIPTION>
+```
+
+Options:
+- `--name`: Chart name
+- `--description`: Chart description
+
+#### `hivemind helm install`
+
+Install a Helm chart.
+
+```bash
+hivemind helm install --name <NAME> --chart <CHART> --namespace <NAMESPACE> [options]
+```
+
+Options:
+- `--name`: Release name
+- `--chart`: Chart reference
+- `--namespace`: Namespace
+- `--values`: Values file
+- `--set`: Set values on the command line (can be specified multiple times)
+
+#### `hivemind helm list-releases`
+
+List Helm releases.
+
+```bash
+hivemind helm list-releases [--namespace <NAMESPACE>] [--output <format>]
+```
+
+Options:
+- `--namespace`: Filter by namespace
+- `--output`: Output format (table, json, yaml)
+
+Output:
+```
+NAME        NAMESPACE  CHART          VERSION  STATUS    UPDATED
+my-release  default    bitnami/nginx  9.5.0    deployed  2025-06-01 12:00:00
+```
+
+### Observability Commands
+
+#### `hivemind observability configure-metrics`
+
+Configure metrics collection.
+
+```bash
+hivemind observability configure-metrics --port <PORT> --path <PATH> [options]
+```
+
+Options:
+- `--port`: Port to expose metrics on
+- `--path`: Path to expose metrics on
+- `--collectors`: Collectors to enable (comma-separated)
+
+#### `hivemind observability configure-tracing`
+
+Configure distributed tracing.
+
+```bash
+hivemind observability configure-tracing --service-name <SERVICE_NAME> --endpoint <ENDPOINT> [options]
+```
+
+Options:
+- `--service-name`: Service name
+- `--endpoint`: Tracing endpoint
+- `--sample-rate`: Sampling rate
+
+#### `hivemind observability configure-logging`
+
+Configure log aggregation.
+
+```bash
+hivemind observability configure-logging --endpoint <ENDPOINT> --index <INDEX> [options]
+```
+
+Options:
+- `--endpoint`: Logging endpoint
+- `--index`: Log index
+- `--level`: Log level
+
+#### `hivemind observability import-dashboards`
+
+Import pre-built dashboards.
+
+```bash
+hivemind observability import-dashboards --target <TARGET>
+```
+
+Options:
+- `--target`: Target system (grafana, kibana)
+
 ## Conclusion
 
 This CLI reference covers the main commands and options of the Hivemind CLI. For more detailed information on specific commands or features, refer to the following resources:
@@ -1093,3 +1594,8 @@ This CLI reference covers the main commands and options of the Hivemind CLI. For
 - [Administration Guide](administration_guide.md)
 - [Troubleshooting Guide](troubleshooting_guide.md)
 - [API Reference](api_reference.md)
+- [CI/CD Integration](cicd_integration.md)
+- [Monitoring & Observability](monitoring_observability.md)
+- [Cloud Integration](cloud_integration.md)
+- [Advanced Deployments](advanced_deployments.md)
+- [Helm Integration](helm_integration.md)

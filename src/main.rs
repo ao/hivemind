@@ -10,10 +10,16 @@ use hivemind::containerd_manager::Container;
 use hivemind::health_monitor::HealthMonitor;
 use hivemind::node::NodeManager;
 use hivemind::network::NetworkManager;
+use hivemind::cicd::CicdManager;
+use hivemind::cloud::CloudManager;
+use hivemind::deployment::DeploymentManager;
+use hivemind::helm::HelmManager;
+use hivemind::observability::ObservabilityManager;
 use hivemind::security::SecurityManager;
 use hivemind::service_discovery::{ServiceDiscovery, ServiceEndpoint};
 use hivemind::storage::StorageManager;
 use hivemind::web;
+use std::path::PathBuf;
 use std::sync::Arc;
 
 #[derive(Parser)]
@@ -310,6 +316,80 @@ async fn main() -> Result<()> {
             } else {
                 println!("Security manager initialized successfully");
             }
+            
+            // Initialize CI/CD manager
+            let cicd_base_dir = cli.data_dir.join("cicd");
+            let cicd_manager = CicdManager::new(
+                Arc::new(app_manager.clone()),
+                security_manager.clone(),
+                cicd_base_dir,
+            );
+            
+            if let Err(e) = cicd_manager.initialize().await {
+                eprintln!("Failed to initialize CI/CD manager: {}", e);
+            } else {
+                println!("CI/CD manager initialized successfully");
+            }
+            
+            // Initialize cloud manager
+            let cloud_base_dir = cli.data_dir.join("cloud");
+            let cloud_manager = CloudManager::new(cloud_base_dir);
+            
+            if let Err(e) = cloud_manager.initialize().await {
+                eprintln!("Failed to initialize cloud manager: {}", e);
+            } else {
+                println!("Cloud manager initialized successfully");
+            }
+            
+            // Initialize deployment manager
+            let deployment_manager = DeploymentManager::new();
+            
+            // Initialize Helm manager
+            let helm_base_dir = cli.data_dir.join("helm");
+            let helm_manager = HelmManager::new(helm_base_dir);
+            
+            if let Err(e) = helm_manager.initialize().await {
+                eprintln!("Failed to initialize Helm manager: {}", e);
+            } else {
+                println!("Helm manager initialized successfully");
+            }
+            
+            // Initialize observability manager
+            let observability_base_dir = cli.data_dir.join("observability");
+            let mut observability_manager = ObservabilityManager::new(observability_base_dir);
+            
+            if let Err(e) = observability_manager.initialize().await {
+                eprintln!("Failed to initialize observability manager: {}", e);
+            } else {
+                println!("Observability manager initialized successfully");
+                
+                // Initialize Prometheus exporter
+                if let Err(e) = observability_manager.init_prometheus_exporter(9090, "/metrics".to_string()).await {
+                    eprintln!("Failed to initialize Prometheus exporter: {}", e);
+                } else {
+                    println!("Prometheus exporter initialized successfully");
+                }
+                
+                // Initialize OpenTelemetry tracer
+                if let Err(e) = observability_manager.init_opentelemetry_tracer(
+                    "hivemind".to_string(),
+                    "http://localhost:4317".to_string(),
+                ).await {
+                    eprintln!("Failed to initialize OpenTelemetry tracer: {}", e);
+                } else {
+                    println!("OpenTelemetry tracer initialized successfully");
+                }
+                
+                // Initialize log aggregator
+                if let Err(e) = observability_manager.init_log_aggregator(
+                    "http://localhost:9200".to_string(),
+                    "hivemind-logs".to_string(),
+                ).await {
+                    eprintln!("Failed to initialize log aggregator: {}", e);
+                } else {
+                    println!("Log aggregator initialized successfully");
+                }
+            }
 
             // Create AppState for sharing between web and API
             let app_state = AppState {
@@ -319,6 +399,11 @@ async fn main() -> Result<()> {
                 network_manager,
                 health_monitor: Some(health_monitor.clone()),
                 security_manager: Some(security_manager.clone()),
+                cicd_manager: Some(Arc::new(cicd_manager)),
+                cloud_manager: Some(Arc::new(cloud_manager)),
+                deployment_manager: Some(Arc::new(deployment_manager)),
+                helm_manager: Some(Arc::new(helm_manager)),
+                observability_manager: Some(Arc::new(observability_manager)),
             };
 
             // Start the web interface in a separate task
@@ -363,6 +448,11 @@ async fn main() -> Result<()> {
                 network_manager: None, // No network manager for web-only mode
                 health_monitor: None, // No health monitor for web-only mode
                 security_manager: None, // No security manager for web-only mode
+                cicd_manager: None, // No CI/CD manager for web-only mode
+                cloud_manager: None, // No cloud manager for web-only mode
+                deployment_manager: None, // No deployment manager for web-only mode
+                helm_manager: None, // No Helm manager for web-only mode
+                observability_manager: None, // No observability manager for web-only mode
             };
 
             // Start the web server
@@ -428,6 +518,11 @@ async fn main() -> Result<()> {
                                 network_manager: Some(manager_arc),
                                 health_monitor: None,
                                 security_manager: None,
+                                cicd_manager: None,
+                                cloud_manager: None,
+                                deployment_manager: None,
+                                helm_manager: None,
+                                observability_manager: None,
                             };
                         }
                     }
@@ -451,6 +546,11 @@ async fn main() -> Result<()> {
                 network_manager: None,
                 health_monitor: None,
                 security_manager: None,
+                cicd_manager: None,
+                cloud_manager: None,
+                deployment_manager: None,
+                helm_manager: None,
+                observability_manager: None,
             };
             match command {
                 NodeCommands::Ls => {
@@ -485,6 +585,11 @@ async fn main() -> Result<()> {
                 network_manager: None,
                 health_monitor: None,
                 security_manager: None,
+                cicd_manager: None,
+                cloud_manager: None,
+                deployment_manager: None,
+                helm_manager: None,
+                observability_manager: None,
             };
 
             match command {

@@ -22,6 +22,11 @@ Hivemind is a modern, lightweight container orchestration system designed with s
 - **🩺 Health Monitoring** - Comprehensive health checking and auto-healing capabilities
 - **📊 Network-Aware Scheduling** - Intelligent container placement based on network topology
 - **🔄 Node Membership Protocol** - SWIM-based cluster membership management
+- **🚀 Advanced Deployment Strategies** - Blue-green, canary, and A/B testing deployments
+- **☁️ Cloud Provider Integration** - Seamless integration with AWS, Azure, and GCP
+- **📈 Observability** - Prometheus metrics, OpenTelemetry tracing, and log aggregation
+- **🔄 CI/CD Integration** - Built-in support for CI/CD pipelines and GitHub Actions
+- **⚓ Helm Chart Support** - Deploy applications using Helm charts
 
 ## 🔧 Quick Start
 
@@ -207,6 +212,11 @@ Hivemind follows a clean, modular architecture:
 - **Health Monitor** - Container and node health monitoring
 - **Security Manager** - Security features including scanning, RBAC, and secrets
 - **Web UI** - Dashboard and visual management
+- **Deployment Manager** - Advanced deployment strategies (blue-green, canary, A/B testing)
+- **Cloud Manager** - Integration with cloud providers (AWS, Azure, GCP)
+- **Observability Manager** - Metrics, tracing, and logging
+- **CI/CD Manager** - CI/CD pipeline integration
+- **Helm Manager** - Helm chart support
 
 For more details, see [ARCHITECTURE.md](ARCHITECTURE.md).
 
@@ -331,6 +341,12 @@ For more details, see [developer_guide.md](developer_guide.md).
 - [Architecture](ARCHITECTURE.md) - System design and components
 - [Developer Guide](developer_guide.md) - How to develop for Hivemind
 - [Component Documentation](docs/) - Documentation for individual components
+- [CI/CD Integration](docs/cicd_integration.md) - CI/CD pipeline integration
+- [Monitoring & Observability](docs/monitoring_observability.md) - Metrics, tracing, and logging
+- [Cloud Integration](docs/cloud_integration.md) - Cloud provider integration
+- [Advanced Deployments](docs/advanced_deployments.md) - Advanced deployment strategies
+- [Helm Integration](docs/helm_integration.md) - Helm chart support
+- [Project Summary](docs/project_summary.md) - Overview of all implemented features
 
 ## 📜 License
 
