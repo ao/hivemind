@@ -14,6 +14,11 @@ const PING_TIMEOUT: Duration = Duration::from_millis(500);
 const INDIRECT_PING_COUNT: usize = 3;
 const SUSPICION_MULTIPLIER: u32 = 5;
 const MAX_TRANSMIT_SIZE: usize = 512;
+const GOSSIP_FACTOR: usize = 3; // Number of members to gossip to per round
+const MAX_GOSSIP_UPDATES: usize = 5; // Maximum number of updates to include in gossip
+const REINTEGRATION_TIME: Duration = Duration::from_secs(60); // Time before allowing a failed node to rejoin
+const QUORUM_PERCENTAGE: f64 = 0.51; // Percentage of nodes needed for quorum (>50%)
+const LEADER_CHECK_INTERVAL: Duration = Duration::from_secs(5); // How often to check leader status
 
 // Node states in the membership protocol
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -22,6 +27,7 @@ pub enum NodeState {
     Suspected,
     Dead,
     Left,
+    Maintenance, // New state for planned maintenance
 }
 
 // Member represents a node in the cluster
@@ -32,6 +38,9 @@ pub struct Member {
     pub state: NodeState,
     pub incarnation: u64,
     pub last_state_change: u64,
+    pub is_leader: bool, // Whether this node is a leader
+    pub last_leader_check: u64, // Last time leadership was checked
+    pub metadata: Option<HashMap<String, String>>, // Additional metadata for the node
 }
 
 // Message types for the membership protocol
@@ -43,6 +52,11 @@ pub enum MessageType {
     Sync,
     Join,
     Leave,
+    LeaderElection, // For leader election
+    LeaderAnnounce, // For announcing a new leader
+    Maintenance,    // For entering maintenance mode
+    Reintegrate,    // For reintegrating after failure
+    StateSync,      // For state synchronization
 }
 
 // Protocol message structure
@@ -64,6 +78,12 @@ pub enum MembershipEvent {
     MemberDead(Member),
     MemberLeft(Member),
     MemberAlive(Member),
+    MemberMaintenance(Member),
+    LeaderElected(Member),
+    NetworkPartitionDetected,
+    NetworkPartitionResolved,
+    QuorumLost,
+    QuorumRestored,
 }
 
 // MembershipConfig holds configuration for the membership protocol
@@ -75,6 +95,11 @@ pub struct MembershipConfig {
     pub ping_timeout: Duration,
     pub suspicion_mult: u32,
     pub indirect_checks: usize,
+    pub gossip_factor: usize,
+    pub max_gossip_updates: usize,
+    pub reintegration_time: Duration,
+    pub quorum_percentage: f64,
+    pub leader_check_interval: Duration,
 }
 
 impl Default for MembershipConfig {
@@ -86,6 +111,11 @@ impl Default for MembershipConfig {
             ping_timeout: PING_TIMEOUT,
             suspicion_mult: SUSPICION_MULTIPLIER,
             indirect_checks: INDIRECT_PING_COUNT,
+            gossip_factor: GOSSIP_FACTOR,
+            max_gossip_updates: MAX_GOSSIP_UPDATES,
+            reintegration_time: REINTEGRATION_TIME,
+            quorum_percentage: QUORUM_PERCENTAGE,
+            leader_check_interval: LEADER_CHECK_INTERVAL,
         }
     }
 }
@@ -98,12 +128,18 @@ pub struct MembershipProtocol {
     incarnation: Arc<Mutex<u64>>,
     members: Arc<Mutex<HashMap<String, Member>>>,
     suspect_timers: Arc<Mutex<HashMap<String, Instant>>>,
+    reintegration_timers: Arc<Mutex<HashMap<String, Instant>>>,
     config: MembershipConfig,
     socket: Arc<UdpSocket>,
     event_tx: tokio::sync::mpsc::Sender<MembershipEvent>,
     event_rx: Arc<Mutex<tokio::sync::mpsc::Receiver<MembershipEvent>>>,
     shutdown_tx: tokio::sync::mpsc::Sender<()>,
     shutdown_rx: Arc<Mutex<tokio::sync::mpsc::Receiver<()>>>,
+    state_store: Arc<Mutex<HashMap<String, Vec<u8>>>>,
+    state_versions: Arc<Mutex<HashMap<String, u64>>>,
+    is_leader: Arc<Mutex<bool>>,
+    quorum_size: Arc<Mutex<usize>>,
+    partition_detected: Arc<Mutex<bool>>,
 }
 
 impl MembershipProtocol {
@@ -126,16 +162,21 @@ impl MembershipProtocol {
             .unwrap()
             .as_secs();
             
-        members.insert(
-            node_id.clone(),
-            Member {
-                id: node_id.clone(),
-                address: addr.clone(),
-                state: NodeState::Alive,
-                incarnation: 1,
-                last_state_change: now,
-            },
-        );
+        let self_member = Member {
+            id: node_id.clone(),
+            address: addr.clone(),
+            state: NodeState::Alive,
+            incarnation: 1,
+            last_state_change: now,
+            is_leader: false, // Start as non-leader
+            last_leader_check: now,
+            metadata: Some(HashMap::new()),
+        };
+        
+        members.insert(node_id.clone(), self_member);
+        
+        // Calculate initial quorum size (just 1 for single node)
+        let quorum_size = 1;
         
         Ok(Self {
             node_id,
@@ -143,12 +184,18 @@ impl MembershipProtocol {
             incarnation: Arc::new(Mutex::new(1)),
             members: Arc::new(Mutex::new(members)),
             suspect_timers: Arc::new(Mutex::new(HashMap::new())),
+            reintegration_timers: Arc::new(Mutex::new(HashMap::new())),
             config,
             socket: Arc::new(socket),
             event_tx,
             event_rx: Arc::new(Mutex::new(event_rx)),
             shutdown_tx,
             shutdown_rx: Arc::new(Mutex::new(shutdown_rx)),
+            state_store: Arc::new(Mutex::new(HashMap::new())),
+            state_versions: Arc::new(Mutex::new(HashMap::new())),
+            is_leader: Arc::new(Mutex::new(false)),
+            quorum_size: Arc::new(Mutex::new(quorum_size)),
+            partition_detected: Arc::new(Mutex::new(false)),
         })
     }
     
@@ -162,10 +209,16 @@ impl MembershipProtocol {
         let members = self.members.clone();
         let incarnation = self.incarnation.clone();
         let suspect_timers = self.suspect_timers.clone();
+        let reintegration_timers = self.reintegration_timers.clone();
         let socket = self.socket.clone();
         let config = self.config.clone();
         let event_tx = self.event_tx.clone();
         let shutdown_rx = self.shutdown_rx.clone();
+        let state_store = self.state_store.clone();
+        let state_versions = self.state_versions.clone();
+        let is_leader = self.is_leader.clone();
+        let quorum_size = self.quorum_size.clone();
+        let partition_detected = self.partition_detected.clone();
         
         // Start the main protocol loop
         tokio::spawn(async move {
@@ -175,10 +228,16 @@ impl MembershipProtocol {
                 members,
                 incarnation,
                 suspect_timers,
+                reintegration_timers,
                 socket,
                 config,
                 event_tx,
                 shutdown_rx,
+                state_store,
+                state_versions,
+                is_leader,
+                quorum_size,
+                partition_detected,
             )
             .await
             {
@@ -196,14 +255,24 @@ impl MembershipProtocol {
         members: Arc<Mutex<HashMap<String, Member>>>,
         incarnation: Arc<Mutex<u64>>,
         suspect_timers: Arc<Mutex<HashMap<String, Instant>>>,
+        reintegration_timers: Arc<Mutex<HashMap<String, Instant>>>,
         socket: Arc<UdpSocket>,
         config: MembershipConfig,
         event_tx: tokio::sync::mpsc::Sender<MembershipEvent>,
         shutdown_rx: Arc<Mutex<tokio::sync::mpsc::Receiver<()>>>,
+        state_store: Arc<Mutex<HashMap<String, Vec<u8>>>>,
+        state_versions: Arc<Mutex<HashMap<String, u64>>>,
+        is_leader: Arc<Mutex<bool>>,
+        quorum_size: Arc<Mutex<usize>>,
+        partition_detected: Arc<Mutex<bool>>,
     ) -> Result<()> {
         // Set up protocol period ticker
         let protocol_period = time::interval(config.protocol_period);
         tokio::pin!(protocol_period);
+        
+        // Set up leader check ticker
+        let leader_check = time::interval(config.leader_check_interval);
+        tokio::pin!(leader_check);
         
         // Buffer for receiving messages
         let mut buf = [0u8; MAX_TRANSMIT_SIZE];
@@ -218,6 +287,37 @@ impl MembershipProtocol {
                         &members,
                         &incarnation,
                         &suspect_timers,
+                        &reintegration_timers,
+                        &socket,
+                        &config,
+                        &event_tx,
+                    ).await?;
+                    
+                    // Perform gossip dissemination
+                    Self::gossip_dissemination(
+                        &node_id,
+                        &addr,
+                        &members,
+                        &incarnation,
+                        &socket,
+                        &config,
+                    ).await?;
+                    
+                    // Check for quorum
+                    Self::check_quorum(
+                        &members,
+                        &quorum_size,
+                        &partition_detected,
+                        &event_tx,
+                    ).await?;
+                }
+                
+                _ = leader_check.tick() => {
+                    // Check leader status and elect if needed
+                    Self::check_leader_status(
+                        &node_id,
+                        &members,
+                        &is_leader,
                         &socket,
                         &config,
                         &event_tx,
@@ -236,9 +336,15 @@ impl MembershipProtocol {
                                     &members,
                                     &incarnation,
                                     &suspect_timers,
+                                    &reintegration_timers,
                                     &socket,
                                     &config,
                                     &event_tx,
+                                    &state_store,
+                                    &state_versions,
+                                    &is_leader,
+                                    &quorum_size,
+                                    &partition_detected,
                                 ).await?;
                             }
                         }
@@ -265,12 +371,16 @@ impl MembershipProtocol {
         members: &Arc<Mutex<HashMap<String, Member>>>,
         incarnation: &Arc<Mutex<u64>>,
         suspect_timers: &Arc<Mutex<HashMap<String, Instant>>>,
+        reintegration_timers: &Arc<Mutex<HashMap<String, Instant>>>,
         socket: &Arc<UdpSocket>,
         config: &MembershipConfig,
         event_tx: &tokio::sync::mpsc::Sender<MembershipEvent>,
     ) -> Result<()> {
         // Check suspect timers
         Self::check_suspect_timers(members, suspect_timers, config, event_tx).await?;
+        
+        // Check reintegration timers
+        Self::check_reintegration_timers(members, reintegration_timers, event_tx).await?;
         
         // Select a random member to ping
         let target = {
@@ -586,9 +696,15 @@ impl MembershipProtocol {
         members: &Arc<Mutex<HashMap<String, Member>>>,
         incarnation: &Arc<Mutex<u64>>,
         suspect_timers: &Arc<Mutex<HashMap<String, Instant>>>,
+        reintegration_timers: &Arc<Mutex<HashMap<String, Instant>>>,
         socket: &Arc<UdpSocket>,
         config: &MembershipConfig,
         event_tx: &tokio::sync::mpsc::Sender<MembershipEvent>,
+        state_store: &Arc<Mutex<HashMap<String, Vec<u8>>>>,
+        state_versions: &Arc<Mutex<HashMap<String, u64>>>,
+        is_leader: &Arc<Mutex<bool>>,
+        quorum_size: &Arc<Mutex<usize>>,
+        partition_detected: &Arc<Mutex<bool>>,
     ) -> Result<()> {
         match msg.message_type {
             MessageType::Ping => {
@@ -715,6 +831,61 @@ impl MembershipProtocol {
                     ).await?;
                 }
             }
+            MessageType::LeaderElection => {
+                // Process leader election message
+                Self::process_leader_election(
+                    &msg.sender_id,
+                    &msg.sender_addr,
+                    msg.incarnation,
+                    members,
+                    incarnation,
+                    socket,
+                    config,
+                    is_leader,
+                    event_tx,
+                ).await?;
+            }
+            MessageType::LeaderAnnounce => {
+                // Process leader announcement
+                Self::process_leader_announce(
+                    &msg.sender_id,
+                    msg.incarnation,
+                    members,
+                    is_leader,
+                    event_tx,
+                ).await?;
+            }
+            MessageType::Maintenance => {
+                // Process maintenance mode request
+                Self::process_maintenance(
+                    &msg.sender_id,
+                    members,
+                    event_tx,
+                ).await?;
+            }
+            MessageType::Reintegrate => {
+                // Process reintegration request
+                Self::process_reintegration(
+                    &msg.sender_id,
+                    &msg.sender_addr,
+                    members,
+                    reintegration_timers,
+                    event_tx,
+                ).await?;
+            }
+            MessageType::StateSync => {
+                // Process state synchronization
+                if let Some(member_list) = msg.members {
+                    Self::process_state_sync(
+                        &msg.sender_id,
+                        member_list,
+                        state_store,
+                        state_versions,
+                        socket,
+                        src,
+                    ).await?;
+                }
+            }
         }
         
         Ok(())
@@ -838,6 +1009,14 @@ impl MembershipProtocol {
                                         .await;
                                 }
                             }
+                            NodeState::Maintenance => {
+                                if old_state != NodeState::Maintenance {
+                                    // Send event
+                                    let _ = event_tx
+                                        .send(MembershipEvent::MemberMaintenance(local_member.clone()))
+                                        .await;
+                                }
+                            }
                         }
                     }
                 }
@@ -876,6 +1055,11 @@ impl MembershipProtocol {
                         NodeState::Left => {
                             let _ = event_tx
                                 .send(MembershipEvent::MemberLeft(remote_member))
+                                .await;
+                        }
+                        NodeState::Maintenance => {
+                            let _ = event_tx
+                                .send(MembershipEvent::MemberMaintenance(remote_member))
                                 .await;
                         }
                     }
@@ -919,6 +1103,9 @@ impl MembershipProtocol {
                 state: NodeState::Alive,
                 incarnation: 1,
                 last_state_change: now,
+                is_leader: false,
+                last_leader_check: now,
+                metadata: Some(HashMap::new()),
             };
             
             members_lock.insert(sender_id.to_string(), new_member.clone());
@@ -1117,6 +1304,7 @@ impl MembershipProtocol {
             NodeState::Suspected => MembershipEvent::MemberSuspected(member.clone()),
             NodeState::Dead => MembershipEvent::MemberDead(member.clone()),
             NodeState::Left => MembershipEvent::MemberLeft(member.clone()),
+            NodeState::Maintenance => MembershipEvent::MemberMaintenance(member.clone()),
         };
         self.emit_member_event(event).await
     }
@@ -1131,5 +1319,720 @@ impl MembershipProtocol {
         } else {
             timers.remove(member_id);
         }
+    }
+
+    // Check reintegration timers and allow nodes to rejoin if timeout
+    async fn check_reintegration_timers(
+        members: &Arc<Mutex<HashMap<String, Member>>>,
+        reintegration_timers: &Arc<Mutex<HashMap<String, Instant>>>,
+        event_tx: &tokio::sync::mpsc::Sender<MembershipEvent>,
+    ) -> Result<()> {
+        let now = Instant::now();
+        let mut expired = Vec::new();
+        
+        // Find expired timers
+        {
+            let reintegration_timers_lock = reintegration_timers.lock().await;
+            for (id, deadline) in reintegration_timers_lock.iter() {
+                if now >= *deadline {
+                    expired.push(id.clone());
+                }
+            }
+        }
+        
+        // Process expired timers
+        if !expired.is_empty() {
+            let mut reintegration_timers_lock = reintegration_timers.lock().await;
+            
+            for id in expired {
+                // Remove timer
+                reintegration_timers_lock.remove(&id);
+                println!("Node {} is now allowed to reintegrate", id);
+            }
+        }
+        
+        Ok(())
+    }
+    
+    // Gossip dissemination - spread membership information to random nodes
+    async fn gossip_dissemination(
+        node_id: &str,
+        addr: &str,
+        members: &Arc<Mutex<HashMap<String, Member>>>,
+        incarnation: &Arc<Mutex<u64>>,
+        socket: &Arc<UdpSocket>,
+        config: &MembershipConfig,
+    ) -> Result<()> {
+        // Get list of alive members
+        let targets = {
+            let members_lock = members.lock().await;
+            let alive_members: Vec<_> = members_lock
+                .iter()
+                .filter(|(id, m)| *id != node_id && m.state == NodeState::Alive)
+                .map(|(_, m)| m.clone())
+                .collect();
+                
+            if alive_members.is_empty() {
+                return Ok(());
+            }
+            
+            // Select k random members for gossip
+            let mut selected = Vec::new();
+            let mut indices = HashSet::new();
+            let k = std::cmp::min(config.gossip_factor, alive_members.len());
+            
+            while selected.len() < k {
+                let idx = rand::random::<usize>() % alive_members.len();
+                if indices.insert(idx) {
+                    selected.push(alive_members[idx].clone());
+                }
+            }
+            
+            selected
+        };
+        
+        // Get list of members with recent state changes
+        let member_updates = {
+            let members_lock = members.lock().await;
+            let now = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_secs();
+                
+            let mut updates: Vec<_> = members_lock
+                .values()
+                .filter(|m| now - m.last_state_change < 60) // Members with changes in the last minute
+                .cloned()
+                .collect();
+                
+            // Limit the number of updates to avoid large messages
+            if updates.len() > config.max_gossip_updates {
+                updates.sort_by(|a, b| b.last_state_change.cmp(&a.last_state_change));
+                updates.truncate(config.max_gossip_updates);
+            }
+            
+            updates
+        };
+        
+        if member_updates.is_empty() {
+            return Ok(());
+        }
+        
+        // Send gossip to selected targets
+        let inc = *incarnation.lock().await;
+        for target in targets {
+            let sync_msg = Message {
+                message_type: MessageType::Sync,
+                sender_id: node_id.to_string(),
+                sender_addr: addr.to_string(),
+                target_id: Some(target.id.clone()),
+                incarnation: inc,
+                members: Some(member_updates.clone()),
+            };
+            
+            let encoded = bincode::serialize(&sync_msg)?;
+            let target_addr = format!("{}:{}", target.address, config.bind_port);
+            socket.send_to(&encoded, &target_addr).await?;
+        }
+        
+        Ok(())
+    }
+    
+    // Check if we have quorum
+    async fn check_quorum(
+        members: &Arc<Mutex<HashMap<String, Member>>>,
+        quorum_size: &Arc<Mutex<usize>>,
+        partition_detected: &Arc<Mutex<bool>>,
+        event_tx: &tokio::sync::mpsc::Sender<MembershipEvent>,
+    ) -> Result<()> {
+        let members_lock = members.lock().await;
+        let alive_count = members_lock
+            .values()
+            .filter(|m| m.state == NodeState::Alive)
+            .count();
+            
+        let mut quorum_size_lock = quorum_size.lock().await;
+        let mut partition_detected_lock = partition_detected.lock().await;
+        
+        // Update quorum size if needed (should be majority of all members)
+        let total_members = members_lock.len();
+        let new_quorum_size = (total_members as f64 * 0.51).ceil() as usize;
+        
+        if *quorum_size_lock != new_quorum_size {
+            *quorum_size_lock = new_quorum_size;
+        }
+        
+        // Check if we have quorum
+        let has_quorum = alive_count >= *quorum_size_lock;
+        
+        // Handle partition detection
+        if !has_quorum && !*partition_detected_lock {
+            *partition_detected_lock = true;
+            let _ = event_tx.send(MembershipEvent::QuorumLost).await;
+            let _ = event_tx.send(MembershipEvent::NetworkPartitionDetected).await;
+            println!("Network partition detected! Quorum lost.");
+        } else if has_quorum && *partition_detected_lock {
+            *partition_detected_lock = false;
+            let _ = event_tx.send(MembershipEvent::QuorumRestored).await;
+            let _ = event_tx.send(MembershipEvent::NetworkPartitionResolved).await;
+            println!("Network partition resolved! Quorum restored.");
+        }
+        
+        Ok(())
+    }
+    
+    // Check leader status and elect if needed
+    async fn check_leader_status(
+        node_id: &str,
+        members: &Arc<Mutex<HashMap<String, Member>>>,
+        is_leader: &Arc<Mutex<bool>>,
+        socket: &Arc<UdpSocket>,
+        config: &MembershipConfig,
+        event_tx: &tokio::sync::mpsc::Sender<MembershipEvent>,
+    ) -> Result<()> {
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
+            
+        // Check if we have a leader
+        let (has_leader, self_is_leader, need_election) = {
+            let mut members_lock = members.lock().await;
+            
+            // Find current leader
+            let leader = members_lock.values().find(|m| m.is_leader && m.state == NodeState::Alive);
+            let has_leader = leader.is_some();
+            
+            // Check if we are the leader
+            let self_member = members_lock.get_mut(node_id);
+            let self_is_leader = if let Some(member) = self_member {
+                member.last_leader_check = now;
+                member.is_leader
+            } else {
+                false
+            };
+            
+            // Determine if we need an election
+            let need_election = !has_leader;
+            
+            (has_leader, self_is_leader, need_election)
+        };
+        
+        // Update our leader status
+        {
+            let mut is_leader_lock = is_leader.lock().await;
+            *is_leader_lock = self_is_leader;
+        }
+        
+        // If we need an election and we're the oldest node, elect ourselves
+        if need_election {
+            let should_be_leader = {
+                let members_lock = members.lock().await;
+                
+                // Find oldest alive node by incarnation number
+                let oldest = members_lock.values()
+                    .filter(|m| m.state == NodeState::Alive)
+                    .min_by_key(|m| m.incarnation);
+                    
+                if let Some(oldest) = oldest {
+                    oldest.id == node_id
+                } else {
+                    false
+                }
+            };
+            
+            if should_be_leader {
+                // Elect ourselves as leader
+                {
+                    let mut members_lock = members.lock().await;
+                    if let Some(self_member) = members_lock.get_mut(node_id) {
+                        self_member.is_leader = true;
+                        self_member.last_leader_check = now;
+                        
+                        // Update our leader status
+                        let mut is_leader_lock = is_leader.lock().await;
+                        *is_leader_lock = true;
+                        
+                        // Send event
+                        let _ = event_tx
+                            .send(MembershipEvent::LeaderElected(self_member.clone()))
+                            .await;
+                            
+                        println!("Node {} elected as leader", node_id);
+                    }
+                }
+                
+                // Announce leadership to all nodes
+                let members_list = Self::get_members_list(members).await;
+                let leader_msg = Message {
+                    message_type: MessageType::LeaderAnnounce,
+                    sender_id: node_id.to_string(),
+                    sender_addr: "".to_string(),
+                    target_id: None,
+                    incarnation: 0,
+                    members: Some(members_list),
+                };
+                
+                let encoded = bincode::serialize(&leader_msg)?;
+                
+                // Send to all alive members
+                let alive_members = {
+                    let members_lock = members.lock().await;
+                    members_lock.values()
+                        .filter(|m| m.state == NodeState::Alive && m.id != node_id)
+                        .cloned()
+                        .collect::<Vec<_>>()
+                };
+                
+                for member in alive_members {
+                    let addr = format!("{}:{}", member.address, config.bind_port);
+                    socket.send_to(&encoded, addr).await?;
+                }
+            }
+        }
+        
+        Ok(())
+    }
+    
+    // Process leader election message
+    async fn process_leader_election(
+        sender_id: &str,
+        sender_addr: &str,
+        sender_incarnation: u64,
+        members: &Arc<Mutex<HashMap<String, Member>>>,
+        incarnation: &Arc<Mutex<u64>>,
+        socket: &Arc<UdpSocket>,
+        config: &MembershipConfig,
+        is_leader: &Arc<Mutex<bool>>,
+        event_tx: &tokio::sync::mpsc::Sender<MembershipEvent>,
+    ) -> Result<()> {
+        // Check if we should be the leader instead
+        let our_incarnation = *incarnation.lock().await;
+        
+        if our_incarnation < sender_incarnation {
+            // The sender has a higher incarnation, they should be leader
+            let mut members_lock = members.lock().await;
+            
+            // Update sender as leader
+            if let Some(member) = members_lock.get_mut(sender_id) {
+                member.is_leader = true;
+                member.incarnation = sender_incarnation;
+                
+                // Update our leader status
+                let mut is_leader_lock = is_leader.lock().await;
+                *is_leader_lock = false;
+                
+                // Send event
+                let _ = event_tx
+                    .send(MembershipEvent::LeaderElected(member.clone()))
+                    .await;
+                    
+                println!("Node {} elected as leader", sender_id);
+            } else {
+                // Add the sender as a new member
+                let now = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap()
+                    .as_secs();
+                    
+                let new_member = Member {
+                    id: sender_id.to_string(),
+                    address: sender_addr.to_string(),
+                    state: NodeState::Alive,
+                    incarnation: sender_incarnation,
+                    last_state_change: now,
+                    is_leader: true,
+                    last_leader_check: now,
+                    metadata: Some(HashMap::new()),
+                };
+                
+                members_lock.insert(sender_id.to_string(), new_member.clone());
+                
+                // Update our leader status
+                let mut is_leader_lock = is_leader.lock().await;
+                *is_leader_lock = false;
+                
+                // Send event
+                let _ = event_tx
+                    .send(MembershipEvent::LeaderElected(new_member))
+                    .await;
+                    
+                println!("Node {} elected as leader", sender_id);
+            }
+        } else {
+            // We have a higher incarnation, we should be leader
+            // Send a leader announce message
+            let members_list = Self::get_members_list(members).await;
+            let leader_msg = Message {
+                message_type: MessageType::LeaderAnnounce,
+                sender_id: "".to_string(),
+                sender_addr: "".to_string(),
+                target_id: Some(sender_id.to_string()),
+                incarnation: our_incarnation,
+                members: Some(members_list),
+            };
+            
+            let encoded = bincode::serialize(&leader_msg)?;
+            let target_addr = format!("{}:{}", sender_addr, config.bind_port);
+            socket.send_to(&encoded, target_addr).await?;
+        }
+        
+        Ok(())
+    }
+    
+    // Process leader announcement
+    async fn process_leader_announce(
+        sender_id: &str,
+        sender_incarnation: u64,
+        members: &Arc<Mutex<HashMap<String, Member>>>,
+        is_leader: &Arc<Mutex<bool>>,
+        event_tx: &tokio::sync::mpsc::Sender<MembershipEvent>,
+    ) -> Result<()> {
+        let mut members_lock = members.lock().await;
+        
+        // Update all members to not be leader
+        for (_, member) in members_lock.iter_mut() {
+            member.is_leader = false;
+        }
+        
+        // Update sender as leader
+        if let Some(member) = members_lock.get_mut(sender_id) {
+            member.is_leader = true;
+            member.incarnation = sender_incarnation;
+            
+            // Update our leader status
+            let mut is_leader_lock = is_leader.lock().await;
+            *is_leader_lock = false;
+            
+            // Send event
+            let _ = event_tx
+                .send(MembershipEvent::LeaderElected(member.clone()))
+                .await;
+                
+            println!("Node {} announced as leader", sender_id);
+        }
+        
+        Ok(())
+    }
+    
+    // Process maintenance mode request
+    async fn process_maintenance(
+        sender_id: &str,
+        members: &Arc<Mutex<HashMap<String, Member>>>,
+        event_tx: &tokio::sync::mpsc::Sender<MembershipEvent>,
+    ) -> Result<()> {
+        let mut members_lock = members.lock().await;
+        
+        if let Some(member) = members_lock.get_mut(sender_id) {
+            let now = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_secs();
+                
+            member.state = NodeState::Maintenance;
+            member.last_state_change = now;
+            
+            // Clone for event
+            let member_clone = member.clone();
+            
+            // Send event
+            let _ = event_tx
+                .send(MembershipEvent::MemberMaintenance(member_clone))
+                .await;
+                
+            println!("Member {} is now in maintenance mode", sender_id);
+        }
+        
+        Ok(())
+    }
+    
+    // Process reintegration request
+    async fn process_reintegration(
+        sender_id: &str,
+        sender_addr: &str,
+        members: &Arc<Mutex<HashMap<String, Member>>>,
+        reintegration_timers: &Arc<Mutex<HashMap<String, Instant>>>,
+        event_tx: &tokio::sync::mpsc::Sender<MembershipEvent>,
+    ) -> Result<()> {
+        // Check if node is allowed to reintegrate
+        let can_reintegrate = {
+            let reintegration_timers_lock = reintegration_timers.lock().await;
+            !reintegration_timers_lock.contains_key(sender_id)
+        };
+        
+        if can_reintegrate {
+            let mut members_lock = members.lock().await;
+            
+            let now = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_secs();
+                
+            if let Some(member) = members_lock.get_mut(sender_id) {
+                // Update existing member
+                member.state = NodeState::Alive;
+                member.address = sender_addr.to_string();
+                member.last_state_change = now;
+                
+                // Clone for event
+                let member_clone = member.clone();
+                
+                // Send event
+                let _ = event_tx
+                    .send(MembershipEvent::MemberAlive(member_clone))
+                    .await;
+                    
+                println!("Member {} has reintegrated", sender_id);
+            } else {
+                // Add as new member
+                let new_member = Member {
+                    id: sender_id.to_string(),
+                    address: sender_addr.to_string(),
+                    state: NodeState::Alive,
+                    incarnation: 1,
+                    last_state_change: now,
+                    is_leader: false,
+                    last_leader_check: now,
+                    metadata: Some(HashMap::new()),
+                };
+                
+                members_lock.insert(sender_id.to_string(), new_member.clone());
+                
+                // Send event
+                let _ = event_tx
+                    .send(MembershipEvent::MemberJoined(new_member))
+                    .await;
+                    
+                println!("Member {} has joined through reintegration", sender_id);
+            }
+        }
+        
+        Ok(())
+    }
+    
+    // Process state synchronization
+    async fn process_state_sync(
+        sender_id: &str,
+        member_list: Vec<Member>,
+        state_store: &Arc<Mutex<HashMap<String, Vec<u8>>>>,
+        state_versions: &Arc<Mutex<HashMap<String, u64>>>,
+        socket: &Arc<UdpSocket>,
+        src: SocketAddr,
+    ) -> Result<()> {
+        // Process member list to extract state information
+        for member in member_list {
+            if let Some(metadata) = &member.metadata {
+                for (key, value) in metadata {
+                    if key.starts_with("state:") {
+                        let state_key = key.trim_start_matches("state:");
+                        let version_key = format!("version:{}", state_key);
+                        
+                        if let Some(version_str) = metadata.get(&version_key) {
+                            if let Ok(version) = version_str.parse::<u64>() {
+                                // Check if we have a newer version
+                                let should_update = {
+                                    let versions_lock = state_versions.lock().await;
+                                    !versions_lock.contains_key(state_key) ||
+                                    versions_lock.get(state_key).unwrap() < &version
+                                };
+                                
+                                if should_update {
+                                    // Update our state
+                                    let mut state_store_lock = state_store.lock().await;
+                                    let mut versions_lock = state_versions.lock().await;
+                                    
+                                    state_store_lock.insert(state_key.to_string(), value.as_bytes().to_vec());
+                                    versions_lock.insert(state_key.to_string(), version);
+                                    
+                                    println!("Updated state {} to version {}", state_key, version);
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        
+        // Send acknowledgment
+        let ack_msg = Message {
+            message_type: MessageType::Ack,
+            sender_id: "".to_string(),
+            sender_addr: "".to_string(),
+            target_id: Some(sender_id.to_string()),
+            incarnation: 0,
+            members: None,
+        };
+        
+        let encoded = bincode::serialize(&ack_msg)?;
+        socket.send_to(&encoded, src).await?;
+        
+        Ok(())
+    }
+    
+    // Enter maintenance mode
+    pub async fn enter_maintenance_mode(&self) -> Result<()> {
+        println!("Entering maintenance mode");
+        
+        // Increment incarnation
+        let mut inc_lock = self.incarnation.lock().await;
+        *inc_lock += 1;
+        let inc = *inc_lock;
+        
+        // Create maintenance message
+        let maintenance_msg = Message {
+            message_type: MessageType::Maintenance,
+            sender_id: self.node_id.clone(),
+            sender_addr: self.addr.clone(),
+            target_id: None,
+            incarnation: inc,
+            members: None,
+        };
+        
+        // Send maintenance message to all alive members
+        let encoded = bincode::serialize(&maintenance_msg)?;
+        
+        let members = self.get_alive_members().await;
+        for member in members {
+            if member.id != self.node_id {
+                let addr = format!("{}:{}", member.address, self.config.bind_port);
+                self.socket.send_to(&encoded, addr).await?;
+            }
+        }
+        
+        // Update own state
+        let mut members_lock = self.members.lock().await;
+        if let Some(self_member) = members_lock.get_mut(&self.node_id) {
+            let now = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_secs();
+                
+            self_member.state = NodeState::Maintenance;
+            self_member.last_state_change = now;
+            
+            // Send event
+            let _ = self.event_tx
+                .send(MembershipEvent::MemberMaintenance(self_member.clone()))
+                .await;
+        }
+        
+        println!("Entered maintenance mode");
+        Ok(())
+    }
+    
+    // Exit maintenance mode
+    pub async fn exit_maintenance_mode(&self) -> Result<()> {
+        println!("Exiting maintenance mode");
+        
+        // Increment incarnation
+        let mut inc_lock = self.incarnation.lock().await;
+        *inc_lock += 1;
+        let inc = *inc_lock;
+        
+        // Update own state
+        let mut members_lock = self.members.lock().await;
+        if let Some(self_member) = members_lock.get_mut(&self.node_id) {
+            let now = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_secs();
+                
+            self_member.state = NodeState::Alive;
+            self_member.last_state_change = now;
+            
+            // Send event
+            let _ = self.event_tx
+                .send(MembershipEvent::MemberAlive(self_member.clone()))
+                .await;
+        }
+        
+        // Rejoin the cluster
+        self.join_cluster(&self.addr).await?;
+        
+        println!("Exited maintenance mode");
+        Ok(())
+    }
+    
+    // Store distributed state
+    pub async fn store_state(&self, key: &str, value: &[u8]) -> Result<()> {
+        let mut state_store_lock = self.state_store.lock().await;
+        let mut versions_lock = self.state_versions.lock().await;
+        
+        // Get current version and increment
+        let version = versions_lock.get(key).unwrap_or(&0) + 1;
+        
+        // Store state and version
+        state_store_lock.insert(key.to_string(), value.to_vec());
+        versions_lock.insert(key.to_string(), version);
+        
+        // Update metadata in member info
+        let mut members_lock = self.members.lock().await;
+        if let Some(self_member) = members_lock.get_mut(&self.node_id) {
+            if self_member.metadata.is_none() {
+                self_member.metadata = Some(HashMap::new());
+            }
+            
+            if let Some(metadata) = &mut self_member.metadata {
+                metadata.insert(format!("state:{}", key), String::from_utf8_lossy(value).to_string());
+                metadata.insert(format!("version:{}", key), version.to_string());
+            }
+        }
+        
+        // Propagate state through gossip
+        self.gossip_state(key, value, version).await?;
+        
+        Ok(())
+    }
+    
+    // Get distributed state
+    pub async fn get_state(&self, key: &str) -> Option<Vec<u8>> {
+        let state_store_lock = self.state_store.lock().await;
+        state_store_lock.get(key).cloned()
+    }
+    
+    // Gossip state to other nodes
+    async fn gossip_state(&self, key: &str, value: &[u8], version: u64) -> Result<()> {
+        // Create metadata with state
+        let mut metadata = HashMap::new();
+        metadata.insert(format!("state:{}", key), String::from_utf8_lossy(value).to_string());
+        metadata.insert(format!("version:{}", key), version.to_string());
+        
+        // Create a temporary member with the state
+        let state_member = Member {
+            id: format!("state:{}", key),
+            address: "".to_string(),
+            state: NodeState::Alive,
+            incarnation: version,
+            last_state_change: std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_secs(),
+            is_leader: false,
+            last_leader_check: 0,
+            metadata: Some(metadata),
+        };
+        
+        // Create sync message with state
+        let sync_msg = Message {
+            message_type: MessageType::StateSync,
+            sender_id: self.node_id.clone(),
+            sender_addr: self.addr.clone(),
+            target_id: None,
+            incarnation: *self.incarnation.lock().await,
+            members: Some(vec![state_member]),
+        };
+        
+        // Send to all alive members
+        let encoded = bincode::serialize(&sync_msg)?;
+        
+        let members = self.get_alive_members().await;
+        for member in members {
+            if member.id != self.node_id {
+                let addr = format!("{}:{}", member.address, self.config.bind_port);
+                self.socket.send_to(&encoded, addr).await?;
+            }
+        }
+        
+        Ok(())
     }
 }

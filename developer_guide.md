@@ -1,6 +1,145 @@
 # Hivemind Developer Guide
 
-This guide provides information for developers working with the Hivemind platform, including how to deploy applications and understand the container networking system.
+This guide provides comprehensive information for developers working with the Hivemind platform, including how to set up a development environment, understand the codebase, deploy applications, and extend the platform with new features.
+
+## Development Environment Setup
+
+### Prerequisites
+
+- **Rust 1.60+**: Hivemind is built in Rust and requires version 1.60 or newer
+- **containerd**: For container runtime integration (optional for development with mock mode)
+- **SQLite**: For persistent storage
+- **Git**: For version control
+- **Docker**: For building and testing container images
+
+### Getting Started
+
+1. **Clone the repository**:
+   ```bash
+   git clone https://github.com/ao/hivemind.git
+   cd hivemind
+   ```
+
+2. **Build the project**:
+   ```bash
+   cargo build
+   ```
+
+3. **Run tests**:
+   ```bash
+   cargo test
+   ```
+
+4. **Run in development mode**:
+   ```bash
+   cargo run -- web --port 3000
+   ```
+
+### Development Modes
+
+Hivemind supports different development modes:
+
+1. **Mock Mode**: Uses mock implementations of container runtime and other external dependencies
+   ```bash
+   cargo run -- web --port 3000 --mock
+   ```
+
+2. **Full Mode**: Uses real implementations of all components
+   ```bash
+   cargo run -- daemon --web-port 3000
+   ```
+
+3. **Web-Only Mode**: Runs only the web interface
+   ```bash
+   cargo run -- web --port 3000
+   ```
+
+## Project Structure
+
+The Hivemind codebase is organized into several key modules:
+
+- `src/app.rs` - Application & container management
+- `src/containerd_manager.rs` - Container runtime integration
+- `src/service_discovery.rs` - Service discovery & DNS
+- `src/storage.rs` - Persistence layer
+- `src/node.rs` - Node & cluster management
+- `src/membership.rs` - SWIM-based node membership protocol
+- `src/network.rs` - Container networking & overlay network
+- `src/scheduler.rs` - Container scheduler
+- `src/health_monitor.rs` - Health monitoring system
+- `src/security/` - Security features
+  - `container_scanning.rs` - Container image scanning
+  - `network_policy.rs` - Network policy enforcement
+  - `rbac.rs` - Role-based access control
+  - `secret_management.rs` - Secret management
+- `src/web.rs` - Web UI & dashboard
+- `src/main.rs` - CLI & entry point
+
+### Key Abstractions
+
+1. **AppManager**: Manages applications and containers
+2. **ContainerdManager**: Integrates with the container runtime
+3. **ServiceDiscovery**: Provides service discovery and DNS resolution
+4. **NodeManager**: Manages cluster nodes
+5. **MembershipProtocol**: Implements the SWIM protocol for cluster membership
+6. **NetworkManager**: Manages container networking
+7. **ContainerScheduler**: Schedules containers on nodes
+8. **HealthMonitor**: Monitors container and node health
+9. **SecurityManager**: Manages security features
+
+## Development Workflow
+
+### Making Changes
+
+1. **Create a feature branch**:
+   ```bash
+   git checkout -b feature/my-feature
+   ```
+
+2. **Make your changes**: Implement your feature or fix
+
+3. **Write tests**: Add tests for your changes
+
+4. **Run tests**:
+   ```bash
+   cargo test
+   ```
+
+5. **Format your code**:
+   ```bash
+   cargo fmt
+   ```
+
+6. **Check for linting issues**:
+   ```bash
+   cargo clippy
+   ```
+
+7. **Submit a pull request**: Push your changes and create a PR
+
+### Testing
+
+Hivemind has several types of tests:
+
+1. **Unit Tests**: Test individual components in isolation
+   ```bash
+   cargo test --lib
+   ```
+
+2. **Integration Tests**: Test multiple components working together
+   ```bash
+   cargo test --test integration_tests
+   ```
+
+3. **Performance Tests**: Test performance under load
+   ```bash
+   cargo test --test performance_tests
+   ```
+
+4. **Chaos Tests**: Test resilience under failure conditions
+   ```bash
+   cargo test --test chaos_tests
+   ```
 
 ## Deployment Options
 
@@ -10,12 +149,12 @@ A developer has three main ways to deploy their Docker image to Hivemind:
 2. **Web UI**
 3. **REST API**
 
-## Prerequisites
+### Prerequisites
 
 - The Docker image is already built and pushed to a registry (Docker Hub, ECR, etc.)
 - Hivemind daemon is running on the server
 
-## Option 1: Command Line Interface (CLI)
+### Option 1: Command Line Interface (CLI)
 
 The simplest way to deploy using the CLI:
 
@@ -29,7 +168,7 @@ For a public-facing service with a domain:
 hivemind app deploy --image your-registry/your-image:tag --name your-app-name --service your-service-domain
 ```
 
-### CLI Examples
+#### CLI Examples
 
 1. **Deploy a simple application**:
    ```bash
@@ -41,27 +180,42 @@ hivemind app deploy --image your-registry/your-image:tag --name your-app-name --
    hivemind app deploy --image myapp:latest --name myapp --service app.example.com
    ```
 
-3. **Check deployed containers**:
+3. **Deploy with resource limits**:
+   ```bash
+   hivemind app deploy --image myapp:latest --name myapp --cpu 0.5 --memory 512M
+   ```
+
+4. **Deploy with volume mounts**:
+   ```bash
+   hivemind app deploy --image myapp:latest --name myapp --volume my-data:/data
+   ```
+
+5. **Deploy with environment variables**:
+   ```bash
+   hivemind app deploy --image myapp:latest --name myapp --env "KEY1=value1" --env "KEY2=value2"
+   ```
+
+6. **Check deployed containers**:
    ```bash
    hivemind app containers
    ```
 
-4. **Get detailed container info**:
+7. **Get detailed container info**:
    ```bash
    hivemind app container-info --container-id <container-id>
    ```
 
-5. **Restart an application**:
+8. **Restart an application**:
    ```bash
    hivemind app restart --name myapp
    ```
 
-6. **Scale an application**:
+9. **Scale an application**:
    ```bash
    hivemind app scale --name myapp --replicas 3
    ```
 
-## Option 2: Web UI
+### Option 2: Web UI
 
 Hivemind provides a web interface accessible at port 3000 by default:
 
@@ -71,9 +225,12 @@ Hivemind provides a web interface accessible at port 3000 by default:
    - Name: Give your application a name
    - Image: Select or enter your Docker image (in format `repository/image:tag`)
    - Service Domain (optional): Enter a domain name if you want the application exposed
+   - Resource Limits (optional): Set CPU and memory limits
+   - Volumes (optional): Add volume mounts
+   - Environment Variables (optional): Add environment variables
 4. Click "Deploy" button
 
-## Option 3: REST API
+### Option 3: REST API
 
 For automated or programmatic deployments, you can use the REST API:
 
@@ -83,7 +240,18 @@ curl -X POST http://<your-server>:3000/api/deploy \
   -d '{
     "image": "your-registry/your-image:tag",
     "name": "your-app-name",
-    "service": "optional-domain-name"
+    "service": "optional-domain-name",
+    "resources": {
+      "cpu": 0.5,
+      "memory": "512M"
+    },
+    "volumes": [
+      {"name": "my-data", "mountPath": "/data"}
+    ],
+    "env": {
+      "KEY1": "value1",
+      "KEY2": "value2"
+    }
   }'
 ```
 
@@ -108,7 +276,79 @@ If your application needs persistent storage, you can create and use volumes:
    ```
 
 2. **Deploy with volumes**:
-   Unfortunately, the CLI and API don't directly expose volume mounts, but you can use the web UI to deploy applications with volumes or modify the code to add this capability.
+   ```bash
+   hivemind app deploy --image nginx:latest --name web-frontend --volume my-data-volume:/data
+   ```
+
+## Working with Security Features
+
+### Container Scanning
+
+Scan container images for vulnerabilities:
+
+```bash
+hivemind security scan-image --image nginx:latest
+```
+
+### Network Policies
+
+Create a network policy:
+
+```bash
+curl -X POST http://<your-server>:3000/api/security/network-policies \
+  -H "Content-Type: application/json" \
+  -d '{
+    "name": "web-to-db",
+    "selector": {
+      "labels": {"app": "web"}
+    },
+    "ingress_rules": [
+      {
+        "ports": [{"protocol": "TCP", "port_min": 80, "port_max": 80}],
+        "from": [{"ip_block": "10.244.2.0/24"}]
+      }
+    ],
+    "egress_rules": [
+      {
+        "ports": [{"protocol": "TCP", "port_min": 5432, "port_max": 5432}],
+        "from": [{"selector": {"labels": {"app": "db"}}}]
+      }
+    ]
+  }'
+```
+
+### Secret Management
+
+Create and use secrets:
+
+```bash
+# Create a secret
+hivemind security create-secret --name db-password --file password.txt
+
+# Use a secret in a deployment
+hivemind app deploy --image myapp:latest --name myapp --secret db-password:/etc/secrets/db-password
+```
+
+## Extending Hivemind
+
+### Adding a New Command
+
+1. Add a new subcommand to the CLI in `src/main.rs`
+2. Implement the command handler
+3. Add tests for the new command
+
+### Adding a New API Endpoint
+
+1. Add a new route in `src/web.rs`
+2. Implement the handler function
+3. Add tests for the new endpoint
+
+### Adding a New Feature
+
+1. Create a new module in `src/`
+2. Implement the feature
+3. Integrate with existing components
+4. Add tests for the new feature
 
 ## How It Works Under the Hood
 
@@ -126,42 +366,6 @@ The connection between Hivemind and your container images happens in the `Contai
 - Creates and manages containers
 - Maps ports and volumes
 - Monitors container status
-
-## Limitations and Notes
-
-1. The current implementation has a mock `pull_image` function - in production, this would actually pull from your registry
-2. The system supports common container configuration:
-   - Environment variables
-   - Port mappings
-   - Volume mounts
-3. The service discovery allows public access to your containers
-4. The platform supports scaling, restarting, and monitoring containers
-5. Container logs and metrics are tracked for monitoring
-
-## Advanced Features
-
-Hivemind also provides these additional capabilities:
-
-1. **Scaling**: Adjust the number of container replicas
-   ```bash
-   hivemind app scale --name your-app-name --replicas 3
-   ```
-
-2. **Health Checks**: Monitor application health
-   ```bash
-   hivemind health
-   ```
-
-3. **Service Discovery**: Automatic registration and DNS for services
-
-4. **Multi-node Clusters**: Join nodes to create a distributed cluster
-   ```bash
-   hivemind join --host <any-node-address>
-   ```
-
-5. **Container Networking**: Seamless communication between containers across nodes
-
-By following these instructions, a developer can successfully deploy their Docker images to the Hivemind platform and manage them effectively.
 
 ## Container Networking
 
@@ -207,3 +411,59 @@ If containers are having trouble communicating:
 4. Ensure that the nodes can reach each other on the VXLAN port (default: 4789)
 
 For more detailed troubleshooting, refer to the [Container Networking Documentation](docs/container_networking.md).
+
+## Debugging Tips
+
+### Logging
+
+Hivemind uses the standard Rust logging framework. You can control the log level using the `RUST_LOG` environment variable:
+
+```bash
+RUST_LOG=debug cargo run -- daemon
+```
+
+Log levels:
+- `error`: Error conditions
+- `warn`: Warning conditions
+- `info`: Informational messages
+- `debug`: Debug-level messages
+- `trace`: Trace-level messages
+
+### Common Issues
+
+1. **Container fails to start**:
+   - Check the container logs: `hivemind app logs --name <app-name>`
+   - Check the Hivemind logs: `RUST_LOG=debug hivemind daemon`
+   - Verify the image exists: `docker pull <image>`
+
+2. **Service discovery not working**:
+   - Check the service is registered: `hivemind app services`
+   - Verify DNS resolution: `nslookup <service-name>.local`
+   - Check network policies: `hivemind security list-network-policies`
+
+3. **Node not joining cluster**:
+   - Check network connectivity between nodes
+   - Verify the node is running: `hivemind node ls`
+   - Check the membership protocol logs: `RUST_LOG=debug hivemind daemon`
+
+## Contributing
+
+We welcome contributions to Hivemind! Please follow these guidelines:
+
+1. Fork the repository
+2. Create a feature branch
+3. Make your changes
+4. Write tests for your changes
+5. Format your code with `cargo fmt`
+6. Check for linting issues with `cargo clippy`
+7. Submit a pull request
+
+## Additional Resources
+
+- [API Documentation](docs/api_reference.md)
+- [CLI Reference](docs/cli_reference.md)
+- [Architecture Guide](ARCHITECTURE.md)
+- [Container Networking](docs/container_networking.md)
+- [Service Discovery](docs/service_discovery.md)
+- [Security Features](docs/security_features.md)
+- [Node Membership Protocol](docs/node_membership_protocol.md)

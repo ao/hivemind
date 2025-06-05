@@ -1,9 +1,9 @@
 use crate::storage::StorageManager;
 #[cfg(feature = "containerd")]
 use crate::containerd_manager::ContainerdManager;
-use crate::containerd_manager::{MockContainerManager, Container, ContainerStats, ContainerStatus};
+use crate::containerd_manager::{Container, ContainerStats, ContainerStatus};
 use crate::service_discovery::ServiceDiscovery;
-use anyhow::{Context, Result};
+use anyhow::Result;
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use tokio::sync::Mutex;
@@ -55,6 +55,9 @@ pub trait ContainerRuntime: Send + Sync + 'static {
     
     /// List volumes
     async fn list_volumes(&self) -> Result<Vec<Volume>>;
+    
+    /// Get as Any for downcasting
+    fn as_any(&self) -> &dyn std::any::Any;
 }
 
 /// AppManager is responsible for managing applications and containers
@@ -112,10 +115,31 @@ impl AppManager {
     pub async fn create_volume(&self, name: &str) -> Result<()> {
         println!("Creating volume {}", name);
 
+        // Validate volume name
+        self.validate_volume_name(name)?;
+
+        // Check if volume already exists
+        if let Some(runtime) = &self.container_runtime {
+            let existing_volumes = runtime.list_volumes().await?;
+            if existing_volumes.iter().any(|v| v.name == name) {
+                return Err(anyhow::anyhow!("Volume with name '{}' already exists", name));
+            }
+        }
+
         // Check if container runtime is available
         if let Some(runtime) = &self.container_runtime {
             // Create volume using container runtime
             runtime.create_volume(name).await?;
+            
+            // If we have storage, save the volume info
+            if let Some(storage) = &self.storage {
+                // Get the volume details from the runtime
+                let volumes = runtime.list_volumes().await?;
+                if let Some(volume) = volumes.iter().find(|v| v.name == name) {
+                    storage.save_volume(&volume.name, &volume.path, volume.size, volume.created_at).await?;
+                }
+            }
+            
             println!("Volume {} created", name);
             Ok(())
         } else {
@@ -125,14 +149,69 @@ impl AppManager {
         }
     }
 
+    // Validate volume name
+    fn validate_volume_name(&self, name: &str) -> Result<()> {
+        // Check if name is empty
+        if name.is_empty() {
+            return Err(anyhow::anyhow!("Volume name cannot be empty"));
+        }
+
+        // Check if name contains only alphanumeric characters, dashes, and underscores
+        if !name.chars().all(|c| c.is_alphanumeric() || c == '-' || c == '_') {
+            return Err(anyhow::anyhow!(
+                "Volume name can only contain alphanumeric characters, dashes, and underscores"
+            ));
+        }
+
+        // Check if name starts with a letter or number
+        if !name.chars().next().unwrap().is_alphanumeric() {
+            return Err(anyhow::anyhow!(
+                "Volume name must start with an alphanumeric character"
+            ));
+        }
+
+        // Check if name is too long
+        if name.len() > 63 {
+            return Err(anyhow::anyhow!("Volume name cannot exceed 63 characters"));
+        }
+
+        Ok(())
+    }
+
     // Delete a volume - delegates to container runtime
     pub async fn delete_volume(&self, name: &str) -> Result<()> {
         println!("Deleting volume {}", name);
+
+        // Validate volume name
+        self.validate_volume_name(name)?;
+
+        // Check if volume exists
+        if let Some(runtime) = &self.container_runtime {
+            let existing_volumes = runtime.list_volumes().await?;
+            if !existing_volumes.iter().any(|v| v.name == name) {
+                return Err(anyhow::anyhow!("Volume '{}' not found", name));
+            }
+        }
+
+        // Check if volume is in use by any container
+        let is_in_use = self.is_volume_in_use(name).await?;
+        if is_in_use {
+            return Err(anyhow::anyhow!(
+                "Cannot delete volume '{}' because it is in use by one or more containers",
+                name
+            ));
+        }
 
         // Check if container runtime is available
         if let Some(runtime) = &self.container_runtime {
             // Delete volume using container runtime
             runtime.delete_volume(name).await?;
+            
+            // If we have storage, delete the volume info
+            if let Some(storage) = &self.storage {
+                storage.delete_volume(name).await?;
+            }
+            
             println!("Volume {} deleted", name);
             Ok(())
         } else {
@@ -142,6 +221,38 @@ impl AppManager {
         }
     }
 
+    // Check if a volume is in use by any container
+    async fn is_volume_in_use(&self, volume_name: &str) -> Result<bool> {
+        // If we have storage, check if volume is in use
+        if let Some(storage) = &self.storage {
+            return storage.is_volume_in_use(volume_name).await;
+        }
+
+        // Otherwise, check all containers in memory
+        let containers = self.containers.lock().await;
+        for container in containers.iter() {
+            for volume in &container.volumes {
+                if volume.name == volume_name {
+                    return Ok(true);
+                }
+            }
+        }
+
+        // If we have a container runtime, check containers there too
+        if let Some(runtime) = &self.container_runtime {
+            let runtime_containers = runtime.list_containers().await?;
+            for container in runtime_containers {
+                for volume in container.volumes {
+                    if volume.name == volume_name {
+                        return Ok(true);
+                    }
+                }
+            }
+        }
+
+        Ok(false)
+    }
+
     // List volumes - delegates to container runtime
     pub async fn list_volumes(&self) -> Result<Vec<Volume>> {
         println!("Listing volumes");
@@ -149,7 +260,37 @@ impl AppManager {
         // Check if container runtime is available
         if let Some(runtime) = &self.container_runtime {
             // Get volumes from container runtime
-            runtime.list_volumes().await
+            let mut volumes = runtime.list_volumes().await?;
+            
+            // If we have storage, update volume information from the database
+            if let Some(storage) = &self.storage {
+                // Get volumes from storage
+                let db_volumes = storage.get_volumes().await?;
+                
+                // Update volume information with data from the database
+                for (name, path, size, created_at) in db_volumes {
+                    // Find the volume in the runtime list
+                    if let Some(volume) = volumes.iter_mut().find(|v| v.name == name) {
+                        // Update with database information
+                        volume.path = path;
+                        volume.size = size;
+                        volume.created_at = created_at;
+                    } else {
+                        // Volume exists in database but not in runtime, add it
+                        volumes.push(Volume {
+                            name,
+                            path,
+                            size,
+                            created_at,
+                        });
+                    }
+                }
+            }
+            
+            // Sort volumes by name for consistent output
+            volumes.sort_by(|a, b| a.name.cmp(&b.name));
+            
+            Ok(volumes)
         } else {
             // Error if no container runtime
             println!("No container runtime available to list volumes");
@@ -173,12 +314,43 @@ impl AppManager {
         let env_vars = env_vars.unwrap_or_else(|| vec![("APP_NAME", name)]);
         let ports = ports.unwrap_or_else(|| vec![(80, 8080)]);
 
+        // Validate volume names and paths
+        for (volume_name, container_path) in &volumes {
+            // Validate volume name
+            self.validate_volume_name(volume_name)?;
+            
+            // Validate container path
+            if container_path.is_empty() {
+                return Err(anyhow::anyhow!("Container path cannot be empty"));
+            }
+            
+            // Container path must be absolute
+            if !container_path.starts_with('/') {
+                return Err(anyhow::anyhow!(
+                    "Container path '{}' must be absolute (start with /)",
+                    container_path
+                ));
+            }
+        }
+        
+        // Check for duplicate mount paths
+        let mut mount_paths = HashSet::new();
+        for (_, container_path) in &volumes {
+            if !mount_paths.insert(container_path) {
+                return Err(anyhow::anyhow!(
+                    "Duplicate container mount path: {}",
+                    container_path
+                ));
+            }
+        }
+        
         // Ensure all volumes exist
         for (volume_name, _) in &volumes {
             // Check if volume exists
             if let Some(runtime) = &self.container_runtime {
                 let runtime_volumes = runtime.list_volumes().await?;
                 if !runtime_volumes.iter().any(|v| v.name == *volume_name) {
+                    println!("Volume '{}' does not exist, creating it", volume_name);
                     // Create volume if it doesn't exist
                     self.create_volume(volume_name).await?;
                 }
@@ -268,18 +440,178 @@ impl AppManager {
 
     pub async fn with_containerd(
         storage: StorageManager,
-        socket_path: &str,
-        namespace: &str,
+        _socket_path: &str,
+        _namespace: &str,
     ) -> Result<Self> {
         #[cfg(feature = "containerd")]
-        let runtime = ContainerdManager::new(socket_path.to_string(), namespace.to_string())
-            .await
-            .context("Failed to initialize containerd manager")?;
+        let runtime = {
+            use anyhow::Context;
+            use crate::containerd_manager::ContainerdManager;
+            ContainerdManager::new(_socket_path.to_string(), _namespace.to_string())
+                .await
+                .context("Failed to initialize containerd manager")?
+        };
             
         #[cfg(not(feature = "containerd"))]
         let runtime = {
             eprintln!("Containerd feature not enabled, using mock runtime");
-            MockContainerManager::new()
+            
+            // Create a simple mock runtime
+            struct MockRuntime {
+                containers: Arc<Mutex<HashMap<String, Container>>>,
+                volumes: Arc<Mutex<HashMap<String, Volume>>>,
+            }
+            
+            #[async_trait::async_trait]
+            impl ContainerRuntime for MockRuntime {
+                async fn pull_image(&self, _image: &str) -> Result<()> {
+                    Ok(())
+                }
+                
+                async fn create_container(
+                    &self,
+                    image: &str,
+                    name: &str,
+                    env_vars: Vec<EnvVar>,
+                    ports: Vec<PortMapping>,
+                ) -> Result<String> {
+                    let container_id = format!("mock-{}", uuid::Uuid::new_v4());
+                    let container = Container {
+                        id: container_id.clone(),
+                        name: name.to_string(),
+                        image: image.to_string(),
+                        status: ContainerStatus::Running,
+                        node_id: "local".to_string(),
+                        created_at: chrono::Utc::now().timestamp(),
+                        ports,
+                        env_vars,
+                        volumes: Vec::new(),
+                        service_domain: None,
+                    };
+                    
+                    let mut containers = self.containers.lock().await;
+                    containers.insert(container_id.clone(), container);
+                    
+                    Ok(container_id)
+                }
+                
+                async fn create_container_with_volumes(
+                    &self,
+                    image: &str,
+                    name: &str,
+                    env_vars: Vec<EnvVar>,
+                    ports: Vec<PortMapping>,
+                    volumes: Vec<(String, String)>,
+                ) -> Result<String> {
+                    let container_id = format!("mock-{}", uuid::Uuid::new_v4());
+                    
+                    // Convert volumes to Volume objects
+                    let volume_objects = volumes.iter().map(|(name, path)| {
+                        // Check if volume exists
+                        Volume {
+                            name: name.clone(),
+                            path: path.clone(),
+                            size: 1024 * 1024 * 1024, // 1GB default
+                            created_at: chrono::Utc::now().timestamp(),
+                        }
+                    }).collect();
+                    
+                    let container = Container {
+                        id: container_id.clone(),
+                        name: name.to_string(),
+                        image: image.to_string(),
+                        status: ContainerStatus::Running,
+                        node_id: "local".to_string(),
+                        created_at: chrono::Utc::now().timestamp(),
+                        ports,
+                        env_vars,
+                        volumes: volume_objects,
+                        service_domain: None,
+                    };
+                    
+                    let mut containers = self.containers.lock().await;
+                    containers.insert(container_id.clone(), container);
+                    
+                    Ok(container_id)
+                }
+                
+                async fn stop_container(&self, container_id: &str) -> Result<()> {
+                    let mut containers = self.containers.lock().await;
+                    if let Some(container) = containers.get_mut(container_id) {
+                        container.status = ContainerStatus::Stopped;
+                    }
+                    Ok(())
+                }
+                
+                async fn list_containers(&self) -> Result<Vec<Container>> {
+                    let containers = self.containers.lock().await;
+                    Ok(containers.values().cloned().collect())
+                }
+                
+                async fn get_container_metrics(&self, _container_id: &str) -> Result<ContainerStats> {
+                    Ok(ContainerStats {
+                        cpu_usage: 0.0,
+                        memory_usage: 0,
+                        network_rx: 0,
+                        network_tx: 0,
+                        last_updated: 0,
+                    })
+                }
+                
+                async fn create_volume(&self, name: &str) -> Result<()> {
+                    let mut volumes = self.volumes.lock().await;
+                    
+                    // Check if volume already exists
+                    if volumes.contains_key(name) {
+                        return Err(anyhow::anyhow!("Volume {} already exists", name));
+                    }
+                    
+                    volumes.insert(name.to_string(), Volume {
+                        name: name.to_string(),
+                        path: format!("/var/lib/hivemind/volumes/{}", name),
+                        size: 1024 * 1024 * 1024, // 1GB default
+                        created_at: chrono::Utc::now().timestamp(),
+                    });
+                    
+                    Ok(())
+                }
+                
+                async fn delete_volume(&self, name: &str) -> Result<()> {
+                    let mut volumes = self.volumes.lock().await;
+                    
+                    // Check if volume exists
+                    if !volumes.contains_key(name) {
+                        return Err(anyhow::anyhow!("Volume {} not found", name));
+                    }
+                    
+                    // Check if volume is in use
+                    let containers = self.containers.lock().await;
+                    for container in containers.values() {
+                        for volume in &container.volumes {
+                            if volume.name == name {
+                                return Err(anyhow::anyhow!("Volume {} is in use by container {}", name, container.name));
+                            }
+                        }
+                    }
+                    
+                    volumes.remove(name);
+                    Ok(())
+                }
+                
+                async fn list_volumes(&self) -> Result<Vec<Volume>> {
+                    let volumes = self.volumes.lock().await;
+                    Ok(volumes.values().cloned().collect())
+                }
+                
+                fn as_any(&self) -> &dyn std::any::Any {
+                    self
+                }
+            }
+            
+            MockRuntime {
+                containers: Arc::new(Mutex::new(HashMap::new())),
+                volumes: Arc::new(Mutex::new(HashMap::new())),
+            }
         };
             
         Ok(Self {
@@ -297,6 +629,166 @@ impl AppManager {
         // Create an app manager with storage
         let mut manager = Self::new().await?;
         manager.storage = Some(storage);
+        
+        // Create a simple mock runtime for testing
+        struct MockRuntime {
+            containers: Arc<Mutex<HashMap<String, Container>>>,
+            volumes: Arc<Mutex<HashMap<String, Volume>>>,
+        }
+        
+        #[async_trait::async_trait]
+        impl ContainerRuntime for MockRuntime {
+            async fn pull_image(&self, _image: &str) -> Result<()> {
+                Ok(())
+            }
+            
+            async fn create_container(
+                &self,
+                image: &str,
+                name: &str,
+                env_vars: Vec<EnvVar>,
+                ports: Vec<PortMapping>,
+            ) -> Result<String> {
+                let container_id = format!("mock-{}", uuid::Uuid::new_v4());
+                let container = Container {
+                    id: container_id.clone(),
+                    name: name.to_string(),
+                    image: image.to_string(),
+                    status: ContainerStatus::Running,
+                    node_id: "local".to_string(),
+                    created_at: chrono::Utc::now().timestamp(),
+                    ports,
+                    env_vars,
+                    volumes: Vec::new(),
+                    service_domain: None,
+                };
+                
+                let mut containers = self.containers.lock().await;
+                containers.insert(container_id.clone(), container);
+                
+                Ok(container_id)
+            }
+            
+            async fn create_container_with_volumes(
+                &self,
+                image: &str,
+                name: &str,
+                env_vars: Vec<EnvVar>,
+                ports: Vec<PortMapping>,
+                volumes: Vec<(String, String)>,
+            ) -> Result<String> {
+                let container_id = format!("mock-{}", uuid::Uuid::new_v4());
+                
+                // Convert volumes to Volume objects
+                let volume_objects = volumes.iter().map(|(name, path)| {
+                    // Check if volume exists
+                    Volume {
+                        name: name.clone(),
+                        path: path.clone(),
+                        size: 1024 * 1024 * 1024, // 1GB default
+                        created_at: chrono::Utc::now().timestamp(),
+                    }
+                }).collect();
+                
+                let container = Container {
+                    id: container_id.clone(),
+                    name: name.to_string(),
+                    image: image.to_string(),
+                    status: ContainerStatus::Running,
+                    node_id: "local".to_string(),
+                    created_at: chrono::Utc::now().timestamp(),
+                    ports,
+                    env_vars,
+                    volumes: volume_objects,
+                    service_domain: None,
+                };
+                
+                let mut containers = self.containers.lock().await;
+                containers.insert(container_id.clone(), container);
+                
+                Ok(container_id)
+            }
+            
+            async fn stop_container(&self, container_id: &str) -> Result<()> {
+                let mut containers = self.containers.lock().await;
+                if let Some(container) = containers.get_mut(container_id) {
+                    container.status = ContainerStatus::Stopped;
+                }
+                Ok(())
+            }
+            
+            async fn list_containers(&self) -> Result<Vec<Container>> {
+                let containers = self.containers.lock().await;
+                Ok(containers.values().cloned().collect())
+            }
+            
+            async fn get_container_metrics(&self, _container_id: &str) -> Result<ContainerStats> {
+                Ok(ContainerStats {
+                    cpu_usage: 0.0,
+                    memory_usage: 0,
+                    network_rx: 0,
+                    network_tx: 0,
+                    last_updated: 0,
+                })
+            }
+            
+            async fn create_volume(&self, name: &str) -> Result<()> {
+                let mut volumes = self.volumes.lock().await;
+                
+                // Check if volume already exists
+                if volumes.contains_key(name) {
+                    return Err(anyhow::anyhow!("Volume {} already exists", name));
+                }
+                
+                volumes.insert(name.to_string(), Volume {
+                    name: name.to_string(),
+                    path: format!("/var/lib/hivemind/volumes/{}", name),
+                    size: 1024 * 1024 * 1024, // 1GB default
+                    created_at: chrono::Utc::now().timestamp(),
+                });
+                
+                Ok(())
+            }
+            
+            async fn delete_volume(&self, name: &str) -> Result<()> {
+                let mut volumes = self.volumes.lock().await;
+                
+                // Check if volume exists
+                if !volumes.contains_key(name) {
+                    return Err(anyhow::anyhow!("Volume {} not found", name));
+                }
+                
+                // Check if volume is in use
+                let containers = self.containers.lock().await;
+                for container in containers.values() {
+                    for volume in &container.volumes {
+                        if volume.name == name {
+                            return Err(anyhow::anyhow!("Volume {} is in use by container {}", name, container.name));
+                        }
+                    }
+                }
+                
+                volumes.remove(name);
+                Ok(())
+            }
+            
+            async fn list_volumes(&self) -> Result<Vec<Volume>> {
+                let volumes = self.volumes.lock().await;
+                Ok(volumes.values().cloned().collect())
+            }
+            
+            fn as_any(&self) -> &dyn std::any::Any {
+                self
+            }
+        }
+        
+        // Set up the mock runtime
+        let runtime = MockRuntime {
+            containers: Arc::new(Mutex::new(HashMap::new())),
+            volumes: Arc::new(Mutex::new(HashMap::new())),
+        };
+        
+        manager.container_runtime = Some(Arc::new(runtime) as Arc<dyn ContainerRuntime>);
         
         Ok(manager)
     }
@@ -934,5 +1426,90 @@ impl AppManager {
             }
         }
         None
+    }
+    
+    pub async fn get_container_health_status(&self, container_id: &str) -> Result<crate::containerd_manager::HealthCheckStatus> {
+        if let Some(runtime) = &self.container_runtime {
+            // Try to get health status from container runtime
+            if let Some(containerd_manager) = runtime.as_any().downcast_ref::<crate::containerd_manager::ContainerdManager>() {
+                return containerd_manager.get_health_check_status(container_id).await;
+            }
+        }
+        Err(anyhow::anyhow!("Container runtime does not support health checks"))
+    }
+    
+    pub async fn configure_container_health_check(
+        &self,
+        container_id: &str,
+        check_type: crate::containerd_manager::HealthCheckType,
+        interval_seconds: u64,
+        timeout_seconds: u64,
+        retries: u32,
+    ) -> Result<()> {
+        if let Some(runtime) = &self.container_runtime {
+            // Try to configure health check using container runtime
+            if let Some(containerd_manager) = runtime.as_any().downcast_ref::<crate::containerd_manager::ContainerdManager>() {
+                return containerd_manager.configure_health_check(
+                    container_id,
+                    check_type,
+                    interval_seconds,
+                    timeout_seconds,
+                    retries,
+                ).await;
+            }
+        }
+        Err(anyhow::anyhow!("Container runtime does not support health checks"))
+    }
+    
+    pub async fn stream_container_logs(
+        &self,
+        container_id: &str,
+        follow: bool,
+        tail: Option<usize>,
+        since: Option<i64>,
+        until: Option<i64>,
+        stdout: bool,
+        stderr: bool,
+    ) -> Result<impl tokio::stream::Stream<Item = Result<crate::containerd_manager::LogEntry>>> {
+        if let Some(runtime) = &self.container_runtime {
+            // Try to stream logs using container runtime
+            if let Some(containerd_manager) = runtime.as_any().downcast_ref::<crate::containerd_manager::ContainerdManager>() {
+                return containerd_manager.stream_container_logs(
+                    container_id,
+                    follow,
+                    tail,
+                    since,
+                    until,
+                    stdout,
+                    stderr,
+                ).await;
+            }
+        }
+        Err(anyhow::anyhow!("Container runtime does not support log streaming"))
+    }
+    
+    pub async fn get_container_logs(
+        &self,
+        container_id: &str,
+        tail: Option<usize>,
+        since: Option<i64>,
+        until: Option<i64>,
+        stdout: bool,
+        stderr: bool,
+    ) -> Result<Vec<crate::containerd_manager::LogEntry>> {
+        if let Some(runtime) = &self.container_runtime {
+            // Try to get logs using container runtime
+            if let Some(containerd_manager) = runtime.as_any().downcast_ref::<crate::containerd_manager::ContainerdManager>() {
+                return containerd_manager.get_container_logs(
+                    container_id,
+                    tail,
+                    since,
+                    until,
+                    stdout,
+                    stderr,
+                ).await;
+            }
+        }
+        Err(anyhow::anyhow!("Container runtime does not support log retrieval"))
     }
 }
