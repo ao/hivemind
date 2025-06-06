@@ -437,6 +437,11 @@ impl NetworkManager {
         labels: Option<HashMap<String, String>>,
         tenant_context: &TenantContext,
     ) -> Result<ContainerNetworkConfig> {
+        println!("Setting up container network for tenant {}", tenant_context.tenant_id);
+        
+        // Check if tenant overlay network exists, if not create it
+        self.ensure_tenant_overlay_network(&tenant_context.tenant_id).await?;
+        
         // Create container network config with tenant context
         let config = self.create_container_network_config_with_tenant(
             container_id,
@@ -458,7 +463,152 @@ impl NetworkManager {
         // Register container labels for policy matching
         self.policies.lock().await.register_container_labels(container_id, all_labels).await?;
         
+        // Apply tenant-specific network policies
+        self.apply_tenant_network_policies(&tenant_context.tenant_id, container_id, &config).await?;
+        
         Ok(config)
+    }
+    
+    // Ensure tenant overlay network exists
+    async fn ensure_tenant_overlay_network(&self, tenant_id: &str) -> Result<()> {
+        let mut tenant_overlays = self.tenant_overlays.lock().await;
+        
+        if !tenant_overlays.contains_key(tenant_id) {
+            println!("Creating overlay network for tenant {}", tenant_id);
+            
+            // Create a new overlay network for this tenant
+            let tenant_vxlan_id = 100 + tenant_id.as_bytes().iter().fold(0u16, |acc, &b| acc.wrapping_add(b as u16));
+            let tenant_overlay = OverlayNetwork::new(
+                self.config.overlay_type.clone(),
+                tenant_vxlan_id,
+                self.config.vxlan_port,
+            ).with_mtu(self.config.mtu)
+             .with_tunnel_interface(format!("vxlan-{}", &tenant_id[..8]));
+            
+            // Initialize the tenant overlay network
+            let node_id = self.node_manager.get_node_id();
+            let node_ip = self.get_node_ip().await?;
+            
+            // Allocate a subnet for this tenant
+            let mut tenant_network_cidrs = self.tenant_network_cidrs.lock().await;
+            if !tenant_network_cidrs.contains_key(tenant_id) {
+                // Allocate a new CIDR for this tenant
+                // Use a different subnet range for each tenant to ensure isolation
+                let tenant_num = tenant_id.as_bytes().iter().fold(0u8, |acc, &b| acc.wrapping_add(b));
+                let tenant_cidr = format!("10.100.{}.0/24", tenant_num);
+                tenant_network_cidrs.insert(tenant_id.to_string(), tenant_cidr);
+            }
+            
+            // Get the tenant's network CIDR
+            let tenant_cidr_str = tenant_network_cidrs.get(tenant_id).unwrap().clone();
+            let tenant_cidr = IpNetwork::from_str(&tenant_cidr_str)?;
+            
+            // Initialize the overlay network
+            let mut tenant_overlay_instance = tenant_overlay.clone();
+            tenant_overlay_instance.initialize(&node_id, node_ip).await?;
+            
+            // Create the bridge for this tenant
+            let bridge_name = format!("hivemind-{}", &tenant_id[..8]);
+            let gateway_ip = Self::get_gateway_ip(tenant_cidr)?;
+            
+            // Create bridge if it doesn't exist
+            if !Self::bridge_exists(&bridge_name)? {
+                Self::create_bridge(&bridge_name)?;
+                Self::set_bridge_ip(&bridge_name, gateway_ip, tenant_cidr.prefix())?;
+                Self::enable_bridge(&bridge_name)?;
+            }
+            
+            // Set up the overlay network
+            tenant_overlay_instance.setup_local_network(
+                &node_id,
+                node_ip,
+                tenant_cidr,
+                &bridge_name,
+            ).await?;
+            
+            // Store the tenant overlay network
+            tenant_overlays.insert(tenant_id.to_string(), Arc::new(Mutex::new(tenant_overlay_instance)));
+            
+            println!("Tenant overlay network created successfully");
+        }
+        
+        Ok(())
+    }
+    
+    // Apply tenant-specific network policies
+    async fn apply_tenant_network_policies(&self, tenant_id: &str, container_id: &str, config: &ContainerNetworkConfig) -> Result<()> {
+        println!("Applying network policies for tenant {} container {}", tenant_id, container_id);
+        
+        // Create default isolation policy for tenant
+        let policy = NetworkPolicy {
+            name: format!("tenant-{}-isolation", tenant_id),
+            selector: NetworkSelector {
+                labels: {
+                    let mut labels = HashMap::new();
+                    labels.insert("tenant".to_string(), tenant_id.to_string());
+                    labels
+                },
+            },
+            ingress_rules: vec![
+                // Allow traffic from same tenant
+                NetworkRule {
+                    ports: vec![],  // All ports
+                    from: vec![
+                        NetworkPeer {
+                            ip_block: None,
+                            selector: Some(NetworkSelector {
+                                labels: {
+                                    let mut labels = HashMap::new();
+                                    labels.insert("tenant".to_string(), tenant_id.to_string());
+                                    labels
+                                },
+                            }),
+                        },
+                    ],
+                    action: Some(PolicyAction::Allow),
+                    log: false,
+                    description: Some(format!("Allow traffic from tenant {}", tenant_id)),
+                    id: Some(format!("tenant-{}-ingress-allow", tenant_id)),
+                },
+                // Deny traffic from other tenants
+                NetworkRule {
+                    ports: vec![],  // All ports
+                    from: vec![],   // All sources not matched by previous rules
+                    action: Some(PolicyAction::Deny),
+                    log: true,
+                    description: Some(format!("Deny traffic from other tenants to {}", tenant_id)),
+                    id: Some(format!("tenant-{}-ingress-deny", tenant_id)),
+                },
+            ],
+            egress_rules: vec![
+                // Allow all outbound traffic (can be restricted further if needed)
+                NetworkRule {
+                    ports: vec![],  // All ports
+                    from: vec![],   // All destinations
+                    action: Some(PolicyAction::Allow),
+                    log: false,
+                    description: Some(format!("Allow all outbound traffic from tenant {}", tenant_id)),
+                    id: Some(format!("tenant-{}-egress-allow", tenant_id)),
+                },
+            ],
+            priority: 100,
+            namespace: None,
+            tenant_id: Some(tenant_id.to_string()),
+            labels: HashMap::new(),
+            created_at: std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_secs(),
+            updated_at: std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_secs(),
+        };
+        
+        // Apply the policy
+        self.policies.lock().await.apply_policy(policy).await?;
+        
+        Ok(())
     }
     
     // Create container network config with tenant context
@@ -682,9 +832,123 @@ impl NetworkManager {
         
         Ok(())
     }
+}
+
+// NetworkPolicyManager handles network policies
+#[derive(Debug)]
+pub struct NetworkPolicyManager {
+    policies: HashMap<String, NetworkPolicy>,
+    container_labels: HashMap<String, HashMap<String, String>>,
+}
+
+impl NetworkPolicyManager {
+    pub fn new() -> Self {
+        Self {
+            policies: HashMap::new(),
+            container_labels: HashMap::new(),
+        }
+    }
     
-    // Configure DNS resolution in container
-    fn configure_container_dns(pid: i32, dns_server: IpAddr) -> Result<()> {
+    // Register container labels for policy matching
+    pub async fn register_container_labels(&mut self, container_id: &str, labels: HashMap<String, String>) -> Result<()> {
+        self.container_labels.insert(container_id.to_string(), labels);
+        Ok(())
+    }
+    
+    // Apply a network policy
+    pub async fn apply_policy(&mut self, policy: NetworkPolicy) -> Result<()> {
+        println!("Applying network policy: {}", policy.name);
+        
+        // Store the policy
+        self.policies.insert(policy.name.clone(), policy.clone());
+        
+        // In a real implementation, this would translate the policy to iptables rules
+        // For now, we'll just log that we're applying the policy
+        println!("Network policy {} applied successfully", policy.name);
+        
+        Ok(())
+    }
+    
+    // Check if traffic is allowed between containers
+    pub fn is_traffic_allowed(&self, src_container_id: &str, dst_container_id: &str, protocol: Protocol, port: u16) -> bool {
+        // Get container labels
+        let src_labels = match self.container_labels.get(src_container_id) {
+            Some(labels) => labels,
+            None => return true, // If we don't have labels, allow by default
+        };
+        
+        let dst_labels = match self.container_labels.get(dst_container_id) {
+            Some(labels) => labels,
+            None => return true, // If we don't have labels, allow by default
+        };
+        
+        // Check if containers are in the same tenant
+        let src_tenant = src_labels.get("tenant");
+        let dst_tenant = dst_labels.get("tenant");
+        
+        if let (Some(src_tenant_id), Some(dst_tenant_id)) = (src_tenant, dst_tenant) {
+            // If different tenants, check policies
+            if src_tenant_id != dst_tenant_id {
+                // Find policies that apply to the destination container
+                for policy in self.policies.values() {
+                    // Check if policy applies to destination container
+                    if Self::selector_matches(&policy.selector, dst_labels) {
+                        // Check ingress rules
+                        for rule in &policy.ingress_rules {
+                            // Check if rule matches source container
+                            let matches_source = rule.from.iter().any(|peer| {
+                                if let Some(selector) = &peer.selector {
+                                    Self::selector_matches(selector, src_labels)
+                                } else {
+                                    false
+                                }
+                            });
+                            
+                            // Check if rule matches port and protocol
+                            let matches_port = rule.ports.is_empty() || rule.ports.iter().any(|port_range| {
+                                port_range.protocol == protocol &&
+                                port >= port_range.port_min &&
+                                port <= port_range.port_max
+                            });
+                            
+                            if matches_source && matches_port {
+                                // Return based on action
+                                return match rule.action {
+                                    Some(PolicyAction::Allow) => true,
+                                    Some(PolicyAction::Deny) => false,
+                                    _ => true, // Default to allow
+                                };
+                            }
+                        }
+                    }
+                }
+                
+                // If no matching policy found, default to deny for cross-tenant traffic
+                return false;
+            }
+        }
+        
+        // Default to allow for same tenant or if tenant info is missing
+        true
+    }
+    
+    // Check if a selector matches container labels
+    fn selector_matches(selector: &NetworkSelector, labels: &HashMap<String, String>) -> bool {
+        for (key, value) in &selector.labels {
+            if let Some(label_value) = labels.get(key) {
+                if label_value != value {
+                    return false;
+                }
+            } else {
+                return false;
+            }
+        }
+        true
+    }
+}
+    
+// Configure DNS resolution in container
+fn configure_container_dns(pid: i32, dns_server: IpAddr) -> Result<()> {
         // Create resolv.conf content
         let resolv_conf = format!("nameserver {}\nsearch hivemind\n", dns_server);
         

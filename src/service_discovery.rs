@@ -655,7 +655,7 @@ impl ServiceDiscovery {
                 // Create A records for all endpoints
                 for endpoint in endpoints_to_use {
                     if let Ok(ip) = Ipv4Addr::from_str(&endpoint.ip_address) {
-                        let rdata = RData::A(trust_dns_proto::rr::rdata::A(ip));
+                        let rdata = RData::A(ip);
                         let record = Record::from_rdata(query_name.clone(), 300, rdata);
                         records.push(record);
                     }
@@ -671,17 +671,17 @@ impl ServiceDiscovery {
                         ).unwrap_or_else(|_| query_name.clone());
                         
                         // Create the SRV record
-                        let rdata = RData::SRV(trust_dns_proto::rr::rdata::SRV::new(
-                            0, // priority
-                            10, // weight
-                            endpoint.port,
-                            target_name.clone(),
-                        ));
+                        let rdata = RData::SRV {
+                            priority: 0,
+                            weight: 10,
+                            port: endpoint.port,
+                            target: target_name.clone(),
+                        };
                         let srv_record = Record::from_rdata(query_name.clone(), 300, rdata);
                         records.push(srv_record);
                         
                         // Also add an A record for the target
-                        let a_rdata = RData::A(trust_dns_proto::rr::rdata::A(ip));
+                        let a_rdata = RData::A(ip);
                         let a_record = Record::from_rdata(target_name, 300, a_rdata);
                         records.push(a_record);
                     }
@@ -701,7 +701,7 @@ impl ServiceDiscovery {
                 let healthy_count = healthy_endpoints.len();
                 txt_data.push(format!("healthy={}", healthy_count));
                 
-                let rdata = RData::TXT(trust_dns_proto::rr::rdata::TXT::new(txt_data));
+                let rdata = RData::TXT(txt_data);
                 let record = Record::from_rdata(query_name.clone(), 300, rdata);
                 records.push(record);
             },
