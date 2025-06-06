@@ -1,6 +1,7 @@
 use crate::membership::Member;
 use crate::node::NodeManager;
 use crate::service_discovery::ServiceDiscovery;
+use crate::tenant::TenantContext;
 use anyhow::{Context, Result};
 use ipnetwork::IpNetwork;
 use serde::{Deserialize, Serialize};
@@ -119,6 +120,7 @@ pub struct NetworkPolicy {
     pub egress_rules: Vec<NetworkRule>,
     pub priority: i32,
     pub namespace: Option<String>,
+    pub tenant_id: Option<String>,
     pub labels: HashMap<String, String>,
     pub created_at: u64,
     pub updated_at: u64,
@@ -197,6 +199,10 @@ pub struct NetworkManager {
     metrics: Arc<Mutex<NetworkMetrics>>,
     health_check_interval: u64,
     last_health_check: Arc<Mutex<u64>>,
+    // Tenant-specific overlay networks
+    tenant_overlays: Arc<Mutex<HashMap<String, Arc<Mutex<OverlayNetwork>>>>>,
+    // Tenant-specific network CIDRs
+    tenant_network_cidrs: Arc<Mutex<HashMap<String, String>>>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -264,6 +270,8 @@ impl NetworkManager {
             metrics: Arc::new(Mutex::new(NetworkMetrics::default())),
             health_check_interval: 60, // Default to 60 seconds
             last_health_check: Arc::new(Mutex::new(0)),
+            tenant_overlays: Arc::new(Mutex::new(HashMap::new())),
+            tenant_network_cidrs: Arc::new(Mutex::new(HashMap::new())),
         })
     }
     
@@ -418,6 +426,39 @@ impl NetworkManager {
                 anyhow::bail!("IPv6 not supported yet");
             }
         }
+    }
+    
+    // Setup container network with tenant context
+    pub async fn setup_container_network_with_tenant(
+        &self,
+        container_id: &str,
+        pid: i32,
+        static_ip: Option<IpAddr>,
+        labels: Option<HashMap<String, String>>,
+        tenant_context: &TenantContext,
+    ) -> Result<ContainerNetworkConfig> {
+        // Create container network config with tenant context
+        let config = self.create_container_network_config_with_tenant(
+            container_id,
+            &self.node_manager.get_node_id(),
+            tenant_context
+        ).await?;
+        
+        // Set up container network namespace
+        self.setup_container_namespace(pid, &config).await?;
+        
+        // Register container in service discovery for DNS resolution
+        self.register_container_dns(container_id, config.ip_address).await?;
+        
+        // Add tenant ID to labels
+        let mut all_labels = labels.unwrap_or_default();
+        all_labels.insert("tenant".to_string(), tenant_context.tenant_id.clone());
+        all_labels.insert("user".to_string(), tenant_context.user_id.clone());
+        
+        // Register container labels for policy matching
+        self.policies.lock().await.register_container_labels(container_id, all_labels).await?;
+        
+        Ok(config)
     }
     
     pub async fn setup_container_network(
@@ -1747,6 +1788,8 @@ pub struct NetworkPolicyManager {
     policies: HashMap<String, NetworkPolicy>,
     container_labels: HashMap<String, HashMap<String, String>>,
     chain_prefix: String,
+    // Track policies by tenant
+    tenant_policies: HashMap<String, Vec<String>>,
 }
 
 impl NetworkPolicyManager {
@@ -1755,6 +1798,7 @@ impl NetworkPolicyManager {
             policies: HashMap::new(),
             container_labels: HashMap::new(),
             chain_prefix: "HIVEMIND".to_string(),
+            tenant_policies: HashMap::new(),
         }
     }
     
@@ -1788,6 +1832,13 @@ impl NetworkPolicyManager {
         // Store policy
         self.policies.insert(policy.name.clone(), policy.clone());
         
+        // Track policy by tenant if tenant_id is set
+        if let Some(tenant_id) = &policy.tenant_id {
+            let tenant_policies = self.tenant_policies.entry(tenant_id.clone())
+                .or_insert_with(Vec::new);
+            tenant_policies.push(policy.name.clone());
+        }
+        
         // Apply policy rules to all matching containers
         self.apply_policy_rules(&policy).await?;
         
@@ -1801,11 +1852,45 @@ impl NetworkPolicyManager {
         if let Some(policy) = policy {
             println!("Removing network policy: {}", policy.name);
             
+            // Remove policy from tenant tracking
+            if let Some(tenant_id) = &policy.tenant_id {
+                if let Some(tenant_policies) = self.tenant_policies.get_mut(tenant_id) {
+                    tenant_policies.retain(|p| p != &policy.name);
+                }
+            }
+            
             // Remove policy rules
             self.remove_policy_rules(&policy).await?;
         }
         
         Ok(())
+    }
+    
+    // Get all policies for a specific tenant
+    pub fn get_policies_by_tenant(&self, tenant_id: &str) -> Vec<EnhancedNetworkPolicy> {
+        let mut result = Vec::new();
+        
+        // Get policy names for this tenant
+        if let Some(policy_names) = self.tenant_policies.get(tenant_id) {
+            // Get each policy
+            for name in policy_names {
+                if let Some(policy) = self.policies.get(name) {
+                    // Convert to EnhancedNetworkPolicy
+                    let enhanced = EnhancedNetworkPolicy {
+                        base_policy: policy.clone(),
+                        policy_type: PolicyType::Isolation,
+                        applies_to_ingress: !policy.ingress_rules.is_empty(),
+                        applies_to_egress: !policy.egress_rules.is_empty(),
+                        action: PolicyAction::Allow,
+                        log_violations: false,
+                    };
+                    
+                    result.push(enhanced);
+                }
+            }
+        }
+        
+        result
     }
     
     async fn apply_policy_rules(&self, policy: &NetworkPolicy) -> Result<()> {

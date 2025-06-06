@@ -401,6 +401,10 @@ async fn main() -> Result<()> {
                 scheduler_instance = scheduler_instance.with_network_manager(network_manager_ref.clone());
             }
             
+            if let Some(tenant_manager_ref) = &tenant_manager {
+                scheduler_instance = scheduler_instance.with_tenant_manager(tenant_manager_ref.clone());
+            }
+            
             let scheduler = Arc::new(scheduler_instance);
             
             // Initialize deployment manager
@@ -663,10 +667,15 @@ async fn main() -> Result<()> {
             ));
             
             // Initialize container scheduler
-            let scheduler = Arc::new(
-                ContainerScheduler::new(app_manager.clone())
-                    .with_service_discovery(Arc::new(service_discovery.clone()))
-            );
+            let mut scheduler_instance = ContainerScheduler::new(app_manager.clone())
+                .with_service_discovery(Arc::new(service_discovery.clone()));
+                
+            // Add tenant manager if available
+            if let Some(tenant_manager) = &_app_state.tenant_manager {
+                scheduler_instance = scheduler_instance.with_tenant_manager(tenant_manager.clone());
+            }
+            
+            let scheduler = Arc::new(scheduler_instance);
             
             // Initialize deployment manager
             let mut deployment_manager = DeploymentManager::new();

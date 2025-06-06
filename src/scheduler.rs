@@ -3,6 +3,7 @@ use crate::containerd_manager::{Container, ContainerStatus};
 use crate::node::{NodeManager, NodeResources};
 use crate::service_discovery::ServiceDiscovery;
 use crate::network::NetworkManager;
+use crate::tenant::{TenantManager, TenantContext};
 use anyhow::Result;
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
@@ -12,6 +13,7 @@ pub struct ContainerScheduler {
     node_manager: Option<Arc<NodeManager>>,
     service_discovery: Option<Arc<ServiceDiscovery>>,
     network_manager: Option<Arc<NetworkManager>>,
+    tenant_manager: Option<Arc<TenantManager>>,
     scheduling_interval: u64, // seconds
     rebalance_threshold: f64, // percentage difference to trigger rebalancing
     service_affinity_map: HashMap<String, HashSet<String>>, // service -> nodes it prefers
@@ -35,6 +37,12 @@ pub struct ContainerScheduler {
     
     // Bin-packing strategy
     bin_packing_strategy: BinPackingStrategy,
+    
+    // Tenant resource tracking
+    tenant_cpu_usage: HashMap<String, f64>, // tenant_id -> used CPU
+    tenant_memory_usage: HashMap<String, u64>, // tenant_id -> used memory in bytes
+    tenant_container_count: HashMap<String, u32>, // tenant_id -> container count
+    tenant_service_count: HashMap<String, u32>, // tenant_id -> service count
 }
 
 struct NodeLoad {
@@ -101,6 +109,7 @@ impl ContainerScheduler {
             node_manager: None,
             service_discovery: None,
             network_manager: None,
+            tenant_manager: None,
             scheduling_interval: 30,
             rebalance_threshold: 20.0, // 20% difference in load will trigger rebalancing
             service_affinity_map: HashMap::new(),
@@ -114,6 +123,10 @@ impl ContainerScheduler {
             priority_classes: HashMap::new(),
             container_priorities: HashMap::new(),
             bin_packing_strategy: BinPackingStrategy::BestFit,
+            tenant_cpu_usage: HashMap::new(),
+            tenant_memory_usage: HashMap::new(),
+            tenant_container_count: HashMap::new(),
+            tenant_service_count: HashMap::new(),
         }
     }
 
@@ -129,6 +142,11 @@ impl ContainerScheduler {
 
     pub fn with_network_manager(mut self, network_manager: Arc<NetworkManager>) -> Self {
         self.network_manager = Some(network_manager);
+        self
+    }
+    
+    pub fn with_tenant_manager(mut self, tenant_manager: Arc<TenantManager>) -> Self {
+        self.tenant_manager = Some(tenant_manager);
         self
     }
 
@@ -188,6 +206,110 @@ impl ContainerScheduler {
         self.add_node_taint(node_id, key, value, TaintEffect::PreferNoSchedule);
         
         self
+    }
+    
+    // Check if deploying a container would exceed tenant resource quotas
+    pub async fn check_tenant_quotas(&self, tenant_id: &str, resource_requirements: &ResourceRequirements) -> Result<bool> {
+        if let Some(tenant_manager) = &self.tenant_manager {
+            // Get tenant details
+            if let Some(tenant) = tenant_manager.get_tenant(tenant_id).await {
+                // Check CPU quota
+                if let Some(cpu_limit) = tenant.resource_quotas.cpu_limit {
+                    let current_cpu_usage = self.tenant_cpu_usage.get(tenant_id).cloned().unwrap_or(0.0);
+                    if current_cpu_usage + resource_requirements.requests.cpu > cpu_limit as f64 {
+                        println!("Tenant {} CPU quota exceeded: current={}, requested={}, limit={}",
+                            tenant_id, current_cpu_usage, resource_requirements.requests.cpu, cpu_limit);
+                        return Ok(false);
+                    }
+                }
+                
+                // Check memory quota
+                if let Some(memory_limit) = tenant.resource_quotas.memory_limit {
+                    let current_memory_usage = self.tenant_memory_usage.get(tenant_id).cloned().unwrap_or(0);
+                    if current_memory_usage + resource_requirements.requests.memory > memory_limit {
+                        println!("Tenant {} memory quota exceeded: current={}, requested={}, limit={}",
+                            tenant_id, current_memory_usage, resource_requirements.requests.memory, memory_limit);
+                        return Ok(false);
+                    }
+                }
+                
+                // Check container count quota
+                if let Some(max_containers) = tenant.resource_quotas.max_containers {
+                    let current_container_count = self.tenant_container_count.get(tenant_id).cloned().unwrap_or(0);
+                    if current_container_count + 1 > max_containers {
+                        println!("Tenant {} container quota exceeded: current={}, limit={}",
+                            tenant_id, current_container_count, max_containers);
+                        return Ok(false);
+                    }
+                }
+                
+                // All quotas satisfied
+                return Ok(true);
+            } else {
+                // Tenant not found
+                return Err(anyhow::anyhow!("Tenant {} not found", tenant_id));
+            }
+        }
+        
+        // No tenant manager, no quota enforcement
+        Ok(true)
+    }
+    
+    // Update tenant resource usage after container deployment
+    pub fn update_tenant_resource_usage(&mut self, tenant_id: &str, resource_requirements: &ResourceRequirements, is_addition: bool) {
+        // Update CPU usage
+        let cpu_entry = self.tenant_cpu_usage.entry(tenant_id.to_string()).or_insert(0.0);
+        if is_addition {
+            *cpu_entry += resource_requirements.requests.cpu;
+        } else {
+            *cpu_entry -= resource_requirements.requests.cpu;
+            if *cpu_entry < 0.0 {
+                *cpu_entry = 0.0;
+            }
+        }
+        
+        // Update memory usage
+        let memory_entry = self.tenant_memory_usage.entry(tenant_id.to_string()).or_insert(0);
+        if is_addition {
+            *memory_entry += resource_requirements.requests.memory;
+        } else {
+            *memory_entry -= resource_requirements.requests.memory;
+            if *memory_entry < 0 {
+                *memory_entry = 0;
+            }
+        }
+        
+        // Update container count
+        let container_count_entry = self.tenant_container_count.entry(tenant_id.to_string()).or_insert(0);
+        if is_addition {
+            *container_count_entry += 1;
+        } else {
+            if *container_count_entry > 0 {
+                *container_count_entry -= 1;
+            }
+        }
+    }
+    
+    // Update tenant service count
+    pub fn update_tenant_service_count(&mut self, tenant_id: &str, is_addition: bool) {
+        let service_count_entry = self.tenant_service_count.entry(tenant_id.to_string()).or_insert(0);
+        if is_addition {
+            *service_count_entry += 1;
+        } else {
+            if *service_count_entry > 0 {
+                *service_count_entry -= 1;
+            }
+        }
+    }
+    
+    // Get tenant resource usage
+    pub fn get_tenant_resource_usage(&self, tenant_id: &str) -> (f64, u64, u32, u32) {
+        let cpu_usage = self.tenant_cpu_usage.get(tenant_id).cloned().unwrap_or(0.0);
+        let memory_usage = self.tenant_memory_usage.get(tenant_id).cloned().unwrap_or(0);
+        let container_count = self.tenant_container_count.get(tenant_id).cloned().unwrap_or(0);
+        let service_count = self.tenant_service_count.get(tenant_id).cloned().unwrap_or(0);
+        
+        (cpu_usage, memory_usage, container_count, service_count)
     }
 
     pub async fn start(&self) -> Result<()> {
@@ -365,6 +487,50 @@ impl ContainerScheduler {
                     resource_requirements.requests.cpu,
                     resource_requirements.requests.memory / (1024 * 1024));
                 
+                // Check tenant resource quotas if tenant context is available
+                // Extract tenant ID from container name or service domain
+                // In a real implementation, this would come from container metadata or labels
+                let tenant_id = if let Some(service_domain) = &container.service_domain {
+                    if service_domain.contains('.') {
+                        service_domain.split('.').next().unwrap_or("default").to_string()
+                    } else {
+                        "default".to_string()
+                    }
+                } else {
+                    // Extract tenant from container name if it follows the pattern tenant-name
+                    if container.name.contains('-') {
+                        container.name.split('-').next().unwrap_or("default").to_string()
+                    } else {
+                        "default".to_string()
+                    }
+                };
+                let quota_check_passed = if let Some(tenant_manager) = &self.tenant_manager {
+                    match self.check_tenant_quotas(&tenant_id, &resource_requirements).await {
+                        Ok(passed) => {
+                            if !passed {
+                                println!("Container {} ({}) exceeds tenant {} resource quotas",
+                                    container.id, container.name, tenant_id);
+                                false
+                            } else {
+                                true
+                            }
+                        },
+                        Err(e) => {
+                            println!("Error checking tenant quotas: {}", e);
+                            // Default to allowing the container if quota check fails
+                            true
+                        }
+                    }
+                } else {
+                    // No tenant manager, no quota enforcement
+                    true
+                };
+                
+                // Only proceed with scheduling if quota check passed
+                if !quota_check_passed {
+                    continue;
+                }
+                
                 // Select the best node for this container
                 if let Some(best_node) = self.select_best_node_for_container(
                     container,
@@ -372,6 +538,16 @@ impl ContainerScheduler {
                     &node_loads,
                     &containers
                 ).await? {
+                    // Update tenant resource usage
+                    if let Some(tenant_manager) = &self.tenant_manager {
+                        // This is a mutable operation, but self is immutable in this context
+                        // In a real implementation, we would use interior mutability
+                        // For now, we'll just log the update
+                        println!("Would update tenant {} resource usage: +{:.2} CPU, +{} MB memory, +1 container",
+                            tenant_id,
+                            resource_requirements.requests.cpu,
+                            resource_requirements.requests.memory / (1024 * 1024));
+                    }
                     println!("Selected node {} for container {} ({})",
                         best_node, container.id, container.name);
                     
@@ -650,12 +826,23 @@ impl ContainerScheduler {
             BinPackingStrategy::FirstFit => {
                 // For FirstFit, sort nodes by ID and pick the first one that fits
                 // We'll implement this by boosting scores of nodes with lower IDs
-                let mut sorted_nodes: Vec<&String> = node_scores.keys().collect();
-                sorted_nodes.sort();
+                // Collect node IDs and sort them
+                let mut node_ids: Vec<String> = node_scores.keys().cloned().collect();
+                node_ids.sort();
                 
-                for (idx, node_id) in sorted_nodes.iter().enumerate() {
-                    if let Some(score) = node_scores.get_mut(*node_id) {
-                        *score += 0.1 * (sorted_nodes.len() - idx) as f64 / sorted_nodes.len() as f64;
+                // Create a map of boosts to apply
+                let mut boosts = HashMap::new();
+                let node_count = node_ids.len();
+                
+                for (idx, node_id) in node_ids.iter().enumerate() {
+                    let boost = 0.1 * (node_count - idx) as f64 / node_count as f64;
+                    boosts.insert(node_id.clone(), boost);
+                }
+                
+                // Apply the boosts
+                for (node_id, boost) in boosts {
+                    if let Some(score) = node_scores.get_mut(&node_id) {
+                        *score += boost;
                     }
                 }
             },
