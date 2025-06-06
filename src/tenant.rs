@@ -204,25 +204,76 @@ impl TenantManager {
         Ok(updated_tenant)
     }
     
-    /// Delete a tenant
+    /// Delete a tenant and clean up all associated resources
     pub async fn delete_tenant(&self, tenant_id: &str) -> Result<()> {
         // Don't allow deleting the default tenant
         if tenant_id == self.default_tenant_id {
             anyhow::bail!("Cannot delete the default tenant");
         }
         
-        let mut tenants = self.tenants.write().await;
+        // Get tenant info before removing it
+        let tenant_namespaces: Vec<String>;
+        let tenant_owner: String;
         
-        if !tenants.contains_key(tenant_id) {
-            anyhow::bail!("Tenant not found");
+        {
+            let tenants = self.tenants.read().await;
+            
+            if !tenants.contains_key(tenant_id) {
+                anyhow::bail!("Tenant not found");
+            }
+            
+            let tenant = tenants.get(tenant_id).unwrap();
+            tenant_namespaces = tenant.namespaces.clone();
+            tenant_owner = tenant.owner_id.clone();
         }
         
-        tenants.remove(tenant_id);
+        // First, update tenant status to Terminating
+        {
+            let mut tenants = self.tenants.write().await;
+            if let Some(tenant) = tenants.get_mut(tenant_id) {
+                tenant.status = TenantStatus::Terminating;
+                tenant.updated_at = chrono::Utc::now();
+            }
+        }
         
-        // TODO: Clean up tenant resources
-        // - Delete tenant-specific roles
-        // - Delete tenant namespaces
-        // - Clean up tenant resources
+        // Clean up tenant resources
+        
+        // 1. Delete tenant-specific roles
+        let admin_role_id = format!("{}-admin", tenant_id);
+        if let Err(e) = self.rbac_manager.delete_role(&admin_role_id).await {
+            eprintln!("Failed to delete tenant admin role: {}", e);
+        }
+        
+        // 2. Delete all roles associated with this tenant's namespaces
+        for namespace in &tenant_namespaces {
+            // Find and delete roles with permissions scoped to this namespace
+            if let Ok(roles) = self.rbac_manager.list_roles().await {
+                for role in roles {
+                    let has_tenant_scope = role.permissions.iter().any(|p| {
+                        if let PermissionScope::Namespace(ns) = &p.scope {
+                            ns == namespace
+                        } else {
+                            false
+                        }
+                    });
+                    
+                    if has_tenant_scope {
+                        if let Err(e) = self.rbac_manager.delete_role(&role.id).await {
+                            eprintln!("Failed to delete role {}: {}", role.id, e);
+                        }
+                    }
+                }
+            }
+        }
+        
+        // 3. Revoke user access to tenant
+        if let Err(e) = self.rbac_manager.revoke_user_role(&tenant_owner, &admin_role_id).await {
+            eprintln!("Failed to revoke tenant owner role: {}", e);
+        }
+        
+        // Finally, remove the tenant
+        let mut tenants = self.tenants.write().await;
+        tenants.remove(tenant_id);
         
         Ok(())
     }
@@ -370,6 +421,129 @@ impl TenantManager {
             default_tenant_id: self.default_tenant_id.clone(),
         }
     }
+    /// Check if a tenant has exceeded its resource quotas
+    pub async fn check_resource_quotas(&self, tenant_id: &str,
+                                      cpu_request: Option<u32>,
+                                      memory_request: Option<u64>,
+                                      storage_request: Option<u64>) -> Result<bool> {
+        let tenants = self.tenants.read().await;
+        let tenant = tenants.get(tenant_id).context("Tenant not found")?;
+        
+        // Check CPU quota
+        if let (Some(cpu_limit), Some(cpu_req)) = (tenant.resource_quotas.cpu_limit, cpu_request) {
+            if cpu_req > cpu_limit {
+                return Ok(false);
+            }
+        }
+        
+        // Check memory quota
+        if let (Some(memory_limit), Some(memory_req)) = (tenant.resource_quotas.memory_limit, memory_request) {
+            if memory_req > memory_limit {
+                return Ok(false);
+            }
+        }
+        
+        // Check storage quota
+        if let (Some(storage_limit), Some(storage_req)) = (tenant.resource_quotas.storage_limit, storage_request) {
+            if storage_req > storage_limit {
+                return Ok(false);
+            }
+        }
+        
+        Ok(true)
+    }
+    
+    /// Check if a tenant can create more containers
+    pub async fn can_create_container(&self, tenant_id: &str) -> Result<bool> {
+        let tenants = self.tenants.read().await;
+        let tenant = tenants.get(tenant_id).context("Tenant not found")?;
+        
+        // If no limit is set, allow container creation
+        if tenant.resource_quotas.max_containers.is_none() {
+            return Ok(true);
+        }
+        
+        // TODO: Count current containers for this tenant
+        // For now, we'll just return true
+        Ok(true)
+    }
+    
+    /// Check if a tenant can create more services
+    pub async fn can_create_service(&self, tenant_id: &str) -> Result<bool> {
+        let tenants = self.tenants.read().await;
+        let tenant = tenants.get(tenant_id).context("Tenant not found")?;
+        
+        // If no limit is set, allow service creation
+        if tenant.resource_quotas.max_services.is_none() {
+            return Ok(true);
+        }
+        
+        // TODO: Count current services for this tenant
+        // For now, we'll just return true
+        Ok(true)
+    }
+    
+    /// Get network isolation settings for a tenant
+    pub async fn get_network_isolation(&self, tenant_id: &str) -> Result<bool> {
+        let tenants = self.tenants.read().await;
+        let tenant = tenants.get(tenant_id).context("Tenant not found")?;
+        
+        match &tenant.isolation_level {
+            IsolationLevel::Hard => Ok(true),
+            IsolationLevel::NetworkOnly => Ok(true),
+            IsolationLevel::Soft => Ok(false),
+            IsolationLevel::Custom(settings) => Ok(settings.network_isolation),
+        }
+    }
+    
+    /// Get storage isolation settings for a tenant
+    pub async fn get_storage_isolation(&self, tenant_id: &str) -> Result<bool> {
+        let tenants = self.tenants.read().await;
+        let tenant = tenants.get(tenant_id).context("Tenant not found")?;
+        
+        match &tenant.isolation_level {
+            IsolationLevel::Hard => Ok(true),
+            IsolationLevel::NetworkOnly => Ok(false),
+            IsolationLevel::Soft => Ok(false),
+            IsolationLevel::Custom(settings) => Ok(settings.storage_isolation),
+        }
+    }
+    
+    /// Get compute isolation settings for a tenant
+    pub async fn get_compute_isolation(&self, tenant_id: &str) -> Result<bool> {
+        let tenants = self.tenants.read().await;
+        let tenant = tenants.get(tenant_id).context("Tenant not found")?;
+        
+        match &tenant.isolation_level {
+            IsolationLevel::Hard => Ok(true),
+            IsolationLevel::NetworkOnly => Ok(false),
+            IsolationLevel::Soft => Ok(false),
+            IsolationLevel::Custom(settings) => Ok(settings.compute_isolation),
+        }
+    }
+    
+    /// Get resource usage for a tenant
+    pub async fn get_resource_usage(&self, tenant_id: &str) -> Result<ResourceUsage> {
+        // TODO: Implement actual resource usage tracking
+        // For now, return placeholder values
+        Ok(ResourceUsage {
+            cpu_usage: 0,
+            memory_usage: 0,
+            storage_usage: 0,
+            container_count: 0,
+            service_count: 0,
+        })
+    }
+}
+
+/// Resource usage statistics for a tenant
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ResourceUsage {
+    pub cpu_usage: u32,
+    pub memory_usage: u64,
+    pub storage_usage: u64,
+    pub container_count: u32,
+    pub service_count: u32,
 }
 
 /// TenantContext provides tenant-specific context for operations

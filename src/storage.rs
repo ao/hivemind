@@ -1239,7 +1239,8 @@ impl StorageManager {
 
     // Get a specific volume by name
     pub async fn get_volume(&self, name: &str) -> Result<Option<(String, String, u64, i64)>> {
-        match self.get_volume_enhanced(name).await {
+        let result = self.get_volume_enhanced(name).await;
+        match result {
             Ok(volume) => Ok(Some((
                 volume.name,
                 volume.path,
