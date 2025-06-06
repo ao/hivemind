@@ -1464,23 +1464,6 @@ impl ServiceDiscovery {
     }
     
     // Configure service mesh for a service
-            Self {
-                max_connections: 100,
-                max_pending_requests: 10,
-                max_requests: 1000,
-                max_retries: 3,
-                consecutive_errors_threshold: 5,
-                interval_ms: 10000,
-                base_ejection_time_ms: 30000,
-                state: CircuitBreakerState::Closed,
-                last_state_change: 0,
-                failure_count: 0,
-                success_count: 0,
-                half_open_allowed_calls: 5,
-            }
-        }
-
-    // Configure service mesh for a service
     pub async fn configure_service_mesh(&self, service_name: &str, config: ServiceMeshConfig) -> Result<()> {
         // In a real implementation, this would store the configuration and apply it
         // For now, we'll just log that we're configuring the service mesh
