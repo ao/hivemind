@@ -1,0 +1,401 @@
+{% extends "base.html" %}
+{% block content %}
+<h1>Tenant Management</h1>
+
+<div class="card">
+    <h2>Create New Tenant</h2>
+    <form id="create-tenant-form">
+        <div class="form-group">
+            <label for="name">Name</label>
+            <input type="text" id="name" name="name" required>
+        </div>
+        <div class="form-group">
+            <label for="isolation_level">Isolation Level</label>
+            <select id="isolation_level" name="isolation_level">
+                <option value="Soft">Soft (Logical isolation with resource quotas)</option>
+                <option value="Hard">Hard (Complete isolation - dedicated resources)</option>
+                <option value="NetworkOnly">Network Only (Network isolation but shared compute)</option>
+                <option value="Custom">Custom</option>
+            </select>
+        </div>
+        <div class="form-group">
+            <label for="description">Description</label>
+            <textarea id="description" name="description"></textarea>
+        </div>
+        <div class="form-group">
+            <label for="owner_id">Owner ID</label>
+            <input type="text" id="owner_id" name="owner_id" required>
+        </div>
+        <h3>Resource Quotas</h3>
+        <div class="form-group">
+            <label for="cpu_limit">CPU Limit (cores)</label>
+            <input type="number" id="cpu_limit" name="cpu_limit" min="0" step="1">
+        </div>
+        <div class="form-group">
+            <label for="memory_limit">Memory Limit (MB)</label>
+            <input type="number" id="memory_limit" name="memory_limit" min="0" step="1">
+        </div>
+        <div class="form-group">
+            <label for="storage_limit">Storage Limit (GB)</label>
+            <input type="number" id="storage_limit" name="storage_limit" min="0" step="1">
+        </div>
+        <div class="form-group">
+            <label for="max_containers">Max Containers</label>
+            <input type="number" id="max_containers" name="max_containers" min="0" step="1">
+        </div>
+        <div class="form-group">
+            <label for="max_services">Max Services</label>
+            <input type="number" id="max_services" name="max_services" min="0" step="1">
+        </div>
+        <button type="submit" class="btn">Create Tenant</button>
+    </form>
+</div>
+
+<div class="card">
+    <h2>Existing Tenants</h2>
+    <table>
+        <thead>
+            <tr>
+                <th>ID</th>
+                <th>Name</th>
+                <th>Isolation Level</th>
+                <th>Owner</th>
+                <th>Status</th>
+                <th>Actions</th>
+            </tr>
+        </thead>
+        <tbody>
+            {% for tenant in tenants %}
+            <tr>
+                <td>{{ tenant.id }}</td>
+                <td>{{ tenant.name }}</td>
+                <td>{{ tenant.isolation_level }}</td>
+                <td>{{ tenant.owner_id }}</td>
+                <td>{{ tenant.status }}</td>
+                <td>
+                    <button class="btn" onclick="viewTenant('{{ tenant.id }}')">View</button>
+                    <button class="btn" onclick="editTenant('{{ tenant.id }}')">Edit</button>
+                    <button class="btn btn-danger" onclick="deleteTenant('{{ tenant.id }}')">Delete</button>
+                </td>
+            </tr>
+            {% endfor %}
+        </tbody>
+    </table>
+</div>
+
+<!-- Tenant Details Modal -->
+<div id="tenant-modal" class="modal">
+    <div class="modal-content">
+        <span class="close">&times;</span>
+        <h2>Tenant Details</h2>
+        <div id="tenant-details"></div>
+    </div>
+</div>
+
+<!-- Edit Tenant Modal -->
+<div id="edit-tenant-modal" class="modal">
+    <div class="modal-content">
+        <span class="close">&times;</span>
+        <h2>Edit Tenant</h2>
+        <form id="edit-tenant-form">
+            <input type="hidden" id="edit-id" name="id">
+            <div class="form-group">
+                <label for="edit-name">Name</label>
+                <input type="text" id="edit-name" name="name" required>
+            </div>
+            <div class="form-group">
+                <label for="edit-isolation_level">Isolation Level</label>
+                <select id="edit-isolation_level" name="isolation_level">
+                    <option value="Soft">Soft (Logical isolation with resource quotas)</option>
+                    <option value="Hard">Hard (Complete isolation - dedicated resources)</option>
+                    <option value="NetworkOnly">Network Only (Network isolation but shared compute)</option>
+                    <option value="Custom">Custom</option>
+                </select>
+            </div>
+            <div class="form-group">
+                <label for="edit-description">Description</label>
+                <textarea id="edit-description" name="description"></textarea>
+            </div>
+            <div class="form-group">
+                <label for="edit-status">Status</label>
+                <select id="edit-status" name="status">
+                    <option value="Active">Active</option>
+                    <option value="Suspended">Suspended</option>
+                    <option value="Pending">Pending</option>
+                    <option value="Terminating">Terminating</option>
+                </select>
+            </div>
+            <h3>Resource Quotas</h3>
+            <div class="form-group">
+                <label for="edit-cpu_limit">CPU Limit (cores)</label>
+                <input type="number" id="edit-cpu_limit" name="cpu_limit" min="0" step="1">
+            </div>
+            <div class="form-group">
+                <label for="edit-memory_limit">Memory Limit (MB)</label>
+                <input type="number" id="edit-memory_limit" name="memory_limit" min="0" step="1">
+            </div>
+            <div class="form-group">
+                <label for="edit-storage_limit">Storage Limit (GB)</label>
+                <input type="number" id="edit-storage_limit" name="storage_limit" min="0" step="1">
+            </div>
+            <div class="form-group">
+                <label for="edit-max_containers">Max Containers</label>
+                <input type="number" id="edit-max_containers" name="max_containers" min="0" step="1">
+            </div>
+            <div class="form-group">
+                <label for="edit-max_services">Max Services</label>
+                <input type="number" id="edit-max_services" name="max_services" min="0" step="1">
+            </div>
+            <button type="submit" class="btn">Update Tenant</button>
+        </form>
+    </div>
+</div>
+
+<style>
+    .modal {
+        display: none;
+        position: fixed;
+        z-index: 1;
+        left: 0;
+        top: 0;
+        width: 100%;
+        height: 100%;
+        overflow: auto;
+        background-color: rgba(0,0,0,0.4);
+    }
+    
+    .modal-content {
+        background-color: #fefefe;
+        margin: 15% auto;
+        padding: 20px;
+        border: 1px solid #888;
+        width: 80%;
+        max-width: 600px;
+        border-radius: 5px;
+    }
+    
+    .close {
+        color: #aaa;
+        float: right;
+        font-size: 28px;
+        font-weight: bold;
+        cursor: pointer;
+    }
+    
+    .close:hover,
+    .close:focus {
+        color: black;
+        text-decoration: none;
+        cursor: pointer;
+    }
+</style>
+
+<script>
+    // Create tenant form submission
+    document.getElementById('create-tenant-form').addEventListener('submit', function(e) {
+        e.preventDefault();
+        
+        const formData = {
+            name: document.getElementById('name').value,
+            isolation_level: document.getElementById('isolation_level').value,
+            description: document.getElementById('description').value,
+            owner_id: document.getElementById('owner_id').value,
+            cpu_limit: parseInt(document.getElementById('cpu_limit').value) || null,
+            memory_limit: parseInt(document.getElementById('memory_limit').value) * 1024 * 1024 || null, // Convert MB to bytes
+            storage_limit: parseInt(document.getElementById('storage_limit').value) * 1024 * 1024 * 1024 || null, // Convert GB to bytes
+            max_containers: parseInt(document.getElementById('max_containers').value) || null,
+            max_services: parseInt(document.getElementById('max_services').value) || null
+        };
+        
+        fetch('/api/tenants/create', {
+            method: 'POST',
+            headers: {
+                'Content-Type': 'application/json'
+            },
+            body: JSON.stringify(formData)
+        })
+        .then(response => response.json())
+        .then(data => {
+            if (data.error) {
+                alert('Error: ' + data.error);
+            } else {
+                alert('Tenant created successfully');
+                window.location.reload();
+            }
+        })
+        .catch(error => {
+            console.error('Error:', error);
+            alert('Failed to create tenant');
+        });
+    });
+    
+    // View tenant details
+    function viewTenant(id) {
+        fetch(`/api/tenants/${id}`)
+            .then(response => response.json())
+            .then(tenant => {
+                if (tenant.error) {
+                    alert('Error: ' + tenant.error);
+                    return;
+                }
+                
+                // Format resource quotas for display
+                const cpuLimit = tenant.resource_quotas.cpu_limit ? `${tenant.resource_quotas.cpu_limit} cores` : 'Unlimited';
+                const memoryLimit = tenant.resource_quotas.memory_limit ? `${Math.round(tenant.resource_quotas.memory_limit / (1024 * 1024))} MB` : 'Unlimited';
+                const storageLimit = tenant.resource_quotas.storage_limit ? `${Math.round(tenant.resource_quotas.storage_limit / (1024 * 1024 * 1024))} GB` : 'Unlimited';
+                const maxContainers = tenant.resource_quotas.max_containers || 'Unlimited';
+                const maxServices = tenant.resource_quotas.max_services || 'Unlimited';
+                
+                // Format dates
+                const createdAt = new Date(tenant.created_at).toLocaleString();
+                const updatedAt = new Date(tenant.updated_at).toLocaleString();
+                
+                // Build HTML for tenant details
+                const detailsHtml = `
+                    <div>
+                        <p><strong>ID:</strong> ${tenant.id}</p>
+                        <p><strong>Name:</strong> ${tenant.name}</p>
+                        <p><strong>Description:</strong> ${tenant.description || 'N/A'}</p>
+                        <p><strong>Isolation Level:</strong> ${tenant.isolation_level}</p>
+                        <p><strong>Owner:</strong> ${tenant.owner_id}</p>
+                        <p><strong>Status:</strong> ${tenant.status}</p>
+                        <p><strong>Created:</strong> ${createdAt}</p>
+                        <p><strong>Updated:</strong> ${updatedAt}</p>
+                        <h3>Resource Quotas</h3>
+                        <p><strong>CPU Limit:</strong> ${cpuLimit}</p>
+                        <p><strong>Memory Limit:</strong> ${memoryLimit}</p>
+                        <p><strong>Storage Limit:</strong> ${storageLimit}</p>
+                        <p><strong>Max Containers:</strong> ${maxContainers}</p>
+                        <p><strong>Max Services:</strong> ${maxServices}</p>
+                        <h3>Namespaces</h3>
+                        <ul>
+                            ${tenant.namespaces.map(ns => `<li>${ns}</li>`).join('')}
+                        </ul>
+                    </div>
+                `;
+                
+                document.getElementById('tenant-details').innerHTML = detailsHtml;
+                document.getElementById('tenant-modal').style.display = 'block';
+            })
+            .catch(error => {
+                console.error('Error:', error);
+                alert('Failed to load tenant details');
+            });
+    }
+    
+    // Edit tenant
+    function editTenant(id) {
+        fetch(`/api/tenants/${id}`)
+            .then(response => response.json())
+            .then(tenant => {
+                if (tenant.error) {
+                    alert('Error: ' + tenant.error);
+                    return;
+                }
+                
+                // Populate form with tenant data
+                document.getElementById('edit-id').value = tenant.id;
+                document.getElementById('edit-name').value = tenant.name;
+                document.getElementById('edit-isolation_level').value = tenant.isolation_level;
+                document.getElementById('edit-description').value = tenant.description || '';
+                document.getElementById('edit-status').value = tenant.status;
+                
+                // Convert resource quotas from bytes to MB/GB for display
+                document.getElementById('edit-cpu_limit').value = tenant.resource_quotas.cpu_limit || '';
+                document.getElementById('edit-memory_limit').value = tenant.resource_quotas.memory_limit ? Math.round(tenant.resource_quotas.memory_limit / (1024 * 1024)) : '';
+                document.getElementById('edit-storage_limit').value = tenant.resource_quotas.storage_limit ? Math.round(tenant.resource_quotas.storage_limit / (1024 * 1024 * 1024)) : '';
+                document.getElementById('edit-max_containers').value = tenant.resource_quotas.max_containers || '';
+                document.getElementById('edit-max_services').value = tenant.resource_quotas.max_services || '';
+                
+                document.getElementById('edit-tenant-modal').style.display = 'block';
+            })
+            .catch(error => {
+                console.error('Error:', error);
+                alert('Failed to load tenant details for editing');
+            });
+    }
+    
+    // Update tenant form submission
+    document.getElementById('edit-tenant-form').addEventListener('submit', function(e) {
+        e.preventDefault();
+        
+        const formData = {
+            id: document.getElementById('edit-id').value,
+            name: document.getElementById('edit-name').value,
+            isolation_level: document.getElementById('edit-isolation_level').value,
+            description: document.getElementById('edit-description').value,
+            status: document.getElementById('edit-status').value,
+            cpu_limit: parseInt(document.getElementById('edit-cpu_limit').value) || null,
+            memory_limit: parseInt(document.getElementById('edit-memory_limit').value) * 1024 * 1024 || null, // Convert MB to bytes
+            storage_limit: parseInt(document.getElementById('edit-storage_limit').value) * 1024 * 1024 * 1024 || null, // Convert GB to bytes
+            max_containers: parseInt(document.getElementById('edit-max_containers').value) || null,
+            max_services: parseInt(document.getElementById('edit-max_services').value) || null
+        };
+        
+        fetch('/api/tenants/update', {
+            method: 'POST',
+            headers: {
+                'Content-Type': 'application/json'
+            },
+            body: JSON.stringify(formData)
+        })
+        .then(response => response.json())
+        .then(data => {
+            if (data.error) {
+                alert('Error: ' + data.error);
+            } else {
+                alert('Tenant updated successfully');
+                window.location.reload();
+            }
+        })
+        .catch(error => {
+            console.error('Error:', error);
+            alert('Failed to update tenant');
+        });
+    });
+    
+    // Delete tenant
+    function deleteTenant(id) {
+        if (confirm('Are you sure you want to delete this tenant? This action cannot be undone.')) {
+            fetch('/api/tenants/delete', {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json'
+                },
+                body: JSON.stringify({ id: id })
+            })
+            .then(response => response.json())
+            .then(data => {
+                if (data.error) {
+                    alert('Error: ' + data.error);
+                } else {
+                    alert('Tenant deleted successfully');
+                    window.location.reload();
+                }
+            })
+            .catch(error => {
+                console.error('Error:', error);
+                alert('Failed to delete tenant');
+            });
+        }
+    }
+    
+    // Close modals when clicking the X
+    document.querySelectorAll('.close').forEach(function(closeBtn) {
+        closeBtn.addEventListener('click', function() {
+            document.getElementById('tenant-modal').style.display = 'none';
+            document.getElementById('edit-tenant-modal').style.display = 'none';
+        });
+    });
+    
+    // Close modals when clicking outside
+    window.addEventListener('click', function(event) {
+        if (event.target == document.getElementById('tenant-modal')) {
+            document.getElementById('tenant-modal').style.display = 'none';
+        }
+        if (event.target == document.getElementById('edit-tenant-modal')) {
+            document.getElementById('edit-tenant-modal').style.display = 'none';
+        }
+    });
+</script>
+{% endblock %}

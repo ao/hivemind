@@ -366,6 +366,13 @@ impl WebServer {
             .route("/api/volumes", get(api_list_volumes))
             .route("/api/volumes/create", post(api_create_volume))
             .route("/api/volumes/delete", post(api_delete_volume))
+            // Tenant management API routes
+            .route("/tenants", get(tenants_handler))
+            .route("/api/tenants", get(api_list_tenants))
+            .route("/api/tenants/create", post(api_create_tenant))
+            .route("/api/tenants/update", post(api_update_tenant))
+            .route("/api/tenants/delete", post(api_delete_tenant))
+            .route("/api/tenants/:id", get(api_get_tenant))
             // Static assets
             .route("/assets/*path", get(static_handler))
             // With shared state
@@ -495,6 +502,321 @@ async fn volumes_handler(State(state): State<WebServerState>) -> impl IntoRespon
     context.insert("volumes", &volumes);
 
     render_template(&state.templates, "volumes.html", &context)
+}
+
+// Tenant management handlers
+async fn tenants_handler(State(state): State<WebServerState>) -> impl IntoResponse {
+    let app_state = &state.app_state;
+    
+    // Get tenants if tenant manager is available
+    let tenants = if let Some(tenant_manager) = &app_state.tenant_manager {
+        tenant_manager.list_tenants().await
+    } else {
+        Vec::new()
+    };
+    
+    let mut context = Context::new();
+    context.insert("tenants", &tenants);
+    
+    render_template(&state.templates, "tenants.html", &context)
+}
+
+async fn api_list_tenants(State(state): State<WebServerState>) -> Response {
+    let app_state = &state.app_state;
+    
+    if let Some(tenant_manager) = &app_state.tenant_manager {
+        match tenant_manager.list_tenants().await {
+            tenants => {
+                (StatusCode::OK, Json(tenants)).into_response()
+            }
+        }
+    } else {
+        (
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(serde_json::json!({
+                "error": "Tenant manager is not available"
+            })),
+        )
+            .into_response()
+    }
+}
+
+#[derive(Deserialize)]
+struct CreateTenantRequest {
+    name: String,
+    isolation_level: String,
+    description: Option<String>,
+    cpu_limit: Option<u32>,
+    memory_limit: Option<u64>,
+    storage_limit: Option<u64>,
+    max_containers: Option<u32>,
+    max_services: Option<u32>,
+    owner_id: String,
+}
+
+async fn api_create_tenant(
+    State(state): State<WebServerState>,
+    Json(payload): Json<CreateTenantRequest>,
+) -> Response {
+    let app_state = &state.app_state;
+    
+    if let Some(tenant_manager) = &app_state.tenant_manager {
+        // Convert isolation level string to enum
+        let isolation_level = match payload.isolation_level.as_str() {
+            "Hard" => crate::tenant::IsolationLevel::Hard,
+            "Soft" => crate::tenant::IsolationLevel::Soft,
+            "NetworkOnly" => crate::tenant::IsolationLevel::NetworkOnly,
+            "Custom" => {
+                // Default custom settings
+                let settings = crate::tenant::IsolationSettings {
+                    network_isolation: true,
+                    storage_isolation: false,
+                    compute_isolation: false,
+                    resource_guarantees: false,
+                };
+                crate::tenant::IsolationLevel::Custom(settings)
+            },
+            _ => crate::tenant::IsolationLevel::Soft, // Default to Soft
+        };
+        
+        // Create resource quotas
+        let resource_quotas = crate::tenant::ResourceQuotas {
+            cpu_limit: payload.cpu_limit,
+            memory_limit: payload.memory_limit,
+            storage_limit: payload.storage_limit,
+            max_containers: payload.max_containers,
+            max_services: payload.max_services,
+        };
+        
+        // Create tenant
+        let tenant_id = uuid::Uuid::new_v4().to_string();
+        let now = chrono::Utc::now();
+        
+        let tenant = crate::tenant::Tenant {
+            id: tenant_id.clone(),
+            name: payload.name,
+            isolation_level,
+            resource_quotas,
+            namespaces: vec![tenant_id.clone()],
+            created_at: now,
+            updated_at: now,
+            owner_id: payload.owner_id,
+            description: payload.description,
+            labels: HashMap::new(),
+            status: crate::tenant::TenantStatus::Active,
+        };
+        
+        match tenant_manager.create_tenant(tenant).await {
+            Ok(created_tenant) => {
+                (
+                    StatusCode::CREATED,
+                    Json(created_tenant),
+                ).into_response()
+            },
+            Err(e) => {
+                (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(serde_json::json!({
+                        "error": format!("Failed to create tenant: {}", e)
+                    })),
+                ).into_response()
+            }
+        }
+    } else {
+        (
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(serde_json::json!({
+                "error": "Tenant manager is not available"
+            })),
+        )
+            .into_response()
+    }
+}
+
+async fn api_get_tenant(
+    State(state): State<WebServerState>,
+    Path(tenant_id): Path<String>,
+) -> Response {
+    let app_state = &state.app_state;
+    
+    if let Some(tenant_manager) = &app_state.tenant_manager {
+        match tenant_manager.get_tenant(&tenant_id).await {
+            Some(tenant) => {
+                (StatusCode::OK, Json(tenant)).into_response()
+            },
+            None => {
+                (
+                    StatusCode::NOT_FOUND,
+                    Json(serde_json::json!({
+                        "error": format!("Tenant {} not found", tenant_id)
+                    })),
+                ).into_response()
+            }
+        }
+    } else {
+        (
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(serde_json::json!({
+                "error": "Tenant manager is not available"
+            })),
+        )
+            .into_response()
+    }
+}
+
+#[derive(Deserialize)]
+struct UpdateTenantRequest {
+    id: String,
+    name: String,
+    isolation_level: String,
+    description: Option<String>,
+    cpu_limit: Option<u32>,
+    memory_limit: Option<u64>,
+    storage_limit: Option<u64>,
+    max_containers: Option<u32>,
+    max_services: Option<u32>,
+    status: String,
+}
+
+async fn api_update_tenant(
+    State(state): State<WebServerState>,
+    Json(payload): Json<UpdateTenantRequest>,
+) -> Response {
+    let app_state = &state.app_state;
+    
+    if let Some(tenant_manager) = &app_state.tenant_manager {
+        // Get existing tenant
+        let existing_tenant = match tenant_manager.get_tenant(&payload.id).await {
+            Some(tenant) => tenant,
+            None => {
+                return (
+                    StatusCode::NOT_FOUND,
+                    Json(serde_json::json!({
+                        "error": format!("Tenant {} not found", payload.id)
+                    })),
+                ).into_response();
+            }
+        };
+        
+        // Convert isolation level string to enum
+        let isolation_level = match payload.isolation_level.as_str() {
+            "Hard" => crate::tenant::IsolationLevel::Hard,
+            "Soft" => crate::tenant::IsolationLevel::Soft,
+            "NetworkOnly" => crate::tenant::IsolationLevel::NetworkOnly,
+            "Custom" => {
+                // Use existing custom settings or create default ones
+                if let crate::tenant::IsolationLevel::Custom(settings) = &existing_tenant.isolation_level {
+                    crate::tenant::IsolationLevel::Custom(settings.clone())
+                } else {
+                    let settings = crate::tenant::IsolationSettings {
+                        network_isolation: true,
+                        storage_isolation: false,
+                        compute_isolation: false,
+                        resource_guarantees: false,
+                    };
+                    crate::tenant::IsolationLevel::Custom(settings)
+                }
+            },
+            _ => existing_tenant.isolation_level.clone(),
+        };
+        
+        // Create resource quotas
+        let resource_quotas = crate::tenant::ResourceQuotas {
+            cpu_limit: payload.cpu_limit,
+            memory_limit: payload.memory_limit,
+            storage_limit: payload.storage_limit,
+            max_containers: payload.max_containers,
+            max_services: payload.max_services,
+        };
+        
+        // Convert status string to enum
+        let status = match payload.status.as_str() {
+            "Active" => crate::tenant::TenantStatus::Active,
+            "Suspended" => crate::tenant::TenantStatus::Suspended,
+            "Pending" => crate::tenant::TenantStatus::Pending,
+            "Terminating" => crate::tenant::TenantStatus::Terminating,
+            _ => existing_tenant.status,
+        };
+        
+        // Create updated tenant
+        let updated_tenant = crate::tenant::Tenant {
+            id: payload.id.clone(),
+            name: payload.name,
+            isolation_level,
+            resource_quotas,
+            namespaces: existing_tenant.namespaces,
+            created_at: existing_tenant.created_at,
+            updated_at: chrono::Utc::now(),
+            owner_id: existing_tenant.owner_id,
+            description: payload.description,
+            labels: existing_tenant.labels,
+            status,
+        };
+        
+        match tenant_manager.update_tenant(&payload.id, updated_tenant).await {
+            Ok(tenant) => {
+                (StatusCode::OK, Json(tenant)).into_response()
+            },
+            Err(e) => {
+                (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(serde_json::json!({
+                        "error": format!("Failed to update tenant: {}", e)
+                    })),
+                ).into_response()
+            }
+        }
+    } else {
+        (
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(serde_json::json!({
+                "error": "Tenant manager is not available"
+            })),
+        )
+            .into_response()
+    }
+}
+
+#[derive(Deserialize)]
+struct DeleteTenantRequest {
+    id: String,
+}
+
+async fn api_delete_tenant(
+    State(state): State<WebServerState>,
+    Json(payload): Json<DeleteTenantRequest>,
+) -> Response {
+    let app_state = &state.app_state;
+    
+    if let Some(tenant_manager) = &app_state.tenant_manager {
+        match tenant_manager.delete_tenant(&payload.id).await {
+            Ok(_) => {
+                (
+                    StatusCode::OK,
+                    Json(serde_json::json!({
+                        "success": true,
+                        "message": format!("Tenant {} deleted", payload.id)
+                    })),
+                ).into_response()
+            },
+            Err(e) => {
+                (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(serde_json::json!({
+                        "error": format!("Failed to delete tenant: {}", e)
+                    })),
+                ).into_response()
+            }
+        }
+    } else {
+        (
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(serde_json::json!({
+                "error": "Tenant manager is not available"
+            })),
+        )
+            .into_response()
+    }
 }
 
 // Static file handler
