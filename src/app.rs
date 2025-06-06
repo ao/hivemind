@@ -116,6 +116,11 @@ impl AppManager {
         self.container_runtime = Some(runtime as Arc<dyn ContainerRuntime>);
         self
     }
+    
+    /// Get the container runtime
+    pub fn get_container_runtime(&self) -> Option<Arc<dyn ContainerRuntime>> {
+        self.container_runtime.clone()
+    }
 
     // Create a volume - delegates to container runtime
     pub async fn create_volume(&self, name: &str) -> Result<()> {

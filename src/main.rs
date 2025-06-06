@@ -20,6 +20,7 @@ use hivemind::security::SecurityManager;
 use hivemind::service_discovery::{ServiceDiscovery, ServiceEndpoint};
 use hivemind::storage::StorageManager;
 use hivemind::tenant::TenantManager;
+use hivemind::tenant_quota::TenantQuotaEnforcer;
 use hivemind::web;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -365,8 +366,29 @@ async fn main() -> Result<()> {
             }
             
             // Initialize tenant manager
-            let tenant_manager = Arc::new(TenantManager::new(security_manager.rbac_manager()));
+            let mut tenant_manager = TenantManager::new(security_manager.rbac_manager());
+            
+            // Connect tenant manager with container runtime if available
+            if let Some(container_runtime) = app_manager.get_container_runtime() {
+                tenant_manager.set_container_runtime(container_runtime.clone());
+                println!("Tenant manager connected to container runtime");
+            }
+            
+            let tenant_manager = Arc::new(tenant_manager);
             println!("Tenant manager initialized successfully");
+            
+            // Initialize tenant quota enforcer
+            let tenant_quota_enforcer = Arc::new(TenantQuotaEnforcer::new(
+                tenant_manager.clone(),
+                Arc::new(tokio::sync::RwLock::new(app_manager.clone())),
+            ));
+            
+            // Initialize quota tracking
+            if let Err(e) = tenant_quota_enforcer.initialize_quota_tracking().await {
+                eprintln!("Failed to initialize quota tracking: {}", e);
+            } else {
+                println!("Tenant quota enforcement initialized successfully");
+            }
             
             // Initialize CI/CD manager
             let cicd_base_dir = cli.data_dir.join("cicd");
@@ -468,6 +490,10 @@ async fn main() -> Result<()> {
                     println!("Log aggregator initialized successfully");
                 }
             }
+            
+            // Initialize resilience manager
+            let resilience_manager = Arc::new(resilience::ResilienceManager::new());
+            println!("Resilience manager initialized successfully");
 
             // Create AppState for sharing between web and API
             let app_state = AppState {
@@ -482,7 +508,9 @@ async fn main() -> Result<()> {
                 deployment_manager: Some(Arc::new(deployment_manager)),
                 helm_manager: Some(Arc::new(helm_manager)),
                 tenant_manager: Some(tenant_manager),
+                tenant_quota_enforcer: Some(tenant_quota_enforcer),
                 observability_manager: Some(Arc::new(observability_manager)),
+                resilience_manager: Some(resilience_manager),
             };
 
             // Start the web interface in a separate task
@@ -528,11 +556,13 @@ async fn main() -> Result<()> {
                 health_monitor: None, // No health monitor for web-only mode
                 security_manager: None, // No security manager for web-only mode
                 tenant_manager: None, // No tenant manager for web-only mode
+                tenant_quota_enforcer: None, // No tenant quota enforcer for web-only mode
                 cicd_manager: None, // No CI/CD manager for web-only mode
                 cloud_manager: None, // No cloud manager for web-only mode
                 deployment_manager: None, // No deployment manager for web-only mode
                 helm_manager: None, // No Helm manager for web-only mode
                 observability_manager: None, // No observability manager for web-only mode
+                resilience_manager: None, // No resilience manager for web-only mode
             };
 
             // Start the web server
@@ -599,11 +629,13 @@ async fn main() -> Result<()> {
                                 health_monitor: None,
                                 security_manager: None,
                                 tenant_manager: None,
+                                tenant_quota_enforcer: None,
                                 cicd_manager: None,
                                 cloud_manager: None,
                                 deployment_manager: None,
                                 helm_manager: None,
                                 observability_manager: None,
+                                resilience_manager: None,
                             };
                         }
                     }
@@ -633,6 +665,8 @@ async fn main() -> Result<()> {
                 deployment_manager: None,
                 helm_manager: None,
                 observability_manager: None,
+                tenant_quota_enforcer: None,
+                resilience_manager: None,
             };
             match command {
                 NodeCommands::Ls => {
@@ -704,6 +738,8 @@ async fn main() -> Result<()> {
                 deployment_manager: Some(Arc::new(deployment_manager)),
                 helm_manager: None,
                 observability_manager: None,
+                tenant_quota_enforcer: None,
+                resilience_manager: None,
             };
 
             match command {
@@ -936,6 +972,8 @@ async fn main() -> Result<()> {
                 deployment_manager: None,
                 helm_manager: None,
                 observability_manager: None,
+                tenant_quota_enforcer: None,
+                resilience_manager: None,
             };
 
             println!("Checking system health...");

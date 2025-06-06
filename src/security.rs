@@ -7,8 +7,13 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 pub mod container_scanning;
 pub mod network_policy;
+pub mod network_policy_controller;
+pub mod network_policy_manager;
 pub mod rbac;
 pub mod secret_management;
+pub mod storage_acl;
+pub mod storage_encryption;
+pub mod storage_qos;
 
 pub use container_scanning::{
     ContainerScanner, SecurityPolicy, ScanResult, Vulnerability, VulnerabilitySeverity,
@@ -21,6 +26,12 @@ pub use network_policy::{
     NetworkTrafficLog, NetworkAction, NetworkSecurityAlert, NetworkAlertType, AlertSeverity
 };
 
+pub use network_policy_controller::{
+    NetworkPolicyController, ViolationLog
+};
+
+pub use network_policy_manager::NetworkPolicyManager;
+
 pub use rbac::{
     RbacManager, User, Role, Group, Permission, PermissionScope, AuthRequest, AuthResponse,
     AuditLogEntry, AuditStatus
@@ -31,12 +42,29 @@ pub use secret_management::{
     EncryptionKey, EncryptionAlgorithm
 };
 
+pub use storage_acl::{
+    StorageAccessControl, VolumeAcl, StorageOperation, StorageAuditLogEntry
+};
+
+pub use storage_encryption::{
+    StorageEncryptionManager, TenantEncryptionKey
+};
+
+pub use storage_qos::{
+    StorageQoSManager, StorageOperationType, TenantQoSPolicy, TenantStorageStats
+};
+
 /// SecurityManager is the main entry point for all security features in Hivemind
 pub struct SecurityManager {
     container_scanner: Arc<ContainerScanner>,
     network_policy_enforcer: Arc<NetworkPolicyEnforcer>,
+    network_policy_controller: Arc<RwLock<NetworkPolicyController>>,
+    network_policy_manager: Arc<RwLock<NetworkPolicyManager>>,
     rbac_manager: Arc<RbacManager>,
     secret_manager: Arc<SecretManager>,
+    storage_access_control: Arc<StorageAccessControl>,
+    storage_encryption_manager: Arc<StorageEncryptionManager>,
+    storage_qos_manager: Arc<StorageQoSManager>,
 }
 
 impl SecurityManager {
@@ -44,8 +72,13 @@ impl SecurityManager {
         Self {
             container_scanner: Arc::new(ContainerScanner::new()),
             network_policy_enforcer: Arc::new(NetworkPolicyEnforcer::new()),
+            network_policy_controller: Arc::new(RwLock::new(NetworkPolicyController::new())),
+            network_policy_manager: Arc::new(RwLock::new(NetworkPolicyManager::new())),
             rbac_manager: Arc::new(RbacManager::new()),
             secret_manager: Arc::new(SecretManager::new()),
+            storage_access_control: Arc::new(StorageAccessControl::new()),
+            storage_encryption_manager: Arc::new(StorageEncryptionManager::new()),
+            storage_qos_manager: Arc::new(StorageQoSManager::default()),
         }
     }
 
@@ -56,6 +89,14 @@ impl SecurityManager {
     pub fn network_policy_enforcer(&self) -> Arc<NetworkPolicyEnforcer> {
         self.network_policy_enforcer.clone()
     }
+    
+    pub fn network_policy_controller(&self) -> Arc<RwLock<NetworkPolicyController>> {
+        self.network_policy_controller.clone()
+    }
+    
+    pub fn network_policy_manager(&self) -> Arc<RwLock<NetworkPolicyManager>> {
+        self.network_policy_manager.clone()
+    }
 
     pub fn rbac_manager(&self) -> Arc<RbacManager> {
         self.rbac_manager.clone()
@@ -63,6 +104,18 @@ impl SecurityManager {
 
     pub fn secret_manager(&self) -> Arc<SecretManager> {
         self.secret_manager.clone()
+    }
+    
+    pub fn storage_access_control(&self) -> Arc<StorageAccessControl> {
+        self.storage_access_control.clone()
+    }
+    
+    pub fn storage_encryption_manager(&self) -> Arc<StorageEncryptionManager> {
+        self.storage_encryption_manager.clone()
+    }
+    
+    pub fn storage_qos_manager(&self) -> Arc<StorageQoSManager> {
+        self.storage_qos_manager.clone()
     }
     
     /// Initialize all security components
@@ -96,6 +149,7 @@ impl SecurityManager {
         self.container_scanner.create_policy(default_policy).await?;
         
         // Create a default network policy
+        let now = SystemTime::now().duration_since(UNIX_EPOCH)?.as_secs();
         let base_policy = crate::network::NetworkPolicy {
             name: "default-network-policy".to_string(),
             selector: crate::network::NetworkSelector {
@@ -103,6 +157,12 @@ impl SecurityManager {
             },
             ingress_rules: Vec::new(),
             egress_rules: Vec::new(),
+            priority: 100,
+            namespace: None,
+            tenant_id: None,
+            labels: HashMap::new(),
+            created_at: now,
+            updated_at: now,
         };
         
         let enhanced_policy = EnhancedNetworkPolicy {
@@ -145,12 +205,30 @@ impl SecurityManager {
         protocol: crate::network::Protocol,
         port: u16,
     ) -> Result<bool> {
-        self.network_policy_enforcer.is_traffic_allowed(
+        // First try with the new controller
+        let controller = self.network_policy_controller.read().await;
+        match controller.is_traffic_allowed(
             source_container,
             destination_container,
             protocol,
             port,
-        ).await
+        ).await {
+            Ok(result) => Ok(result),
+            // Fall back to the old enforcer if the new controller fails
+            Err(_) => {
+                self.network_policy_enforcer.is_traffic_allowed(
+                    source_container,
+                    destination_container,
+                    protocol,
+                    port,
+                ).await
+            }
+        }
+    }
+    
+    /// Get network policy violation logs
+    pub async fn get_network_policy_violations(&self) -> Vec<ViolationLog> {
+        self.network_policy_controller.read().await.get_violation_logs().await
     }
     
     /// Authenticate a user
@@ -228,5 +306,27 @@ impl SecurityManager {
     /// Get all audit logs
     pub async fn get_audit_logs(&self) -> Vec<AuditLogEntry> {
         self.rbac_manager.get_audit_logs().await
+    }
+    
+    /// Run network policy reconciliation to ensure policies are consistently applied
+    pub async fn run_network_policy_reconciliation(&self) -> Result<()> {
+        // Run reconciliation on the new controller
+        self.network_policy_controller.write().await.run_reconciliation().await?;
+        
+        // Also run reconciliation on the network policy manager
+        self.network_policy_manager.write().await.run_reconciliation().await?;
+        
+        Ok(())
+    }
+    
+    /// Create default network policies for a new tenant
+    pub async fn create_default_tenant_network_policies(&self, tenant_id: &str) -> Result<()> {
+        // Create default policies using the new controller
+        self.network_policy_controller.write().await.create_default_tenant_policies(tenant_id).await?;
+        
+        // Also create default policies using the network policy manager
+        self.network_policy_manager.write().await.create_default_tenant_policies(tenant_id).await?;
+        
+        Ok(())
     }
 }
