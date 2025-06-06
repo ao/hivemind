@@ -19,6 +19,7 @@ use hivemind::scheduler::ContainerScheduler;
 use hivemind::security::SecurityManager;
 use hivemind::service_discovery::{ServiceDiscovery, ServiceEndpoint};
 use hivemind::storage::StorageManager;
+use hivemind::tenant::TenantManager;
 use hivemind::web;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -363,6 +364,10 @@ async fn main() -> Result<()> {
                 println!("Security manager initialized successfully");
             }
             
+            // Initialize tenant manager
+            let tenant_manager = Arc::new(TenantManager::new(security_manager.rbac_manager()));
+            println!("Tenant manager initialized successfully");
+            
             // Initialize CI/CD manager
             let cicd_base_dir = cli.data_dir.join("cicd");
             let cicd_manager = CicdManager::new(
@@ -472,6 +477,7 @@ async fn main() -> Result<()> {
                 cloud_manager: Some(Arc::new(cloud_manager)),
                 deployment_manager: Some(Arc::new(deployment_manager)),
                 helm_manager: Some(Arc::new(helm_manager)),
+                tenant_manager: Some(tenant_manager),
                 observability_manager: Some(Arc::new(observability_manager)),
             };
 
@@ -517,6 +523,7 @@ async fn main() -> Result<()> {
                 network_manager: None, // No network manager for web-only mode
                 health_monitor: None, // No health monitor for web-only mode
                 security_manager: None, // No security manager for web-only mode
+                tenant_manager: None, // No tenant manager for web-only mode
                 cicd_manager: None, // No CI/CD manager for web-only mode
                 cloud_manager: None, // No cloud manager for web-only mode
                 deployment_manager: None, // No deployment manager for web-only mode
@@ -587,6 +594,7 @@ async fn main() -> Result<()> {
                                 network_manager: Some(manager_arc),
                                 health_monitor: None,
                                 security_manager: None,
+                                tenant_manager: None,
                                 cicd_manager: None,
                                 cloud_manager: None,
                                 deployment_manager: None,
@@ -615,6 +623,7 @@ async fn main() -> Result<()> {
                 network_manager: None,
                 health_monitor: None,
                 security_manager: None,
+                tenant_manager: None,
                 cicd_manager: None,
                 cloud_manager: None,
                 deployment_manager: None,
@@ -680,6 +689,7 @@ async fn main() -> Result<()> {
                 network_manager: None,
                 health_monitor: Some(health_monitor.clone()),
                 security_manager: None,
+                tenant_manager: None,
                 cicd_manager: None,
                 cloud_manager: None,
                 deployment_manager: Some(Arc::new(deployment_manager)),
@@ -911,6 +921,7 @@ async fn main() -> Result<()> {
                 network_manager,
                 health_monitor: None,
                 security_manager: None,
+                tenant_manager: None,
                 cicd_manager: None,
                 cloud_manager: None,
                 deployment_manager: None,

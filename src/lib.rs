@@ -13,6 +13,7 @@ pub mod scheduler;
 pub mod security;
 pub mod service_discovery;
 pub mod storage;
+pub mod tenant;
 pub mod web;
 pub use containerd_manager::*;
 
@@ -27,6 +28,7 @@ pub struct AppState {
     pub network_manager: Option<std::sync::Arc<network::NetworkManager>>,
     pub health_monitor: Option<std::sync::Arc<health_monitor::HealthMonitor>>,
     pub security_manager: Option<std::sync::Arc<security::SecurityManager>>,
+    pub tenant_manager: Option<std::sync::Arc<tenant::TenantManager>>,
     pub cicd_manager: Option<std::sync::Arc<cicd::CicdManager>>,
     pub cloud_manager: Option<std::sync::Arc<cloud::CloudManager>>,
     pub deployment_manager: Option<std::sync::Arc<deployment::DeploymentManager>>,

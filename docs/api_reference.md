@@ -1835,6 +1835,311 @@ Creates a new secret.
 }
 ```
 
+### Tenants
+
+#### List Tenants
+
+```
+GET /tenants
+```
+
+Lists all tenants the authenticated user has access to.
+
+**Query Parameters:**
+
+| Parameter | Type | Description |
+|-----------|------|-------------|
+| `status` | string | Filter by tenant status (active, suspended, etc.) |
+| `limit` | integer | Maximum number of tenants to return |
+| `offset` | integer | Offset for pagination |
+
+**Response:**
+
+```json
+{
+  "success": true,
+  "data": {
+    "tenants": [
+      {
+        "id": "tenant-1",
+        "name": "Engineering",
+        "isolation_level": "soft",
+        "namespaces": ["engineering", "dev"],
+        "created_at": "2025-06-01T12:00:00Z",
+        "owner_id": "user-1",
+        "status": "active"
+      },
+      {
+        "id": "tenant-2",
+        "name": "Marketing",
+        "isolation_level": "network_only",
+        "namespaces": ["marketing"],
+        "created_at": "2025-06-01T14:00:00Z",
+        "owner_id": "user-2",
+        "status": "active"
+      }
+    ],
+    "total": 2
+  }
+}
+```
+
+#### Get Tenant Details
+
+```
+GET /tenants/{tenant_id}
+```
+
+Gets detailed information about a specific tenant.
+
+**Response:**
+
+```json
+{
+  "success": true,
+  "data": {
+    "id": "tenant-1",
+    "name": "Engineering",
+    "isolation_level": "soft",
+    "resource_quotas": {
+      "cpu_limit": 8,
+      "memory_limit": 16000000000,
+      "storage_limit": 100000000000,
+      "max_containers": 20,
+      "max_services": 10
+    },
+    "namespaces": ["engineering", "dev"],
+    "created_at": "2025-06-01T12:00:00Z",
+    "updated_at": "2025-06-01T15:00:00Z",
+    "owner_id": "user-1",
+    "description": "Engineering department tenant",
+    "labels": {
+      "department": "engineering",
+      "cost_center": "cc-123"
+    },
+    "status": "active"
+  }
+}
+```
+
+#### Create Tenant
+
+```
+POST /tenants
+```
+
+Creates a new tenant.
+
+**Request Body:**
+
+```json
+{
+  "name": "Finance",
+  "isolation_level": "hard",
+  "resource_quotas": {
+    "cpu_limit": 4,
+    "memory_limit": 8000000000,
+    "storage_limit": 50000000000,
+    "max_containers": 10,
+    "max_services": 5
+  },
+  "namespaces": ["finance"],
+  "description": "Finance department tenant",
+  "labels": {
+    "department": "finance",
+    "cost_center": "cc-456"
+  }
+}
+```
+
+**Response:**
+
+```json
+{
+  "success": true,
+  "data": {
+    "id": "tenant-3",
+    "name": "Finance",
+    "isolation_level": "hard",
+    "created_at": "2025-06-02T10:00:00Z",
+    "owner_id": "user-1",
+    "status": "active",
+    "message": "Tenant created successfully"
+  }
+}
+```
+
+#### Update Tenant
+
+```
+PUT /tenants/{tenant_id}
+```
+
+Updates an existing tenant.
+
+**Request Body:**
+
+```json
+{
+  "name": "Finance Department",
+  "isolation_level": "soft",
+  "resource_quotas": {
+    "cpu_limit": 8,
+    "memory_limit": 16000000000,
+    "storage_limit": 100000000000,
+    "max_containers": 20,
+    "max_services": 10
+  },
+  "description": "Updated finance department tenant",
+  "labels": {
+    "department": "finance",
+    "cost_center": "cc-789"
+  }
+}
+```
+
+**Response:**
+
+```json
+{
+  "success": true,
+  "data": {
+    "id": "tenant-3",
+    "name": "Finance Department",
+    "isolation_level": "soft",
+    "updated_at": "2025-06-02T11:00:00Z",
+    "message": "Tenant updated successfully"
+  }
+}
+```
+
+#### Delete Tenant
+
+```
+DELETE /tenants/{tenant_id}
+```
+
+Deletes a tenant.
+
+**Response:**
+
+```json
+{
+  "success": true,
+  "data": {
+    "id": "tenant-3",
+    "message": "Tenant deleted successfully"
+  }
+}
+```
+
+#### Add Namespace to Tenant
+
+```
+POST /tenants/{tenant_id}/namespaces
+```
+
+Adds a namespace to a tenant.
+
+**Request Body:**
+
+```json
+{
+  "namespace": "finance-dev"
+}
+```
+
+**Response:**
+
+```json
+{
+  "success": true,
+  "data": {
+    "tenant_id": "tenant-3",
+    "namespace": "finance-dev",
+    "message": "Namespace added successfully"
+  }
+}
+```
+
+#### Remove Namespace from Tenant
+
+```
+DELETE /tenants/{tenant_id}/namespaces/{namespace}
+```
+
+Removes a namespace from a tenant.
+
+**Response:**
+
+```json
+{
+  "success": true,
+  "data": {
+    "tenant_id": "tenant-3",
+    "namespace": "finance-dev",
+    "message": "Namespace removed successfully"
+  }
+}
+```
+
+#### Update Tenant Resource Quotas
+
+```
+PUT /tenants/{tenant_id}/quotas
+```
+
+Updates resource quotas for a tenant.
+
+**Request Body:**
+
+```json
+{
+  "cpu_limit": 16,
+  "memory_limit": 32000000000,
+  "storage_limit": 200000000000,
+  "max_containers": 40,
+  "max_services": 20
+}
+```
+
+**Response:**
+
+```json
+{
+  "success": true,
+  "data": {
+    "tenant_id": "tenant-3",
+    "message": "Resource quotas updated successfully"
+  }
+}
+```
+
+#### Get Tenant Resource Usage
+
+```
+GET /tenants/{tenant_id}/usage
+```
+
+Gets resource usage for a tenant.
+
+**Response:**
+
+```json
+{
+  "success": true,
+  "data": {
+    "tenant_id": "tenant-3",
+    "cpu_usage": 2.5,
+    "memory_usage": 4000000000,
+    "storage_usage": 20000000000,
+    "container_count": 5,
+    "service_count": 2,
+    "timestamp": "2025-06-02T12:00:00Z"
+  }
+}
+```
+
 ### Authentication
 
 #### Login
