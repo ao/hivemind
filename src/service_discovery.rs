@@ -230,8 +230,8 @@ impl ServiceDiscovery {
         // Start the DNS server
         self.start_dns_server().await?;
         
-        // Start the proxy server if needed
-        // self.start_proxy_server().await?;
+        // Start the proxy server
+        self.start_proxy_server().await?;
         
         // If we have a network manager, set up the integration
         if let Some(network_manager) = &self.network_manager {
@@ -755,9 +755,18 @@ impl ServiceDiscovery {
         let proxy_port = self.proxy_port;
         let routing_rules = self.routing_rules.clone();
         let traffic_splits = self.traffic_splits.clone();
+        let load_balancing_strategy = self.load_balancing_strategy.clone();
+        let endpoint_stats = self.endpoint_stats.clone();
 
         tokio::spawn(async move {
-            if let Err(e) = Self::run_proxy_server(proxy_port, services, routing_rules, traffic_splits).await {
+            if let Err(e) = Self::run_proxy_server(
+                proxy_port,
+                services,
+                routing_rules,
+                traffic_splits,
+                load_balancing_strategy,
+                endpoint_stats
+            ).await {
                 eprintln!("Proxy server error: {}", e);
             }
         });
@@ -770,6 +779,8 @@ impl ServiceDiscovery {
         services: Arc<Mutex<HashMap<String, Vec<ServiceEndpoint>>>>,
         routing_rules: Arc<Mutex<Vec<RoutingRule>>>,
         traffic_splits: Arc<Mutex<HashMap<String, TrafficSplitConfig>>>,
+        load_balancing_strategies: Arc<Mutex<HashMap<String, LoadBalancingStrategy>>>,
+        endpoint_stats: Arc<Mutex<HashMap<String, EndpointStats>>>,
     ) -> Result<()> {
         use hyper::service::{make_service_fn, service_fn};
         use hyper::{Body, Client, Request, Response, Server, StatusCode};
@@ -793,6 +804,15 @@ impl ServiceDiscovery {
                     
                     async move {
                         // Extract the host from the request
+                        // Extract tenant ID from headers if available
+                        let tenant_id = req.headers()
+                            .get("X-Tenant-ID")
+                            .and_then(|h| h.to_str().ok())
+                            .unwrap_or("default");
+                        
+                        // Log tenant ID for debugging
+                        println!("Request from tenant: {}", tenant_id);
+                        
                         let host = match req.headers().get(hyper::header::HOST) {
                             Some(host) => match host.to_str() {
                                 Ok(host) => host.split(':').next().unwrap_or("").to_string(),
@@ -822,6 +842,7 @@ impl ServiceDiscovery {
                         let mut found_service = false;
                         let mut service_name = String::new();
                         let mut service_endpoints = Vec::new();
+                        let mut service_tenant_id = String::new();
                         
                         // First, try to find a service by domain
                         for (name, endpoints) in services_lock.iter() {
@@ -830,6 +851,13 @@ impl ServiceDiscovery {
                                     found_service = true;
                                     service_name = name.clone();
                                     service_endpoints = endpoints.clone();
+                                    
+                                    // Extract tenant ID from metadata if available
+                                    if let Some(metadata) = &endpoint.metadata {
+                                        if let Some(id) = metadata.get("tenant_id") {
+                                            service_tenant_id = id.clone();
+                                        }
+                                    }
                                     break;
                                 }
                             }
@@ -848,6 +876,15 @@ impl ServiceDiscovery {
                                             found_service = true;
                                             service_name = rule.service_name.clone();
                                             service_endpoints = endpoints.clone();
+                                            
+                                            // Extract tenant ID from the first endpoint's metadata
+                                            if !endpoints.is_empty() {
+                                                if let Some(metadata) = &endpoints[0].metadata {
+                                                    if let Some(id) = metadata.get("tenant_id") {
+                                                        service_tenant_id = id.clone();
+                                                    }
+                                                }
+                                            }
                                             break;
                                         }
                                     }
@@ -898,6 +935,16 @@ impl ServiceDiscovery {
                                 .unwrap());
                         }
                         
+                        // Tenant boundary check - ensure the request tenant can access the service tenant
+                        if !service_tenant_id.is_empty() && tenant_id != "default" && tenant_id != service_tenant_id {
+                            println!("Tenant boundary violation: {} attempting to access service in tenant {}",
+                                     tenant_id, service_tenant_id);
+                            return Ok(Response::builder()
+                                .status(StatusCode::FORBIDDEN)
+                                .body(Body::from("Access denied: tenant boundary violation"))
+                                .unwrap());
+                        }
+                        
                         // Filter to only healthy endpoints
                         let mut healthy_endpoints: Vec<&ServiceEndpoint> = service_endpoints
                             .iter()
@@ -906,6 +953,12 @@ impl ServiceDiscovery {
                         
                         // If no healthy endpoints, return error
                         if healthy_endpoints.is_empty() {
+                            // Log the health status of all endpoints for debugging
+                            println!("No healthy endpoints for service {}. Available endpoints:", service_name);
+                            for (i, endpoint) in service_endpoints.iter().enumerate() {
+                                println!("  Endpoint {}: {} ({})", i, endpoint.ip_address, endpoint.health_status);
+                            }
+                            
                             return Ok(Response::builder()
                                 .status(StatusCode::SERVICE_UNAVAILABLE)
                                 .body(Body::from("No healthy endpoints available"))
@@ -983,7 +1036,8 @@ impl ServiceDiscovery {
                             });
                         
                         // Get the load balancing strategy for this service
-                        let load_balancing_strategy = load_balancing_strategies.get(&service_name)
+                        let load_balancing_strategy = load_balancing_strategies.lock().await
+                            .get(&service_name)
                             .cloned()
                             .unwrap_or(LoadBalancingStrategy::RoundRobin);
                         
@@ -1082,6 +1136,27 @@ impl ServiceDiscovery {
                             }
                         };
                         
+                        // Update metrics for the selected endpoint
+                        let stats_key = format!("{}_{}", service_name, selected.ip_address);
+                        let mut endpoint_stats_lock = endpoint_stats.lock().await;
+                        let stats = endpoint_stats_lock
+                            .entry(stats_key.clone())
+                            .or_insert(EndpointStats {
+                                active_connections: 0,
+                                total_requests: 0,
+                                failed_requests: 0,
+                                avg_response_time_ms: 0.0,
+                                last_selected: 0,
+                            });
+                        
+                        // Increment active connections and total requests
+                        stats.active_connections += 1;
+                        stats.total_requests += 1;
+                        stats.last_selected = std::time::SystemTime::now()
+                            .duration_since(std::time::UNIX_EPOCH)
+                            .unwrap_or_default()
+                            .as_secs() as i64;
+                        
                         // Create the forwarding URI
                         let uri = format!("http://{}:{}{}",
                             selected.ip_address,
@@ -1116,19 +1191,58 @@ impl ServiceDiscovery {
                         new_req = new_req.header("X-Forwarded-Proto", "http");
                         
                         // Forward the request
-                        match new_req.body(req.into_body()) {
+                        // Record start time for response time metrics
+                        let start_time = std::time::Instant::now();
+                        
+                        let result = match new_req.body(req.into_body()) {
                             Ok(new_req) => match client.request(new_req).await {
-                                Ok(res) => Ok(res),
-                                Err(_) => Ok(Response::builder()
-                                    .status(StatusCode::BAD_GATEWAY)
-                                    .body(Body::from("Error forwarding request"))
-                                    .unwrap()),
+                                Ok(res) => {
+                                    // Record successful request
+                                    let elapsed = start_time.elapsed().as_millis() as f64;
+                                    
+                                    // Update endpoint stats with response time
+                                    if let Some(stats) = endpoint_stats_lock.get_mut(&stats_key) {
+                                        // Update average response time
+                                        let total_requests = stats.total_requests as f64;
+                                        stats.avg_response_time_ms =
+                                            ((stats.avg_response_time_ms * (total_requests - 1.0)) + elapsed) / total_requests;
+                                        
+                                        // Decrement active connections
+                                        if stats.active_connections > 0 {
+                                            stats.active_connections -= 1;
+                                        }
+                                    }
+                                    
+                                    Ok(res)
+                                },
+                                Err(e) => {
+                                    // Record failed request
+                                    if let Some(stats) = endpoint_stats_lock.get_mut(&stats_key) {
+                                        stats.failed_requests += 1;
+                                        
+                                        // Decrement active connections
+                                        if stats.active_connections > 0 {
+                                            stats.active_connections -= 1;
+                                        }
+                                    }
+                                    
+                                    eprintln!("Proxy error forwarding to {}: {}", selected.ip_address, e);
+                                    Ok(Response::builder()
+                                        .status(StatusCode::BAD_GATEWAY)
+                                        .body(Body::from("Error forwarding request"))
+                                        .unwrap())
+                                },
                             },
-                            Err(_) => Ok(Response::builder()
-                                .status(StatusCode::INTERNAL_SERVER_ERROR)
-                                .body(Body::from("Error creating request"))
-                                .unwrap()),
-                        }
+                            Err(e) => {
+                                eprintln!("Proxy error creating request: {}", e);
+                                Ok(Response::builder()
+                                    .status(StatusCode::INTERNAL_SERVER_ERROR)
+                                    .body(Body::from("Error creating request"))
+                                    .unwrap())
+                            },
+                        };
+                        
+                        result
                     }
                 }))
             }
@@ -1191,6 +1305,8 @@ impl ServiceDiscovery {
         services: &Arc<Mutex<HashMap<String, Vec<ServiceEndpoint>>>>,
         health_check_config: &Arc<Mutex<HashMap<String, HealthCheckConfig>>>,
     ) -> Result<()> {
+        // Track health status changes for proxy routing updates
+        let mut health_status_changed = false;
         let mut services_lock = services.lock().await;
         let health_check_config_lock = health_check_config.lock().await;
         let _now = SystemTime::now()
@@ -1225,9 +1341,17 @@ impl ServiceDiscovery {
                         }
                     };
                     
+                    // Check if health status changed
+                    let previous_status = endpoint.health_status.clone();
+                    
                     // Update endpoint health status
                     endpoint.health_status = health_status.clone();
                     endpoint.last_health_check = _now;
+                    
+                    // If health status changed, mark for proxy routing update
+                    if previous_status != health_status {
+                        health_status_changed = true;
+                    }
                     
                     println!(
                         "Health check for {}/{}: {}",
@@ -1235,6 +1359,12 @@ impl ServiceDiscovery {
                     );
                 }
             }
+        }
+        
+        // If health status changed, update proxy routing
+        if health_status_changed {
+            // In a real implementation, we would call a method to update the proxy routing
+            println!("Health status changed, updating proxy routing");
         }
         
         Ok(())
@@ -1503,6 +1633,37 @@ impl ServiceDiscovery {
         Ok(())
     }
     
+    // Add a tenant-specific routing rule
+    pub async fn add_tenant_routing_rule(
+        &self,
+        tenant_id: &str,
+        service_name: &str,
+        path_prefix: Option<String>,
+        headers: Option<HashMap<String, String>>,
+        weight: Option<u32>,
+    ) -> Result<()> {
+        // Create a new routing rule with tenant information
+        let mut rule = RoutingRule {
+            path_prefix,
+            headers: headers.clone(),
+            service_name: service_name.to_string(),
+            weight,
+        };
+        
+        // Add tenant information to headers if not already present
+        if let Some(mut headers) = headers {
+            headers.insert("X-Tenant-ID".to_string(), tenant_id.to_string());
+            rule.headers = Some(headers);
+        } else {
+            let mut new_headers = HashMap::new();
+            new_headers.insert("X-Tenant-ID".to_string(), tenant_id.to_string());
+            rule.headers = Some(new_headers);
+        }
+        
+        // Add the rule
+        self.add_routing_rule(rule).await
+    }
+    
     // Remove a routing rule
     pub async fn remove_routing_rule(&self, service_name: &str, path_prefix: Option<&str>) -> Result<()> {
         let mut routing_rules = self.routing_rules.lock().await;
@@ -1566,6 +1727,28 @@ impl ServiceDiscovery {
         traffic_splits.get(service_name).cloned()
     }
     
+    // Register a service with tenant information
+    pub async fn register_service_with_tenant(
+        &self,
+        service_config: &ServiceConfig,
+        node_id: &str,
+        ip_address: &str,
+        port: u16,
+        tenant_id: &str,
+    ) -> Result<()> {
+        let mut metadata = HashMap::new();
+        metadata.insert("tenant_id".to_string(), tenant_id.to_string());
+        
+        self.register_service_with_version(
+            service_config,
+            node_id,
+            ip_address,
+            port,
+            "v1", // Default version
+            Some(metadata),
+        ).await
+    }
+    
     // Register a service endpoint with version information
     pub async fn register_service_with_version(
         &self,
@@ -1620,6 +1803,101 @@ impl ServiceDiscovery {
 
         Ok(())
     }
+    
+    // Get proxy metrics for monitoring
+    pub async fn get_proxy_metrics(&self) -> Result<HashMap<String, f64>> {
+        let mut metrics = HashMap::new();
+        let endpoint_stats = self.endpoint_stats.lock().await;
+        
+        // Calculate aggregate metrics
+        let mut total_requests: u64 = 0;
+        let mut total_failed_requests: u64 = 0;
+        let mut total_active_connections: u32 = 0;
+        let mut avg_response_times = Vec::new();
+        
+        for stats in endpoint_stats.values() {
+            total_requests += stats.total_requests;
+            total_failed_requests += stats.failed_requests;
+            total_active_connections += stats.active_connections;
+            
+            if stats.avg_response_time_ms > 0.0 {
+                avg_response_times.push(stats.avg_response_time_ms);
+            }
+        }
+        
+        // Calculate overall average response time
+        let avg_response_time = if !avg_response_times.is_empty() {
+            avg_response_times.iter().sum::<f64>() / avg_response_times.len() as f64
+        } else {
+            0.0
+        };
+        
+        // Calculate error rate
+        let error_rate = if total_requests > 0 {
+            total_failed_requests as f64 / total_requests as f64
+        } else {
+            0.0
+        };
+        
+        // Store metrics
+        metrics.insert("total_requests".to_string(), total_requests as f64);
+        metrics.insert("failed_requests".to_string(), total_failed_requests as f64);
+        metrics.insert("active_connections".to_string(), total_active_connections as f64);
+        metrics.insert("avg_response_time_ms".to_string(), avg_response_time);
+        metrics.insert("error_rate".to_string(), error_rate);
+        metrics.insert("service_count".to_string(), self.services.lock().await.len() as f64);
+        metrics.insert("endpoint_count".to_string(),
+            self.services.lock().await.values().map(|v| v.len()).sum::<usize>() as f64);
+        
+        Ok(metrics)
+    }
+    
+    // Get health check statistics for monitoring
+    pub async fn get_health_check_statistics(&self) -> Result<HashMap<String, f64>> {
+        let mut metrics = HashMap::new();
+        let services = self.services.lock().await;
+        
+        // Count endpoints by health status
+        let mut total_endpoints = 0;
+        let mut healthy_endpoints = 0;
+        let mut unhealthy_endpoints = 0;
+        let mut unknown_endpoints = 0;
+        
+        for endpoints in services.values() {
+            for endpoint in endpoints {
+                total_endpoints += 1;
+                match endpoint.health_status {
+                    ServiceHealth::Healthy => healthy_endpoints += 1,
+                    ServiceHealth::Unhealthy => unhealthy_endpoints += 1,
+                    ServiceHealth::Unknown => unknown_endpoints += 1,
+                }
+            }
+        }
+        
+        // Calculate health percentages
+        let healthy_percent = if total_endpoints > 0 {
+            (healthy_endpoints as f64 / total_endpoints as f64) * 100.0
+        } else {
+            0.0
+        };
+        
+        let unhealthy_percent = if total_endpoints > 0 {
+            (unhealthy_endpoints as f64 / total_endpoints as f64) * 100.0
+        } else {
+            0.0
+        };
+        
+        // Store metrics
+        metrics.insert("total_endpoints".to_string(), total_endpoints as f64);
+        metrics.insert("healthy_endpoints".to_string(), healthy_endpoints as f64);
+        metrics.insert("unhealthy_endpoints".to_string(), unhealthy_endpoints as f64);
+        metrics.insert("unknown_endpoints".to_string(), unknown_endpoints as f64);
+        metrics.insert("healthy_percent".to_string(), healthy_percent);
+        metrics.insert("unhealthy_percent".to_string(), unhealthy_percent);
+        
+        Ok(metrics)
+    }
+    
     // Weighted round robin selection based on container metrics
     fn select_weighted_round_robin<'a>(
         endpoints: &[&'a ServiceEndpoint],

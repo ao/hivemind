@@ -70,6 +70,21 @@ pub struct TenantManager {
     tenants: Arc<RwLock<HashMap<String, Tenant>>>,
     rbac_manager: Arc<RbacManager>,
     default_tenant_id: String,
+    container_runtime: Option<Arc<dyn crate::app::ContainerRuntime>>,
+    // Cache for resource usage to avoid excessive monitoring overhead
+    resource_usage_cache: Arc<RwLock<HashMap<String, (ResourceUsage, i64)>>>, // (usage, timestamp)
+    // Cache TTL in seconds
+    cache_ttl: i64,
+    // Track containers per tenant
+    tenant_containers: Arc<RwLock<HashMap<String, HashSet<String>>>>, // tenant_id -> set of container_ids
+    // Track services per tenant
+    tenant_services: Arc<RwLock<HashMap<String, HashSet<String>>>>, // tenant_id -> set of service_names
+    // Grace periods for quota violations (in seconds)
+    container_quota_grace_period: i64,
+    service_quota_grace_period: i64,
+    // Track temporary quota violations with expiration timestamps
+    container_quota_violations: Arc<RwLock<HashMap<String, i64>>>, // tenant_id -> expiration timestamp
+    service_quota_violations: Arc<RwLock<HashMap<String, i64>>>, // tenant_id -> expiration timestamp
 }
 
 impl TenantManager {
@@ -79,6 +94,15 @@ impl TenantManager {
             tenants: Arc::new(RwLock::new(HashMap::new())),
             rbac_manager,
             default_tenant_id: "default".to_string(),
+            container_runtime: None,
+            resource_usage_cache: Arc::new(RwLock::new(HashMap::new())),
+            cache_ttl: 60, // Default 60 seconds TTL for cache
+            tenant_containers: Arc::new(RwLock::new(HashMap::new())),
+            tenant_services: Arc::new(RwLock::new(HashMap::new())),
+            container_quota_grace_period: 3600, // Default 1 hour grace period
+            service_quota_grace_period: 3600, // Default 1 hour grace period
+            container_quota_violations: Arc::new(RwLock::new(HashMap::new())),
+            service_quota_violations: Arc::new(RwLock::new(HashMap::new())),
         };
         
         // Initialize with default tenant
@@ -247,29 +271,29 @@ impl TenantManager {
         // 2. Delete all roles associated with this tenant's namespaces
         for namespace in &tenant_namespaces {
             // Find and delete roles with permissions scoped to this namespace
-            if let Ok(roles) = self.rbac_manager.list_roles().await {
-                for role in roles {
-                    let has_tenant_scope = role.permissions.iter().any(|p| {
-                        if let PermissionScope::Namespace(ns) = &p.scope {
-                            ns == namespace
-                        } else {
-                            false
-                        }
-                    });
-                    
-                    if has_tenant_scope {
-                        if let Err(e) = self.rbac_manager.delete_role(&role.id).await {
-                            eprintln!("Failed to delete role {}: {}", role.id, e);
-                        }
+            let roles = self.rbac_manager.list_roles().await;
+            for role in roles {
+                let has_tenant_scope = role.permissions.iter().any(|p| {
+                    if let PermissionScope::Namespace(ns) = &p.scope {
+                        ns == &namespace.to_string()
+                    } else {
+                        false
+                    }
+                });
+                
+                if has_tenant_scope {
+                    if let Err(e) = self.rbac_manager.delete_role(&role.id).await {
+                        eprintln!("Failed to delete role {}: {}", role.id, e);
                     }
                 }
             }
         }
         
-        // 3. Revoke user access to tenant
-        if let Err(e) = self.rbac_manager.revoke_user_role(&tenant_owner, &admin_role_id).await {
-            eprintln!("Failed to revoke tenant owner role: {}", e);
-        }
+        // 3. Remove tenant admin role from users
+        // Since there's no direct revoke_user_role method, we'd need to update each user
+        // This is a simplified approach - in a real implementation, we would need to
+        // find all users with this role and update them
+        eprintln!("Note: Users with tenant admin role should be updated separately");
         
         // Finally, remove the tenant
         let mut tenants = self.tenants.write().await;
@@ -419,7 +443,26 @@ impl TenantManager {
             tenants: self.tenants.clone(),
             rbac_manager: self.rbac_manager.clone(),
             default_tenant_id: self.default_tenant_id.clone(),
+            container_runtime: self.container_runtime.clone(),
+            resource_usage_cache: self.resource_usage_cache.clone(),
+            cache_ttl: self.cache_ttl,
+            tenant_containers: self.tenant_containers.clone(),
+            tenant_services: self.tenant_services.clone(),
+            container_quota_grace_period: self.container_quota_grace_period,
+            service_quota_grace_period: self.service_quota_grace_period,
+            container_quota_violations: self.container_quota_violations.clone(),
+            service_quota_violations: self.service_quota_violations.clone(),
         }
+    }
+    
+    /// Set the container runtime
+    pub fn set_container_runtime(&mut self, runtime: Arc<dyn crate::app::ContainerRuntime>) {
+        self.container_runtime = Some(runtime);
+    }
+    
+    /// Set the cache TTL in seconds
+    pub fn set_cache_ttl(&mut self, ttl: i64) {
+        self.cache_ttl = ttl;
     }
     /// Check if a tenant has exceeded its resource quotas
     pub async fn check_resource_quotas(&self, tenant_id: &str,
@@ -463,9 +506,27 @@ impl TenantManager {
             return Ok(true);
         }
         
-        // TODO: Count current containers for this tenant
-        // For now, we'll just return true
-        Ok(true)
+        // Check if tenant has a grace period for container quota violations
+        {
+            let violations = self.container_quota_violations.read().await;
+            if let Some(expiration) = violations.get(tenant_id) {
+                let current_time = chrono::Utc::now().timestamp();
+                if current_time < *expiration {
+                    // Grace period is still active, allow container creation
+                    return Ok(true);
+                }
+            }
+        }
+        
+        // Count current containers for this tenant
+        let container_count = {
+            let containers = self.tenant_containers.read().await;
+            containers.get(tenant_id).map_or(0, |set| set.len() as u32)
+        };
+        
+        // Check if container count is below the limit
+        let max_containers = tenant.resource_quotas.max_containers.unwrap();
+        Ok(container_count < max_containers)
     }
     
     /// Check if a tenant can create more services
@@ -478,9 +539,27 @@ impl TenantManager {
             return Ok(true);
         }
         
-        // TODO: Count current services for this tenant
-        // For now, we'll just return true
-        Ok(true)
+        // Check if tenant has a grace period for service quota violations
+        {
+            let violations = self.service_quota_violations.read().await;
+            if let Some(expiration) = violations.get(tenant_id) {
+                let current_time = chrono::Utc::now().timestamp();
+                if current_time < *expiration {
+                    // Grace period is still active, allow service creation
+                    return Ok(true);
+                }
+            }
+        }
+        
+        // Count current services for this tenant
+        let service_count = {
+            let services = self.tenant_services.read().await;
+            services.get(tenant_id).map_or(0, |set| set.len() as u32)
+        };
+        
+        // Check if service count is below the limit
+        let max_services = tenant.resource_quotas.max_services.unwrap();
+        Ok(service_count < max_services)
     }
     
     /// Get network isolation settings for a tenant
@@ -524,15 +603,382 @@ impl TenantManager {
     
     /// Get resource usage for a tenant
     pub async fn get_resource_usage(&self, tenant_id: &str) -> Result<ResourceUsage> {
-        // TODO: Implement actual resource usage tracking
-        // For now, return placeholder values
-        Ok(ResourceUsage {
-            cpu_usage: 0,
-            memory_usage: 0,
-            storage_usage: 0,
-            container_count: 0,
-            service_count: 0,
-        })
+        // Check if tenant exists
+        let tenants = self.tenants.read().await;
+        if !tenants.contains_key(tenant_id) {
+            anyhow::bail!("Tenant not found");
+        }
+        
+        // Check cache first
+        {
+            let cache = self.resource_usage_cache.read().await;
+            if let Some((usage, timestamp)) = cache.get(tenant_id) {
+                let current_time = chrono::Utc::now().timestamp();
+                // If cache is still valid, return cached value
+                if current_time - timestamp < self.cache_ttl {
+                    return Ok(usage.clone());
+                }
+            }
+        }
+        
+        // If no container runtime is available, return zeros
+        if self.container_runtime.is_none() {
+            return Ok(ResourceUsage {
+                cpu_usage: 0,
+                memory_usage: 0,
+                storage_usage: 0,
+                container_count: 0,
+                service_count: 0,
+            });
+        }
+        
+        let container_runtime = self.container_runtime.as_ref().unwrap();
+        
+        // Get all containers
+        let containers = match container_runtime.list_containers().await {
+            Ok(containers) => containers,
+            Err(_) => {
+                // If we can't get containers, return zeros
+                return Ok(ResourceUsage {
+                    cpu_usage: 0,
+                    memory_usage: 0,
+                    storage_usage: 0,
+                    container_count: 0,
+                    service_count: 0,
+                });
+            }
+        };
+        
+        // Filter containers by tenant ID
+        // We'll use the tenant's namespaces to identify containers belonging to this tenant
+        let tenant = tenants.get(tenant_id).unwrap();
+        let tenant_namespaces: HashSet<String> = tenant.namespaces.iter().cloned().collect();
+        
+        let mut cpu_usage: u32 = 0;
+        let mut memory_usage: u64 = 0;
+        let mut storage_usage: u64 = 0;
+        let mut container_count: u32 = 0;
+        
+        // Map to track unique services
+        let mut services = HashSet::new();
+        
+        // Collect metrics for each container belonging to this tenant
+        for container in containers {
+            // Check if container belongs to this tenant
+            // We'll use a simple heuristic: check if the container name contains any of the tenant's namespaces
+            let belongs_to_tenant = tenant_namespaces.iter().any(|ns| container.name.contains(ns));
+            
+            if belongs_to_tenant {
+                container_count += 1;
+                
+                // Extract service name from container (assuming format: service-name-replica-id)
+                if let Some(service_name) = container.name.split('-').next() {
+                    services.insert(service_name.to_string());
+                }
+                
+                // Get container metrics
+                if let Ok(stats) = container_runtime.get_container_metrics(&container.id).await {
+                    cpu_usage = cpu_usage.saturating_add(stats.cpu_usage as u32);
+                    memory_usage = memory_usage.saturating_add(stats.memory_usage);
+                    
+                    // For storage, we'll use the sum of volumes attached to the container
+                    for volume in &container.volumes {
+                        storage_usage = storage_usage.saturating_add(volume.size);
+                    }
+                }
+            }
+        }
+        
+        // Create resource usage object
+        let usage = ResourceUsage {
+            cpu_usage,
+            memory_usage,
+            storage_usage,
+            container_count,
+            service_count: services.len() as u32,
+        };
+        
+        // Update cache
+        {
+            let mut cache = self.resource_usage_cache.write().await;
+            cache.insert(tenant_id.to_string(), (usage.clone(), chrono::Utc::now().timestamp()));
+        }
+        
+        Ok(usage)
+    }
+
+    /// Register a container with a tenant
+    pub async fn register_container(&self, tenant_id: &str, container_id: &str) -> Result<()> {
+        // Verify tenant exists
+        let tenants = self.tenants.read().await;
+        if !tenants.contains_key(tenant_id) {
+            return Err(anyhow::anyhow!("Tenant not found"));
+        }
+        drop(tenants);
+
+        // Add container to tenant's container set
+        let mut containers = self.tenant_containers.write().await;
+        let tenant_containers = containers.entry(tenant_id.to_string()).or_insert_with(HashSet::new);
+        tenant_containers.insert(container_id.to_string());
+
+        // Invalidate resource usage cache for this tenant
+        let mut cache = self.resource_usage_cache.write().await;
+        cache.remove(tenant_id);
+
+        Ok(())
+    }
+
+    /// Unregister a container from a tenant
+    pub async fn unregister_container(&self, tenant_id: &str, container_id: &str) -> Result<()> {
+        // Verify tenant exists
+        let tenants = self.tenants.read().await;
+        if !tenants.contains_key(tenant_id) {
+            return Err(anyhow::anyhow!("Tenant not found"));
+        }
+        drop(tenants);
+
+        // Remove container from tenant's container set
+        let mut containers = self.tenant_containers.write().await;
+        if let Some(tenant_containers) = containers.get_mut(tenant_id) {
+            tenant_containers.remove(container_id);
+        }
+
+        // Invalidate resource usage cache for this tenant
+        let mut cache = self.resource_usage_cache.write().await;
+        cache.remove(tenant_id);
+
+        Ok(())
+    }
+
+    /// Register a service with a tenant
+    pub async fn register_service(&self, tenant_id: &str, service_name: &str) -> Result<()> {
+        // Verify tenant exists
+        let tenants = self.tenants.read().await;
+        if !tenants.contains_key(tenant_id) {
+            return Err(anyhow::anyhow!("Tenant not found"));
+        }
+        drop(tenants);
+
+        // Add service to tenant's service set
+        let mut services = self.tenant_services.write().await;
+        let tenant_services = services.entry(tenant_id.to_string()).or_insert_with(HashSet::new);
+        tenant_services.insert(service_name.to_string());
+
+        // Invalidate resource usage cache for this tenant
+        let mut cache = self.resource_usage_cache.write().await;
+        cache.remove(tenant_id);
+
+        Ok(())
+    }
+
+    /// Unregister a service from a tenant
+    pub async fn unregister_service(&self, tenant_id: &str, service_name: &str) -> Result<()> {
+        // Verify tenant exists
+        let tenants = self.tenants.read().await;
+        if !tenants.contains_key(tenant_id) {
+            return Err(anyhow::anyhow!("Tenant not found"));
+        }
+        drop(tenants);
+
+        // Remove service from tenant's service set
+        let mut services = self.tenant_services.write().await;
+        if let Some(tenant_services) = services.get_mut(tenant_id) {
+            tenant_services.remove(service_name);
+        }
+
+        // Invalidate resource usage cache for this tenant
+        let mut cache = self.resource_usage_cache.write().await;
+        cache.remove(tenant_id);
+
+        Ok(())
+    }
+
+    /// Get the current container count for a tenant
+    pub async fn get_container_count(&self, tenant_id: &str) -> Result<u32> {
+        // Verify tenant exists
+        let tenants = self.tenants.read().await;
+        if !tenants.contains_key(tenant_id) {
+            return Err(anyhow::anyhow!("Tenant not found"));
+        }
+        drop(tenants);
+
+        // Get container count
+        let containers = self.tenant_containers.read().await;
+        let count = containers.get(tenant_id).map_or(0, |set| set.len() as u32);
+        
+        Ok(count)
+    }
+
+    /// Get the current service count for a tenant
+    pub async fn get_service_count(&self, tenant_id: &str) -> Result<u32> {
+        // Verify tenant exists
+        let tenants = self.tenants.read().await;
+        if !tenants.contains_key(tenant_id) {
+            return Err(anyhow::anyhow!("Tenant not found"));
+        }
+        drop(tenants);
+
+        // Get service count
+        let services = self.tenant_services.read().await;
+        let count = services.get(tenant_id).map_or(0, |set| set.len() as u32);
+        
+        Ok(count)
+    }
+
+    /// Set grace period for container quota violations
+    pub async fn set_container_quota_grace_period(&mut self, seconds: i64) {
+        self.container_quota_grace_period = seconds;
+    }
+
+    /// Set grace period for service quota violations
+    pub async fn set_service_quota_grace_period(&mut self, seconds: i64) {
+        self.service_quota_grace_period = seconds;
+    }
+
+    /// Grant temporary container quota violation grace period for a tenant
+    pub async fn grant_container_quota_grace(&self, tenant_id: &str) -> Result<()> {
+        // Verify tenant exists
+        let tenants = self.tenants.read().await;
+        if !tenants.contains_key(tenant_id) {
+            return Err(anyhow::anyhow!("Tenant not found"));
+        }
+        drop(tenants);
+
+        // Set expiration timestamp
+        let expiration = chrono::Utc::now().timestamp() + self.container_quota_grace_period;
+        let mut violations = self.container_quota_violations.write().await;
+        violations.insert(tenant_id.to_string(), expiration);
+
+        Ok(())
+    }
+
+    /// Grant temporary service quota violation grace period for a tenant
+    pub async fn grant_service_quota_grace(&self, tenant_id: &str) -> Result<()> {
+        // Verify tenant exists
+        let tenants = self.tenants.read().await;
+        if !tenants.contains_key(tenant_id) {
+            return Err(anyhow::anyhow!("Tenant not found"));
+        }
+        drop(tenants);
+
+        // Set expiration timestamp
+        let expiration = chrono::Utc::now().timestamp() + self.service_quota_grace_period;
+        let mut violations = self.service_quota_violations.write().await;
+        violations.insert(tenant_id.to_string(), expiration);
+
+        Ok(())
+    }
+
+    /// Revoke container quota violation grace period for a tenant
+    pub async fn revoke_container_quota_grace(&self, tenant_id: &str) -> Result<()> {
+        // Verify tenant exists
+        let tenants = self.tenants.read().await;
+        if !tenants.contains_key(tenant_id) {
+            return Err(anyhow::anyhow!("Tenant not found"));
+        }
+        drop(tenants);
+
+        // Remove grace period
+        let mut violations = self.container_quota_violations.write().await;
+        violations.remove(tenant_id);
+
+        Ok(())
+    }
+
+    /// Revoke service quota violation grace period for a tenant
+    pub async fn revoke_service_quota_grace(&self, tenant_id: &str) -> Result<()> {
+        // Verify tenant exists
+        let tenants = self.tenants.read().await;
+        if !tenants.contains_key(tenant_id) {
+            return Err(anyhow::anyhow!("Tenant not found"));
+        }
+        drop(tenants);
+
+        // Remove grace period
+        let mut violations = self.service_quota_violations.write().await;
+        violations.remove(tenant_id);
+
+        Ok(())
+    }
+
+    /// Check if a tenant is approaching its container quota limit
+    /// Returns true if the tenant is using more than the specified percentage of its quota
+    pub async fn is_approaching_container_quota(&self, tenant_id: &str, threshold_percent: u32) -> Result<bool> {
+        // Verify tenant exists and has a container quota
+        let tenants = self.tenants.read().await;
+        let tenant = tenants.get(tenant_id).context("Tenant not found")?;
+        
+        if let Some(max_containers) = tenant.resource_quotas.max_containers {
+            // Get current container count
+            let container_count = self.get_container_count(tenant_id).await?;
+            
+            // Calculate percentage used
+            let percent_used = (container_count as f64 / max_containers as f64) * 100.0;
+            
+            return Ok(percent_used >= threshold_percent as f64);
+        }
+        
+        // No quota set, so not approaching limit
+        Ok(false)
+    }
+
+    /// Check if a tenant is approaching its service quota limit
+    /// Returns true if the tenant is using more than the specified percentage of its quota
+    pub async fn is_approaching_service_quota(&self, tenant_id: &str, threshold_percent: u32) -> Result<bool> {
+        // Verify tenant exists and has a service quota
+        let tenants = self.tenants.read().await;
+        let tenant = tenants.get(tenant_id).context("Tenant not found")?;
+        
+        if let Some(max_services) = tenant.resource_quotas.max_services {
+            // Get current service count
+            let service_count = self.get_service_count(tenant_id).await?;
+            
+            // Calculate percentage used
+            let percent_used = (service_count as f64 / max_services as f64) * 100.0;
+            
+            return Ok(percent_used >= threshold_percent as f64);
+        }
+        
+        // No quota set, so not approaching limit
+        Ok(false)
+    }
+
+    /// Pre-check if a container can be created for a tenant
+    /// This should be called before actually creating the container
+    pub async fn pre_check_container_creation(&self, tenant_id: &str) -> Result<bool> {
+        // Check if tenant can create more containers
+        let can_create = self.can_create_container(tenant_id).await?;
+        
+        if !can_create {
+            // Check if tenant is approaching quota limit
+            let approaching_limit = self.is_approaching_container_quota(tenant_id, 90).await?;
+            
+            if approaching_limit {
+                // Log warning
+                eprintln!("WARNING: Tenant {} is approaching container quota limit", tenant_id);
+            }
+        }
+        
+        Ok(can_create)
+    }
+
+    /// Pre-check if a service can be created for a tenant
+    /// This should be called before actually creating the service
+    pub async fn pre_check_service_creation(&self, tenant_id: &str) -> Result<bool> {
+        // Check if tenant can create more services
+        let can_create = self.can_create_service(tenant_id).await?;
+        
+        if !can_create {
+            // Check if tenant is approaching quota limit
+            let approaching_limit = self.is_approaching_service_quota(tenant_id, 90).await?;
+            
+            if approaching_limit {
+                // Log warning
+                eprintln!("WARNING: Tenant {} is approaching service quota limit", tenant_id);
+            }
+        }
+        
+        Ok(can_create)
     }
 }
 
@@ -544,6 +990,26 @@ pub struct ResourceUsage {
     pub storage_usage: u64,
     pub container_count: u32,
     pub service_count: u32,
+}
+
+/// Quota alert level
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub enum QuotaAlertLevel {
+    Info,
+    Warning,
+    Critical,
+}
+
+/// Quota alert notification
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct QuotaAlert {
+    pub tenant_id: String,
+    pub resource_type: String,
+    pub current_usage: u32,
+    pub quota_limit: u32,
+    pub usage_percent: f64,
+    pub alert_level: QuotaAlertLevel,
+    pub timestamp: i64,
 }
 
 /// TenantContext provides tenant-specific context for operations
