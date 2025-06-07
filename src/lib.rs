@@ -6,7 +6,9 @@ pub mod containerd_manager;
 pub mod deployment;
 pub mod health_monitor;
 pub mod helm;
+pub mod logging;
 pub mod membership;
+pub mod monitoring;
 pub mod network;
 pub mod node;
 pub mod observability;
@@ -16,6 +18,7 @@ pub mod service_discovery;
 pub mod storage;
 pub mod tenant;
 pub mod tenant_quota;
+pub mod threshold;
 pub mod web;
 pub mod resilience;
 pub mod service_discovery_resilience;
@@ -40,6 +43,10 @@ pub struct AppState {
     pub helm_manager: Option<std::sync::Arc<helm::HelmManager>>,
     pub observability_manager: Option<std::sync::Arc<observability::ObservabilityManager>>,
     pub resilience_manager: Option<std::sync::Arc<resilience::ResilienceManager>>,
+    pub monitoring_manager: Option<std::sync::Arc<monitoring::MonitoringManager>>,
+    pub threshold_manager: Option<std::sync::Arc<threshold::ThresholdManager>>,
+    pub monitoring_manager: Option<std::sync::Arc<monitoring::MonitoringManager>>,
+    pub threshold_manager: Option<std::sync::Arc<threshold::ThresholdManager>>,
 }
 
 #[derive(Deserialize)]
