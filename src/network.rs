@@ -494,7 +494,7 @@ impl NetworkManager {
     
     // Initialize tenant network with specified CIDR
     pub async fn initialize_tenant_network(&self, tenant_id: &str, cidr: Option<String>) -> Result<()> {
-        println!("Initializing network for tenant {}", tenant_id);
+        info!("Initializing network for tenant {}", tenant_id);
         
         // Validate tenant ID
         if tenant_id.is_empty() {
@@ -504,7 +504,7 @@ impl NetworkManager {
         // Check if tenant network already exists
         let tenant_overlays = self.tenant_overlays.lock().await;
         if tenant_overlays.contains_key(tenant_id) {
-            println!("Tenant network already initialized for {}", tenant_id);
+            info!("Tenant network already initialized for {}", tenant_id);
             return Ok(());
         }
         drop(tenant_overlays); // Release the lock
@@ -538,7 +538,7 @@ impl NetworkManager {
         // Initialize the tenant overlay network with retry logic
         self.initialize_tenant_overlay_with_retry(tenant_id, &tenant_cidr).await?;
         
-        println!("Tenant network initialized successfully for {} with CIDR {}", tenant_id, tenant_cidr);
+        info!("Tenant network initialized successfully for {} with CIDR {}", tenant_id, tenant_cidr);
         Ok(())
     }
     
@@ -550,19 +550,20 @@ impl NetworkManager {
         
         loop {
             attempt += 1;
-            println!("Attempt {} of {} to initialize tenant overlay network", attempt, max_attempts);
+            info!("Attempt {} of {} to initialize tenant overlay network for {}", attempt, max_attempts, tenant_id);
             
             match self.ensure_tenant_overlay_network(tenant_id, Some(cidr_str.to_string())).await {
                 Ok(_) => {
-                    println!("Successfully initialized tenant overlay network on attempt {}", attempt);
+                    info!("Successfully initialized tenant overlay network for {} on attempt {}", tenant_id, attempt);
                     return Ok(());
                 },
                 Err(e) => {
                     if attempt >= max_attempts {
+                        error!("Failed to initialize tenant overlay network for {} after {} attempts: {}", tenant_id, max_attempts, e);
                         return Err(anyhow::anyhow!("Failed to initialize tenant overlay network after {} attempts: {}", max_attempts, e));
                     }
                     
-                    println!("Attempt {} failed: {}. Retrying in {}ms...", attempt, e, backoff_ms);
+                    warn!("Attempt {} failed for tenant {}: {}. Retrying in {}ms...", attempt, tenant_id, e, backoff_ms);
                     tokio::time::sleep(tokio::time::Duration::from_millis(backoff_ms)).await;
                 }
             }
@@ -597,7 +598,7 @@ impl NetworkManager {
         let mut tenant_overlays = self.tenant_overlays.lock().await;
         
         if !tenant_overlays.contains_key(tenant_id) {
-            println!("Creating overlay network for tenant {}", tenant_id);
+            info!("Creating overlay network for tenant {}", tenant_id);
             
             // Create a new overlay network for this tenant
             let tenant_vxlan_id = 100 + tenant_id.as_bytes().iter().fold(0u16, |acc, &b| acc.wrapping_add(b as u16));
@@ -658,7 +659,247 @@ impl NetworkManager {
             // Store the tenant overlay network
             tenant_overlays.insert(tenant_id.to_string(), Arc::new(Mutex::new(tenant_overlay_instance)));
             
-            println!("Tenant overlay network created successfully");
+            info!("Tenant overlay network created successfully for {}", tenant_id);
+        }
+        
+        Ok(())
+    }
+    
+    /// Verify and repair tenant network configuration
+    /// This method checks if the tenant network is properly configured and repairs any inconsistencies
+    pub async fn verify_tenant_network(&self, tenant_id: &str) -> Result<bool> {
+        info!("Verifying network configuration for tenant {}", tenant_id);
+        
+        let mut repairs_made = false;
+        
+        // Check if tenant CIDR exists
+        let tenant_cidr = {
+            let tenant_network_cidrs = self.tenant_network_cidrs.lock().await;
+            match tenant_network_cidrs.get(tenant_id) {
+                Some(cidr) => cidr.clone(),
+                None => {
+                    warn!("Tenant {} missing CIDR configuration, allocating new one", tenant_id);
+                    drop(tenant_network_cidrs); // Release the lock before calling allocate_cidr
+                    
+                    // Allocate a new CIDR for this tenant
+                    let mut cidr_pool = self.tenant_cidr_pool.lock().await;
+                    let new_cidr = cidr_pool.allocate_cidr(tenant_id)?;
+                    
+                    // Store the tenant CIDR
+                    let mut tenant_network_cidrs = self.tenant_network_cidrs.lock().await;
+                    tenant_network_cidrs.insert(tenant_id.to_string(), new_cidr.clone());
+                    
+                    repairs_made = true;
+                    new_cidr
+                }
+            }
+        };
+        
+        // Check if tenant overlay network exists
+        let tenant_overlay_exists = {
+            let tenant_overlays = self.tenant_overlays.lock().await;
+            tenant_overlays.contains_key(tenant_id)
+        };
+        
+        if !tenant_overlay_exists {
+            warn!("Tenant {} missing overlay network, initializing", tenant_id);
+            
+            // Initialize the tenant overlay network with retry logic
+            self.initialize_tenant_overlay_with_retry(tenant_id, &tenant_cidr).await?;
+            
+            repairs_made = true;
+        }
+        
+        // Check if bridge exists
+        let bridge_name = format!("hivemind-{}", &tenant_id[..8]);
+        if !Self::bridge_exists(&bridge_name)? {
+            warn!("Tenant {} missing bridge {}, creating", tenant_id, bridge_name);
+            
+            // Parse the tenant CIDR
+            let tenant_cidr_network = IpNetwork::from_str(&tenant_cidr)?;
+            let gateway_ip = Self::get_gateway_ip(tenant_cidr_network)?;
+            
+            // Create and configure the bridge
+            Self::create_bridge(&bridge_name)?;
+            Self::set_bridge_ip(&bridge_name, gateway_ip, tenant_cidr_network.prefix())?;
+            Self::enable_bridge(&bridge_name)?;
+            
+            repairs_made = true;
+        }
+        
+        // Check if network policies exist
+        let policies = self.policies.lock().await;
+        let has_isolation_policy = policies.values().any(|p|
+            p.name == format!("tenant-{}-isolation", tenant_id) &&
+            p.tenant_id.as_ref().map_or(false, |id| id == tenant_id)
+        );
+        drop(policies);
+        
+        if !has_isolation_policy {
+            warn!("Tenant {} missing network policies, creating defaults", tenant_id);
+            
+            // Create default network policies
+            self.create_default_tenant_policies(tenant_id).await?;
+            
+            repairs_made = true;
+        }
+        
+        if repairs_made {
+            info!("Completed repairs for tenant {} network configuration", tenant_id);
+        } else {
+            debug!("Tenant {} network configuration verified, no repairs needed", tenant_id);
+        }
+        
+        Ok(repairs_made)
+    }
+    
+    /// Verify and repair all tenant networks
+    /// This method checks all tenant networks and repairs any inconsistencies
+    pub async fn verify_all_tenant_networks(&self) -> Result<HashMap<String, bool>> {
+        info!("Verifying all tenant networks");
+        
+        let mut repair_results = HashMap::new();
+        
+        // Get all tenant IDs from various sources
+        let mut tenant_ids = HashSet::new();
+        
+        // Add tenant IDs from network CIDRs
+        {
+            let tenant_network_cidrs = self.tenant_network_cidrs.lock().await;
+            for tenant_id in tenant_network_cidrs.keys() {
+                tenant_ids.insert(tenant_id.clone());
+            }
+        }
+        
+        // Add tenant IDs from overlay networks
+        {
+            let tenant_overlays = self.tenant_overlays.lock().await;
+            for tenant_id in tenant_overlays.keys() {
+                tenant_ids.insert(tenant_id.clone());
+            }
+        }
+        
+        // Add tenant IDs from network policies
+        {
+            let policies = self.policies.lock().await;
+            for policy in policies.values() {
+                if let Some(tenant_id) = &policy.tenant_id {
+                    tenant_ids.insert(tenant_id.clone());
+                }
+            }
+        }
+        
+        // Verify each tenant network
+        for tenant_id in tenant_ids {
+            match self.verify_tenant_network(&tenant_id).await {
+                Ok(repairs_made) => {
+                    repair_results.insert(tenant_id, repairs_made);
+                },
+                Err(e) => {
+                    error!("Failed to verify tenant network for {}: {}", tenant_id, e);
+                    repair_results.insert(tenant_id, false);
+                }
+            }
+        }
+        
+        let repair_count = repair_results.values().filter(|&repaired| *repaired).count();
+        info!("Completed verification of all tenant networks: {} tenants, {} repairs",
+            repair_results.len(), repair_count);
+        
+        Ok(repair_results)
+    }
+    
+    /// Run periodic maintenance tasks for network management
+    /// This method should be called regularly to ensure network consistency
+    pub async fn run_maintenance(&self) -> Result<()> {
+        info!("Running network maintenance tasks");
+        
+        // Verify and repair all tenant networks
+        let repair_results = self.verify_all_tenant_networks().await?;
+        
+        // Check for orphaned resources
+        self.cleanup_orphaned_resources().await?;
+        
+        // Run reconciliation for network policies
+        if let Some(policies) = &self.policies {
+            policies.lock().await.run_reconciliation().await?;
+        }
+        
+        info!("Network maintenance completed successfully");
+        
+        Ok(())
+    }
+    
+    /// Cleanup orphaned network resources
+    /// This method identifies and removes network resources that are no longer needed
+    async fn cleanup_orphaned_resources(&self) -> Result<()> {
+        debug!("Checking for orphaned network resources");
+        
+        // Find orphaned bridges (bridges without associated tenant)
+        let mut orphaned_bridges = Vec::new();
+        
+        // Get all tenant IDs
+        let tenant_ids: HashSet<String> = {
+            let tenant_network_cidrs = self.tenant_network_cidrs.lock().await;
+            tenant_network_cidrs.keys().cloned().collect()
+        };
+        
+        // Check for bridges that don't match any tenant
+        let output = Command::new("ip")
+            .args(&["link", "show", "type", "bridge"])
+            .output()?;
+            
+        if output.status.success() {
+            let output_str = String::from_utf8_lossy(&output.stdout);
+            
+            for line in output_str.lines() {
+                if line.contains("hivemind-") {
+                    // Extract bridge name
+                    if let Some(start) = line.find("hivemind-") {
+                        let end = line[start..].find(':').unwrap_or(line[start..].len()) + start;
+                        let bridge_name = &line[start..end];
+                        
+                        // Extract tenant ID from bridge name
+                        if bridge_name.len() > 9 { // "hivemind-" + at least 1 char
+                            let tenant_prefix = &bridge_name[9..];
+                            
+                            // Check if this bridge belongs to any known tenant
+                            let belongs_to_tenant = tenant_ids.iter().any(|id| {
+                                if id.len() >= 8 {
+                                    &id[..8] == tenant_prefix
+                                } else {
+                                    false
+                                }
+                            });
+                            
+                            if !belongs_to_tenant {
+                                orphaned_bridges.push(bridge_name.to_string());
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        
+        // Remove orphaned bridges
+        for bridge in orphaned_bridges {
+            warn!("Removing orphaned bridge: {}", bridge);
+            
+            let status = Command::new("ip")
+                .args(&["link", "set", &bridge, "down"])
+                .status()?;
+                
+            if status.success() {
+                let status = Command::new("ip")
+                    .args(&["link", "delete", &bridge, "type", "bridge"])
+                    .status()?;
+                    
+                if status.success() {
+                    info!("Successfully removed orphaned bridge: {}", bridge);
+                } else {
+                    warn!("Failed to remove orphaned bridge: {}", bridge);
+                }
+            }
         }
         
         Ok(())
@@ -666,7 +907,7 @@ impl NetworkManager {
     
     // Apply tenant-specific network policies
     async fn apply_tenant_network_policies(&self, tenant_id: &str, container_id: &str, config: &ContainerNetworkConfig) -> Result<()> {
-        println!("Applying network policies for tenant {} container {}", tenant_id, container_id);
+        info!("Applying network policies for tenant {} container {}", tenant_id, container_id);
         
         // Create default isolation policy for tenant
         let policy = NetworkPolicy {
