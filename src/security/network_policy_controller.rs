@@ -5,10 +5,12 @@ use std::process::Command;
 use std::sync::Arc;
 use tokio::sync::Mutex;
 use std::time::{SystemTime, UNIX_EPOCH};
+use log::{info, warn, error, debug, trace};
 
 use crate::network::{
     NetworkPolicy, NetworkRule, NetworkSelector, NetworkPeer, PortRange, Protocol, PolicyAction
 };
+use crate::monitoring::MonitoringManager;
 
 /// NetworkPolicyController translates network policies to actual network rules
 pub struct NetworkPolicyController {
@@ -29,6 +31,10 @@ pub struct NetworkPolicyController {
     // Violation logs
     violation_logs: Arc<Mutex<Vec<ViolationLog>>>,
     max_log_entries: usize,
+    // External monitoring integration
+    monitoring_manager: Option<Arc<MonitoringManager>>,
+    // Notification endpoints for policy violations
+    notification_endpoints: Vec<String>,
 }
 
 /// Log entry for policy violations
@@ -46,6 +52,24 @@ pub struct ViolationLog {
     pub rule_id: Option<String>,
     pub action: PolicyAction,
     pub tenant_id: Option<String>,
+    pub severity: ViolationSeverity,
+    pub resolved: bool,
+    pub resolution_timestamp: Option<u64>,
+    pub resolution_action: Option<String>,
+}
+
+/// Severity level for policy violations
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ViolationSeverity {
+    Info,
+    Warning,
+    Critical,
+}
+
+impl Default for ViolationSeverity {
+    fn default() -> Self {
+        Self::Warning
+    }
 }
 
 impl NetworkPolicyController {
@@ -61,7 +85,20 @@ impl NetworkPolicyController {
             last_reconciliation: Arc::new(Mutex::new(0)),
             violation_logs: Arc::new(Mutex::new(Vec::new())),
             max_log_entries: 10000, // Store up to 10,000 log entries
+            monitoring_manager: None,
+            notification_endpoints: Vec::new(),
         }
+    }
+    
+    /// Set monitoring manager for metrics collection
+    pub fn with_monitoring_manager(mut self, monitoring_manager: Arc<MonitoringManager>) -> Self {
+        self.monitoring_manager = Some(monitoring_manager);
+        self
+    }
+    
+    /// Add notification endpoint for policy violation alerts
+    pub fn add_notification_endpoint(&mut self, endpoint: String) {
+        self.notification_endpoints.push(endpoint);
     }
 
     /// Register container labels for policy matching
@@ -139,7 +176,7 @@ impl NetworkPolicyController {
     
     /// Apply a network policy
     pub async fn apply_policy(&mut self, policy: NetworkPolicy) -> Result<()> {
-        println!("Applying network policy: {}", policy.name);
+        info!("Applying network policy: {}", policy.name);
         
         // Store the policy
         let mut policies = self.policies.lock().await;
@@ -154,6 +191,8 @@ impl NetworkPolicyController {
         // Find containers that match the policy selector
         let matching_containers = self.find_matching_containers(&policy.selector).await;
         
+        debug!("Policy {} matches {} containers", policy.name, matching_containers.len());
+        
         // Apply policy to matching containers
         for container_id in matching_containers {
             let container_ips = self.container_ips.lock().await;
@@ -162,7 +201,41 @@ impl NetworkPolicyController {
             }
         }
         
-        println!("Network policy {} applied successfully", policy.name);
+        // Send metrics if monitoring is available
+        if let Some(monitoring) = &self.monitoring_manager {
+            let mut labels = HashMap::new();
+            labels.insert("policy_name".to_string(), policy.name.clone());
+            if let Some(tenant_id) = &policy.tenant_id {
+                labels.insert("tenant_id".to_string(), tenant_id.clone());
+            }
+            
+            let metrics = vec![
+                crate::monitoring::Metric {
+                    name: "network_policy_applied".to_string(),
+                    value: 1.0,
+                    labels: labels.clone(),
+                    timestamp: SystemTime::now()
+                        .duration_since(UNIX_EPOCH)
+                        .unwrap_or_default()
+                        .as_secs() as i64,
+                },
+                crate::monitoring::Metric {
+                    name: "network_policy_affected_containers".to_string(),
+                    value: matching_containers.len() as f64,
+                    labels,
+                    timestamp: SystemTime::now()
+                        .duration_since(UNIX_EPOCH)
+                        .unwrap_or_default()
+                        .as_secs() as i64,
+                },
+            ];
+            
+            if let Err(e) = monitoring.send_metrics(metrics).await {
+                warn!("Failed to send network policy metrics: {}", e);
+            }
+        }
+        
+        info!("Network policy {} applied successfully", policy.name);
         
         Ok(())
     }
@@ -797,7 +870,7 @@ impl NetworkPolicyController {
             return Ok(());
         }
         
-        println!("Running network policy reconciliation...");
+        info!("Running network policy reconciliation...");
         
         // Update last reconciliation time
         *last_reconciliation = now;
@@ -812,14 +885,40 @@ impl NetworkPolicyController {
         // For each container, apply all matching policies
         let container_ids: Vec<String> = self.container_labels.lock().await.keys().cloned().collect();
         
+        debug!("Reconciling policies for {} containers", container_ids.len());
+        
+        let mut applied_policies = 0;
         for container_id in container_ids {
             self.apply_policies_to_container(&container_id).await?;
+            applied_policies += 1;
         }
         
         // Check for policy violations in system logs
         self.check_policy_violations().await?;
         
-        println!("Network policy reconciliation completed successfully");
+        info!("Network policy reconciliation completed successfully for {} containers", applied_policies);
+        
+        // Send metrics if monitoring is available
+        if let Some(monitoring) = &self.monitoring_manager {
+            let metrics = vec![
+                crate::monitoring::Metric {
+                    name: "network_policy_reconciliation".to_string(),
+                    value: 1.0,
+                    labels: HashMap::new(),
+                    timestamp: now as i64,
+                },
+                crate::monitoring::Metric {
+                    name: "network_policy_containers_reconciled".to_string(),
+                    value: applied_policies as f64,
+                    labels: HashMap::new(),
+                    timestamp: now as i64,
+                },
+            ];
+            
+            if let Err(e) = monitoring.send_metrics(metrics).await {
+                warn!("Failed to send reconciliation metrics: {}", e);
+            }
+        }
         
         Ok(())
     }
@@ -829,12 +928,8 @@ impl NetworkPolicyController {
         // In a real implementation, we would parse /var/log/kern.log or similar
         // to find iptables LOG messages for policy violations
         
-        // For now, we'll just simulate finding some violations
-        let now = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_secs();
-            
+        debug!("Checking for network policy violations in system logs");
+        
         // Get all container IPs
         let container_ips = self.container_ips.lock().await;
         let ip_to_container: HashMap<IpAddr, String> = container_ips
@@ -842,18 +937,26 @@ impl NetworkPolicyController {
             .map(|(id, ip)| (*ip, id.clone()))
             .collect();
         drop(container_ips);
-            
+        
+        // Get container labels to determine tenant IDs
+        let container_labels = self.container_labels.lock().await;
+        
         // Try to read the kernel log for iptables messages
         if let Ok(output) = Command::new("grep")
             .args(&[
-                "-E", 
-                "HIVEMIND-POLICY-.*: ", 
+                "-E",
+                "HIVEMIND-POLICY-.*: ",
                 "/var/log/kern.log"
             ])
             .output() {
                 
             if output.status.success() {
                 let log_content = String::from_utf8_lossy(&output.stdout);
+                let violation_count = log_content.lines().count();
+                
+                if violation_count > 0 {
+                    info!("Found {} potential network policy violations in logs", violation_count);
+                }
                 
                 for line in log_content.lines() {
                     // Parse the log line to extract policy violation information
@@ -863,36 +966,48 @@ impl NetworkPolicyController {
                             let src_container = ip_to_container.get(&src_ip).cloned();
                             let dst_container = ip_to_container.get(&dst_ip).cloned();
                             
-                            if let Some(src_container_id) = src_container {
-                                // Create a violation log entry
-                                let mut violation_logs = self.violation_logs.lock().await;
-                                let violation = ViolationLog {
-                                    id: format!("VIOLATION-{}-{}", now, src_container_id),
-                                    timestamp: now,
-                                    source_container: src_container_id,
-                                    source_ip: src_ip,
-                                    destination_container: dst_container,
-                                    destination_ip: dst_ip,
-                                    protocol,
-                                    port,
-                                    policy_name,
-                                    rule_id: None, // We don't have this information from the log
-                                    action: PolicyAction::Deny,
-                                    tenant_id: None, // We don't have this information from the log
+                            if let Some(src_container_id) = src_container.clone() {
+                                // Determine tenant ID if available
+                                let tenant_id = if let Some(labels) = container_labels.get(&src_container_id) {
+                                    labels.get("tenant").cloned()
+                                } else {
+                                    None
                                 };
                                 
-                                // Add to violation logs
-                                violation_logs.push(violation);
+                                // Determine severity based on policy name or other factors
+                                let severity = if policy_name.contains("critical") {
+                                    ViolationSeverity::Critical
+                                } else if policy_name.contains("warning") {
+                                    ViolationSeverity::Warning
+                                } else {
+                                    ViolationSeverity::Info
+                                };
                                 
-                                // Limit the number of logs
-                                if violation_logs.len() > self.max_log_entries {
-                                    violation_logs.remove(0);
-                                }
+                                // Record the violation using our new method
+                                self.record_violation(
+                                    &src_container_id,
+                                    src_ip,
+                                    dst_container.as_deref(),
+                                    dst_ip,
+                                    protocol,
+                                    port,
+                                    &policy_name,
+                                    None, // We don't have rule ID from the log
+                                    PolicyAction::Deny,
+                                    tenant_id.as_deref(),
+                                    severity
+                                ).await?;
                             }
                         }
                     }
                 }
             }
+        }
+        
+        // Clean up old violations (older than 30 days)
+        let removed = self.cleanup_old_violations(30).await?;
+        if removed > 0 {
+            debug!("Cleaned up {} old violation logs during policy check", removed);
         }
         
         Ok(())
@@ -964,8 +1079,233 @@ impl NetworkPolicyController {
     }
     
     /// Get policy violation logs
-    pub async fn get_violation_logs(&self) -> Vec<ViolationLog> {
-        self.violation_logs.lock().await.clone()
+    pub async fn get_violation_logs(&self) -> Result<Vec<ViolationLog>> {
+        Ok(self.violation_logs.lock().await.clone())
+    }
+    
+    /// Get all active policies
+    pub async fn get_policies(&self) -> Result<HashMap<String, NetworkPolicy>> {
+        Ok(self.policies.lock().await.clone())
+    }
+    
+    /// Get policy violation logs for a specific tenant
+    pub async fn get_tenant_violation_logs(&self, tenant_id: &str) -> Result<Vec<ViolationLog>> {
+        let logs = self.violation_logs.lock().await;
+        let tenant_logs: Vec<ViolationLog> = logs
+            .iter()
+            .filter(|log| log.tenant_id.as_ref().map_or(false, |id| id == tenant_id))
+            .cloned()
+            .collect();
+        
+        Ok(tenant_logs)
+    }
+    
+    /// Record a policy violation
+    pub async fn record_violation(
+        &self,
+        source_container: &str,
+        source_ip: IpAddr,
+        destination_container: Option<&str>,
+        destination_ip: IpAddr,
+        protocol: Protocol,
+        port: u16,
+        policy_name: &str,
+        rule_id: Option<&str>,
+        action: PolicyAction,
+        tenant_id: Option<&str>,
+        severity: ViolationSeverity,
+    ) -> Result<()> {
+        let timestamp = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs();
+        
+        let violation = ViolationLog {
+            id: uuid::Uuid::new_v4().to_string(),
+            timestamp,
+            source_container: source_container.to_string(),
+            source_ip,
+            destination_container: destination_container.map(|s| s.to_string()),
+            destination_ip,
+            protocol,
+            port,
+            policy_name: policy_name.to_string(),
+            rule_id: rule_id.map(|s| s.to_string()),
+            action,
+            tenant_id: tenant_id.map(|s| s.to_string()),
+            severity,
+            resolved: false,
+            resolution_timestamp: None,
+            resolution_action: None,
+        };
+        
+        // Log the violation
+        match severity {
+            ViolationSeverity::Info => {
+                info!("Network policy violation: {} -> {} ({}:{}), policy: {}, action: {:?}",
+                    source_ip, destination_ip, protocol, port, policy_name, action);
+            },
+            ViolationSeverity::Warning => {
+                warn!("Network policy violation: {} -> {} ({}:{}), policy: {}, action: {:?}",
+                    source_ip, destination_ip, protocol, port, policy_name, action);
+            },
+            ViolationSeverity::Critical => {
+                error!("Critical network policy violation: {} -> {} ({}:{}), policy: {}, action: {:?}",
+                    source_ip, destination_ip, protocol, port, policy_name, action);
+            },
+        }
+        
+        // Store the violation
+        let mut logs = self.violation_logs.lock().await;
+        logs.push(violation.clone());
+        
+        // Trim logs if we exceed the maximum
+        if logs.len() > self.max_log_entries {
+            logs.sort_by(|a, b| b.timestamp.cmp(&a.timestamp));
+            logs.truncate(self.max_log_entries);
+        }
+        
+        // Send notification if endpoints are configured
+        if !self.notification_endpoints.is_empty() {
+            self.send_violation_notification(&violation).await?;
+        }
+        
+        // Send metrics if monitoring is available
+        if let Some(monitoring) = &self.monitoring_manager {
+            let mut labels = HashMap::new();
+            labels.insert("policy_name".to_string(), policy_name.to_string());
+            labels.insert("protocol".to_string(), format!("{:?}", protocol));
+            labels.insert("action".to_string(), format!("{:?}", action));
+            if let Some(tenant) = tenant_id {
+                labels.insert("tenant_id".to_string(), tenant.to_string());
+            }
+            
+            let metrics = vec![
+                crate::monitoring::Metric {
+                    name: "network_policy_violation".to_string(),
+                    value: 1.0,
+                    labels: labels.clone(),
+                    timestamp: timestamp as i64,
+                },
+                crate::monitoring::Metric {
+                    name: "network_policy_violation_severity".to_string(),
+                    value: match severity {
+                        ViolationSeverity::Info => 0.0,
+                        ViolationSeverity::Warning => 1.0,
+                        ViolationSeverity::Critical => 2.0,
+                    },
+                    labels,
+                    timestamp: timestamp as i64,
+                },
+            ];
+            
+            if let Err(e) = monitoring.send_metrics(metrics).await {
+                warn!("Failed to send policy violation metrics: {}", e);
+            }
+        }
+        
+        Ok(())
+    }
+    
+    /// Mark a policy violation as resolved
+    pub async fn resolve_violation(&self, violation_id: &str, resolution_action: &str) -> Result<bool> {
+        let mut logs = self.violation_logs.lock().await;
+        
+        if let Some(violation) = logs.iter_mut().find(|v| v.id == violation_id) {
+            violation.resolved = true;
+            violation.resolution_timestamp = Some(
+                SystemTime::now()
+                    .duration_since(UNIX_EPOCH)
+                    .unwrap_or_default()
+                    .as_secs()
+            );
+            violation.resolution_action = Some(resolution_action.to_string());
+            
+            info!("Resolved network policy violation: {}, action: {}", violation_id, resolution_action);
+            
+            // Send metrics if monitoring is available
+            if let Some(monitoring) = &self.monitoring_manager {
+                let mut labels = HashMap::new();
+                labels.insert("violation_id".to_string(), violation_id.to_string());
+                labels.insert("policy_name".to_string(), violation.policy_name.clone());
+                if let Some(tenant_id) = &violation.tenant_id {
+                    labels.insert("tenant_id".to_string(), tenant_id.clone());
+                }
+                
+                let metrics = vec![
+                    crate::monitoring::Metric {
+                        name: "network_policy_violation_resolved".to_string(),
+                        value: 1.0,
+                        labels,
+                        timestamp: SystemTime::now()
+                            .duration_since(UNIX_EPOCH)
+                            .unwrap_or_default()
+                            .as_secs() as i64,
+                    },
+                ];
+                
+                if let Err(e) = monitoring.send_metrics(metrics).await {
+                    warn!("Failed to send violation resolution metrics: {}", e);
+                }
+            }
+            
+            return Ok(true);
+        }
+        
+        Ok(false)
+    }
+    
+    /// Send notification about a policy violation
+    async fn send_violation_notification(&self, violation: &ViolationLog) -> Result<()> {
+        let severity_str = match violation.severity {
+            ViolationSeverity::Info => "INFO",
+            ViolationSeverity::Warning => "WARNING",
+            ViolationSeverity::Critical => "CRITICAL",
+        };
+        
+        let message = format!(
+            "{}: Network policy violation detected - Source: {} ({}), Destination: {} ({}:{}), Policy: {}, Action: {:?}",
+            severity_str,
+            violation.source_container,
+            violation.source_ip,
+            violation.destination_container.as_deref().unwrap_or("unknown"),
+            violation.protocol,
+            violation.port,
+            violation.policy_name,
+            violation.action
+        );
+        
+        // In a real system, we would send this to each notification endpoint
+        for endpoint in &self.notification_endpoints {
+            debug!("Sending policy violation notification to endpoint {}: {}", endpoint, message);
+            // Here we would make an actual API call to the notification endpoint
+        }
+        
+        Ok(())
+    }
+    
+    /// Clean up old violation logs
+    pub async fn cleanup_old_violations(&self, max_age_days: u64) -> Result<usize> {
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs();
+            
+        let max_age_secs = max_age_days * 24 * 60 * 60;
+        let cutoff = now.saturating_sub(max_age_secs);
+        
+        let mut logs = self.violation_logs.lock().await;
+        let original_count = logs.len();
+        
+        // Remove old logs
+        logs.retain(|log| log.timestamp > cutoff || !log.resolved);
+        
+        let removed_count = original_count - logs.len();
+        if removed_count > 0 {
+            debug!("Removed {} old network policy violation logs", removed_count);
+        }
+        
+        Ok(removed_count)
     }
     
     /// Extract policy name from log line
@@ -1033,7 +1373,12 @@ impl NetworkPolicyController {
     
     /// Create default network policies for a new tenant
     pub async fn create_default_tenant_policies(&mut self, tenant_id: &str) -> Result<()> {
-        println!("Creating default network policies for tenant {}", tenant_id);
+        info!("Creating default network policies for tenant {}", tenant_id);
+        
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs();
         
         // Create default isolation policy
         let isolation_policy = NetworkPolicy {
@@ -1090,21 +1435,117 @@ impl NetworkPolicyController {
             priority: 100,
             namespace: None,
             tenant_id: Some(tenant_id.to_string()),
-            labels: HashMap::new(),
-            created_at: SystemTime::now()
-                .duration_since(UNIX_EPOCH)
-                .unwrap_or_default()
-                .as_secs(),
-            updated_at: SystemTime::now()
-                .duration_since(UNIX_EPOCH)
-                .unwrap_or_default()
-                .as_secs(),
+            labels: {
+                let mut labels = HashMap::new();
+                labels.insert("type".to_string(), "tenant-isolation".to_string());
+                labels
+            },
+            created_at: now,
+            updated_at: now,
         };
         
-        // Apply the policy
+        // Create a security monitoring policy for suspicious traffic
+        let security_policy = NetworkPolicy {
+            name: format!("tenant-{}-security", tenant_id),
+            selector: NetworkSelector {
+                labels: {
+                    let mut labels = HashMap::new();
+                    labels.insert("tenant".to_string(), tenant_id.to_string());
+                    labels
+                },
+            },
+            ingress_rules: vec![
+                // Log suspicious ports
+                NetworkRule {
+                    ports: vec![
+                        // SSH
+                        PortRange {
+                            protocol: Protocol::TCP,
+                            port_min: 22,
+                            port_max: 22,
+                        },
+                        // Telnet
+                        PortRange {
+                            protocol: Protocol::TCP,
+                            port_min: 23,
+                            port_max: 23,
+                        },
+                        // RDP
+                        PortRange {
+                            protocol: Protocol::TCP,
+                            port_min: 3389,
+                            port_max: 3389,
+                        },
+                    ],
+                    from: vec![],  // All sources
+                    action: Some(PolicyAction::Log),
+                    log: true,
+                    description: Some(format!("Log suspicious traffic to tenant {}", tenant_id)),
+                    id: Some(format!("tenant-{}-security-log", tenant_id)),
+                },
+            ],
+            egress_rules: vec![
+                // Log suspicious outbound connections
+                NetworkRule {
+                    ports: vec![
+                        // Common C&C ports
+                        PortRange {
+                            protocol: Protocol::TCP,
+                            port_min: 4444,
+                            port_max: 4444,
+                        },
+                        PortRange {
+                            protocol: Protocol::TCP,
+                            port_min: 8080,
+                            port_max: 8080,
+                        },
+                    ],
+                    from: vec![],  // All destinations
+                    action: Some(PolicyAction::Log),
+                    log: true,
+                    description: Some(format!("Log suspicious outbound traffic from tenant {}", tenant_id)),
+                    id: Some(format!("tenant-{}-security-egress-log", tenant_id)),
+                },
+            ],
+            priority: 50,  // Lower priority than isolation policy
+            namespace: None,
+            tenant_id: Some(tenant_id.to_string()),
+            labels: {
+                let mut labels = HashMap::new();
+                labels.insert("type".to_string(), "security-monitoring".to_string());
+                labels
+            },
+            created_at: now,
+            updated_at: now,
+        };
+        
+        // Apply the policies
+        debug!("Applying isolation policy for tenant {}", tenant_id);
         self.apply_policy(isolation_policy).await?;
         
-        println!("Default network policies created for tenant {}", tenant_id);
+        debug!("Applying security monitoring policy for tenant {}", tenant_id);
+        self.apply_policy(security_policy).await?;
+        
+        info!("Default network policies created for tenant {}", tenant_id);
+        
+        // Send metrics if monitoring is available
+        if let Some(monitoring) = &self.monitoring_manager {
+            let mut labels = HashMap::new();
+            labels.insert("tenant_id".to_string(), tenant_id.to_string());
+            
+            let metrics = vec![
+                crate::monitoring::Metric {
+                    name: "network_policy_default_created".to_string(),
+                    value: 2.0,  // Created 2 policies
+                    labels,
+                    timestamp: now as i64,
+                },
+            ];
+            
+            if let Err(e) = monitoring.send_metrics(metrics).await {
+                warn!("Failed to send policy creation metrics: {}", e);
+            }
+        }
         
         Ok(())
     }

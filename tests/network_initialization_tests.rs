@@ -197,7 +197,7 @@ async fn test_multiple_tenant_networks() -> Result<()> {
     }
     
     // Create a validator to verify the network configuration
-    let validator = hivemind::network::NetworkValidator::new(Arc::new(network_manager));
+    let validator = hivemind::network::NetworkValidator::new(Arc::new(network_manager.clone()));
     
     // Verify all tenant networks were initialized with valid configurations
     for tenant_id in &tenant_ids {
@@ -213,6 +213,94 @@ async fn test_multiple_tenant_networks() -> Result<()> {
                 assert!(is_isolated, "Tenant networks {} and {} should be isolated", tenant1, tenant2);
             }
         }
+    }
+    
+    Ok(())
+}
+
+#[tokio::test]
+async fn test_network_verification_and_repair() -> Result<()> {
+    // Setup
+    let node_manager = Arc::new(NodeManager::new());
+    let service_discovery = Arc::new(ServiceDiscovery::new());
+    
+    // Create network manager
+    let network_manager = NetworkManager::new(
+        node_manager.clone(),
+        service_discovery.clone(),
+        None, // Use default config
+    ).await?;
+    
+    // Create test tenant
+    let tenant_id = "repair-test-tenant".to_string();
+    
+    // Initialize tenant network
+    network_manager.initialize_tenant_network(&tenant_id, None).await?;
+    
+    // Verify the network configuration is valid
+    let repair_needed = network_manager.verify_tenant_network(&tenant_id).await?;
+    assert!(!repair_needed, "Newly initialized network should not need repairs");
+    
+    // Simulate a network inconsistency by removing the tenant CIDR
+    {
+        let mut tenant_network_cidrs = network_manager.tenant_network_cidrs.lock().await;
+        tenant_network_cidrs.remove(&tenant_id);
+    }
+    
+    // Verify and repair the network
+    let repair_needed = network_manager.verify_tenant_network(&tenant_id).await?;
+    assert!(repair_needed, "Network should need repairs after removing CIDR");
+    
+    // Verify the network is now valid
+    let repair_needed = network_manager.verify_tenant_network(&tenant_id).await?;
+    assert!(!repair_needed, "Network should be valid after repairs");
+    
+    Ok(())
+}
+
+#[tokio::test]
+async fn test_network_maintenance() -> Result<()> {
+    // Setup
+    let node_manager = Arc::new(NodeManager::new());
+    let service_discovery = Arc::new(ServiceDiscovery::new());
+    
+    // Create network manager
+    let network_manager = NetworkManager::new(
+        node_manager.clone(),
+        service_discovery.clone(),
+        None, // Use default config
+    ).await?;
+    
+    // Create multiple test tenants
+    let tenant_ids = vec![
+        "maintenance-tenant-1".to_string(),
+        "maintenance-tenant-2".to_string(),
+        "maintenance-tenant-3".to_string(),
+    ];
+    
+    // Initialize all tenant networks
+    for tenant_id in &tenant_ids {
+        network_manager.initialize_tenant_network(tenant_id, None).await?;
+    }
+    
+    // Simulate network inconsistencies
+    {
+        // Remove CIDR for tenant 1
+        let mut tenant_network_cidrs = network_manager.tenant_network_cidrs.lock().await;
+        tenant_network_cidrs.remove(&tenant_ids[0]);
+        
+        // Remove overlay for tenant 2
+        let mut tenant_overlays = network_manager.tenant_overlays.lock().await;
+        tenant_overlays.remove(&tenant_ids[1]);
+    }
+    
+    // Run maintenance
+    network_manager.run_maintenance().await?;
+    
+    // Verify all networks are now valid
+    for tenant_id in &tenant_ids {
+        let repair_needed = network_manager.verify_tenant_network(tenant_id).await?;
+        assert!(!repair_needed, "Network should be valid after maintenance");
     }
     
     Ok(())
