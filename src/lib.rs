@@ -22,6 +22,7 @@ pub mod threshold;
 pub mod web;
 pub mod resilience;
 pub mod service_discovery_resilience;
+pub mod proxy_server;
 pub use containerd_manager::*;
 
 // Re-export types needed by web.rs
