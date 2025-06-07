@@ -1,6 +1,7 @@
 use crate::app::ServiceConfig;
 use crate::network::NetworkManager;
 use anyhow::Result;
+use log::{debug, error, info, warn};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
@@ -222,7 +223,7 @@ impl ServiceDiscovery {
     
     // Initialize service discovery with network integration
     pub async fn initialize(&self) -> Result<()> {
-        println!("Initializing service discovery system");
+        info!("Initializing service discovery system");
         
         // Start the health check system
         self.start_health_check_system().await?;
@@ -505,7 +506,7 @@ impl ServiceDiscovery {
     }
 
     pub async fn start_dns_server(&self) -> Result<()> {
-        println!("Starting DNS server on port {}", self.dns_port);
+        info!("Starting DNS server on port {}", self.dns_port);
 
         // Clone necessary data for the DNS server task
         let services = self.services.clone();
@@ -513,7 +514,7 @@ impl ServiceDiscovery {
 
         tokio::spawn(async move {
             if let Err(e) = Self::run_dns_server(dns_port, services).await {
-                eprintln!("DNS server error: {}", e);
+                error!("DNS server error: {}", e);
             }
         });
 
@@ -748,26 +749,23 @@ impl ServiceDiscovery {
     }
 
     pub async fn start_proxy_server(&self) -> Result<()> {
-        println!("Starting proxy server on port {}", self.proxy_port);
+        info!("Starting proxy server on port {}", self.proxy_port);
 
-        // Clone necessary data for the proxy server task
-        let services = self.services.clone();
-        let proxy_port = self.proxy_port;
-        let routing_rules = self.routing_rules.clone();
-        let traffic_splits = self.traffic_splits.clone();
-        let load_balancing_strategy = self.load_balancing_strategy.clone();
-        let endpoint_stats = self.endpoint_stats.clone();
-
+        // Create a new proxy server instance
+        let proxy_server = crate::proxy_server::ProxyServer::new(Arc::new(self.clone()));
+        
+        // Configure the proxy server
+        let config = crate::proxy_server::ProxyServerConfig {
+            port: self.proxy_port,
+            ..crate::proxy_server::ProxyServerConfig::default()
+        };
+        proxy_server.configure(config).await;
+        
+        // Start the proxy server in a separate task
+        let proxy_server = Arc::new(proxy_server);
         tokio::spawn(async move {
-            if let Err(e) = Self::run_proxy_server(
-                proxy_port,
-                services,
-                routing_rules,
-                traffic_splits,
-                load_balancing_strategy,
-                endpoint_stats
-            ).await {
-                eprintln!("Proxy server error: {}", e);
+            if let Err(e) = proxy_server.start().await {
+                error!("Proxy server error: {}", e);
             }
         });
 
@@ -1280,7 +1278,7 @@ impl ServiceDiscovery {
     
     // Start the health check system
     pub async fn start_health_check_system(&self) -> Result<()> {
-        println!("Starting health check system");
+        info!("Starting health check system");
         
         // Clone necessary data for the health check task
         let services = self.services.clone();
@@ -1289,7 +1287,7 @@ impl ServiceDiscovery {
         tokio::spawn(async move {
             loop {
                 if let Err(e) = Self::run_health_checks(&services, &health_check_config).await {
-                    eprintln!("Health check error: {}", e);
+                    error!("Health check error: {}", e);
                 }
                 
                 // Sleep for a while before the next round of health checks

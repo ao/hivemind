@@ -88,17 +88,22 @@ Tenant network initialization was enhanced to ensure consistency and isolation b
 ### Proxy Server in Service Discovery
 
 #### Technical Approach
-A proxy server was integrated into the service discovery system to provide advanced routing, load balancing, and resilience features. The proxy acts as an intermediary between clients and services.
+A proxy server was integrated into the service discovery system to provide advanced routing, load balancing, and resilience features. The proxy acts as an intermediary between clients and services, enhancing reliability and security. The implementation uses proper logging, monitoring integration, and resilience patterns to ensure robust operation.
 
 #### Key Components
-- **Service Discovery Proxy**: Routes requests to appropriate service endpoints
-- **Load Balancing Strategies**: Implements various algorithms for request distribution
-- **Health Checking**: Monitors endpoint health and routes traffic accordingly
+- **Service Discovery Proxy**: Routes requests to appropriate service endpoints based on domain or path
+- **Load Balancing Strategies**: Implements various algorithms for request distribution (round-robin, weighted, least connections)
+- **Health Checking**: Monitors endpoint health and routes traffic only to healthy instances
+- **Circuit Breaker Integration**: Prevents cascading failures by detecting failing services
+- **Request Metrics Collection**: Gathers detailed metrics on request patterns and performance
+- **Tenant Boundary Enforcement**: Ensures requests respect tenant isolation boundaries
 
 #### Integration Points
 - Integrated with the DNS server for service name resolution
 - Connected to the health monitoring system to track endpoint health
 - Linked to the resilience patterns for circuit breaking and retries
+- Integrated with the logging system for proper request/response logging
+- Connected to external monitoring systems for metrics reporting
 
 ### Circuit Breaker Implementation
 
