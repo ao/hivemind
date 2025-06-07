@@ -2,6 +2,7 @@ use anyhow::Result;
 use axum::{extract::State, Json};
 use clap::{Parser, Subcommand};
 use std::path::PathBuf;
+use log::{info, warn, error, debug};
 
 // Use types from lib.rs
 use hivemind::{AppState, DeployRequest, DeployResponse, ServiceUrlRequest, ServiceUrlResponse};
@@ -14,6 +15,8 @@ use hivemind::cicd::CicdManager;
 use hivemind::cloud::CloudManager;
 use hivemind::deployment::DeploymentManager;
 use hivemind::helm::HelmManager;
+use hivemind::logging;
+use hivemind::monitoring::{MonitoringManager, create_default_monitoring};
 use hivemind::observability::ObservabilityManager;
 use hivemind::scheduler::ContainerScheduler;
 use hivemind::security::SecurityManager;
@@ -21,6 +24,7 @@ use hivemind::service_discovery::{ServiceDiscovery, ServiceEndpoint};
 use hivemind::storage::StorageManager;
 use hivemind::tenant::TenantManager;
 use hivemind::tenant_quota::TenantQuotaEnforcer;
+use hivemind::threshold::ThresholdManager;
 use hivemind::web;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -256,6 +260,10 @@ async fn deploy_container(
 
 #[tokio::main]
 async fn main() -> Result<()> {
+    // Initialize logging system
+    logging::init_logging();
+    info!("Starting Hivemind");
+    
     let cli = Cli::parse();
 
     match cli.command {
@@ -277,12 +285,12 @@ async fn main() -> Result<()> {
             .await
             {
                 Ok(manager) => {
-                    println!("Successfully connected to containerd");
+                    info!("Successfully connected to containerd");
                     manager.with_service_discovery(service_discovery.clone())
                 }
                 Err(e) => {
-                    eprintln!("Failed to connect to containerd: {}", e);
-                    eprintln!("Falling back to mock implementation");
+                    error!("Failed to connect to containerd: {}", e);
+                    warn!("Falling back to mock implementation");
                     AppManager::with_storage(storage)
                         .await?
                         .with_service_discovery(service_discovery.clone())
@@ -292,12 +300,12 @@ async fn main() -> Result<()> {
             // Initialize and start the membership protocol
             let mut node_manager_mut = node_manager.clone();
             if let Err(e) = node_manager_mut.init_membership_protocol().await {
-                eprintln!("Failed to initialize membership protocol: {}", e);
-                eprintln!("Falling back to legacy discovery");
+                error!("Failed to initialize membership protocol: {}", e);
+                warn!("Falling back to legacy discovery");
                 // Fall back to legacy discovery if membership protocol fails
                 node_manager.start_discovery().await?;
             } else {
-                println!("Node membership protocol initialized successfully");
+                info!("Node membership protocol initialized successfully");
             }
 
             // Initialize container networking
@@ -309,10 +317,10 @@ async fn main() -> Result<()> {
                 Ok(manager) => {
                     // Initialize the network
                     if let Err(e) = manager.initialize().await {
-                        eprintln!("Failed to initialize container networking: {}", e);
+                        error!("Failed to initialize container networking: {}", e);
                         None
                     } else {
-                        println!("Container networking initialized successfully");
+                        info!("Container networking initialized successfully");
                         let manager_arc = Arc::new(manager);
                         
                         // Connect network manager to node manager
@@ -322,7 +330,7 @@ async fn main() -> Result<()> {
                     }
                 }
                 Err(e) => {
-                    eprintln!("Failed to create network manager: {}", e);
+                    error!("Failed to create network manager: {}", e);
                     None
                 }
             };
@@ -336,9 +344,9 @@ async fn main() -> Result<()> {
             
             // Start service discovery system
             if let Err(e) = service_discovery.initialize().await {
-                eprintln!("Failed to initialize service discovery: {}", e);
+                error!("Failed to initialize service discovery: {}", e);
             } else {
-                println!("Service discovery initialized successfully");
+                info!("Service discovery initialized successfully");
             }
             
             // Initialize health monitor
@@ -350,9 +358,9 @@ async fn main() -> Result<()> {
 
             // Start health monitoring
             if let Err(e) = health_monitor.start().await {
-                eprintln!("Failed to start health monitor: {}", e);
+                error!("Failed to start health monitor: {}", e);
             } else {
-                println!("Health monitor started successfully");
+                info!("Health monitor started successfully");
             }
 
             // Initialize security manager
@@ -360,9 +368,9 @@ async fn main() -> Result<()> {
             
             // Initialize security components
             if let Err(e) = security_manager.initialize().await {
-                eprintln!("Failed to initialize security manager: {}", e);
+                error!("Failed to initialize security manager: {}", e);
             } else {
-                println!("Security manager initialized successfully");
+                info!("Security manager initialized successfully");
             }
             
             // Initialize tenant manager
@@ -371,11 +379,11 @@ async fn main() -> Result<()> {
             // Connect tenant manager with container runtime if available
             if let Some(container_runtime) = app_manager.get_container_runtime() {
                 tenant_manager.set_container_runtime(container_runtime.clone());
-                println!("Tenant manager connected to container runtime");
+                info!("Tenant manager connected to container runtime");
             }
             
             let tenant_manager = Arc::new(tenant_manager);
-            println!("Tenant manager initialized successfully");
+            info!("Tenant manager initialized successfully");
             
             // Initialize tenant quota enforcer
             let tenant_quota_enforcer = Arc::new(TenantQuotaEnforcer::new(
@@ -385,9 +393,9 @@ async fn main() -> Result<()> {
             
             // Initialize quota tracking
             if let Err(e) = tenant_quota_enforcer.initialize_quota_tracking().await {
-                eprintln!("Failed to initialize quota tracking: {}", e);
+                error!("Failed to initialize quota tracking: {}", e);
             } else {
-                println!("Tenant quota enforcement initialized successfully");
+                info!("Tenant quota enforcement initialized successfully");
             }
             
             // Initialize CI/CD manager
@@ -399,9 +407,9 @@ async fn main() -> Result<()> {
             );
             
             if let Err(e) = cicd_manager.initialize().await {
-                eprintln!("Failed to initialize CI/CD manager: {}", e);
+                error!("Failed to initialize CI/CD manager: {}", e);
             } else {
-                println!("CI/CD manager initialized successfully");
+                info!("CI/CD manager initialized successfully");
             }
             
             // Initialize cloud manager
@@ -409,9 +417,9 @@ async fn main() -> Result<()> {
             let cloud_manager = CloudManager::new(cloud_base_dir);
             
             if let Err(e) = cloud_manager.initialize().await {
-                eprintln!("Failed to initialize cloud manager: {}", e);
+                error!("Failed to initialize cloud manager: {}", e);
             } else {
-                println!("Cloud manager initialized successfully");
+                info!("Cloud manager initialized successfully");
             }
             
             // Initialize container scheduler
@@ -439,9 +447,9 @@ async fn main() -> Result<()> {
                 health_monitor.clone(),
                 Arc::new(service_discovery.clone()),
             ).await {
-                eprintln!("Failed to initialize deployment manager: {}", e);
+                error!("Failed to initialize deployment manager: {}", e);
             } else {
-                println!("Deployment manager initialized successfully with zero-downtime support");
+                info!("Deployment manager initialized successfully with zero-downtime support");
             }
             
             // Initialize Helm manager
@@ -449,9 +457,9 @@ async fn main() -> Result<()> {
             let helm_manager = HelmManager::new(helm_base_dir);
             
             if let Err(e) = helm_manager.initialize().await {
-                eprintln!("Failed to initialize Helm manager: {}", e);
+                error!("Failed to initialize Helm manager: {}", e);
             } else {
-                println!("Helm manager initialized successfully");
+                info!("Helm manager initialized successfully");
             }
             
             // Initialize observability manager
@@ -459,15 +467,15 @@ async fn main() -> Result<()> {
             let mut observability_manager = ObservabilityManager::new(observability_base_dir);
             
             if let Err(e) = observability_manager.initialize().await {
-                eprintln!("Failed to initialize observability manager: {}", e);
+                error!("Failed to initialize observability manager: {}", e);
             } else {
-                println!("Observability manager initialized successfully");
+                info!("Observability manager initialized successfully");
                 
                 // Initialize Prometheus exporter
                 if let Err(e) = observability_manager.init_prometheus_exporter(9090, "/metrics".to_string()).await {
-                    eprintln!("Failed to initialize Prometheus exporter: {}", e);
+                    error!("Failed to initialize Prometheus exporter: {}", e);
                 } else {
-                    println!("Prometheus exporter initialized successfully");
+                    info!("Prometheus exporter initialized successfully");
                 }
                 
                 // Initialize OpenTelemetry tracer
@@ -475,9 +483,9 @@ async fn main() -> Result<()> {
                     "hivemind".to_string(),
                     "http://localhost:4317".to_string(),
                 ).await {
-                    eprintln!("Failed to initialize OpenTelemetry tracer: {}", e);
+                    error!("Failed to initialize OpenTelemetry tracer: {}", e);
                 } else {
-                    println!("OpenTelemetry tracer initialized successfully");
+                    info!("OpenTelemetry tracer initialized successfully");
                 }
                 
                 // Initialize log aggregator
@@ -485,15 +493,23 @@ async fn main() -> Result<()> {
                     "http://localhost:9200".to_string(),
                     "hivemind-logs".to_string(),
                 ).await {
-                    eprintln!("Failed to initialize log aggregator: {}", e);
+                    error!("Failed to initialize log aggregator: {}", e);
                 } else {
-                    println!("Log aggregator initialized successfully");
+                    info!("Log aggregator initialized successfully");
                 }
             }
             
             // Initialize resilience manager
             let resilience_manager = Arc::new(resilience::ResilienceManager::new());
-            println!("Resilience manager initialized successfully");
+            info!("Resilience manager initialized successfully");
+            
+            // Initialize monitoring manager
+            let monitoring_manager = Arc::new(create_default_monitoring());
+            info!("Monitoring manager initialized successfully");
+            
+            // Initialize threshold manager
+            let threshold_manager = Arc::new(ThresholdManager::new());
+            info!("Threshold manager initialized successfully");
 
             // Create AppState for sharing between web and API
             let app_state = AppState {
@@ -511,6 +527,8 @@ async fn main() -> Result<()> {
                 tenant_quota_enforcer: Some(tenant_quota_enforcer),
                 observability_manager: Some(Arc::new(observability_manager)),
                 resilience_manager: Some(resilience_manager),
+                monitoring_manager: Some(monitoring_manager),
+                threshold_manager: Some(threshold_manager),
             };
 
             // Start the web interface in a separate task
@@ -518,7 +536,7 @@ async fn main() -> Result<()> {
             tokio::spawn(async move {
                 let web_server = web::WebServer::new(web_state, web_port);
                 if let Err(e) = web_server.start().await {
-                    eprintln!("Web server error: {}", e);
+                    error!("Web server error: {}", e);
                 }
             });
 
@@ -527,7 +545,7 @@ async fn main() -> Result<()> {
             tokio::spawn(async move {
                 loop {
                     if let Err(e) = monitor_app_manager.monitor_containers().await {
-                        eprintln!("Container monitoring error: {}", e);
+                        error!("Container monitoring error: {}", e);
                     }
                     tokio::time::sleep(tokio::time::Duration::from_secs(30)).await;
                 }
@@ -563,6 +581,8 @@ async fn main() -> Result<()> {
                 helm_manager: None, // No Helm manager for web-only mode
                 observability_manager: None, // No observability manager for web-only mode
                 resilience_manager: None, // No resilience manager for web-only mode
+                monitoring_manager: None, // No monitoring manager for web-only mode
+                threshold_manager: None, // No threshold manager for web-only mode
             };
 
             // Start the web server
@@ -576,12 +596,12 @@ async fn main() -> Result<()> {
             let mut node_manager = NodeManager::with_storage(storage.clone()).await;
             let service_discovery = ServiceDiscovery::new();
             
-            println!("Joining cluster at {}", host);
+            info!("Joining cluster at {}", host);
             
             // Initialize membership protocol
             if let Err(e) = node_manager.init_membership_protocol().await {
-                eprintln!("Failed to initialize membership protocol: {}", e);
-                eprintln!("Falling back to legacy discovery");
+                error!("Failed to initialize membership protocol: {}", e);
+                warn!("Falling back to legacy discovery");
                 // Fall back to legacy discovery
                 node_manager.start_discovery().await?;
             }
@@ -591,7 +611,7 @@ async fn main() -> Result<()> {
             
             // Initialize container networking after joining
             if join_result.is_ok() {
-                println!("Successfully joined cluster, initializing container networking...");
+                info!("Successfully joined cluster, initializing container networking...");
                 
                 // Initialize container networking
                 match NetworkManager::new(

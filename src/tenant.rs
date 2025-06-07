@@ -5,8 +5,12 @@ use std::sync::Arc;
 use tokio::sync::RwLock;
 use std::time::{SystemTime, UNIX_EPOCH};
 use uuid::Uuid;
+use log::{info, warn, error, debug, trace};
 
 use crate::security::rbac::{RbacManager, Permission, PermissionScope, Role};
+use crate::logging;
+use crate::monitoring::{MonitoringManager, create_default_monitoring};
+use crate::threshold::{ThresholdManager, ResourceLimits, ThresholdAlert};
 
 /// Tenant represents a logical isolation boundary in the system
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -85,11 +89,24 @@ pub struct TenantManager {
     // Track temporary quota violations with expiration timestamps
     container_quota_violations: Arc<RwLock<HashMap<String, i64>>>, // tenant_id -> expiration timestamp
     service_quota_violations: Arc<RwLock<HashMap<String, i64>>>, // tenant_id -> expiration timestamp
+    // Monitoring manager for external monitoring systems
+    monitoring_manager: Option<Arc<MonitoringManager>>,
+    // Threshold manager for dynamic threshold adjustment
+    threshold_manager: Option<Arc<ThresholdManager>>,
 }
 
 impl TenantManager {
     /// Create a new TenantManager
     pub fn new(rbac_manager: Arc<RbacManager>) -> Self {
+        // Initialize logging
+        logging::init_logging();
+        
+        // Create monitoring manager
+        let monitoring_manager = Some(Arc::new(create_default_monitoring()));
+        
+        // Create threshold manager
+        let threshold_manager = Some(Arc::new(ThresholdManager::new()));
+        
         let manager = Self {
             tenants: Arc::new(RwLock::new(HashMap::new())),
             rbac_manager,
@@ -103,6 +120,8 @@ impl TenantManager {
             service_quota_grace_period: 3600, // Default 1 hour grace period
             container_quota_violations: Arc::new(RwLock::new(HashMap::new())),
             service_quota_violations: Arc::new(RwLock::new(HashMap::new())),
+            monitoring_manager,
+            threshold_manager,
         };
         
         // Initialize with default tenant
@@ -110,7 +129,7 @@ impl TenantManager {
             let manager = manager.clone();
             async move {
                 if let Err(e) = manager.initialize_default_tenant().await {
-                    eprintln!("Failed to initialize default tenant: {}", e);
+                    error!("Failed to initialize default tenant: {}", e);
                 }
             }
         });
@@ -606,8 +625,12 @@ impl TenantManager {
         // Check if tenant exists
         let tenants = self.tenants.read().await;
         if !tenants.contains_key(tenant_id) {
+            error!("Tenant not found: {}", tenant_id);
             anyhow::bail!("Tenant not found");
         }
+        
+        // Get tenant for quota limits
+        let tenant = tenants.get(tenant_id).unwrap();
         
         // Check cache first
         {
@@ -616,6 +639,27 @@ impl TenantManager {
                 let current_time = chrono::Utc::now().timestamp();
                 // If cache is still valid, return cached value
                 if current_time - timestamp < self.cache_ttl {
+                    let age = current_time - timestamp;
+                    logging::log_cache_hit(tenant_id, age);
+                    
+                    // Check thresholds if available
+                    if let Some(threshold_manager) = &self.threshold_manager {
+                        let resource_limits = ResourceLimits {
+                            cpu_limit: tenant.resource_quotas.cpu_limit,
+                            memory_limit: tenant.resource_quotas.memory_limit,
+                            storage_limit: tenant.resource_quotas.storage_limit,
+                            max_containers: tenant.resource_quotas.max_containers,
+                            max_services: tenant.resource_quotas.max_services,
+                        };
+                        
+                        let alerts = threshold_manager.check_thresholds(tenant_id, usage, &resource_limits).await;
+                        
+                        // Process alerts if needed
+                        if !alerts.is_empty() {
+                            debug!("Found {} threshold alerts for tenant {}", alerts.len(), tenant_id);
+                        }
+                    }
+                    
                     return Ok(usage.clone());
                 }
             }
@@ -623,6 +667,7 @@ impl TenantManager {
         
         // If no container runtime is available, return zeros
         if self.container_runtime.is_none() {
+            warn!("No container runtime available for tenant {}", tenant_id);
             return Ok(ResourceUsage {
                 cpu_usage: 0,
                 memory_usage: 0,
@@ -637,7 +682,10 @@ impl TenantManager {
         // Get all containers
         let containers = match container_runtime.list_containers().await {
             Ok(containers) => containers,
-            Err(_) => {
+            Err(e) => {
+                logging::log_container_runtime_error(tenant_id, &e.to_string());
+                error!("Failed to list containers for tenant {}: {}", tenant_id, e);
+                
                 // If we can't get containers, return zeros
                 return Ok(ResourceUsage {
                     cpu_usage: 0,
@@ -651,7 +699,6 @@ impl TenantManager {
         
         // Filter containers by tenant ID
         // We'll use the tenant's namespaces to identify containers belonging to this tenant
-        let tenant = tenants.get(tenant_id).unwrap();
         let tenant_namespaces: HashSet<String> = tenant.namespaces.iter().cloned().collect();
         
         let mut cpu_usage: u32 = 0;
@@ -670,6 +717,7 @@ impl TenantManager {
             
             if belongs_to_tenant {
                 container_count += 1;
+                debug!("Found container {} belonging to tenant {}", container.name, tenant_id);
                 
                 // Extract service name from container (assuming format: service-name-replica-id)
                 if let Some(service_name) = container.name.split('-').next() {
@@ -677,13 +725,21 @@ impl TenantManager {
                 }
                 
                 // Get container metrics
-                if let Ok(stats) = container_runtime.get_container_metrics(&container.id).await {
-                    cpu_usage = cpu_usage.saturating_add(stats.cpu_usage as u32);
-                    memory_usage = memory_usage.saturating_add(stats.memory_usage);
-                    
-                    // For storage, we'll use the sum of volumes attached to the container
-                    for volume in &container.volumes {
-                        storage_usage = storage_usage.saturating_add(volume.size);
+                match container_runtime.get_container_metrics(&container.id).await {
+                    Ok(stats) => {
+                        cpu_usage = cpu_usage.saturating_add(stats.cpu_usage as u32);
+                        memory_usage = memory_usage.saturating_add(stats.memory_usage);
+                        
+                        // For storage, we'll use the sum of volumes attached to the container
+                        for volume in &container.volumes {
+                            storage_usage = storage_usage.saturating_add(volume.size);
+                        }
+                        
+                        trace!("Container {} metrics - CPU: {}%, Memory: {} bytes",
+                            container.name, stats.cpu_usage, stats.memory_usage);
+                    },
+                    Err(e) => {
+                        warn!("Failed to get metrics for container {}: {}", container.id, e);
                     }
                 }
             }
@@ -698,10 +754,57 @@ impl TenantManager {
             service_count: services.len() as u32,
         };
         
+        // Log the resource usage
+        logging::log_resource_usage(
+            tenant_id,
+            usage.cpu_usage,
+            usage.memory_usage,
+            usage.storage_usage,
+            usage.container_count,
+            usage.service_count
+        );
+        
         // Update cache
         {
             let mut cache = self.resource_usage_cache.write().await;
             cache.insert(tenant_id.to_string(), (usage.clone(), chrono::Utc::now().timestamp()));
+            logging::log_cache_update(tenant_id);
+        }
+        
+        // Send metrics to external monitoring systems if available
+        if let Some(monitoring_manager) = &self.monitoring_manager {
+            if let Err(e) = monitoring_manager.send_tenant_metrics(tenant_id, &usage).await {
+                warn!("Failed to send metrics to external monitoring systems: {}", e);
+            }
+        }
+        
+        // Record usage for threshold adjustment if available
+        if let Some(threshold_manager) = &self.threshold_manager {
+            threshold_manager.record_usage(tenant_id, &usage).await;
+            
+            // Periodically adjust thresholds (every 10 calls)
+            let current_time = chrono::Utc::now().timestamp();
+            if current_time % 10 == 0 {
+                if let Err(e) = threshold_manager.adjust_thresholds(tenant_id).await {
+                    warn!("Failed to adjust thresholds for tenant {}: {}", tenant_id, e);
+                }
+            }
+            
+            // Check thresholds
+            let resource_limits = ResourceLimits {
+                cpu_limit: tenant.resource_quotas.cpu_limit,
+                memory_limit: tenant.resource_quotas.memory_limit,
+                storage_limit: tenant.resource_quotas.storage_limit,
+                max_containers: tenant.resource_quotas.max_containers,
+                max_services: tenant.resource_quotas.max_services,
+            };
+            
+            let alerts = threshold_manager.check_thresholds(tenant_id, &usage, &resource_limits).await;
+            
+            // Process alerts if needed
+            if !alerts.is_empty() {
+                debug!("Found {} threshold alerts for tenant {}", alerts.len(), tenant_id);
+            }
         }
         
         Ok(usage)
@@ -712,6 +815,7 @@ impl TenantManager {
         // Verify tenant exists
         let tenants = self.tenants.read().await;
         if !tenants.contains_key(tenant_id) {
+            error!("Tenant not found when registering container: {}", tenant_id);
             return Err(anyhow::anyhow!("Tenant not found"));
         }
         drop(tenants);
@@ -720,10 +824,13 @@ impl TenantManager {
         let mut containers = self.tenant_containers.write().await;
         let tenant_containers = containers.entry(tenant_id.to_string()).or_insert_with(HashSet::new);
         tenant_containers.insert(container_id.to_string());
+        
+        info!("Registered container {} with tenant {}", container_id, tenant_id);
 
         // Invalidate resource usage cache for this tenant
         let mut cache = self.resource_usage_cache.write().await;
         cache.remove(tenant_id);
+        debug!("Invalidated resource usage cache for tenant {}", tenant_id);
 
         Ok(())
     }
@@ -733,6 +840,7 @@ impl TenantManager {
         // Verify tenant exists
         let tenants = self.tenants.read().await;
         if !tenants.contains_key(tenant_id) {
+            error!("Tenant not found when unregistering container: {}", tenant_id);
             return Err(anyhow::anyhow!("Tenant not found"));
         }
         drop(tenants);
@@ -741,11 +849,15 @@ impl TenantManager {
         let mut containers = self.tenant_containers.write().await;
         if let Some(tenant_containers) = containers.get_mut(tenant_id) {
             tenant_containers.remove(container_id);
+            info!("Unregistered container {} from tenant {}", container_id, tenant_id);
+        } else {
+            warn!("Container {} not found in tenant {}", container_id, tenant_id);
         }
 
         // Invalidate resource usage cache for this tenant
         let mut cache = self.resource_usage_cache.write().await;
         cache.remove(tenant_id);
+        debug!("Invalidated resource usage cache for tenant {}", tenant_id);
 
         Ok(())
     }
@@ -755,6 +867,7 @@ impl TenantManager {
         // Verify tenant exists
         let tenants = self.tenants.read().await;
         if !tenants.contains_key(tenant_id) {
+            error!("Tenant not found when registering service: {}", tenant_id);
             return Err(anyhow::anyhow!("Tenant not found"));
         }
         drop(tenants);
@@ -763,10 +876,13 @@ impl TenantManager {
         let mut services = self.tenant_services.write().await;
         let tenant_services = services.entry(tenant_id.to_string()).or_insert_with(HashSet::new);
         tenant_services.insert(service_name.to_string());
+        
+        info!("Registered service {} with tenant {}", service_name, tenant_id);
 
         // Invalidate resource usage cache for this tenant
         let mut cache = self.resource_usage_cache.write().await;
         cache.remove(tenant_id);
+        debug!("Invalidated resource usage cache for tenant {}", tenant_id);
 
         Ok(())
     }
@@ -776,6 +892,7 @@ impl TenantManager {
         // Verify tenant exists
         let tenants = self.tenants.read().await;
         if !tenants.contains_key(tenant_id) {
+            error!("Tenant not found when unregistering service: {}", tenant_id);
             return Err(anyhow::anyhow!("Tenant not found"));
         }
         drop(tenants);
@@ -784,11 +901,15 @@ impl TenantManager {
         let mut services = self.tenant_services.write().await;
         if let Some(tenant_services) = services.get_mut(tenant_id) {
             tenant_services.remove(service_name);
+            info!("Unregistered service {} from tenant {}", service_name, tenant_id);
+        } else {
+            warn!("Service {} not found in tenant {}", service_name, tenant_id);
         }
 
         // Invalidate resource usage cache for this tenant
         let mut cache = self.resource_usage_cache.write().await;
         cache.remove(tenant_id);
+        debug!("Invalidated resource usage cache for tenant {}", tenant_id);
 
         Ok(())
     }
@@ -915,6 +1036,17 @@ impl TenantManager {
             // Calculate percentage used
             let percent_used = (container_count as f64 / max_containers as f64) * 100.0;
             
+            // Log if approaching limit
+            if percent_used >= threshold_percent as f64 {
+                logging::log_approaching_quota(
+                    tenant_id,
+                    "container",
+                    container_count as u64,
+                    max_containers as u64,
+                    percent_used
+                );
+            }
+            
             return Ok(percent_used >= threshold_percent as f64);
         }
         
@@ -936,6 +1068,17 @@ impl TenantManager {
             // Calculate percentage used
             let percent_used = (service_count as f64 / max_services as f64) * 100.0;
             
+            // Log if approaching limit
+            if percent_used >= threshold_percent as f64 {
+                logging::log_approaching_quota(
+                    tenant_id,
+                    "service",
+                    service_count as u64,
+                    max_services as u64,
+                    percent_used
+                );
+            }
+            
             return Ok(percent_used >= threshold_percent as f64);
         }
         
@@ -955,7 +1098,10 @@ impl TenantManager {
             
             if approaching_limit {
                 // Log warning
-                eprintln!("WARNING: Tenant {} is approaching container quota limit", tenant_id);
+                warn!("Tenant {} is approaching container quota limit", tenant_id);
+            } else {
+                // If not approaching limit but still can't create, it means quota is exceeded
+                error!("Tenant {} has exceeded container quota limit", tenant_id);
             }
         }
         
@@ -974,7 +1120,10 @@ impl TenantManager {
             
             if approaching_limit {
                 // Log warning
-                eprintln!("WARNING: Tenant {} is approaching service quota limit", tenant_id);
+                warn!("Tenant {} is approaching service quota limit", tenant_id);
+            } else {
+                // If not approaching limit but still can't create, it means quota is exceeded
+                error!("Tenant {} has exceeded service quota limit", tenant_id);
             }
         }
         
