@@ -1,20 +1,23 @@
-{% extends "base.html" %} {% block title %}Scale Application{% endblock %} {%
-block content %}
-<h1>Scale Application: {{ app_name }}</h1>
+{{ template "base.html" . }}
+
+{{ define "title" }}Scale Application{{ end }}
+
+{{ define "content" }}
+<h1>Scale Application: {{ .app_name }}</h1>
 
 <div class="card">
-    {% if service %}
-    <p>Current replicas: {{ service.current_replicas }}</p>
-    <p>Desired replicas: {{ service.desired_replicas }}</p>
+    {{ if .service }}
+    <p>Current replicas: {{ .service.CurrentReplicas }}</p>
+    <p>Desired replicas: {{ .service.DesiredReplicas }}</p>
 
-    <form method="post" action="/scale/{{ app_name }}">
+    <form method="post" action="/scale/{{ .app_name }}">
         <div class="form-group">
             <label for="replicas">Number of replicas</label>
             <input
                 type="number"
                 id="replicas"
                 name="replicas"
-                value="{{ service.current_replicas }}"
+                value="{{ .service.CurrentReplicas }}"
                 min="1"
                 required
             />
@@ -23,9 +26,9 @@ block content %}
         <button type="submit" class="btn btn-success">Apply Scale</button>
         <a href="/applications" class="btn">Cancel</a>
     </form>
-    {% else %}
+    {{ else }}
     <p>Service not found.</p>
     <a href="/applications" class="btn">Back to Applications</a>
-    {% endif %}
+    {{ end }}
 </div>
-{% endblock %}
+{{ end }}

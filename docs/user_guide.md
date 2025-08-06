@@ -24,6 +24,7 @@ Before using Hivemind, ensure you have:
 - Hivemind installed (see [Installation Guide](installation_guide.md))
 - Docker images available in a registry (Docker Hub, ECR, etc.)
 - Basic understanding of containers and microservices
+- Go 1.18 or later (if building from source)
 
 ### Checking Hivemind Status
 
@@ -37,11 +38,30 @@ This will show the status of the Hivemind daemon, nodes, and services.
 
 ### Accessing the Web Dashboard
 
-Hivemind provides a web dashboard for easy management:
+Hivemind provides a fully functional web dashboard for easy management:
 
-1. Open a web browser
-2. Navigate to `http://<your-server>:3000`
-3. You should see the Hivemind dashboard
+1. Start the Hivemind server:
+   ```bash
+   go run cmd/hivemind/main.go --runtime docker
+   ```
+
+2. Open a web browser and navigate to:
+   ```
+   http://localhost:4483
+   ```
+
+3. You will see the Hivemind dashboard with full navigation functionality
+
+The web interface includes all major management features:
+- **Dashboard**: Cluster overview and system status
+- **Applications**: Application deployment and management
+- **Containers**: Container monitoring and control
+- **Nodes**: Node health and resource monitoring
+- **Services**: Service discovery and load balancing
+- **Volumes**: Persistent storage management
+- **Health**: System health monitoring and diagnostics
+
+All pages are fully functional with proper template rendering and navigation.
 
 ## Deploying Applications
 
@@ -88,9 +108,10 @@ hivemind app deploy --image mysql:8 --name mysql-db --volume mysql-data:/var/lib
 
 The web UI provides a user-friendly way to deploy applications:
 
-1. Navigate to `http://<your-server>:3000`
-2. Click on "Deploy" in the navigation menu
-3. Fill in the deployment form:
+1. Navigate to `http://localhost:4483`
+2. Click on "Applications" in the navigation menu
+3. Click "Deploy New Application" or use the deployment form
+4. Fill in the deployment form:
    - Image: The container image to deploy
    - Name: A name for your application
    - Service Domain (optional): A domain name for service discovery
@@ -98,14 +119,22 @@ The web UI provides a user-friendly way to deploy applications:
    - Resource Limits: CPU and memory limits
    - Environment Variables: Key-value pairs for configuration
    - Volumes: Storage volumes to mount
-4. Click "Deploy" to start the deployment
+5. Click "Deploy" to start the deployment
+
+The web interface now includes:
+- **Real-time Updates**: Live status updates for deployments
+- **Interactive Forms**: User-friendly forms for all operations
+- **Navigation**: Consistent navigation across all pages
+- **Error Handling**: Proper error messages and validation
+- **Template Rendering**: All pages render correctly without template errors
 
 ### Using the REST API
 
-For automated deployments, you can use the REST API:
+For automated deployments, you can use the REST API or the Go client library:
 
 ```bash
-curl -X POST http://<your-server>:3000/api/deploy \
+# Using curl with the REST API
+curl -X POST http://<your-server>:4483/api/deploy \
   -H "Content-Type: application/json" \
   -d '{
     "image": "nginx:latest",
@@ -124,6 +153,57 @@ curl -X POST http://<your-server>:3000/api/deploy \
       {"name": "data-volume", "mountPath": "/data"}
     ]
   }'
+```
+
+```go
+// Using the Go client library
+package main
+
+import (
+    "context"
+    "log"
+    
+    "github.com/ao/hivemind/pkg/client"
+    "github.com/ao/hivemind/pkg/api/types"
+)
+
+func main() {
+    // Create a new client
+    c, err := client.NewClient("http://localhost:4483")
+    if err != nil {
+        log.Fatalf("Failed to create client: %v", err)
+    }
+    
+    // Define deployment
+    deployment := &types.Deployment{
+        Image:    "nginx:latest",
+        Name:     "web-server",
+        Service:  "web.local",
+        Replicas: 2,
+        Resources: types.Resources{
+            CPU:    0.5,
+            Memory: "256M",
+        },
+        Env: map[string]string{
+            "KEY1": "value1",
+            "KEY2": "value2",
+        },
+        Volumes: []types.Volume{
+            {
+                Name:      "data-volume",
+                MountPath: "/data",
+            },
+        },
+    }
+    
+    // Deploy the application
+    result, err := c.Deploy(context.Background(), deployment)
+    if err != nil {
+        log.Fatalf("Deployment failed: %v", err)
+    }
+    
+    log.Printf("Deployment successful: %s", result.Message)
+}
 ```
 
 ## Managing Applications
@@ -349,7 +429,7 @@ Hivemind performs health checks on containers to ensure they're functioning prop
 
 ```bash
 hivemind app deploy --image myapp:latest --name myapp \
-  --health-cmd "curl -f http://localhost:8080/health" \
+  --health-cmd "curl -f http://localhost:4483/health" \
   --health-interval 30s \
   --health-retries 3
 ```
@@ -397,6 +477,35 @@ hivemind app deploy --image postgres:13 --name postgres \
   --secret db-password:POSTGRES_PASSWORD
 ```
 
+You can also manage secrets programmatically using the Go client:
+
+```go
+package main
+
+import (
+    "context"
+    "log"
+    
+    "github.com/ao/hivemind/pkg/client"
+)
+
+func main() {
+    // Create a new client
+    c, err := client.NewClient("http://localhost:4483")
+    if err != nil {
+        log.Fatalf("Failed to create client: %v", err)
+    }
+    
+    // Create a secret
+    err = c.CreateSecret(context.Background(), "db-password", "my-secure-password")
+    if err != nil {
+        log.Fatalf("Failed to create secret: %v", err)
+    }
+    
+    log.Println("Secret created successfully")
+}
+```
+
 ### Role-Based Access Control (RBAC)
 
 Hivemind includes a comprehensive RBAC system:
@@ -411,11 +520,24 @@ hivemind security assign-role --user john --role developer
 
 ## Web Dashboard
 
-The Hivemind web dashboard provides a user-friendly interface for managing your cluster.
+The Hivemind web dashboard provides a fully functional, user-friendly interface for managing your cluster. All template rendering issues have been resolved, and navigation works correctly across all pages.
 
 ### Dashboard Overview
 
 The dashboard home page shows:
+- **Cluster Status**: Overall health and node count
+- **Resource Usage**: CPU, memory, and storage utilization
+- **Active Applications**: Running applications and their status
+- **Recent Activity**: Latest deployments and system events
+- **Quick Actions**: Common management tasks
+
+### Navigation Features
+
+The web interface includes consistent navigation with:
+- **Responsive Design**: Works on desktop and mobile devices
+- **Real-time Updates**: Live data refresh for monitoring
+- **Error Handling**: Proper error messages and recovery
+- **Template Consistency**: All pages use consistent base templates
 - Cluster status
 - Node resources
 - Running containers
@@ -497,13 +619,50 @@ hivemind app autoscale --name web \
   --cpu-percent 80
 ```
 
+Using the Go client:
+
+```go
+package main
+
+import (
+    "context"
+    "log"
+    
+    "github.com/ao/hivemind/pkg/client"
+    "github.com/ao/hivemind/pkg/api/types"
+)
+
+func main() {
+    // Create a new client
+    c, err := client.NewClient("http://localhost:4483")
+    if err != nil {
+        log.Fatalf("Failed to create client: %v", err)
+    }
+    
+    // Configure auto-scaling
+    autoscale := &types.AutoscaleConfig{
+        AppName:     "web",
+        MinReplicas: 2,
+        MaxReplicas: 10,
+        CPUPercent:  80,
+    }
+    
+    err = c.ConfigureAutoscale(context.Background(), autoscale)
+    if err != nil {
+        log.Fatalf("Failed to configure auto-scaling: %v", err)
+    }
+    
+    log.Println("Auto-scaling configured successfully")
+}
+```
+
 ### Custom Health Checks
 
 Configure custom health checks:
 
 ```bash
 hivemind app deploy --image myapp:latest --name myapp \
-  --health-cmd "curl -f http://localhost:8080/health" \
+  --health-cmd "curl -f http://localhost:4483/health" \
   --health-interval 30s \
   --health-timeout 5s \
   --health-retries 3 \
@@ -527,7 +686,7 @@ Map container ports to host ports:
 
 ```bash
 hivemind app deploy --image nginx:latest --name web \
-  --port 80:8080  # Maps container port 80 to host port 8080
+  --port 80:4483  # Maps container port 80 to host port 8080
 ```
 
 ### Command and Arguments
@@ -603,7 +762,7 @@ jobs:
         tags: myapp:latest
     - name: Deploy to Hivemind
       run: |
-        curl -X POST http://hivemind-server:3000/api/deploy \
+        curl -X POST http://hivemind-server:4483/api/deploy \
           -H "Content-Type: application/json" \
           -d '{
             "image": "myapp:latest",

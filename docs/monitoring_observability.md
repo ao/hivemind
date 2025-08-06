@@ -293,7 +293,7 @@ hivemind profile network --container <CONTAINER_ID> --duration 30s --output netw
 Profiles can be analyzed using standard tools like `pprof`:
 
 ```bash
-go tool pprof -http=:8080 cpu.prof
+go tool pprof -http=:4483 cpu.prof
 ```
 
 ## API Reference
@@ -357,7 +357,7 @@ Here's an example of setting up a complete observability stack with Hivemind:
 
 5. **Deploy Grafana**:
    ```bash
-   hivemind app deploy --image grafana/grafana:8.2.2 --name grafana --volume grafana-data:/var/lib/grafana --port 3000:3000
+   hivemind app deploy --image grafana/grafana:8.2.2 --name grafana --volume grafana-data:/var/lib/grafana --port 3000:4483
    ```
 
 6. **Deploy Jaeger**:

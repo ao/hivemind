@@ -1,5 +1,8 @@
-{% extends "base.html" %}
-{% block content %}
+{{ template "base.html" . }}
+
+{{ define "title" }}Tenants{{ end }}
+
+{{ define "content" }}
 <h1>Tenant Management</h1>
 
 <div class="card">
@@ -65,20 +68,20 @@
             </tr>
         </thead>
         <tbody>
-            {% for tenant in tenants %}
+            {{ range .tenants }}
             <tr>
-                <td>{{ tenant.id }}</td>
-                <td>{{ tenant.name }}</td>
-                <td>{{ tenant.isolation_level }}</td>
-                <td>{{ tenant.owner_id }}</td>
-                <td>{{ tenant.status }}</td>
+                <td>{{ .ID }}</td>
+                <td>{{ .Name }}</td>
+                <td>{{ .IsolationLevel }}</td>
+                <td>{{ .OwnerID }}</td>
+                <td>{{ .Status }}</td>
                 <td>
-                    <button class="btn" onclick="viewTenant('{{ tenant.id }}')">View</button>
-                    <button class="btn" onclick="editTenant('{{ tenant.id }}')">Edit</button>
-                    <button class="btn btn-danger" onclick="deleteTenant('{{ tenant.id }}')">Delete</button>
+                    <button class="btn" onclick="viewTenant('{{ .ID }}')">View</button>
+                    <button class="btn" onclick="editTenant('{{ .ID }}')">Edit</button>
+                    <button class="btn btn-danger" onclick="deleteTenant('{{ .ID }}')">Delete</button>
                 </td>
             </tr>
-            {% endfor %}
+            {{ end }}
         </tbody>
     </table>
 </div>
@@ -398,4 +401,4 @@
         }
     });
 </script>
-{% endblock %}
+{{ end }}

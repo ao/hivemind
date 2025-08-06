@@ -1,24 +1,27 @@
-{% extends "base.html" %} {% block title %}Nodes{% endblock %} {% block content
-%}
+{{ template "base-nodes.html" . }}
+
+{{ define "nodes-title" }}Nodes{{ end }}
+
+{{ define "nodes-content" }}
 <h1>Nodes</h1>
 
-{% for node in nodes %}
+{{ range .nodes }}
 <div class="card">
-    <h2>{{ node.id }}</h2>
+    <h2>{{ .ID }}</h2>
     <div style="display: flex; flex-wrap: wrap">
         <div style="flex: 1; min-width: 200px; margin-right: 20px">
             <h3>Address</h3>
-            <p>{{ node.address }}</p>
+            <p>{{ .Address }}</p>
 
             <h3>Resources</h3>
-            <p>CPU Available: {{ node.cpu_available }}%</p>
-            <p>Memory Available: {{ node.memory_available / 1048576 }} MB</p>
-            <p>Containers Running: {{ node.containers_running }}</p>
+            <p>CPU Available: {{ .CPUAvailable }}%</p>
+            <p>Memory Available: {{ div .MemoryAvailable 1048576 }} MB</p>
+            <p>Containers Running: {{ .ContainersRunning }}</p>
         </div>
 
         <div style="flex: 2; min-width: 300px">
-            <h3>Containers ({{ node.containers|length }})</h3>
-            {% if node.containers|length > 0 %}
+            <h3>Containers ({{ len .Containers }})</h3>
+            {{ if .Containers }}
             <table>
                 <thead>
                     <tr>
@@ -28,21 +31,22 @@
                     </tr>
                 </thead>
                 <tbody>
-                    {% for container in node.containers %}
+                    {{ range .Containers }}
                     <tr>
-                        <td>{{ container.name }}</td>
-                        <td>{{ container.image }}</td>
-                        <td class="status-{{ container.status | lower }}">
-                            {{ container.status }}
+                        <td>{{ .Name }}</td>
+                        <td>{{ .Image }}</td>
+                        <td class="status-{{ lower .Status }}">
+                            {{ .Status }}
                         </td>
                     </tr>
-                    {% endfor %}
+                    {{ end }}
                 </tbody>
             </table>
-            {% else %}
+            {{ else }}
             <p>No containers on this node</p>
-            {% endif %}
+            {{ end }}
         </div>
     </div>
 </div>
-{% endfor %} {% endblock %}
+{{ end }}
+{{ end }}

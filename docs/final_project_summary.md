@@ -6,7 +6,7 @@ This document provides a comprehensive overview of the Hivemind container orches
 
 ### Introduction to Hivemind
 
-Hivemind is a modern, lightweight container orchestration system designed with simplicity and performance in mind. Built in Rust, it offers a Kubernetes alternative that's easier to set up, understand, and operate - perfect for smaller deployments, edge computing, or when you need a container platform without the complexity.
+Hivemind is a modern, lightweight container orchestration system designed with simplicity and performance in mind. Built in Go, it offers a Kubernetes alternative that's easier to set up, understand, and operate - perfect for smaller deployments, edge computing, or when you need a container platform without the complexity.
 
 The project was conceived to address the growing need for container orchestration solutions that don't require extensive resources or expertise to operate. While Kubernetes has become the industry standard for container orchestration, its complexity and resource requirements can be prohibitive for smaller organizations or simpler use cases. Hivemind fills this gap by providing essential container orchestration features with significantly lower complexity and resource overhead.
 
@@ -44,7 +44,7 @@ The Container Runtime component provides integration with containerd for reliabl
 - Container logs streaming
 
 **Implementation Details:**
-- The `ContainerdManager` in `src/containerd_manager.rs` provides the core implementation
+- The `ContainerdManager` in `internal/containerd/manager.go` provides the core implementation
 - A trait-based abstraction allows for different runtime backends
 - Direct integration with containerd via its API
 - Support for container resource limits (CPU, memory)
@@ -70,7 +70,7 @@ The Volume Management component provides persistent storage for stateful applica
 - Support for different volume types
 
 **Implementation Details:**
-- The `StorageManager` in `src/storage.rs` provides the core implementation
+- The `StorageManager` in `internal/storage/manager.go` provides the core implementation
 - Support for local volumes with configurable paths
 - Volume metadata stored in SQLite
 - Integration with containerd for volume mounting
@@ -95,7 +95,7 @@ The Service Discovery component enables containers and applications to find and 
 - Circuit breaker pattern implementation
 
 **Implementation Details:**
-- The `ServiceDiscovery` in `src/service_discovery.rs` provides the core implementation
+- The `ServiceDiscovery` in `internal/service/discovery.go` provides the core implementation
 - Built-in DNS server for resolving service names
 - Multiple load balancing strategies (round-robin, least connections)
 - Health check integration for routing only to healthy endpoints
@@ -121,7 +121,7 @@ The Container Networking component provides seamless communication between conta
 - Network health monitoring
 
 **Implementation Details:**
-- The `NetworkManager` in `src/network.rs` provides the core implementation
+- The `NetworkManager` in `internal/security/network_policy_manager.go` provides the core implementation
 - VXLAN tunnels for cross-node communication
 - IP address management (IPAM) for container IP allocation
 - Network policy enforcement using iptables
@@ -147,7 +147,7 @@ The Auto-healing & Monitoring component provides comprehensive health checking a
 - Health metrics collection and alerting
 
 **Implementation Details:**
-- The `HealthMonitor` in `src/health_monitor.rs` provides the core implementation
+- The `HealthMonitor` in `internal/app/manager.go` provides the core implementation
 - Configurable health checks (HTTP, TCP, command)
 - Health state tracking and history
 - Automatic remediation actions
@@ -173,8 +173,8 @@ The Cluster Management component provides node discovery, coordination, and mana
 - Cluster scaling and management
 
 **Implementation Details:**
-- The `NodeManager` in `src/node.rs` provides the core implementation
-- SWIM protocol implementation in `src/membership.rs`
+- The `NodeManager` in `internal/node/manager.go` provides the core implementation
+- SWIM protocol implementation in `internal/membership/manager.go`
 - Leader election using a deterministic algorithm
 - Distributed state management with versioning
 - Cluster scaling with automatic node integration
@@ -199,7 +199,7 @@ The Security Features component provides comprehensive security capabilities inc
 - Audit logging
 
 **Implementation Details:**
-- The `SecurityManager` in `src/security.rs` provides the core implementation
+- The `SecurityManager` in `internal/security/` provides the core implementation
 - Container scanning integration with external tools
 - Network policy enforcement using iptables
 - RBAC implementation with fine-grained permissions
@@ -225,7 +225,7 @@ The Advanced Deployment Strategies component provides sophisticated deployment m
 - Automated verification and rollback
 
 **Implementation Details:**
-- The `DeploymentManager` in `src/deployment.rs` provides the core implementation
+- The `DeploymentManager` in `internal/app/manager.go` provides the core implementation
 - Strategy pattern for different deployment types
 - Traffic control for gradual rollouts
 - Health verification during deployments
@@ -251,7 +251,7 @@ The Cloud Provider Integration component provides seamless integration with majo
 - Cost optimization features
 
 **Implementation Details:**
-- The `CloudManager` in `src/cloud.rs` provides the core implementation
+- The `CloudManager` would be implemented in `internal/cloud/manager.go`
 - Provider-specific adapters for each cloud platform
 - Unified API for multi-cloud operations
 - Instance lifecycle management
@@ -277,7 +277,7 @@ The CI/CD Integration component provides built-in support for CI/CD pipelines an
 - Release management
 
 **Implementation Details:**
-- The `CicdManager` in `src/cicd.rs` provides the core implementation
+- The `CicdManager` would be implemented in `internal/cicd/manager.go`
 - Provider-specific adapters for CI/CD platforms
 - Pipeline configuration templates
 - Webhook integration for event-driven workflows
@@ -303,7 +303,7 @@ The Helm Chart Support component provides integration with Helm for package mana
 - Hivemind-specific charts
 
 **Implementation Details:**
-- The `HelmManager` in `src/helm.rs` provides the core implementation
+- The `HelmManager` would be implemented in `internal/helm/manager.go`
 - Helm chart template generation
 - Repository management for chart distribution
 - Release tracking and management
@@ -329,7 +329,7 @@ The Observability component provides comprehensive monitoring, tracing, and logg
 - Alerting system
 
 **Implementation Details:**
-- The `ObservabilityManager` in `src/observability.rs` provides the core implementation
+- The `ObservabilityManager` would be implemented in `internal/observability/manager.go`
 - Metrics collection and exposition
 - Distributed tracing with context propagation
 - Structured logging with correlation IDs

@@ -1,17 +1,17 @@
 # Hivemind API Reference
 
-This document provides a comprehensive reference for the Hivemind REST API, including all available endpoints, request/response formats, and examples.
+This document provides a comprehensive reference for the Hivemind REST API, including all available endpoints, request/response formats, and examples. It also covers the Go client library for programmatic interaction with Hivemind.
 
 ## API Overview
 
-The Hivemind API is a RESTful API that allows you to interact with the Hivemind container orchestration platform programmatically. It provides endpoints for managing containers, services, volumes, nodes, and other resources.
+The Hivemind API is a RESTful API that allows you to interact with the Hivemind container orchestration platform programmatically. It provides endpoints for managing containers, services, volumes, nodes, and other resources. The API is implemented in Go and follows RESTful principles.
 
 ### Base URL
 
 All API endpoints are relative to the base URL:
 
 ```
-http://<your-server>:3000/api
+http://<your-server>:4483/api
 ```
 
 ### Authentication
@@ -33,6 +33,16 @@ Use HTTP Basic Authentication with your username and password:
 ```
 Authorization: Basic <base64-encoded-credentials>
 ```
+
+#### JWT Authentication
+
+Include a JWT token in the `Authorization` header:
+
+```
+Authorization: Bearer <your-jwt-token>
+```
+
+To obtain a JWT token, use the `/api/auth/login` endpoint.
 
 ### Response Format
 
@@ -294,6 +304,81 @@ Deploys a new application.
 }
 ```
 
+**Go Client Example:**
+
+```go
+package main
+
+import (
+    "context"
+    "fmt"
+    "log"
+    
+    "github.com/ao/hivemind/pkg/client"
+    "github.com/ao/hivemind/pkg/api/types"
+)
+
+func main() {
+    // Create a new client
+    c, err := client.NewClient("http://localhost:4483")
+    if err != nil {
+        log.Fatalf("Failed to create client: %v", err)
+    }
+    
+    // Define deployment
+    deployment := &types.Deployment{
+        Image:    "nginx:latest",
+        Name:     "web-server",
+        Service:  "web.local",
+        Replicas: 2,
+        Resources: types.Resources{
+            CPU:       0.5,
+            Memory:    "256M",
+            CPULimit:  1.0,
+            MemLimit:  "512M",
+        },
+        Env: map[string]string{
+            "ENV_VAR1": "value1",
+            "ENV_VAR2": "value2",
+        },
+        Volumes: []types.Volume{
+            {
+                Name:      "data-volume",
+                MountPath: "/data",
+            },
+        },
+        Ports: []types.Port{
+            {
+                ContainerPort: 80,
+                HostPort:      8080,
+                Protocol:      "tcp",
+            },
+        },
+        HealthCheck: &types.HealthCheck{
+            Command:     "curl -f http://localhost/",
+            Interval:    "30s",
+            Timeout:     "5s",
+            Retries:     3,
+            StartPeriod: "60s",
+        },
+        NodeAffinity:    "role=frontend",
+        ServiceAffinity: "app=api",
+        PriorityClass:   "high-priority",
+    }
+    
+    // Deploy the application
+    result, err := c.Deploy(context.Background(), deployment)
+    if err != nil {
+        log.Fatalf("Deployment failed: %v", err)
+    }
+    
+    fmt.Printf("App ID: %s\n", result.AppID)
+    fmt.Printf("Container IDs: %v\n", result.ContainerIDs)
+    fmt.Printf("Service ID: %s\n", result.ServiceID)
+    fmt.Printf("Message: %s\n", result.Message)
+}
+```
+
 #### List Applications
 
 ```
@@ -395,6 +480,38 @@ Scales an application to a specific number of replicas.
     "new_replicas": 5,
     "message": "Application scaled successfully"
   }
+}
+```
+
+**Go Client Example:**
+
+```go
+package main
+
+import (
+    "context"
+    "fmt"
+    "log"
+    
+    "github.com/ao/hivemind/pkg/client"
+)
+
+func main() {
+    // Create a new client
+    c, err := client.NewClient("http://localhost:4483")
+    if err != nil {
+        log.Fatalf("Failed to create client: %v", err)
+    }
+    
+    // Scale the application
+    result, err := c.Scale(context.Background(), "web-server", 5)
+    if err != nil {
+        log.Fatalf("Scaling failed: %v", err)
+    }
+    
+    fmt.Printf("Previous replicas: %d\n", result.PreviousReplicas)
+    fmt.Printf("New replicas: %d\n", result.NewReplicas)
+    fmt.Printf("Message: %s\n", result.Message)
 }
 ```
 
@@ -2199,13 +2316,13 @@ In addition to the REST API, Hivemind also provides a WebSocket API for real-tim
 ### Connect to WebSocket
 
 ```
-ws://<your-server>:3000/api/ws
+ws://<your-server>:4483/api/ws
 ```
 
 Include your API token in the query string:
 
 ```
-ws://<your-server>:3000/api/ws?token=<your-api-token>
+ws://<your-server>:4483/api/ws?token=<your-api-token>
 ```
 
 ### Event Types

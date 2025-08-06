@@ -24,7 +24,7 @@ The CLI looks for a configuration file in the following locations:
 Example configuration file:
 
 ```yaml
-server: http://localhost:3000
+server: http://localhost:4483
 data_dir: /var/lib/hivemind
 log_level: info
 ```
@@ -34,7 +34,7 @@ log_level: info
 You can also configure the CLI using environment variables:
 
 ```bash
-export HIVEMIND_SERVER=http://localhost:3000
+export HIVEMIND_SERVER=http://localhost:4483
 export HIVEMIND_DATA_DIR=/var/lib/hivemind
 export HIVEMIND_LOG_LEVEL=info
 ```
@@ -44,7 +44,7 @@ export HIVEMIND_LOG_LEVEL=info
 Global flags that apply to all commands:
 
 ```bash
-hivemind --server http://localhost:3000 --data-dir /var/lib/hivemind --log-level info
+hivemind --server http://localhost:4483 --data-dir /var/lib/hivemind --log-level info
 ```
 
 ### Authentication
@@ -113,7 +113,7 @@ hivemind status
 
 Output:
 ```
-Server: http://localhost:3000
+Server: http://localhost:4483
 Status: Running
 Version: 1.0.0
 Nodes: 3 (3 healthy, 0 unhealthy)
@@ -1049,7 +1049,7 @@ The following environment variables can be used to configure the CLI:
 
 | Variable | Description | Default |
 |----------|-------------|---------|
-| `HIVEMIND_SERVER` | Server URL | http://localhost:3000 |
+| `HIVEMIND_SERVER` | Server URL | http://localhost:4483 |
 | `HIVEMIND_DATA_DIR` | Data directory | /var/lib/hivemind |
 | `HIVEMIND_LOG_LEVEL` | Log level | info |
 | `HIVEMIND_TOKEN` | API token | |

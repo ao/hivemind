@@ -24,3 +24,5 @@ Cargo.lock
 
 /target
 /data
+.DS_Store
+bin/hivemind

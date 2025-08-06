@@ -20,7 +20,7 @@ This guide provides comprehensive instructions for installing and setting up the
 
 ### Software Prerequisites
 - **containerd**: 1.6.0 or newer
-- **Rust**: 1.60 or newer (for building from source)
+- **Go**: 1.18 or newer (for building from source)
 - **SQLite**: 3.35.0 or newer
 
 ## Installation Methods
@@ -102,10 +102,10 @@ Hivemind can be installed using several methods:
 
 ## Package Manager Installation
 
-### Using Cargo (Rust Package Manager)
+### Using Go Install
 
 ```bash
-cargo install hivemind
+go install github.com/ao/hivemind@latest
 ```
 
 ### Using Homebrew (macOS)
@@ -121,7 +121,7 @@ Building from source is recommended for development or if you need to customize 
 
 ### Prerequisites
 
-- Rust 1.60 or newer
+- Go 1.18 or newer
 - Git
 - Build essentials (gcc, make, etc.)
 
@@ -135,12 +135,12 @@ Building from source is recommended for development or if you need to customize 
 
 2. Build the project:
    ```bash
-   cargo build --release
+   make build
    ```
 
 3. Install the binary:
    ```bash
-   sudo cp target/release/hivemind /usr/local/bin/
+   sudo cp bin/hivemind /usr/local/bin/
    ```
 
 4. Verify the installation:
@@ -155,7 +155,7 @@ Hivemind can also be run as a Docker container:
 ```bash
 docker run -d --name hivemind \
   --restart always \
-  -p 3000:3000 \
+  -p 3000:4483 \
   -v /var/run/docker.sock:/var/run/docker.sock \
   -v hivemind-data:/var/lib/hivemind \
   aodev/hivemind:latest
@@ -183,7 +183,7 @@ docker run -d --name hivemind \
    RestartSec=5
    User=root
    Group=root
-   Environment=RUST_LOG=info
+   Environment=GO_LOG=info
 
    [Install]
    WantedBy=multi-user.target
@@ -203,31 +203,34 @@ docker run -d --name hivemind \
 
 ### Configuration
 
-Hivemind uses a configuration file located at `/etc/hivemind/config.toml` by default. You can create this file with custom settings:
+Hivemind uses a configuration file located at `/etc/hivemind/config.yaml` by default. You can create this file with custom settings:
 
 ```bash
 sudo mkdir -p /etc/hivemind
-sudo nano /etc/hivemind/config.toml
+sudo nano /etc/hivemind/config.yaml
 ```
 
 Example configuration:
-```toml
-[daemon]
-web_port = 3000
-data_dir = "/var/lib/hivemind"
-log_level = "info"
+```yaml
+# Daemon configuration
+daemon:
+  web_port: 3000
+  data_dir: "/var/lib/hivemind"
+  log_level: "info"
 
-[network]
-network_cidr = "10.244.0.0/16"
-node_subnet_size = 24
-vxlan_id = 42
-vxlan_port = 4789
+# Network configuration
+network:
+  network_cidr: "10.244.0.0/16"
+  node_subnet_size: 24
+  vxlan_id: 42
+  vxlan_port: 4789
 
-[security]
-enable_rbac = true
-enable_container_scanning = true
-enable_network_policies = true
-enable_secret_management = true
+# Security configuration
+security:
+  enable_rbac: true
+  enable_container_scanning: true
+  enable_network_policies: true
+  enable_secret_management: true
 ```
 
 ### Setting Up containerd
@@ -276,7 +279,7 @@ Hivemind requires containerd to be installed and configured:
 
 2. Join the cluster by specifying the first node's address:
    ```bash
-   hivemind join --host <first-node-ip>:3000
+   hivemind join --host <first-node-ip>:4483
    ```
 
 3. Verify the node has joined the cluster:
@@ -292,7 +295,7 @@ Hivemind requires containerd to be installed and configured:
    ```
 
 2. Access the web UI:
-   Open a web browser and navigate to `http://<node-ip>:3000`
+   Open a web browser and navigate to `http://<node-ip>:4483`
 
 3. Deploy a test application:
    ```bash
