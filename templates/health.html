@@ -1,20 +1,23 @@
-{% extends "base.html" %} {% block title %}Health{% endblock %} {% block content
-%}
+{{ template "base-health.html" . }}
+
+{{ define "health-title" }}Health{{ end }}
+
+{{ define "health-content" }}
 <h1>System Health</h1>
 
 <div class="card">
     <div style="display: flex; align-items: center">
         <div
             style="width: 50px; height: 50px; border-radius: 50%; margin-right: 20px;
-                  {% if node_health %}
+                  {{ if .node_health }}
                     background-color: #4CAF50;
-                  {% else %}
+                  {{ else }}
                     background-color: #F44336;
-                  {% endif %}"
+                  {{ end }}"
         ></div>
         <div>
             <h2>Node Health</h2>
-            <p>{% if node_health %}Healthy{% else %}Unhealthy{% endif %}</p>
+            <p>{{ if .node_health }}Healthy{{ else }}Unhealthy{{ end }}</p>
         </div>
     </div>
 </div>
@@ -30,27 +33,27 @@
             </tr>
         </thead>
         <tbody>
-            {% for container in containers %}
+            {{ range .containers }}
             <tr>
-                <td>{{ container.name }}</td>
-                <td class="status-{{ container.status | lower }}">
-                    {{ container.status }}
+                <td>{{ .Name }}</td>
+                <td class="status-{{ lower (containerStatus .Status) }}">
+                    {{ containerStatus .Status }}
                 </td>
                 <td>
-                    {% if container.status == "Running" %}
-                    <span style="color: #4caf50">●</span> Healthy {% else %}
-                    <span style="color: #f44336">●</span> Unhealthy {% endif %}
+                    {{ if eq (containerStatus .Status) "Running" }}
+                    <span style="color: #4caf50">●</span> Healthy {{ else }}
+                    <span style="color: #f44336">●</span> Unhealthy {{ end }}
                 </td>
             </tr>
-            {% endfor %}
+            {{ end }}
         </tbody>
     </table>
 </div>
 
 <div class="card">
     <h2>Service Health</h2>
-    {% for service_name, endpoints in service_endpoints %}
-    <h3>{{ service_name }}</h3>
+    {{ range $service_name, $endpoints := .service_endpoints }}
+    <h3>{{ $service_name }}</h3>
     <table>
         <thead>
             <tr>
@@ -59,16 +62,16 @@
             </tr>
         </thead>
         <tbody>
-            {% for endpoint in endpoints %}
+            {{ range $endpoints }}
             <tr>
-                <td>{{ endpoint.ip_address }}:{{ endpoint.port }}</td>
-                <td>{{ endpoint.health_status }}</td>
+                <td>{{ .IPAddress }}:{{ .Port }}</td>
+                <td>{{ .HealthStatus }}</td>
             </tr>
-            {% endfor %}
+            {{ end }}
         </tbody>
     </table>
-    {% else %}
+    {{ else }}
     <p>No services registered</p>
-    {% endfor %}
+    {{ end }}
 </div>
-{% endblock %}
+{{ end }}

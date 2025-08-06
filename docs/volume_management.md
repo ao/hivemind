@@ -36,7 +36,7 @@ Options:
 #### Using the API
 
 ```bash
-curl -X POST http://<your-server>:3000/api/volumes/create \
+curl -X POST http://<your-server>:4483/api/volumes/create \
   -H "Content-Type: application/json" \
   -d '{
     "name": "my-data-volume",
@@ -51,7 +51,7 @@ curl -X POST http://<your-server>:3000/api/volumes/create \
 
 #### Using the Web UI
 
-1. Navigate to `http://<your-server>:3000`
+1. Navigate to `http://<your-server>:4483`
 2. Go to the "Volumes" section
 3. Click "Create Volume"
 4. Fill in the form with the volume details
@@ -72,12 +72,12 @@ Options:
 #### Using the API
 
 ```bash
-curl -X GET http://<your-server>:3000/api/volumes
+curl -X GET http://<your-server>:4483/api/volumes
 ```
 
 #### Using the Web UI
 
-1. Navigate to `http://<your-server>:3000`
+1. Navigate to `http://<your-server>:4483`
 2. Go to the "Volumes" section
 
 ### Mounting Volumes to Containers
@@ -99,7 +99,7 @@ hivemind app deploy --image myapp:latest --name myapp \
 #### Using the API
 
 ```bash
-curl -X POST http://<your-server>:3000/api/deploy \
+curl -X POST http://<your-server>:4483/api/deploy \
   -H "Content-Type: application/json" \
   -d '{
     "image": "mysql:8",
@@ -112,7 +112,7 @@ curl -X POST http://<your-server>:3000/api/deploy \
 
 #### Using the Web UI
 
-1. Navigate to `http://<your-server>:3000`
+1. Navigate to `http://<your-server>:4483`
 2. Go to the "Deploy" section
 3. Fill in the deployment form
 4. In the "Volumes" section, add your volume mounts
@@ -132,7 +132,7 @@ Options:
 #### Using the API
 
 ```bash
-curl -X POST http://<your-server>:3000/api/volumes/delete \
+curl -X POST http://<your-server>:4483/api/volumes/delete \
   -H "Content-Type: application/json" \
   -d '{
     "name": "my-data-volume",
@@ -142,7 +142,7 @@ curl -X POST http://<your-server>:3000/api/volumes/delete \
 
 #### Using the Web UI
 
-1. Navigate to `http://<your-server>:3000`
+1. Navigate to `http://<your-server>:4483`
 2. Go to the "Volumes" section
 3. Find the volume you want to delete
 4. Click the "Delete" button

@@ -4,7 +4,7 @@ This document provides a comprehensive overview of the Hivemind container orches
 
 ## System Overview
 
-Hivemind is a lightweight container orchestration platform built in Rust, designed to provide Kubernetes-like features with significantly lower complexity and resource requirements. The system follows a modular architecture with clear separation of concerns between components.
+Hivemind is a lightweight container orchestration platform built in Go, designed to provide Kubernetes-like features with significantly lower complexity and resource requirements. The system follows a modular architecture with clear separation of concerns between components.
 
 ![Hivemind Architecture](./assets/logo1.png)
 
@@ -154,6 +154,7 @@ The Security Manager provides comprehensive security features:
 - **Network Policy Enforcement**: Enforces network security policies
 - **RBAC**: Manages role-based access control
 - **Secret Management**: Securely stores and distributes secrets
+- **Tenant Management**: Manages multi-tenancy and resource isolation
 
 Key interfaces:
 - `SecurityManager`: Main interface for security management
@@ -161,6 +162,7 @@ Key interfaces:
 - `NetworkPolicyEnforcer`: Enforces network policies
 - `RbacManager`: Manages RBAC
 - `SecretManager`: Manages secrets
+- `TenantManager`: Manages tenants and resource quotas
 
 ### CI/CD Manager
 
@@ -276,7 +278,8 @@ The Web UI provides a dashboard for monitoring and management:
 1. Container image is scanned for vulnerabilities before deployment
 2. Network policies are applied to control traffic between containers
 3. User authentication and authorization is performed via RBAC
-4. Secrets are securely stored and distributed to containers
+4. Secrets are securely stored, encrypted, and distributed to containers
+5. Tenant resource quotas are enforced during container deployment
 
 ## Component Interactions
 
@@ -318,13 +321,14 @@ The Security Manager works with the App Manager to ensure secure deployments:
 3. Security Manager checks compliance with security policies
 4. If compliant, App Manager proceeds with deployment
 5. Security Manager applies network policies to the container
+6. Tenant Manager checks resource quotas before deployment
 
 ## Scalability and Performance
 
 Hivemind is designed to be highly scalable and performant:
 
 - **Lightweight Components**: All components are designed to be lightweight and efficient
-- **Rust Implementation**: Built in Rust for memory safety and performance
+- **Go Implementation**: Built in Go for simplicity and performance
 - **Efficient Protocols**: Uses efficient protocols like SWIM for membership management
 - **Minimal Resource Usage**: Requires minimal resources compared to other orchestration platforms
 - **Network-Aware Scheduling**: Optimizes container placement for network performance
@@ -349,8 +353,10 @@ Hivemind includes comprehensive security features:
 
 - **Container Scanning**: Scans container images for vulnerabilities
 - **Network Policies**: Controls traffic flow between containers
-- **RBAC**: Controls access to resources
-- **Secret Management**: Securely stores and distributes secrets
+- **RBAC**: Controls access to resources based on role IDs or role names
+- **Secret Management**: Securely stores, encrypts, and distributes secrets
+- **Storage Encryption**: Encrypts persistent volumes for data protection
+- **Tenant Isolation**: Isolates resources between tenants
 - **Audit Logging**: Logs all security-related events
 
 ## Extensibility
@@ -370,3 +376,14 @@ Hivemind is designed to be extensible:
 ## Conclusion
 
 Hivemind's architecture provides a robust, scalable, and secure platform for container orchestration. The modular design allows for easy extension and customization, while the lightweight implementation ensures efficient resource usage. The combination of these features makes Hivemind an excellent choice for organizations looking for a simpler alternative to Kubernetes without sacrificing essential functionality.
+
+## Testing and Reliability
+
+Hivemind is designed with testability in mind:
+
+- **Mock Interfaces**: All components have mock implementations for testing
+- **Test Skip Flags**: Components that interact with external systems (like iptables) have flags to skip those operations in tests
+- **Flexible Context Handling**: Tests use flexible context matchers to avoid brittle tests
+- **Timing Considerations**: Tests account for asynchronous operations with appropriate wait times
+- **Resource Quota Testing**: Special test cases for tenant resource quota enforcement
+- **Integration Tests**: Comprehensive integration tests for component interactions

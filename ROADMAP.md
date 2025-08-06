@@ -4,7 +4,7 @@
 
 ### ✅ Completed Core Features
 - [x] Basic CLI framework with subcommands
-- [x] Web server foundation with Axum
+- [x] Web server foundation with Gin
 - [x] SQLite storage layer
 - [x] Container runtime trait abstraction
 - [x] Basic containerd integration framework

@@ -1,15 +1,23 @@
-{% extends "base.html" %} {% block title %}Services{% endblock %} {% block
-content %}
+{{ template "base-services.html" . }}
+
+{{ define "services-title" }}Services{{ end }}
+
+{{ define "services-content" }}
 <h1>Services</h1>
 
-{% for service_name, endpoints in service_endpoints %}
+{{ range $service_name, $endpoints := .service_endpoints }}
 <div class="card">
-    <h2>{{ service_name }}</h2>
+    <h2>{{ $service_name }}</h2>
 
     <p>
         <strong>Service URL:</strong>
-        {% if endpoints|length > 0 %} http://{{ endpoints[0].domain }} {% else
-        %} No domain configured {% endif %}
+        {{ if $endpoints }}
+            {{ with index $endpoints 0 }}
+                http://{{ .Domain }}
+            {{ end }}
+        {{ else }}
+            No domain configured
+        {{ end }}
     </p>
 
     <h3>Endpoints</h3>
@@ -23,19 +31,20 @@ content %}
             </tr>
         </thead>
         <tbody>
-            {% for endpoint in endpoints %}
+            {{ range $endpoints }}
             <tr>
-                <td>{{ endpoint.node_id }}</td>
-                <td>{{ endpoint.ip_address }}</td>
-                <td>{{ endpoint.port }}</td>
-                <td>{{ endpoint.health_status }}</td>
+                <td>{{ .NodeID }}</td>
+                <td>{{ .IPAddress }}</td>
+                <td>{{ .Port }}</td>
+                <td>{{ .HealthStatus }}</td>
             </tr>
-            {% endfor %}
+            {{ end }}
         </tbody>
     </table>
 </div>
-{% else %}
+{{ else }}
 <div class="card">
     <p>No services registered yet.</p>
 </div>
-{% endfor %} {% endblock %}
+{{ end }}
+{{ end }}

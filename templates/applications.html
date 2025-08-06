@@ -1,68 +1,73 @@
-{% extends "base.html" %} {% block title %}Applications{% endblock %} {% block
-content %}
+{{ template "base-applications.html" . }}
+
+{{ define "applications-title" }}Applications{{ end }}
+
+{{ define "applications-content" }}
 <h1>Applications</h1>
 
 <div class="card">
     <a href="/deploy" class="btn btn-success">Deploy New Application</a>
 </div>
 
-{% for service in services %}
-<div class="card">
-    <div
-        style="
-            display: flex;
-            justify-content: space-between;
-            align-items: center;
-        "
-    >
-        <h2>{{ service.name }}</h2>
-        <div>
-            <a href="/scale/{{ service.name }}" class="btn">Scale</a>
-            <form
-                method="post"
-                action="/restart/{{ service.name }}"
-                style="display: inline"
-            >
-                <button type="submit" class="btn btn-danger">Restart</button>
-            </form>
-        </div>
-    </div>
+{{ if .services }}
+  {{ range .services }}
+  <div class="card">
+      <div
+          style="
+              display: flex;
+              justify-content: space-between;
+              align-items: center;
+          "
+      >
+          <h2>{{ .Name }}</h2>
+          <div>
+              <a href="/scale/{{ .Name }}" class="btn">Scale</a>
+              <form
+                  method="post"
+                  action="/restart/{{ .Name }}"
+                  style="display: inline"
+              >
+                  <button type="submit" class="btn btn-danger">Restart</button>
+              </form>
+          </div>
+      </div>
 
-    <p><strong>Domain:</strong> {{ service.domain }}</p>
-    <p>
-        <strong>Replicas:</strong> {{ service.current_replicas }}/{{
-        service.desired_replicas }}
-    </p>
+      <p><strong>Domain:</strong> {{ .Domain }}</p>
+      <p>
+          <strong>Replicas:</strong> {{ .CurrentReplicas }}/{{ .DesiredReplicas }}
+      </p>
 
-    <h3>Containers</h3>
-    <table>
-        <thead>
-            <tr>
-                <th>ID</th>
-                <th>Name</th>
-                <th>Status</th>
-                <th>Node</th>
-            </tr>
-        </thead>
-        <tbody>
-            {% for container in service.containers %}
-            <tr>
-                <td>{{ container.id }}</td>
-                <td>{{ container.name }}</td>
-                <td class="status-{{ container.status | lower }}">
-                    {{ container.status }}
-                </td>
-                <td>{{ container.node_id }}</td>
-            </tr>
-            {% endfor %}
-        </tbody>
-    </table>
-</div>
-{% else %}
-<div class="card">
-    <p>
-        No applications deployed yet.
-        <a href="/deploy">Deploy your first application</a>.
-    </p>
-</div>
-{% endfor %} {% endblock %}
+      <h3>Containers</h3>
+      <table>
+          <thead>
+              <tr>
+                  <th>ID</th>
+                  <th>Name</th>
+                  <th>Status</th>
+                  <th>Node</th>
+              </tr>
+          </thead>
+          <tbody>
+              {{ range .Containers }}
+              <tr>
+                  <td>{{ .ID }}</td>
+                  <td>{{ .Name }}</td>
+                  <td class="status-{{ lower .Status }}">
+                      {{ .Status }}
+                  </td>
+                  <td>{{ .NodeID }}</td>
+              </tr>
+              {{ end }}
+          </tbody>
+      </table>
+  </div>
+  {{ end }}
+{{ else }}
+  <div class="card">
+      <p>
+          No applications deployed yet.
+          <a href="/deploy">Deploy your first application</a>.
+      </p>
+  </div>
+{{ end }}
+{{ end }}

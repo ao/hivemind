@@ -34,7 +34,7 @@ To add a new node to an existing cluster:
 2. Join the cluster by specifying an existing node's address:
 
 ```bash
-hivemind join --host <existing-node-ip>:3000
+hivemind join --host <existing-node-ip>:4483
 ```
 
 ### Listing Cluster Nodes
@@ -57,14 +57,15 @@ This shows information about all nodes, their roles, and health status.
 
 ### Cluster Configuration
 
-The cluster configuration is stored in `/etc/hivemind/config.toml` by default. You can modify this file to change cluster-wide settings:
+The cluster configuration is stored in `/etc/hivemind/config.yaml` by default. You can modify this file to change cluster-wide settings:
 
-```toml
-[cluster]
-name = "production-cluster"
-join_timeout = 60
-gossip_interval = 1
-failure_threshold = 3
+```yaml
+# Cluster configuration
+cluster:
+  name: "production-cluster"
+  join_timeout: 60
+  gossip_interval: 1
+  failure_threshold: 3
 ```
 
 After modifying the configuration, restart the Hivemind daemon:
@@ -209,6 +210,59 @@ To list all roles:
 hivemind security role ls
 ```
 
+You can also manage RBAC programmatically using the Go client:
+
+```go
+package main
+
+import (
+    "context"
+    "log"
+    
+    "github.com/ao/hivemind/pkg/client"
+    "github.com/ao/hivemind/pkg/api/types"
+)
+
+func main() {
+    // Create a new client
+    c, err := client.NewClient("http://localhost:4483")
+    if err != nil {
+        log.Fatalf("Failed to create client: %v", err)
+    }
+    
+    // Create a role
+    role := &types.Role{
+        Name:        "developer",
+        Description: "Developer role",
+    }
+    
+    err = c.CreateRole(context.Background(), role)
+    if err != nil {
+        log.Fatalf("Failed to create role: %v", err)
+    }
+    
+    // Add permissions to the role
+    permission := &types.Permission{
+        RoleName: "developer",
+        Resource: "container",
+        Actions:  []string{"create", "read", "update", "delete"},
+    }
+    
+    err = c.AddPermission(context.Background(), permission)
+    if err != nil {
+        log.Fatalf("Failed to add permission: %v", err)
+    }
+    
+    // Assign role to user
+    err = c.AssignRole(context.Background(), "developer", "john")
+    if err != nil {
+        log.Fatalf("Failed to assign role: %v", err)
+    }
+    
+    log.Println("RBAC setup completed successfully")
+}
+```
+
 ### Network Policies
 
 #### Creating Network Policies
@@ -350,6 +404,43 @@ To check the overall health of the system:
 hivemind health
 ```
 
+You can also monitor system health programmatically:
+
+```go
+package main
+
+import (
+    "context"
+    "fmt"
+    "log"
+    
+    "github.com/ao/hivemind/pkg/client"
+)
+
+func main() {
+    // Create a new client
+    c, err := client.NewClient("http://localhost:4483")
+    if err != nil {
+        log.Fatalf("Failed to create client: %v", err)
+    }
+    
+    // Get system health
+    health, err := c.GetSystemHealth(context.Background())
+    if err != nil {
+        log.Fatalf("Failed to get system health: %v", err)
+    }
+    
+    fmt.Printf("System Status: %s\n", health.Status)
+    fmt.Printf("Nodes: %d total, %d healthy\n", health.TotalNodes, health.HealthyNodes)
+    fmt.Printf("Containers: %d total, %d running\n", health.TotalContainers, health.RunningContainers)
+    
+    // Check component health
+    for _, component := range health.Components {
+        fmt.Printf("Component %s: %s\n", component.Name, component.Status)
+    }
+}
+```
+
 ### Container Monitoring
 
 To monitor a specific container:
@@ -398,6 +489,19 @@ Or using journalctl (if using systemd):
 
 ```bash
 journalctl -u hivemind
+```
+
+The Go implementation uses structured logging with different log levels:
+
+```bash
+# Set log level to debug
+hivemind admin logs --level debug
+
+# Filter logs by component
+hivemind admin logs --component scheduler
+
+# Output logs in JSON format
+hivemind admin logs --format json
 ```
 
 ### Alerts and Notifications
@@ -499,7 +603,7 @@ To upgrade Hivemind to the latest version:
 
 4. Replace the binary:
    ```bash
-   sudo mv hivemind /usr/local/bin/
+   sudo cp hivemind /usr/local/bin/
    ```
 
 5. Start the Hivemind service:
@@ -509,8 +613,25 @@ To upgrade Hivemind to the latest version:
 
 6. Verify the upgrade:
    ```bash
-   hivemind --version
+   hivemind version
    ```
+
+For Go developers who want to build from source:
+
+```bash
+# Clone or update the repository
+git clone https://github.com/ao/hivemind.git
+cd hivemind
+
+# Build the latest version
+make build
+
+# Install the binary
+sudo cp bin/hivemind /usr/local/bin/
+
+# Restart the service
+sudo systemctl restart hivemind
+```
 
 ### Rolling Upgrades
 
@@ -663,6 +784,43 @@ hivemind admin diagnostics
 ```
 
 This checks all components and reports any issues.
+
+You can also generate a diagnostic report programmatically:
+
+```go
+package main
+
+import (
+    "context"
+    "fmt"
+    "log"
+    "os"
+    
+    "github.com/ao/hivemind/pkg/client"
+)
+
+func main() {
+    // Create a new client
+    c, err := client.NewClient("http://localhost:4483")
+    if err != nil {
+        log.Fatalf("Failed to create client: %v", err)
+    }
+    
+    // Generate diagnostic report
+    report, err := c.GenerateDiagnostics(context.Background())
+    if err != nil {
+        log.Fatalf("Failed to generate diagnostics: %v", err)
+    }
+    
+    // Save report to file
+    err = os.WriteFile("hivemind-diagnostics.json", []byte(report), 0644)
+    if err != nil {
+        log.Fatalf("Failed to write report: %v", err)
+    }
+    
+    fmt.Println("Diagnostic report saved to hivemind-diagnostics.json")
+}
+```
 
 #### Network Diagnostics
 

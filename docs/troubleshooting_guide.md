@@ -51,11 +51,12 @@ This guide provides solutions for common issues you might encounter when using t
 
 3. **Check for permission issues:**
    ```bash
-   # Try installing with sudo
-   sudo cargo install hivemind
-   
-   # Or if using binary
+   # Try installing with sudo (for Go binary)
    sudo mv hivemind /usr/local/bin/
+   
+   # Or build from source
+   make build
+   sudo cp ./bin/hivemind /usr/local/bin/
    ```
 
 4. **Check disk space:**
@@ -149,7 +150,7 @@ This guide provides solutions for common issues you might encounter when using t
 5. **Reset node state and try again:**
    ```bash
    hivemind reset
-   hivemind join --host <existing-node-ip>:3000
+   hivemind join --host <existing-node-ip>:4483
    ```
 
 ### Node Shows as Unhealthy
@@ -215,7 +216,7 @@ This guide provides solutions for common issues you might encounter when using t
 
 2. **Check membership protocol logs:**
    ```bash
-   RUST_LOG=debug journalctl -u hivemind | grep membership
+   journalctl -u hivemind | grep membership
    ```
 
 3. **Force a cluster reconciliation:**
@@ -397,11 +398,15 @@ This guide provides solutions for common issues you might encounter when using t
 **Symptoms:**
 - Containers cannot communicate despite being on the same network
 - Some connections work while others don't
+- Network policy tests fail with "command not found" errors
+- Permission denied errors when applying network policies
 
 **Possible Causes:**
 - Restrictive network policies
 - Misconfigured policies
 - Policy enforcement issues
+- Missing iptables command
+- Insufficient permissions for iptables operations
 
 **Solutions:**
 
@@ -422,7 +427,27 @@ This guide provides solutions for common issues you might encounter when using t
 
 4. **Check network policy logs:**
    ```bash
-   RUST_LOG=debug journalctl -u hivemind | grep "network policy"
+   journalctl -u hivemind | grep "network policy"
+   ```
+
+5. **Verify iptables installation:**
+   ```bash
+   which iptables
+   ```
+
+6. **Check iptables permissions:**
+   ```bash
+   sudo iptables -L
+   ```
+
+7. **Run with iptables operations skipped (for testing):**
+   ```bash
+   hivemind --skip-iptables-operations
+   ```
+
+8. **Debug network policy controller:**
+   ```bash
+   hivemind security network-policy apply --policy-file <policy-file> --debug
    ```
 
 ### DNS Resolution Issues
@@ -493,6 +518,43 @@ This guide provides solutions for common issues you might encounter when using t
    ```bash
    RUST_LOG=debug hivemind volume create --name <volume-name>
    ```
+
+### Storage Encryption Issues
+
+**Symptoms:**
+- Encryption operations fail or time out
+- Encrypted volumes show incorrect status
+- Timing-related failures in encryption operations
+
+**Possible Causes:**
+- Encryption operations not completing in expected time
+- Race conditions in encryption status checks
+- Encryption key issues
+
+**Solutions:**
+
+1. **Check encryption status:**
+   ```bash
+   hivemind storage encryption-status --volume <volume-id>
+   ```
+
+2. **Verify encryption keys:**
+   ```bash
+   hivemind storage list-encryption-keys
+   ```
+
+3. **Increase operation timeout:**
+   ```bash
+   hivemind storage encrypt-volume --volume <volume-id> --timeout 60s
+   ```
+
+4. **Debug encryption operations:**
+   ```bash
+   RUST_LOG=debug hivemind storage encrypt-volume --volume <volume-id>
+   ```
+
+5. **Wait longer for encryption operations:**
+   For scripts or automation that check encryption status, ensure you wait at least 500ms after starting an encryption operation before checking its status.
 
 ### Volume Mount Issues
 
@@ -772,11 +834,14 @@ This guide provides solutions for common issues you might encounter when using t
 **Symptoms:**
 - Secrets not accessible in containers
 - Permission denied errors
+- Encrypted data returned instead of decrypted data
+- Secret data appears corrupted or unreadable
 
 **Possible Causes:**
 - Secret mounting issues
 - Permission problems
 - Configuration errors
+- Data not being decrypted properly
 
 **Solutions:**
 
@@ -798,6 +863,98 @@ This guide provides solutions for common issues you might encounter when using t
 4. **Try remounting the secret:**
    ```bash
    hivemind app update --name <app-name> --remount-secrets
+   ```
+
+5. **Verify data decryption:**
+   If you're getting encrypted data when retrieving secrets, ensure you're using the `GetSecret` method which automatically decrypts the data:
+   ```bash
+   # Check if the secret is properly decrypted
+   hivemind security get-secret --name <secret-name> --check-decryption
+   ```
+
+6. **Debug secret encryption/decryption:**
+   ```bash
+   RUST_LOG=debug hivemind security get-secret --name <secret-name>
+   ```
+
+## Tenant and Resource Management Issues
+
+### Tenant Resource Scheduling Issues
+
+**Symptoms:**
+- Resource quota exceeded errors when there should be sufficient resources
+- Nil pointer dereference errors in tenant resource scheduling
+- Applications fail to deploy with quota-related errors
+
+**Possible Causes:**
+- Tenant manager not properly connected to app manager
+- Incorrect resource usage calculation
+- Missing tenant-specific resource handling
+
+**Solutions:**
+
+1. **Verify tenant manager connections:**
+   ```bash
+   hivemind admin check-connections
+   ```
+
+2. **Check tenant resource quotas:**
+   ```bash
+   hivemind tenant get-quota --tenant-id <tenant-id>
+   ```
+
+3. **Check actual resource usage:**
+   ```bash
+   hivemind tenant get-usage --tenant-id <tenant-id>
+   ```
+
+4. **Restart the tenant manager:**
+   ```bash
+   hivemind admin restart-component --component tenant-manager
+   ```
+
+5. **Debug tenant resource allocation:**
+   ```bash
+   RUST_LOG=debug hivemind app deploy --image <image> --name <name> --tenant <tenant-id>
+   ```
+
+### RBAC Permission Issues
+
+**Symptoms:**
+- Permission denied errors despite correct role assignments
+- Inconsistent permission behavior
+- Users unable to access resources they should have access to
+
+**Possible Causes:**
+- Mismatch between role names and IDs
+- Incorrect role assignments
+- Permission verification issues
+
+**Solutions:**
+
+1. **Check user roles:**
+   ```bash
+   hivemind security list-user-roles --user <username>
+   ```
+
+2. **Verify role permissions:**
+   ```bash
+   hivemind security list-role-permissions --role <role-name>
+   ```
+
+3. **Test specific permissions:**
+   ```bash
+   hivemind security check-permission --user <username> --resource <resource> --action <action>
+   ```
+
+4. **Debug permission checks:**
+   ```bash
+   RUST_LOG=debug hivemind security check-permission --user <username> --resource <resource> --action <action>
+   ```
+
+5. **Update role assignments using IDs instead of names:**
+   ```bash
+   hivemind security assign-role --user <username> --role-id <role-id>
    ```
 
 ## Performance Issues
@@ -899,6 +1056,104 @@ This guide provides solutions for common issues you might encounter when using t
 4. **Consider container placement for network locality:**
    ```bash
    hivemind app deploy --name <app-name> --image <image> --node-affinity network-zone=zone1
+   ```
+
+## Testing Issues
+
+### Mock Setup Issues
+
+**Symptoms:**
+- Tests fail with mock expectation errors
+- Error messages about unexpected arguments to mocked methods
+
+**Possible Causes:**
+- Too specific mock expectations
+- Context type mismatches
+- Brittle test setup
+
+**Solutions:**
+
+1. **Use more flexible mock matchers:**
+   ```go
+   // Use mock.Anything instead of specific type matchers
+   mockObject.On("Method", mock.Anything).Return(expectedResult)
+   
+   // Instead of
+   mockObject.On("Method", mock.AnythingOfType("*context.timerCtx")).Return(expectedResult)
+   ```
+
+2. **Check mock expectations:**
+   ```bash
+   RUST_LOG=debug go test ./path/to/test -v
+   ```
+
+3. **Verify mock setup order:**
+   Ensure mock expectations are set up before the code under test calls the mocked methods.
+
+### Network Policy Testing Issues
+
+**Symptoms:**
+- Tests fail with "command not found" errors for iptables
+- Permission denied errors when running network policy tests
+
+**Possible Causes:**
+- Missing iptables command
+- Insufficient permissions
+- Running in an environment without iptables support
+
+**Solutions:**
+
+1. **Skip iptables operations in tests:**
+   ```go
+   // Set the flag before running tests
+   networkPolicyController.SkipIptablesOperations = true
+   ```
+
+2. **Run tests with proper permissions:**
+   ```bash
+   sudo go test ./path/to/network/tests
+   ```
+
+3. **Use mock network policy controller:**
+   ```bash
+   go test ./path/to/test -tags=mock_network
+   ```
+
+### Timing-Related Test Failures
+
+**Symptoms:**
+- Intermittent test failures
+- Tests pass locally but fail in CI
+- Race conditions in tests
+
+**Possible Causes:**
+- Insufficient wait times
+- Race conditions
+- Asynchronous operations not completing before assertions
+
+**Solutions:**
+
+1. **Increase wait times:**
+   ```go
+   // Use longer wait times for operations to complete
+   time.Sleep(500 * time.Millisecond)
+   ```
+
+2. **Use proper synchronization:**
+   ```go
+   // Use channels or WaitGroups to synchronize
+   wg := sync.WaitGroup{}
+   wg.Add(1)
+   go func() {
+       defer wg.Done()
+       // Async operation
+   }()
+   wg.Wait()
+   ```
+
+3. **Run tests with race detector:**
+   ```bash
+   go test -race ./...
    ```
 
 ## Diagnostic Tools
@@ -1018,5 +1273,134 @@ When reporting issues, always include:
 - Hivemind version (`hivemind --version`)
 - OS and kernel version
 - Relevant logs
+
+## Web Interface Template Issues
+
+### Template Name Collision Issues
+
+**Symptoms:**
+- Web pages show incorrect content
+- Navigation leads to wrong page content
+- Template rendering shows content from different pages
+
+**Possible Causes:**
+- Template name collisions between different pages
+- Incorrect template registration in the template manager
+- Base template conflicts
+
+**Solutions:**
+
+1. **Check template registration:**
+   ```bash
+   # Check if templates are properly registered
+   grep -r "template.Must" internal/web/
+   ```
+
+2. **Verify template names are unique:**
+   ```bash
+   # Check for duplicate template names
+   find templates/ -name "*.html" | xargs grep -l "define"
+   ```
+
+3. **Clear template cache and restart:**
+   ```bash
+   # Restart the Hivemind server
+   pkill -f hivemind
+   go run cmd/hivemind/main.go --runtime docker
+   ```
+
+4. **Check template inheritance:**
+   ```bash
+   # Verify base template usage
+   grep -r "template.*base" templates/
+   ```
+
+### Health Page Template Execution Errors
+
+**Symptoms:**
+- Health page shows malformed HTML
+- Template execution errors in logs
+- "template: health.html:X:Y: executing" errors
+
+**Possible Causes:**
+- Template syntax errors
+- Missing template variables
+- Incorrect template function calls
+
+**Solutions:**
+
+1. **Check template syntax:**
+   ```bash
+   # Validate HTML template syntax
+   go run cmd/hivemind/main.go --validate-templates
+   ```
+
+2. **Check server logs for template errors:**
+   ```bash
+   # Look for template execution errors
+   journalctl -u hivemind | grep "template.*executing"
+   ```
+
+3. **Verify template variables are passed correctly:**
+   ```bash
+   # Check handler code for proper variable passing
+   grep -A 10 -B 5 "health.html" internal/web/handlers.go
+   ```
+
+4. **Test template rendering in isolation:**
+   ```bash
+   # Use Go's template testing tools
+   go test -v internal/web/ -run TestHealthTemplate
+   ```
+
+### Template Base Issues
+
+**Symptoms:**
+- Inconsistent page layouts
+- Missing navigation or styling
+- Base template not loading
+
+**Possible Causes:**
+- Base template path issues
+- Template inheritance problems
+- Missing template blocks
+
+**Solutions:**
+
+1. **Verify base template paths:**
+   ```bash
+   # Check if base templates exist
+   ls -la templates/base*.html
+   ```
+
+2. **Check template block definitions:**
+   ```bash
+   # Verify all required blocks are defined
+   grep -r "{{.*block.*}}" templates/
+   ```
+
+3. **Validate template inheritance chain:**
+   ```bash
+   # Check template extends/includes
+   grep -r "{{.*template.*}}" templates/
+   ```
+
+4. **Test with minimal template:**
+   ```bash
+   # Create a simple test template to isolate issues
+   echo '{{template "base.html" .}}' > templates/test.html
+   ```
+
+### Recent Template Fixes Applied
+
+The following template issues have been resolved:
+
+1. **Template Name Collision Resolution**: All page templates now have unique names and proper base template inheritance
+2. **Health Page Template Execution Fix**: Fixed malformed HTML generation and template execution errors
+3. **Navigation Template Consistency**: Ensured all pages use consistent base templates and navigation
+4. **Template Variable Passing**: Fixed missing or incorrect template variable passing in handlers
+
+If you encounter template-related issues, these fixes should resolve most common problems. If issues persist, check the server logs and verify your template files match the current project structure.
+
 - Steps to reproduce the issue
 - Any error messages or symptoms

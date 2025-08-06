@@ -1,8 +1,11 @@
-{% extends "base.html" %} {% block title %}Error{% endblock %} {% block content
-%}
+{{ template "base.html" . }}
+
+{{ define "title" }}Error{{ end }}
+
+{{ define "content" }}
 <div class="card">
     <h1>Error</h1>
-    <p>{{ error }}</p>
-    <a href="{{ back_url }}" class="btn">Go Back</a>
+    <p>{{ .error }}</p>
+    <a href="{{ .back_url }}" class="btn">Go Back</a>
 </div>
-{% endblock %}
+{{ end }}

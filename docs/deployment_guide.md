@@ -32,7 +32,7 @@ Before deploying Hivemind in production, ensure your environment meets these req
 ### Software Requirements
 
 - **Operating System**: Linux (Ubuntu 20.04+, CentOS 8+, or Debian 11+)
-- **Rust**: 1.60 or newer
+- **Go**: 1.18 or newer
 - **containerd**: 1.5 or newer
 - **SQLite**: 3.35 or newer
 - **iptables**: For network policy enforcement
@@ -47,19 +47,15 @@ For production deployments, we recommend installing from source to ensure you ha
 ```bash
 # Install dependencies
 sudo apt update
-sudo apt install -y build-essential pkg-config libsqlite3-dev containerd iptables
-
-# Install Rust
-curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
-source $HOME/.cargo/env
+sudo apt install -y build-essential pkg-config libsqlite3-dev containerd iptables golang-go
 
 # Clone the repository
 git clone https://github.com/ao/hivemind.git
 cd hivemind
 
 # Build and install
-cargo build --release
-sudo cp target/release/hivemind /usr/local/bin/
+make build
+sudo cp bin/hivemind /usr/local/bin/
 ```
 
 ### System Service Setup
@@ -133,6 +129,7 @@ web:
 storage:
   data_dir: "/var/lib/hivemind"
   volume_dir: "/var/lib/hivemind/volumes"
+  driver: "local"  # Options: local, nfs, csi
 
 # Network configuration
 network:
@@ -142,6 +139,10 @@ network:
     subnet: "10.244.0.0/16"
   service_cidr: "10.245.0.0/16"
   dns_domain: "cluster.local"
+  cni_plugins:
+    - "bridge"
+    - "portmap"
+    - "firewall"
 
 # Security configuration
 security:
@@ -165,6 +166,8 @@ observability:
   logging:
     level: "info"
     json_format: true
+    output: "file"  # Options: file, stdout, syslog
+    file_path: "/var/log/hivemind/hivemind.log"
 EOF
 ```
 
@@ -301,6 +304,23 @@ storage:
     - "http://etcd1:2379"
     - "http://etcd2:2379"
     - "http://etcd3:2379"
+  prefix: "/hivemind/"
+  tls:
+    enabled: true
+    cert_file: "/etc/hivemind/certs/etcd-client.crt"
+    key_file: "/etc/hivemind/certs/etcd-client.key"
+    ca_file: "/etc/hivemind/certs/etcd-ca.crt"
+```
+
+4. **Implement leader election** using the Go implementation's built-in leader election mechanism:
+
+```yaml
+cluster:
+  leader_election:
+    enabled: true
+    lease_duration: "15s"
+    renew_deadline: "10s"
+    retry_period: "2s"
 ```
 
 ### Worker Node HA
@@ -368,6 +388,8 @@ observability:
   metrics:
     enabled: true
     prometheus_endpoint: "/metrics"
+    expose_process_metrics: true
+    expose_go_metrics: true
 ```
 
 Configure Prometheus to scrape Hivemind metrics:
@@ -377,7 +399,30 @@ scrape_configs:
   - job_name: 'hivemind'
     scrape_interval: 15s
     static_configs:
-      - targets: ['hivemind:3000']
+      - targets: ['hivemind:4483']
+    metrics_path: '/metrics'
+    scheme: 'http'
+```
+
+Example of available metrics in the Go implementation:
+
+```
+# HELP hivemind_containers_total Total number of containers managed by Hivemind
+# TYPE hivemind_containers_total gauge
+hivemind_containers_total{node="node1"} 42
+
+# HELP hivemind_container_status_count Number of containers in each status
+# TYPE hivemind_container_status_count gauge
+hivemind_container_status_count{node="node1",status="running"} 38
+hivemind_container_status_count{node="node1",status="stopped"} 4
+
+# HELP hivemind_node_cpu_usage_percent CPU usage percentage by node
+# TYPE hivemind_node_cpu_usage_percent gauge
+hivemind_node_cpu_usage_percent{node="node1"} 35.2
+
+# HELP hivemind_node_memory_usage_bytes Memory usage in bytes by node
+# TYPE hivemind_node_memory_usage_bytes gauge
+hivemind_node_memory_usage_bytes{node="node1"} 4294967296
 ```
 
 ### Grafana Dashboards
@@ -413,14 +458,45 @@ groups:
 Backup the Hivemind database:
 
 ```bash
-# Stop Hivemind
+# Using the built-in backup command (no need to stop the service)
+hivemind admin backup --output /var/backups/hivemind-$(date +%Y%m%d)
+
+# Or manually (requires stopping the service)
 sudo systemctl stop hivemind
-
-# Backup the database
 sudo cp /var/lib/hivemind/hivemind.db /var/backups/hivemind-$(date +%Y%m%d).db
-
-# Start Hivemind
 sudo systemctl start hivemind
+```
+
+You can also use the Go client to perform backups programmatically:
+
+```go
+package main
+
+import (
+    "context"
+    "fmt"
+    "log"
+    "time"
+    
+    "github.com/ao/hivemind/pkg/client"
+)
+
+func main() {
+    // Create a new client
+    c, err := client.NewClient("http://localhost:4483")
+    if err != nil {
+        log.Fatalf("Failed to create client: %v", err)
+    }
+    
+    // Create backup
+    backupPath := fmt.Sprintf("/var/backups/hivemind-%s", time.Now().Format("20060102"))
+    err = c.CreateBackup(context.Background(), backupPath)
+    if err != nil {
+        log.Fatalf("Backup failed: %v", err)
+    }
+    
+    log.Printf("Backup created at: %s", backupPath)
+}
 ```
 
 ### Volume Backup

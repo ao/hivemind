@@ -1,5 +1,8 @@
-{% extends "base.html" %} {% block title %}Dashboard{% endblock %} {% block
-content %}
+{{ template "base-dashboard.html" . }}
+
+{{ define "dashboard-title" }}Dashboard{{ end }}
+
+{{ define "dashboard-content" }}
 <h1>Hivemind Dashboard</h1>
 
 <div class="card">
@@ -7,19 +10,19 @@ content %}
     <div style="display: flex; justify-content: space-between; flex-wrap: wrap">
         <div style="text-align: center; min-width: 150px; margin: 10px">
             <h3>Containers</h3>
-            <p style="font-size: 2em">{{ containers_count }}</p>
+            <p style="font-size: 2em">{{ .containers_count }}</p>
         </div>
         <div style="text-align: center; min-width: 150px; margin: 10px">
             <h3>Running</h3>
-            <p style="font-size: 2em">{{ running_containers }}</p>
+            <p style="font-size: 2em">{{ .running_containers }}</p>
         </div>
         <div style="text-align: center; min-width: 150px; margin: 10px">
             <h3>Nodes</h3>
-            <p style="font-size: 2em">{{ nodes_count }}</p>
+            <p style="font-size: 2em">{{ .nodes_count }}</p>
         </div>
         <div style="text-align: center; min-width: 150px; margin: 10px">
             <h3>Services</h3>
-            <p style="font-size: 2em">{{ services_count }}</p>
+            <p style="font-size: 2em">{{ .services_count }}</p>
         </div>
     </div>
 </div>
@@ -36,16 +39,16 @@ content %}
             </tr>
         </thead>
         <tbody>
-            {% for container in recent_containers %}
+            {{ range .recent_containers }}
             <tr>
-                <td>{{ container.name }}</td>
-                <td>{{ container.image }}</td>
-                <td class="status-{{ container.status | lower }}">
-                    {{ container.status }}
+                <td>{{ .Name }}</td>
+                <td>{{ .Image }}</td>
+                <td class="status-{{ lower .Status }}">
+                    {{ .Status }}
                 </td>
-                <td>{{ container.node_id }}</td>
+                <td>{{ .NodeID }}</td>
             </tr>
-            {% endfor %}
+            {{ end }}
         </tbody>
     </table>
 </div>
@@ -61,17 +64,16 @@ content %}
             </tr>
         </thead>
         <tbody>
-            {% for service in services %}
+            {{ range .services }}
             <tr>
-                <td>{{ service.name }}</td>
-                <td>{{ service.domain }}</td>
+                <td>{{ .Name }}</td>
+                <td>{{ .Domain }}</td>
                 <td>
-                    {{ service.current_replicas }}/{{ service.desired_replicas
-                    }}
+                    {{ .CurrentReplicas }}/{{ .DesiredReplicas }}
                 </td>
             </tr>
-            {% endfor %}
+            {{ end }}
         </tbody>
     </table>
 </div>
-{% endblock %}
+{{ end }}

@@ -1,5 +1,8 @@
-{% extends "base.html" %} {% block title %}Deploy Application{% endblock %} {%
-block content %}
+{{ template "base-deploy.html" . }}
+
+{{ define "deploy-title" }}Deploy Application{{ end }}
+
+{{ define "deploy-content" }}
 <h1>Deploy Application</h1>
 
 <div class="card">
@@ -12,9 +15,9 @@ block content %}
         <div class="form-group">
             <label for="image">Container Image</label>
             <select id="image" name="image">
-                {% for image in images %}
-                <option value="{{ image }}">{{ image }}</option>
-                {% endfor %}
+                {{ range .images }}
+                <option value="{{ .Name }}:{{ .Tag }}">{{ .Name }}:{{ .Tag }}</option>
+                {{ end }}
             </select>
         </div>
 
@@ -34,7 +37,7 @@ block content %}
 
         <div class="form-group">
             <label>Volumes (optional)</label>
-            {% for volume in volumes %}
+            {{ range .volumes }}
             <div
                 class="volume-mapping"
                 style="
@@ -45,19 +48,19 @@ block content %}
             >
                 <input
                     type="checkbox"
-                    name="use_volume_{{ volume.name }}"
-                    id="use_volume_{{ volume.name }}"
+                    name="use_volume_{{ .Name }}"
+                    id="use_volume_{{ .Name }}"
                 />
-                <label for="use_volume_{{ volume.name }}"
-                    >{{ volume.name }}</label
+                <label for="use_volume_{{ .Name }}"
+                    >{{ .Name }}</label
                 >
                 <input
                     type="text"
-                    name="volume_path_{{ volume.name }}"
+                    name="volume_path_{{ .Name }}"
                     placeholder="Container path (e.g., /data)"
                 />
             </div>
-            {% endfor %}
+            {{ end }}
         </div>
 
         <button type="submit" class="btn btn-success">
@@ -65,4 +68,4 @@ block content %}
         </button>
     </form>
 </div>
-{% endblock %}
+{{ end }}

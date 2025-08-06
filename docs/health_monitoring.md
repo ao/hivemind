@@ -227,7 +227,7 @@ HTTP health checks make an HTTP request to a specified endpoint and check the re
 
 ```bash
 hivemind app deploy --image myapp:latest --name api \
-  --health-cmd "curl -f http://localhost:8080/health" \
+  --health-cmd "curl -f http://localhost:4483/health" \
   --health-interval 30s
 ```
 
@@ -346,7 +346,7 @@ You can define dependencies between health checks:
 
 ```bash
 hivemind app deploy --image myapp:latest --name api \
-  --health-cmd "curl -f http://localhost:8080/health" \
+  --health-cmd "curl -f http://localhost:4483/health" \
   --health-interval 30s \
   --health-depends-on db
 ```
@@ -359,16 +359,16 @@ Hivemind provides a REST API for health monitoring:
 
 ```bash
 # Get system health
-curl -X GET http://<your-server>:3000/api/health
+curl -X GET http://<your-server>:4483/api/health
 
 # Get container health
-curl -X GET http://<your-server>:3000/api/health/container/<container-id>
+curl -X GET http://<your-server>:4483/api/health/container/<container-id>
 
 # Get node health
-curl -X GET http://<your-server>:3000/api/health/node/<node-id>
+curl -X GET http://<your-server>:4483/api/health/node/<node-id>
 
 # Get alerts
-curl -X GET http://<your-server>:3000/api/health/alerts
+curl -X GET http://<your-server>:4483/api/health/alerts
 ```
 
 ## Best Practices
