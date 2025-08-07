@@ -2,6 +2,13 @@
 
 All notable changes to this project will be documented in this file. See [Conventional Commits](https://conventionalcommits.org) for commit guidelines.
 
+## [1.0.1](https://github.com/ao/hivemind/compare/v1.0.0...v1.0.1) (2025-08-07)
+
+
+### 🐛 Bug Fixes
+
+* Update development roadmap to reflect current implementation status and feature completion ([e5ab046](https://github.com/ao/hivemind/commit/e5ab046f92846bd72b04ea5de09efd9470c8ee0d))
+
 ## 1.0.0 (2025-08-07)
 
 
