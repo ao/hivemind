@@ -90,7 +90,7 @@ func TestComponentIntegration(t *testing.T) {
 		nodeID := "test-node-1"
 		nodeInfo := &node.NodeInfo{
 			ID:       nodeID,
-			Address:  "192.168.1.1",
+			Address:  "127.0.0.1",
 			LastSeen: time.Now(),
 			Resources: node.NodeResources{
 				CPUAvailable:      4,
@@ -122,7 +122,7 @@ func TestComponentIntegration(t *testing.T) {
 		nodeInfo := &node.NodeInfo{
 			ID:       nodeID,
 			Hostname: "test-host-2",
-			Address:  "192.168.1.2",
+			Address:  "127.0.0.1",
 			Status:   node.NodeStatusReady,
 			Resources: node.NodeResources{
 				CPU:    4,
@@ -191,7 +191,7 @@ func TestComponentIntegration(t *testing.T) {
 
 		// Register the service
 		nodeID := "test-node-1"
-		ipAddress := "192.168.1.1"
+		ipAddress := "127.0.0.1"
 		port := uint16(4483)
 		err := serviceDiscovery.RegisterService(serviceConfig, nodeID, ipAddress, port)
 		assert.NoError(t, err)
