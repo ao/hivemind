@@ -203,8 +203,10 @@ func (ws *WebServer) Start() error {
 	}
 
 	// Start the server in a goroutine
+	// Capture the server reference to avoid data race
+	server := ws.server
 	go func() {
-		if err := ws.server.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+		if err := server.ListenAndServe(); err != nil && err != http.ErrServerClosed {
 			ws.logger.Errorf("Failed to start web server: %v", err)
 		}
 	}()
