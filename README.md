@@ -9,9 +9,6 @@
 
 ![Tests](https://github.com/ao/hivemind/workflows/Test/badge.svg)
 ![Release](https://github.com/ao/hivemind/workflows/Release/badge.svg)
-[![codecov](https://codecov.io/gh/ao/hivemind/branch/main/graph/badge.svg)](https://codecov.io/gh/ao/hivemind)
-[![Go Report Card](https://goreportcard.com/badge/github.com/ao/hivemind)](https://goreportcard.com/report/github.com/ao/hivemind)
-[![Security Rating](https://sonarcloud.io/api/project_badges/measure?project=ao_hivemind&metric=security_rating)](https://sonarcloud.io/summary/new_code?id=ao_hivemind)
 
 [![Latest Release](https://img.shields.io/github/v/release/ao/hivemind)](https://github.com/ao/hivemind/releases/latest)
 [![Go Version](https://img.shields.io/badge/Go-1.21%20|%201.22%20|%201.23-blue)](https://golang.org/)
