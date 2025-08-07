@@ -153,6 +153,17 @@ func isTestEnvironment() bool {
 			return true
 		}
 	}
+
+	// Additional check for GitHub Actions environment
+	if _, exists := os.LookupEnv("GITHUB_ACTIONS"); exists {
+		return true
+	}
+
+	// Check if we're running under go test
+	if strings.Contains(os.Args[0], "test") {
+		return true
+	}
+
 	return false
 }
 

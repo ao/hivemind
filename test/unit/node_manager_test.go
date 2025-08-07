@@ -219,8 +219,8 @@ func TestNodeManagerWithMembership(t *testing.T) {
 		// Connect the managers
 		nodeManager.WithMembershipManager(membershipManager)
 
-		// Create a test node
-		nodeInfo := fixtures.CreateTestNodeInfo("test-node-1", "test-host-1", "192.168.1.1")
+		// Create a test node with localhost address to avoid network timeouts
+		nodeInfo := fixtures.CreateTestNodeInfo("test-node-1", "test-host-1", "127.0.0.1")
 
 		// Register the node
 		err = nodeManager.RegisterNode(ctx, nodeInfo)
@@ -256,8 +256,8 @@ func TestNodeManagerWithMembership(t *testing.T) {
 		// Connect the managers
 		nodeManager.WithMembershipManager(membershipManager)
 
-		// Create and register a test node
-		nodeInfo := fixtures.CreateTestNodeInfo("test-node-1", "test-host-1", "192.168.1.1")
+		// Create and register a test node with localhost address to avoid network timeouts
+		nodeInfo := fixtures.CreateTestNodeInfo("test-node-1", "test-host-1", "127.0.0.1")
 		err = nodeManager.RegisterNode(ctx, nodeInfo)
 		require.NoError(t, err)
 
