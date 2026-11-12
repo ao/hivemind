@@ -1,212 +1,69 @@
 name: Release
 
+# Runs only when the owner pushes a v* tag. It creates a draft release; publishing it is a manual step.
 on:
   push:
-    branches: [ main ]
-  workflow_dispatch:
+    tags: ['v*']
 
 permissions:
-  contents: write
-  packages: write
+  contents: read
 
 jobs:
   test:
-    name: Run Tests Before Release
     uses: ./.github/workflows/test.yml
 
-  semantic-version:
-    name: Determine Version
-    runs-on: ubuntu-latest
-    needs: test
-    outputs:
-      version: ${{ steps.semantic.outputs.new_release_version }}
-      should_release: ${{ steps.semantic.outputs.new_release_published }}
-      changelog: ${{ steps.semantic.outputs.new_release_notes }}
-    steps:
-    - name: Checkout code
-      uses: actions/checkout@v4
-      with:
-        fetch-depth: 0
-        token: ${{ secrets.GITHUB_TOKEN }}
-
-    - name: Semantic Release
-      uses: cycjimmy/semantic-release-action@v4
-      id: semantic
-      with:
-        semantic_version: 22
-        extra_plugins: |
-          @semantic-release/changelog@6
-          @semantic-release/git@10
-          conventional-changelog-conventionalcommits@7
-      env:
-        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-
   build:
-    name: Build Binaries
+    needs: test
     runs-on: ubuntu-latest
-    needs: [test, semantic-version]
-    if: needs.semantic-version.outputs.should_release == 'true'
     strategy:
       matrix:
         include:
-          - goos: linux
-            goarch: amd64
-            suffix: ""
-          - goos: linux
-            goarch: arm64
-            suffix: ""
-          - goos: windows
-            goarch: amd64
-            suffix: ".exe"
-          - goos: windows
-            goarch: arm64
-            suffix: ".exe"
-          - goos: darwin
-            goarch: amd64
-            suffix: ""
-          - goos: darwin
-            goarch: arm64
-            suffix: ""
+          - { goos: linux, goarch: amd64 }
+          - { goos: linux, goarch: arm64 }
+          - { goos: darwin, goarch: amd64 }
+          - { goos: darwin, goarch: arm64 }
+          - { goos: windows, goarch: amd64, ext: .exe }
+          - { goos: windows, goarch: arm64, ext: .exe }
     steps:
-    - name: Checkout code
-      uses: actions/checkout@v4
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - name: Build
+        env:
+          GOOS: ${{ matrix.goos }}
+          GOARCH: ${{ matrix.goarch }}
+          CGO_ENABLED: '0'
+        run: |
+          mkdir -p dist
+          go build -trimpath \
+            -ldflags "-s -w -X main.version=${GITHUB_REF_NAME} -X main.commit=${GITHUB_SHA::12}" \
+            -o "dist/hivemind-${GOOS}-${GOARCH}${{ matrix.ext }}" ./cmd/hivemind
+      - uses: actions/upload-artifact@v4
+        with:
+          name: hivemind-${{ matrix.goos }}-${{ matrix.goarch }}
+          path: dist/
+          retention-days: 7
 
-    - name: Set up Go
-      uses: actions/setup-go@v5
-      with:
-        go-version: 1.23
-        cache: true
-
-    - name: Build binary
-      env:
-        GOOS: ${{ matrix.goos }}
-        GOARCH: ${{ matrix.goarch }}
-        VERSION: ${{ needs.semantic-version.outputs.version }}
-      run: |
-        # Create build directory
-        mkdir -p dist
-        
-        # Set binary name
-        BINARY_NAME="hivemind-${{ matrix.goos }}-${{ matrix.goarch }}${{ matrix.suffix }}"
-        
-        # Build with version information
-        go build \
-          -ldflags="-X 'main.Version=$VERSION' -X 'main.BuildTime=$(date -u +%Y-%m-%dT%H:%M:%SZ)' -X 'main.GitCommit=$(git rev-parse HEAD)' -s -w" \
-          -o "dist/$BINARY_NAME" \
-          ./cmd/hivemind
-
-    - name: Generate checksums
-      run: |
-        cd dist
-        for file in *; do
-          if [ -f "$file" ]; then
-            sha256sum "$file" > "$file.sha256"
-          fi
-        done
-
-    - name: Upload build artifacts
-      uses: actions/upload-artifact@v4
-      with:
-        name: binaries-${{ matrix.goos }}-${{ matrix.goarch }}
-        path: dist/
-        retention-days: 1
-
-  create-release:
-    name: Create GitHub Release
+  draft-release:
+    needs: build
     runs-on: ubuntu-latest
-    needs: [semantic-version, build]
-    if: needs.semantic-version.outputs.should_release == 'true'
+    permissions:
+      contents: write
     steps:
-    - name: Checkout code
-      uses: actions/checkout@v4
-
-    - name: Download all artifacts
-      uses: actions/download-artifact@v4
-      with:
-        path: dist/
-        merge-multiple: true
-
-    - name: Display structure of downloaded files
-      run: ls -la dist/
-
-    - name: Create Release
-      uses: softprops/action-gh-release@v1
-      with:
-        tag_name: v${{ needs.semantic-version.outputs.version }}
-        name: Release v${{ needs.semantic-version.outputs.version }}
-        body: ${{ needs.semantic-version.outputs.changelog }}
-        draft: false
-        prerelease: false
-        files: |
-          dist/*
-        generate_release_notes: true
-      env:
-        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-
-  docker-build:
-    name: Build and Push Docker Image
-    runs-on: ubuntu-latest
-    needs: [semantic-version, build]
-    if: needs.semantic-version.outputs.should_release == 'true'
-    steps:
-    - name: Checkout code
-      uses: actions/checkout@v4
-
-    - name: Set up Docker Buildx
-      uses: docker/setup-buildx-action@v3
-
-    - name: Log in to GitHub Container Registry
-      uses: docker/login-action@v3
-      with:
-        registry: ghcr.io
-        username: ${{ github.actor }}
-        password: ${{ secrets.GITHUB_TOKEN }}
-
-    - name: Extract metadata
-      id: meta
-      uses: docker/metadata-action@v5
-      with:
-        images: ghcr.io/${{ github.repository }}
-        tags: |
-          type=semver,pattern={{version}},value=v${{ needs.semantic-version.outputs.version }}
-          type=semver,pattern={{major}}.{{minor}},value=v${{ needs.semantic-version.outputs.version }}
-          type=semver,pattern={{major}},value=v${{ needs.semantic-version.outputs.version }}
-          type=raw,value=latest
-
-    - name: Build and push Docker image
-      uses: docker/build-push-action@v5
-      with:
-        context: .
-        platforms: linux/amd64,linux/arm64
-        push: true
-        tags: ${{ steps.meta.outputs.tags }}
-        labels: ${{ steps.meta.outputs.labels }}
-        build-args: |
-          VERSION=${{ needs.semantic-version.outputs.version }}
-          BUILD_TIME=${{ github.event.head_commit.timestamp }}
-          GIT_COMMIT=${{ github.sha }}
-        cache-from: type=gha
-        cache-to: type=gha,mode=max
-
-  notify:
-    name: Notify Release
-    runs-on: ubuntu-latest
-    needs: [semantic-version, create-release, docker-build]
-    if: always() && needs.semantic-version.outputs.should_release == 'true'
-    steps:
-    - name: Release Summary
-      run: |
-        echo "## 🚀 Release Summary" >> $GITHUB_STEP_SUMMARY
-        echo "" >> $GITHUB_STEP_SUMMARY
-        echo "**Version:** v${{ needs.semantic-version.outputs.version }}" >> $GITHUB_STEP_SUMMARY
-        echo "**Status:** ${{ job.status }}" >> $GITHUB_STEP_SUMMARY
-        echo "" >> $GITHUB_STEP_SUMMARY
-        echo "### 📦 Artifacts Created:" >> $GITHUB_STEP_SUMMARY
-        echo "- ✅ Cross-platform binaries (Linux, Windows, macOS)" >> $GITHUB_STEP_SUMMARY
-        echo "- ✅ SHA256 checksums" >> $GITHUB_STEP_SUMMARY
-        echo "- ✅ Docker images (multi-arch)" >> $GITHUB_STEP_SUMMARY
-        echo "- ✅ GitHub Release with changelog" >> $GITHUB_STEP_SUMMARY
-        echo "" >> $GITHUB_STEP_SUMMARY
-        echo "### 🔗 Links:" >> $GITHUB_STEP_SUMMARY
-        echo "- [Release Page](https://github.com/${{ github.repository }}/releases/tag/v${{ needs.semantic-version.outputs.version }})" >> $GITHUB_STEP_SUMMARY
-        echo "- [Docker Image](https://ghcr.io/${{ github.repository }}:v${{ needs.semantic-version.outputs.version }})" >> $GITHUB_STEP_SUMMARY
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist/
+          merge-multiple: true
+      - name: Checksums
+        run: cd dist && sha256sum hivemind-* > SHA256SUMS && cat SHA256SUMS
+      - name: Release notes from CHANGELOG.md
+        run: |
+          v="${GITHUB_REF_NAME#v}"
+          awk -v v="$v" '$0 ~ "^## \\[?"v"\\]?" {on=1; next} on && /^## / {exit} on {print}' CHANGELOG.md > notes.md
+          test -s notes.md || { echo "CHANGELOG.md has no section for $v"; exit 1; }
+      - name: Create draft release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release create "$GITHUB_REF_NAME" --draft --verify-tag --title "$GITHUB_REF_NAME" --notes-file notes.md dist/*
