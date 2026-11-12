@@ -21,3 +21,67 @@ jobs:
       - run: go mod verify
       - run: go vet ./...
       - run: go test -race -count=1 ./...
+
+  # Every release platform compiles with CGO disabled.
+  build:
+    name: Build ${{ matrix.goos }}/${{ matrix.goarch }}
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        include:
+          - { goos: linux, goarch: amd64 }
+          - { goos: linux, goarch: arm64 }
+          - { goos: darwin, goarch: amd64 }
+          - { goos: darwin, goarch: arm64 }
+          - { goos: windows, goarch: amd64, ext: .exe }
+          - { goos: windows, goarch: arm64, ext: .exe }
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - name: Cross-compile
+        env:
+          GOOS: ${{ matrix.goos }}
+          GOARCH: ${{ matrix.goarch }}
+          CGO_ENABLED: '0'
+        run: go build -trimpath -o "hivemind${{ matrix.ext }}" ./cmd/hivemind
+
+  # Runs the binary built on each runner, from an empty directory.
+  smoke:
+    name: Smoke ${{ matrix.name }}
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      matrix:
+        include:
+          - { name: linux-amd64, runner: ubuntu-latest }
+          - { name: linux-arm64, runner: ubuntu-24.04-arm }
+          - { name: darwin-arm64, runner: macos-latest }
+          - { name: windows-amd64, runner: windows-latest }
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - name: Build for this runner
+        shell: bash
+        run: |
+          ext=""
+          [ "$RUNNER_OS" = Windows ] && ext=.exe
+          go build -trimpath -o "$RUNNER_TEMP/hivemind$ext" ./cmd/hivemind
+      - name: Run version and help from an empty directory
+        shell: bash
+        run: |
+          ext=""
+          [ "$RUNNER_OS" = Windows ] && ext=.exe
+          mkdir -p "$RUNNER_TEMP/empty" && cd "$RUNNER_TEMP/empty"
+          "$RUNNER_TEMP/hivemind$ext" version
+          "$RUNNER_TEMP/hivemind$ext" --help
+
+  # The binary in an empty image: no libc, no shell.
+  scratch:
+    name: Scratch image
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: ./scripts/scratch-smoke.sh
