@@ -6,9 +6,11 @@ Each task is one pull request with its tests. A task is done when its acceptance
 
 ## Owner decisions
 
-1. Licence. `LICENSE` is GPL-3.0 and the README badge says GPLv3, but the README's last line says MIT. Which is intended? Until answered, only the README line is wrong and nothing else changes.
-2. Scope. Proposed: a single binary that runs containers on 1 to 10 Linux machines on one network, using Docker Engine, with one control-plane node, host-port networking, and no overlay network, built-in DNS or multi-tenancy. Docker Swarm, Nomad and k3s already cover this ground and more. Hivemind's case would be "less to learn and run than those". The README will say so plainly. Is that the scope?
-3. Dropping features. Proposed for removal, because none of it works and none of it is on the core path (about 12,500 lines of Go, plus their docs):
+Answered by the owner on 2026-11-13:
+
+1. Licence: GPL-3.0. `LICENSE` stays; the README's "MIT" line is fixed.
+2. Scope: a single binary that runs containers on 1 to 10 Linux machines on one network, using Docker Engine, with one control-plane node, host-port networking, and no overlay network, built-in DNS or multi-tenancy. Docker Swarm, Nomad and k3s cover this ground and more; hivemind's case is that it is less to learn and run, and the README says so.
+3. Removed, because none of it works and none of it is on the core path (about 12,500 lines of Go, plus their docs):
    - `internal/security` (RBAC, secrets, network policy, IPAM, tenants, scanning, storage encryption, ACL and QoS);
    - `internal/resilience` (circuit breaker, Redis storage, bulkhead, retry, fallback);
    - the service-discovery DNS server and proxy;
@@ -18,16 +20,16 @@ Each task is one pull request with its tests. A task is done when its acceptance
    - the docs for all of these.
 
    Rolling updates are kept and built properly (task 12).
-4. SWIM. The project is described around SWIM gossip, but with one control-plane node, liveness over the authenticated node API is enough at this size, and it means one transport to secure instead of two. Proposed: remove memberlist in v2 and revisit it if the control plane becomes highly available. The alternative is to keep it with an encryption key and use it only for failure detection.
-5. Version. The API, CLI, default runtime and listen addresses all change, and auth becomes mandatory, so semver says v2.0.0.
-6. Platforms. Proposed: the node (`hivemind serve`) is supported on Linux amd64 and arm64. The darwin and windows builds are the client CLI only. All six are built and smoke-tested in CI.
-7. Container image. `release.yml` pushes `ghcr.io/ao/hivemind`. Keep publishing an image? A node needs the host's Docker socket, so the image is mainly a convenience for the client CLI.
+4. SWIM: memberlist is removed in v2. Liveness runs over the authenticated node API. Revisit if the control plane becomes highly available.
+5. Version: v2.0.0. The API, CLI, default runtime and listen addresses all change, and auth becomes mandatory.
+6. Platforms: the node (`hivemind serve`) is supported on Linux amd64 and arm64. The darwin and windows builds are the client CLI. All six are built and smoke-tested in CI.
+7. Container image: none for v2.0.0. The release is six static binaries and `SHA256SUMS`.
 
 ## Design
 
 Roles. `hivemind init` creates a cluster on one machine, which becomes the server. Every node, the server included, runs an agent. The server stores the desired state and decides placement. Agents run containers and report back. If the server is down, running containers keep running and nothing new is scheduled.
 
-Runtime: Docker Engine first. Docker Engine is reached through its API on the local unix socket, using `github.com/moby/moby/client`. Docker was chosen over containerd for these reasons:
+Runtime: Docker Engine first. Docker Engine is reached through its HTTP API (v1.44, Docker Engine 25 or newer) on the local unix socket, with a small client in this repo. The official client module moved from `github.com/docker/docker` to `github.com/moby/moby/client` in 2025 and is still pre-1.0. The dozen endpoints hivemind needs are easier to pin, test and fuzz directly. Docker was chosen over containerd for these reasons:
 - Docker provides port publishing, container networking, log storage and image-name normalisation. With containerd, hivemind would have to add CNI plugins and port mapping, collect logs and supervise processes itself, none of which exists today.
 - The people this is for (a few machines) mostly have Docker installed already.
 - Integration tests can run real nodes as Docker-in-Docker containers, locally and on GitHub Actions.
