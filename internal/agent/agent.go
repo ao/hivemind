@@ -48,6 +48,9 @@ type Config struct {
 	StopTimeout time.Duration
 	// Logger receives one line per action and per error. Nil means slog.Default().
 	Logger *slog.Logger
+	// Clock gives the time for restart backoff and health start periods.
+	// Nil means time.Now. Tests set it to a fake clock.
+	Clock func() time.Time
 }
 
 // Agent reconciles one node.
@@ -55,7 +58,13 @@ type Agent struct {
 	cfg     Config
 	log     *slog.Logger
 	trigger chan struct{}
-	mu      sync.Mutex // one pass at a time
+
+	// mu makes one pass at a time, and guards the fields below.
+	mu       sync.Mutex
+	restarts map[string]*restartState // by container name
+	probes   map[string]*probe        // by container name, for running containers with a health check
+	seeded   bool                     // restart counts have been read from the store
+	wakeAt   time.Time                // when the next scheduled restart is due, or zero
 }
 
 // New returns an agent. It does nothing until Run or Reconcile is called.
@@ -69,14 +78,19 @@ func New(cfg Config) (*Agent, error) {
 	if cfg.StopTimeout <= 0 {
 		cfg.StopTimeout = DefaultStopTimeout
 	}
+	if cfg.Clock == nil {
+		cfg.Clock = time.Now
+	}
 	log := cfg.Logger
 	if log == nil {
 		log = slog.Default()
 	}
 	return &Agent{
-		cfg:     cfg,
-		log:     log.With("node", cfg.NodeID),
-		trigger: make(chan struct{}, 1),
+		cfg:      cfg,
+		log:      log.With("node", cfg.NodeID),
+		trigger:  make(chan struct{}, 1),
+		restarts: map[string]*restartState{},
+		probes:   map[string]*probe{},
 	}, nil
 }
 
@@ -100,17 +114,33 @@ func (a *Agent) Trigger() {
 // ctx is cancelled. Errors are logged and the next pass retries. It returns
 // nil when ctx is cancelled.
 func (a *Agent) Run(ctx context.Context) error {
+	defer a.Close()
 	t := time.NewTicker(a.cfg.Interval)
 	defer t.Stop()
 	for {
 		if err := a.Reconcile(ctx); err != nil && ctx.Err() == nil {
 			a.log.Warn("reconcile pass failed", "err", err)
 		}
+		// A container waiting out its backoff gets a pass when the wait ends,
+		// not at the next tick.
+		var due <-chan time.Time
+		var timer *time.Timer
+		if w := a.wake(); !w.IsZero() {
+			timer = time.NewTimer(max(0, w.Sub(a.cfg.Clock())))
+			due = timer.C
+		}
 		select {
 		case <-ctx.Done():
+			if timer != nil {
+				timer.Stop()
+			}
 			return nil
 		case <-t.C:
 		case <-a.trigger:
+		case <-due:
+		}
+		if timer != nil {
+			timer.Stop()
 		}
 	}
 }
@@ -139,6 +169,13 @@ func (a *Agent) Reconcile(ctx context.Context) error {
 		}
 	}
 	wantKeys := sortedKeys(want)
+	if !a.seeded {
+		if err := a.seedRestarts(ctx); err != nil {
+			a.log.Warn("reading restart counts", "err", err)
+		} else {
+			a.seeded = true
+		}
+	}
 
 	containers, err := a.cfg.Runtime.List(ctx, map[string]string{runtime.LabelApp: ""})
 	if err != nil {
@@ -197,20 +234,15 @@ func (a *Agent) Reconcile(ctx context.Context) error {
 		as := want[k]
 		st := store.Status{Name: ContainerName(as.App, as.Index, as.Generation), App: as.App, Replica: as.Index, Generation: as.Generation}
 		if c, ok := keep[k]; ok {
-			st.Name, st.ContainerID, st.State = c.Name, c.ID, c.State
-			if c.State == "created" || c.State == "exited" {
-				if err := a.cfg.Runtime.Start(ctx, c.ID); err != nil {
-					err = fmt.Errorf("%s: %w", c.Name, err)
-					errs = append(errs, err)
-					st.Error = err.Error()
-				} else {
-					a.log.Info("started container", "app", as.App, "replica", as.Index, "generation", as.Generation, "container", shortID(c.ID), "was", c.State)
-					st.State = "running"
-				}
+			if err := a.supervise(ctx, as, c, &st); err != nil {
+				errs = append(errs, err)
 			}
 		} else {
 			id, state, err := a.create(ctx, as)
 			st.ContainerID, st.State = id, state
+			if state == "running" {
+				afterStart(as, &st)
+			}
 			if err != nil {
 				errs = append(errs, err)
 				st.Error = err.Error()
@@ -218,6 +250,12 @@ func (a *Agent) Reconcile(ctx context.Context) error {
 		}
 		status = append(status, st)
 	}
+
+	kept := make(map[string]bool, len(keep))
+	for _, c := range keep {
+		kept[c.Name] = true
+	}
+	a.forget(kept)
 
 	if err := a.report(ctx, status); err != nil {
 		errs = append(errs, err)

@@ -53,6 +53,7 @@ type env struct {
 	rt    *fakeRuntime
 	agent *Agent
 	logs  *syncBuffer
+	clock *fakeClock
 }
 
 type syncBuffer struct {
@@ -69,7 +70,8 @@ func (s *syncBuffer) String() string { s.mu.Lock(); defer s.mu.Unlock(); return 
 
 func newEnv(t *testing.T) *env {
 	t.Helper()
-	e := &env{t: t, path: filepath.Join(t.TempDir(), "hivemind.db"), rt: newFakeRuntime()}
+	e := &env{t: t, path: filepath.Join(t.TempDir(), "hivemind.db"), rt: newFakeRuntime(), clock: newFakeClock()}
+	e.rt.now = e.clock.Now
 	e.openStore()
 	if err := e.st.UpsertNode(ctxT(t), store.Node{ID: nodeID, Name: "one"}); err != nil {
 		t.Fatal(err)
@@ -90,7 +92,7 @@ func (e *env) openStore() {
 
 func (e *env) newAgent() {
 	e.logs = &syncBuffer{}
-	a, err := New(Config{NodeID: nodeID, Runtime: e.rt, Source: e.src,
+	a, err := New(Config{NodeID: nodeID, Runtime: e.rt, Source: e.src, Clock: e.clock.Now,
 		Logger: slog.New(slog.NewTextHandler(e.logs, &slog.HandlerOptions{Level: slog.LevelDebug}))})
 	if err != nil {
 		e.t.Fatal(err)
@@ -429,9 +431,18 @@ func TestExitedContainerIsStartedAgain(t *testing.T) {
 	if err := e.rt.Stop(ctxT(t), id, 0); err != nil {
 		t.Fatal(err)
 	}
+	// The first restart waits its 1 s of backoff.
+	e.reconcile()
+	if len(e.running()) != 0 {
+		t.Fatal("restarted before its backoff ended")
+	}
+	e.clock.Advance(time.Second)
 	e.reconcile()
 	if c := e.running()["hivemind-web-0-g1"]; c.ID != id {
 		t.Fatalf("exited container not started again in place: %+v", c)
+	}
+	if st := e.status("web"); len(st) != 1 || st[0].RestartCount != 1 || st[0].CrashLooping || !st[0].Ready {
+		t.Fatalf("status after the restart: %+v", st)
 	}
 }
 

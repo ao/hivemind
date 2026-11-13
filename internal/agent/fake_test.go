@@ -24,6 +24,10 @@ type fakeRuntime struct {
 	// fail, when set, is asked before each operation; a non-nil error is
 	// returned instead of doing it.
 	fail func(op string, arg string) error
+	// now gives the time for StartedAt and FinishedAt. Tests set it to a fake clock.
+	now func() time.Time
+	// execFn, when set, decides the result of Exec on a running container.
+	execFn func(ctx context.Context, id string, cmd []string) (int, error)
 }
 
 type fakeContainer struct {
@@ -32,7 +36,8 @@ type fakeContainer struct {
 }
 
 func newFakeRuntime() *fakeRuntime {
-	return &fakeRuntime{containers: map[string]*fakeContainer{}, images: map[string]bool{}, calls: map[string]int{}}
+	return &fakeRuntime{containers: map[string]*fakeContainer{}, images: map[string]bool{}, calls: map[string]int{},
+		now: time.Now}
 }
 
 func (f *fakeRuntime) begin(op, arg string) error {
@@ -123,7 +128,19 @@ func (f *fakeRuntime) Start(_ context.Context, id string) error {
 		return rtErr("start", runtime.ErrNotFound)
 	}
 	c.State = "running"
+	c.StartedAt = f.now()
+	c.FinishedAt = time.Time{}
+	c.IPAddress = "127.0.0.1"
 	return nil
+}
+
+// exit makes a running container exit with code, as if its process ended.
+func (f *fakeRuntime) exit(id string, code int) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if c := f.find(id); c != nil && c.State == "running" {
+		c.State, c.ExitCode, c.FinishedAt = "exited", code, f.now()
+	}
 }
 
 func (f *fakeRuntime) Stop(_ context.Context, id string, _ time.Duration) error {
@@ -137,7 +154,7 @@ func (f *fakeRuntime) Stop(_ context.Context, id string, _ time.Duration) error 
 		return rtErr("stop", runtime.ErrNotFound)
 	}
 	if c.State == "running" {
-		c.State = "exited"
+		c.State, c.FinishedAt = "exited", f.now()
 	}
 	return nil
 }
@@ -198,13 +215,30 @@ func (f *fakeRuntime) List(_ context.Context, labels map[string]string) ([]runti
 	return out, nil
 }
 
-func (f *fakeRuntime) Exec(_ context.Context, id string, _ []string) (int, error) {
+func (f *fakeRuntime) Exec(ctx context.Context, id string, cmd []string) (int, error) {
 	f.mu.Lock()
-	defer f.mu.Unlock()
 	if err := f.begin("exec", id); err != nil {
+		f.mu.Unlock()
 		return 0, err
 	}
-	return 0, nil
+	c := f.find(id)
+	if c == nil || c.State != "running" {
+		f.mu.Unlock()
+		return 0, rtErr("exec", runtime.ErrConflict)
+	}
+	fn := f.execFn
+	f.mu.Unlock()
+	// The hook runs without the lock, so it may block until ctx ends.
+	if fn == nil {
+		return 0, nil
+	}
+	return fn(ctx, id, cmd)
+}
+
+func (f *fakeRuntime) setExec(fn func(ctx context.Context, id string, cmd []string) (int, error)) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.execFn = fn
 }
 
 func (f *fakeRuntime) Logs(context.Context, string, runtime.LogOptions, io.Writer, io.Writer) error {
