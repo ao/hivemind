@@ -142,6 +142,25 @@ func findFunc(t *testing.T, file, name string) *ast.FuncDecl {
 	return nil
 }
 
+// callsNamed reports whether fn calls a function or method with the given name.
+func callsNamed(fn *ast.FuncDecl, name string) bool {
+	found := false
+	ast.Inspect(fn.Body, func(n ast.Node) bool {
+		c, ok := n.(*ast.CallExpr)
+		if !ok {
+			return true
+		}
+		switch f := c.Fun.(type) {
+		case *ast.Ident:
+			found = found || f.Name == name
+		case *ast.SelectorExpr:
+			found = found || f.Sel.Name == name
+		}
+		return true
+	})
+	return found
+}
+
 func contains(xs []string, s string) bool {
 	for _, x := range xs {
 		if x == s {
