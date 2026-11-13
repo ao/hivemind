@@ -270,6 +270,10 @@ func (s *Store) PutApp(ctx context.Context, a spec.App) (App, error) {
 		var created int64
 		err := tx.QueryRowContext(ctx, `SELECT generation, template, deleted, created_at FROM apps WHERE name = ?`, c.Name).
 			Scan(&gen, &oldTmpl, &deleted, &created)
+		// rolling is a template change to a live app: its replicas move to the
+		// new generation through a rollout. recreate is an app put again after
+		// a delete: its replicas are replaced at once, as before rollouts.
+		rolling, recreate := false, false
 		switch {
 		case errors.Is(err, sql.ErrNoRows):
 			gen, created = 1, now.UnixNano()
@@ -281,8 +285,10 @@ func (s *Store) PutApp(ctx context.Context, a spec.App) (App, error) {
 			if deleted == 1 {
 				gen++
 				created = now.UnixNano()
+				recreate = true
 			} else if oldTmpl != tmpl {
 				gen++
+				rolling = true
 			}
 			_, err = tx.ExecContext(ctx, `UPDATE apps SET spec = ?, template = ?, generation = ?, replicas = ?, deleted = 0,
 				created_at = ?, updated_at = ? WHERE name = ?`, string(specJSON), tmpl, gen, c.Replicas, created, now.UnixNano(), c.Name)
@@ -290,8 +296,18 @@ func (s *Store) PutApp(ctx context.Context, a spec.App) (App, error) {
 		if err != nil {
 			return err
 		}
-		if err := s.syncReplicas(ctx, tx, c.Name, c.Replicas, gen); err != nil {
+		if err := s.syncReplicas(ctx, tx, c.Name, c.Replicas, gen, !recreate); err != nil {
 			return err
+		}
+		switch {
+		case rolling:
+			if err := s.startRollout(ctx, tx, c.Name, gen); err != nil {
+				return err
+			}
+		case recreate:
+			if _, err := tx.ExecContext(ctx, `DELETE FROM rollouts WHERE app = ?`, c.Name); err != nil {
+				return err
+			}
 		}
 		if err := s.placePending(ctx, tx); err != nil {
 			return err
@@ -302,20 +318,41 @@ func (s *Store) PutApp(ctx context.Context, a spec.App) (App, error) {
 	return out, err
 }
 
-// syncReplicas makes replicas 0..n-1 of app desired running at generation
-// gen, and marks the rest for removal.
-func (s *Store) syncReplicas(ctx context.Context, tx *sql.Tx, app string, n, gen int) error {
+// syncReplicas makes replicas 0..n-1 of app desired running, and marks the
+// rest for removal.
+//
+// With keepGen false, every replica moves to generation gen now. With keepGen
+// true, a replica that is on a node keeps its generation: a rollout moves it
+// later, one at a time. A replica with no node has nothing running, so it
+// takes gen at once.
+func (s *Store) syncReplicas(ctx context.Context, tx *sql.Tx, app string, n, gen int, keepGen bool) error {
 	now := s.now().UnixNano()
 	for i := range n {
-		if _, err := tx.ExecContext(ctx, `INSERT INTO replicas (app, idx, node_id, generation, desired, pending_reason, updated_at)
-			VALUES (?, ?, NULL, ?, 'running', '', ?)
-			ON CONFLICT (app, idx) DO UPDATE SET generation = excluded.generation, desired = 'running', updated_at = excluded.updated_at
-			WHERE replicas.generation != excluded.generation OR replicas.desired != 'running'`,
-			app, i, gen, now); err != nil {
+		var err error
+		if keepGen {
+			_, err = tx.ExecContext(ctx, `INSERT INTO replicas (app, idx, node_id, generation, desired, pending_reason, updated_at)
+				VALUES (?, ?, NULL, ?, 'running', '', ?)
+				ON CONFLICT (app, idx) DO UPDATE SET
+					generation = CASE WHEN replicas.node_id IS NULL THEN excluded.generation ELSE replicas.generation END,
+					desired = 'running', updated_at = excluded.updated_at
+				WHERE replicas.desired != 'running' OR (replicas.node_id IS NULL AND replicas.generation != excluded.generation)`,
+				app, i, gen, now)
+		} else {
+			_, err = tx.ExecContext(ctx, `INSERT INTO replicas (app, idx, node_id, generation, desired, pending_reason, updated_at)
+				VALUES (?, ?, NULL, ?, 'running', '', ?)
+				ON CONFLICT (app, idx) DO UPDATE SET generation = excluded.generation, desired = 'running', updated_at = excluded.updated_at
+				WHERE replicas.generation != excluded.generation OR replicas.desired != 'running'`,
+				app, i, gen, now)
+		}
+		if err != nil {
 			return err
 		}
 	}
 	if _, err := tx.ExecContext(ctx, `UPDATE replicas SET desired = 'removed', updated_at = ? WHERE app = ? AND idx >= ? AND desired = 'running'`,
+		now, app, n); err != nil {
+		return err
+	}
+	if _, err := tx.ExecContext(ctx, `UPDATE surges SET desired = 'removed', updated_at = ? WHERE app = ? AND idx >= ?`,
 		now, app, n); err != nil {
 		return err
 	}
@@ -440,7 +477,10 @@ func (s *Store) DeleteApp(ctx context.Context, name string) error {
 		if n, _ := res.RowsAffected(); n == 0 {
 			return fmt.Errorf("app %q: %w", name, ErrNotFound)
 		}
-		if err := s.syncReplicas(ctx, tx, name, 0, 1); err != nil {
+		if _, err := tx.ExecContext(ctx, `DELETE FROM rollouts WHERE app = ?`, name); err != nil {
+			return err
+		}
+		if err := s.syncReplicas(ctx, tx, name, 0, 1, false); err != nil {
 			return err
 		}
 		return purgeDeleted(ctx, tx)
@@ -465,7 +505,7 @@ func (s *Store) Scale(ctx context.Context, name string, replicas int) (App, erro
 			string(specJSON), replicas, now.UnixNano(), name); err != nil {
 			return err
 		}
-		if err := s.syncReplicas(ctx, tx, name, replicas, a.Generation); err != nil {
+		if err := s.syncReplicas(ctx, tx, name, replicas, a.Generation, true); err != nil {
 			return err
 		}
 		if err := s.placePending(ctx, tx); err != nil {
@@ -516,9 +556,18 @@ func (s *Store) Replicas(ctx context.Context, app string) ([]Replica, error) {
 }
 
 // AssignmentsForNode returns every replica placed on the node, running and
-// marked for removal, with its app's spec.
+// marked for removal, with its app's spec. A surge on the node is included
+// as an assignment for the same replica index, at the surge's generation.
 func (s *Store) AssignmentsForNode(ctx context.Context, nodeID string) ([]Assignment, error) {
-	return queryAssignments(ctx, s.db, `r.node_id = ?`, nodeID)
+	out, err := queryAssignments(ctx, s.db, `r.node_id = ?`, nodeID)
+	if err != nil {
+		return nil, err
+	}
+	surges, err := querySurges(ctx, s.db, `s.node_id = ?`, nodeID)
+	if err != nil {
+		return nil, err
+	}
+	return append(out, surges...), nil
 }
 
 // UpsertNode registers a node or updates its name and capacity, renews its
@@ -614,13 +663,21 @@ func (s *Store) ReportStatus(ctx context.Context, nodeID string, st []Status) er
 			nodeID); err != nil {
 			return err
 		}
+		if _, err := tx.ExecContext(ctx, `DELETE FROM surges WHERE desired = 'removed' AND node_id = ?
+			AND NOT EXISTS (SELECT 1 FROM container_status c WHERE c.node_id = surges.node_id AND c.app = surges.app
+				AND c.idx = surges.idx AND c.generation = surges.generation)`,
+			nodeID); err != nil {
+			return err
+		}
 		return purgeDeleted(ctx, tx)
 	})
 }
 
-// purgeDeleted deletes deleted apps that have no replicas left.
+// purgeDeleted deletes deleted apps that have no replicas or surges left.
 func purgeDeleted(ctx context.Context, tx *sql.Tx) error {
-	_, err := tx.ExecContext(ctx, `DELETE FROM apps WHERE deleted = 1 AND NOT EXISTS (SELECT 1 FROM replicas r WHERE r.app = apps.name)`)
+	_, err := tx.ExecContext(ctx, `DELETE FROM apps WHERE deleted = 1
+		AND NOT EXISTS (SELECT 1 FROM replicas r WHERE r.app = apps.name)
+		AND NOT EXISTS (SELECT 1 FROM surges s WHERE s.app = apps.name)`)
 	return err
 }
 

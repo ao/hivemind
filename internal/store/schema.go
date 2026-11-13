@@ -76,6 +76,35 @@ CREATE TABLE cluster (
 	created_at       INTEGER NOT NULL
 ) STRICT;
 `,
+	// 4: rolling updates. A surge is the new-generation copy of one replica,
+	// on another node, that runs beside the old copy until the store moves
+	// the replica there. A rollout records the generation being rolled out,
+	// the replica in flight and its state. replicas.generation is the
+	// generation each replica should run now, so the rollout moves it one
+	// replica at a time.
+	`
+CREATE TABLE surges (
+	app        TEXT NOT NULL REFERENCES apps(name) ON DELETE CASCADE,
+	idx        INTEGER NOT NULL CHECK (idx >= 0),
+	node_id    TEXT NOT NULL REFERENCES nodes(id),
+	generation INTEGER NOT NULL CHECK (generation >= 1),
+	desired    TEXT NOT NULL CHECK (desired IN ('running', 'removed')),
+	updated_at INTEGER NOT NULL,
+	PRIMARY KEY (app, idx)
+) STRICT;
+CREATE INDEX surges_node ON surges(node_id);
+
+CREATE TABLE rollouts (
+	app        TEXT PRIMARY KEY REFERENCES apps(name) ON DELETE CASCADE,
+	target     INTEGER NOT NULL CHECK (target >= 1),
+	state      TEXT NOT NULL CHECK (state IN ('in_progress', 'paused', 'done')),
+	reason     TEXT NOT NULL DEFAULT '',
+	step_idx   INTEGER NOT NULL DEFAULT -1 CHECK (step_idx >= -1),
+	step_from  INTEGER NOT NULL DEFAULT 0 CHECK (step_from >= 0),
+	step_since INTEGER NOT NULL DEFAULT 0,
+	updated_at INTEGER NOT NULL
+) STRICT;
+`,
 }
 
 // SchemaVersion is the schema version this build writes.

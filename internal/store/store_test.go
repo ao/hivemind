@@ -149,13 +149,24 @@ func invariants(ctx context.Context, db *sql.DB) error {
 		}
 		rr.Close()
 		running := 0
+		// A running replica is at the app's generation, or, while a rollout to
+		// it is in progress, at an older one. It is never ahead of the app.
+		var rolling bool
+		var target int
+		var rstate string
+		err = db.QueryRowContext(ctx, `SELECT state, target FROM rollouts WHERE app = ?`, a.name).Scan(&rstate, &target)
+		if err == nil {
+			rolling = rstate == "in_progress" && target == a.gen
+		} else if !errors.Is(err, sql.ErrNoRows) {
+			return err
+		}
 		for _, r := range reps {
 			switch r.desired {
 			case "running":
 				if a.deleted == 1 {
 					return fmt.Errorf("app %s: deleted but replica %d is running", a.name, r.idx)
 				}
-				if r.idx >= a.replicas || r.gen != a.gen {
+				if r.idx >= a.replicas || r.gen > a.gen || (r.gen != a.gen && !rolling) {
 					return fmt.Errorf("app %s: running replica %d gen %d, app has %d replicas gen %d", a.name, r.idx, r.gen, a.replicas, a.gen)
 				}
 				running++
@@ -332,17 +343,28 @@ func TestPutAppGenerationRule(t *testing.T) {
 		t.Fatalf("%d replicas after scaling by PutApp", n)
 	}
 
-	// A template change bumps the generation once, and every running replica
-	// moves to it.
+	// A template change bumps the generation once and starts a rollout. The
+	// replicas keep their generation until the rollout moves them.
 	changed := web(3)
 	changed.Env = map[string]string{"A": "2"}
 	if a = mustPut(t, s, changed); a.Generation != 2 {
 		t.Fatalf("env change: gen %d", a.Generation)
 	}
 	for _, r := range replicasOf(t, s, "web") {
-		if r.Generation != 2 || r.Desired != Running || r.NodeID != node1 {
+		if r.Generation != 1 || r.Desired != Running || r.NodeID != node1 {
 			t.Fatalf("replica after the change: %+v", r)
 		}
+	}
+	if ro, err := s.GetRollout(ctx, "web"); err != nil || ro.Target != 2 || ro.State != RolloutInProgress {
+		t.Fatalf("rollout after the change: %+v %v", ro, err)
+	}
+	// One node, so the first move is in place: replica 0 goes to generation 2
+	// and the others wait for it.
+	if err := s.AdvanceRollouts(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if reps := replicasOf(t, s, "web"); reps[0].Generation != 2 || reps[1].Generation != 1 || reps[2].Generation != 1 {
+		t.Fatalf("after the first step: %+v", reps)
 	}
 	if a = mustPut(t, s, changed); a.Generation != 2 {
 		t.Fatalf("same spec again: gen %d", a.Generation)
@@ -683,7 +705,10 @@ func TestReopenKeepsData(t *testing.T) {
 	if err != nil || a.Generation != 2 || a.Spec.Replicas != 2 || a.Spec.Env["A"] != "2" {
 		t.Fatalf("after reopen: %+v %v", a, err)
 	}
-	if as, _ := s2.AssignmentsForNode(ctx, node1); len(as) != 2 || as[1].Generation != 2 {
+	if ro, err := s2.GetRollout(ctx, "web"); err != nil || ro.Target != 2 || ro.State != RolloutInProgress {
+		t.Fatalf("rollout after reopen: %+v %v", ro, err)
+	}
+	if as, _ := s2.AssignmentsForNode(ctx, node1); len(as) != 2 || as[1].Generation != 1 {
 		t.Fatalf("assignments after reopen: %+v", as)
 	}
 	if st, _ := s2.ListStatus(ctx, "web"); len(st) != 1 {
