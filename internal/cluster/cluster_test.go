@@ -22,6 +22,7 @@ import (
 
 	"github.com/ao/hivemind/internal/nodeapi"
 	"github.com/ao/hivemind/internal/pki"
+	"github.com/ao/hivemind/internal/ratelimit"
 	"github.com/ao/hivemind/internal/store"
 )
 
@@ -35,7 +36,7 @@ type fixture struct {
 	joinAddr string
 }
 
-func newFixture(t *testing.T, limiter *FailLimiter) *fixture {
+func newFixture(t *testing.T, limiter *ratelimit.FailLimiter) *fixture {
 	t.Helper()
 	dir := t.TempDir()
 	ca, err := pki.CreateCA(filepath.Join(dir, "ca"))
@@ -505,7 +506,7 @@ func TestPlaintextToTheClusterPortsFails(t *testing.T) {
 // --- rate limit -------------------------------------------------------------
 
 func TestJoinRateLimitRefusesAfterTheLimit(t *testing.T) {
-	fx := newFixture(t, NewFailLimiter(2, time.Hour))
+	fx := newFixture(t, ratelimit.New(2, time.Hour))
 	tok := fx.issue(time.Hour)
 	forged, err := pki.ParseJoinToken(fx.issue(time.Hour))
 	if err != nil {

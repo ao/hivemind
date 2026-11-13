@@ -1,7 +1,7 @@
 // Package server is the hivemind HTTP API. Every route sits behind
 // auth.Authenticator.Middleware, which admits only GET /healthz without the
-// admin token. The package builds the handler and the http.Server settings;
-// the caller opens the listener.
+// admin token or a session cookie. The package builds the handler and the
+// http.Server settings; the caller opens the listener.
 package server
 
 import (
@@ -9,10 +9,12 @@ import (
 	"errors"
 	"log/slog"
 	"net/http"
+	"strconv"
 	"strings"
 	"time"
 
 	"github.com/ao/hivemind/internal/auth"
+	"github.com/ao/hivemind/internal/ratelimit"
 	"github.com/ao/hivemind/internal/runtime"
 	"github.com/ao/hivemind/internal/store"
 )
@@ -53,7 +55,21 @@ type Config struct {
 	// IssueJoinToken makes a join token that expires after ttl. Nil means
 	// this server has no cluster CA, and POST /v1/join-tokens answers 503.
 	IssueJoinToken func(ttl time.Duration) (token string, expires time.Time, err error)
+	// LoginLimiter counts failed logins (POST /v1/session) per source
+	// address. Nil means LoginFailLimit failures per LoginFailWindow.
+	LoginLimiter *ratelimit.FailLimiter
 }
+
+// Defaults for Config.LoginLimiter: an address may fail LoginFailLimit
+// logins in each LoginFailWindow, and is then refused with 429 until the
+// window ends.
+const (
+	LoginFailLimit  = 5
+	LoginFailWindow = 10 * time.Minute
+)
+
+// sessionPath is the login and logout route.
+const sessionPath = "/v1/session"
 
 // Server serves the API.
 type Server struct {
@@ -83,6 +99,9 @@ func New(cfg Config) (*Server, error) {
 	if cfg.Metrics == nil {
 		cfg.Metrics = NewMetrics()
 	}
+	if cfg.LoginLimiter == nil {
+		cfg.LoginLimiter = ratelimit.New(LoginFailLimit, LoginFailWindow)
+	}
 	s := &Server{cfg: cfg, log: log, metrics: cfg.Metrics, router: auth.NewRouter(), metricsRouter: auth.NewRouter()}
 	s.streams, s.cancelStreams = context.WithCancel(context.Background())
 	s.routes()
@@ -93,14 +112,46 @@ func New(cfg Config) (*Server, error) {
 }
 
 // wrap puts a router behind the request log and counter, the JSON error
-// rewriter and the admin-token check.
+// rewriter, the login limit and the credential check.
 func (s *Server) wrap(r *auth.Router) http.Handler {
-	return s.logRequests(r, jsonErrors(s.cfg.Auth.Middleware(r)))
+	return s.logRequests(r, jsonErrors(s.limitLogins(s.cfg.Auth.Middleware(r))))
+}
+
+// limitLogins counts failed logins per source address, and refuses a login
+// from an address over the limit with 429 before its token is checked. A
+// failed login is a POST /v1/session answered 401, whether the credential
+// check or the login handler refused it. Other routes are not limited: the
+// admin token is 256 random bits, and API clients send it on every request.
+func (s *Server) limitLogins(next http.Handler) http.Handler {
+	lim := s.cfg.LoginLimiter
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost || r.URL.Path != sessionPath {
+			next.ServeHTTP(w, r)
+			return
+		}
+		src := ratelimit.SourceAddr(r)
+		if !lim.Allow(src) {
+			w.Header().Set("Retry-After", strconv.Itoa(int(lim.RetryAfter(src).Seconds())+1))
+			writeError(w, http.StatusTooManyRequests, "too many failed logins from this address; try again later")
+			s.log.Warn("login refused by rate limit", "remote", src)
+			return
+		}
+		sw := &statusWriter{ResponseWriter: w}
+		next.ServeHTTP(sw, r)
+		if sw.code == http.StatusUnauthorized {
+			lim.Fail(src)
+			s.log.Warn("login failed", "remote", src)
+		}
+	})
 }
 
 func (s *Server) routes() {
 	r := s.router
 	r.HandleFunc("GET /healthz", s.healthz)
+	// Login exchanges the bearer token for a session cookie and returns the
+	// CSRF token. Logout needs the CSRF token like any unsafe cookie request.
+	r.Handle("POST "+sessionPath, s.cfg.Auth.LoginHandler())
+	r.Handle("DELETE "+sessionPath, s.cfg.Auth.LogoutHandler())
 	r.HandleFunc("GET /v1/apps", s.listApps)
 	r.HandleFunc("POST /v1/apps", s.postApp)
 	r.HandleFunc("GET /v1/apps/{name}", s.getApp)

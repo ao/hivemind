@@ -29,6 +29,7 @@ import (
 	"time"
 
 	"github.com/ao/hivemind/internal/pki"
+	"github.com/ao/hivemind/internal/ratelimit"
 	"github.com/ao/hivemind/internal/store"
 )
 
@@ -40,6 +41,14 @@ const (
 	idleTimeout       = 120 * time.Second
 	maxHeaderBytes    = 16 << 10
 	shutdownTimeout   = 10 * time.Second
+)
+
+// Defaults for the join limiter in Listen: a source address may fail
+// DefaultFailLimit joins in each DefaultFailWindow. A failed join is one that
+// was refused.
+const (
+	DefaultFailLimit  = 5
+	DefaultFailWindow = 10 * time.Minute
 )
 
 // Config configures Listen.
@@ -59,7 +68,7 @@ type Config struct {
 	LocalNodeID string
 	// Limiter counts failed joins per source address. Nil means
 	// DefaultFailLimit failures per DefaultFailWindow.
-	Limiter *FailLimiter
+	Limiter *ratelimit.FailLimiter
 	// Logger receives one line per join and per rejected node request. Nil
 	// means slog.Default().
 	Logger *slog.Logger
@@ -106,7 +115,7 @@ func Listen(cfg Config) (*Cluster, error) {
 	}
 	limiter := cfg.Limiter
 	if limiter == nil {
-		limiter = NewFailLimiter(DefaultFailLimit, DefaultFailWindow)
+		limiter = ratelimit.New(DefaultFailLimit, DefaultFailWindow)
 	}
 
 	tlsCert, err := serverCert(cfg)

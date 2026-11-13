@@ -80,9 +80,9 @@ func (a *Authenticator) Middleware(next http.Handler) http.Handler {
 	})
 }
 
-// LoginHandler exchanges the admin token for a session. Route it as
-// POST /login behind Middleware. The request must carry the admin token as
-// its bearer header. The handler checks that header itself, so a session
+// LoginHandler exchanges the admin token for a session. The API routes it as
+// POST /v1/session behind Middleware. The request must carry the admin token
+// as its bearer header. The handler checks that header itself, so a session
 // cookie cannot be used to mint a new session. The response sets the session
 // cookie and returns the CSRF token as {"csrf_token": "..."}.
 func (a *Authenticator) LoginHandler() http.Handler {
@@ -105,8 +105,9 @@ func (a *Authenticator) LoginHandler() http.Handler {
 }
 
 // LogoutHandler ends the session named by the cookie, if there is one, and
-// clears the cookie. Route it as POST /logout behind Middleware, so the
-// request needs the same CSRF token as any other unsafe cookie request.
+// clears the cookie. The API routes it as DELETE /v1/session behind
+// Middleware, so a cookie request needs the same CSRF token as any other
+// unsafe cookie request.
 func (a *Authenticator) LogoutHandler() http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if c, err := r.Cookie(SessionCookieName); err == nil {

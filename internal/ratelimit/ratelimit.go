@@ -1,16 +1,15 @@
-package cluster
+// Package ratelimit counts failed attempts per source address. The join
+// listener uses it for failed joins, and the API for failed logins.
+package ratelimit
 
 import (
+	"net"
+	"net/http"
 	"sync"
 	"time"
 )
 
-// Defaults for NewFailLimiter in Listen: a source address may fail DefaultFailLimit
-// joins in each DefaultFailWindow. A failed join is one that was refused.
 const (
-	DefaultFailLimit  = 5
-	DefaultFailWindow = 10 * time.Minute
-
 	// maxTracked bounds the map. Past it, a source that is not tracked
 	// shares one overflow entry, so memory stays bounded and the limit still
 	// applies to a flood from many addresses.
@@ -18,12 +17,12 @@ const (
 	overflow   = "*overflow*"
 )
 
-// FailLimiter counts failed joins per source address. It is safe for
+// FailLimiter counts failures per source address. It is safe for
 // concurrent use.
 //
-// A token is 256 random bits, so no guessing will find one; the limit is there
-// so a flood of bad requests can't keep the CA busy, and so repeated failures
-// from one address are visible in the log.
+// The credentials it guards are 256 random bits, so no guessing will find
+// one. The limit is there so a flood of bad requests can't keep the server
+// busy, and so repeated failures from one address are visible in the log.
 type FailLimiter struct {
 	mu     sync.Mutex
 	limit  int
@@ -37,13 +36,13 @@ type failCount struct {
 	n     int
 }
 
-// NewFailLimiter allows limit failures per address in each window. Once an
-// address has reached the limit, its joins are refused until the window ends.
-func NewFailLimiter(limit int, window time.Duration) *FailLimiter {
+// New allows limit failures per address in each window. Once an
+// address has reached the limit, Allow refuses it until the window ends.
+func New(limit int, window time.Duration) *FailLimiter {
 	return &FailLimiter{limit: limit, window: window, now: time.Now, fails: map[string]*failCount{}}
 }
 
-// Allow reports whether addr may try to join now.
+// Allow reports whether addr may try now.
 func (l *FailLimiter) Allow(addr string) bool {
 	l.mu.Lock()
 	defer l.mu.Unlock()
@@ -58,7 +57,7 @@ func (l *FailLimiter) Allow(addr string) bool {
 	return c.n < l.limit
 }
 
-// Fail records a refused join from addr.
+// Fail records a failure from addr.
 func (l *FailLimiter) Fail(addr string) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
@@ -72,8 +71,8 @@ func (l *FailLimiter) Fail(addr string) {
 	c.n++
 }
 
-// RetryAfter is how long addr must wait before a join is allowed again. It is
-// zero when addr may join now.
+// RetryAfter is how long addr must wait before it is allowed again. It is
+// zero when addr may try now.
 func (l *FailLimiter) RetryAfter(addr string) time.Duration {
 	l.mu.Lock()
 	defer l.mu.Unlock()
@@ -109,4 +108,14 @@ func (l *FailLimiter) prune(now time.Time) {
 			delete(l.fails, k)
 		}
 	}
+}
+
+// SourceAddr is the host part of the peer's address, which is what a limit is
+// keyed by. It ignores forwarding headers, which a client can set to anything.
+func SourceAddr(r *http.Request) string {
+	host, _, err := net.SplitHostPort(r.RemoteAddr)
+	if err != nil {
+		return r.RemoteAddr
+	}
+	return host
 }

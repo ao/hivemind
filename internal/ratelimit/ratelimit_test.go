@@ -1,4 +1,4 @@
-package cluster
+package ratelimit
 
 import (
 	"fmt"
@@ -9,7 +9,7 @@ import (
 // clockedLimiter is a limiter whose clock the test moves.
 func clockedLimiter(limit int, window time.Duration) (*FailLimiter, *time.Time) {
 	now := time.Unix(1_700_000_000, 0)
-	l := NewFailLimiter(limit, window)
+	l := New(limit, window)
 	l.now = func() time.Time { return now }
 	return l, &now
 }

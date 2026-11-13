@@ -4,12 +4,12 @@ import (
 	"encoding/pem"
 	"errors"
 	"log/slog"
-	"net"
 	"net/http"
 	"strconv"
 
 	"github.com/ao/hivemind/internal/nodeapi"
 	"github.com/ao/hivemind/internal/pki"
+	"github.com/ao/hivemind/internal/ratelimit"
 )
 
 // errJoinRefused is the one message for every token failure. It does not say
@@ -18,7 +18,7 @@ const errJoinRefused = "the join token is invalid, used or expired"
 
 // joinRoutes returns the handler of the join listener. It serves POST /join
 // and nothing else.
-func joinRoutes(cfg Config, limiter *FailLimiter, log *slog.Logger) http.Handler {
+func joinRoutes(cfg Config, limiter *ratelimit.FailLimiter, log *slog.Logger) http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("POST "+nodeapi.JoinPath, func(w http.ResponseWriter, r *http.Request) {
 		join(cfg, limiter, log, w, r)
@@ -34,8 +34,8 @@ func joinRoutes(cfg Config, limiter *FailLimiter, log *slog.Logger) http.Handler
 // redeemed. The token is redeemed last, so a request that fails for another
 // reason leaves it usable. The node ID is chosen here, so the joining node
 // never picks its own.
-func join(cfg Config, limiter *FailLimiter, log *slog.Logger, w http.ResponseWriter, r *http.Request) {
-	src := sourceAddr(r)
+func join(cfg Config, limiter *ratelimit.FailLimiter, log *slog.Logger, w http.ResponseWriter, r *http.Request) {
+	src := ratelimit.SourceAddr(r)
 	if !limiter.Allow(src) {
 		w.Header().Set("Retry-After", strconv.Itoa(int(limiter.RetryAfter(src).Seconds())+1))
 		writeError(w, http.StatusTooManyRequests, "too many failed joins from this address; try again later")
@@ -86,14 +86,4 @@ func join(cfg Config, limiter *FailLimiter, log *slog.Logger, w http.ResponseWri
 	certPEM := pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: der})
 	writeJSON(w, http.StatusOK, nodeapi.JoinReply{NodeID: id, CertPEM: string(certPEM), CAPEM: string(cfg.CA.CertPEM)})
 	log.Info("node joined", "node", id, "remote", src)
-}
-
-// sourceAddr is the host part of the peer's address, which is what the
-// failure limit is keyed by.
-func sourceAddr(r *http.Request) string {
-	host, _, err := net.SplitHostPort(r.RemoteAddr)
-	if err != nil {
-		return r.RemoteAddr
-	}
-	return host
 }
