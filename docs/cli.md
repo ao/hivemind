@@ -104,7 +104,7 @@ hivemind init [flags]
 | `--log-level` | string | `info` | `HIVEMIND_LOG_LEVEL` | log level: debug, info, warn or error |
 | `--metrics-addr` | string | - | `HIVEMIND_METRICS_ADDR` | separate loopback address for /metrics, host:port; empty means API only |
 | `--min-ready` | string | `30s` | - | how long a node must be ready before it gets new replicas; 0s means no wait |
-| `--reconcile-interval` | string | `2s` | `HIVEMIND_RECONCILE_INTERVAL` | how often the agent reconciles containers |
+| `--reconcile-interval` | string | `2s` | `HIVEMIND_RECONCILE_INTERVAL` | how often the agent reconciles containers and renews its lease (at most 5s) |
 | `--server` | string | `http://127.0.0.1:4483` | `HIVEMIND_SERVER` | server URL for the client commands |
 | `--token` | string | - | `HIVEMIND_TOKEN` | API token for the client commands (not logged) |
 
@@ -146,7 +146,7 @@ hivemind join <server> [flags]
 | `--log-level` | string | `info` | `HIVEMIND_LOG_LEVEL` | log level: debug, info, warn or error |
 | `--metrics-addr` | string | - | `HIVEMIND_METRICS_ADDR` | separate loopback address for /metrics, host:port; empty means API only |
 | `--min-ready` | string | `30s` | - | how long a node must be ready before it gets new replicas; 0s means no wait |
-| `--reconcile-interval` | string | `2s` | `HIVEMIND_RECONCILE_INTERVAL` | how often the agent reconciles containers |
+| `--reconcile-interval` | string | `2s` | `HIVEMIND_RECONCILE_INTERVAL` | how often the agent reconciles containers and renews its lease (at most 5s) |
 | `--server` | string | `http://127.0.0.1:4483` | `HIVEMIND_SERVER` | server URL for the client commands |
 | `--token` | string | - | `HIVEMIND_TOKEN` | join token from hivemind join-token on the server |
 
@@ -241,7 +241,7 @@ hivemind serve [flags]
 | `--log-level` | string | `info` | `HIVEMIND_LOG_LEVEL` | log level: debug, info, warn or error |
 | `--metrics-addr` | string | - | `HIVEMIND_METRICS_ADDR` | separate loopback address for /metrics, host:port; empty means API only |
 | `--min-ready` | string | `30s` | - | how long a node must be ready before it gets new replicas; 0s means no wait |
-| `--reconcile-interval` | string | `2s` | `HIVEMIND_RECONCILE_INTERVAL` | how often the agent reconciles containers |
+| `--reconcile-interval` | string | `2s` | `HIVEMIND_RECONCILE_INTERVAL` | how often the agent reconciles containers and renews its lease (at most 5s) |
 | `--role` | string | `server` | - | server (API, scheduler and agent) or worker (agent only, after hivemind join) |
 | `--server` | string | `http://127.0.0.1:4483` | `HIVEMIND_SERVER` | server URL for the client commands |
 | `--token` | string | - | `HIVEMIND_TOKEN` | API token for the client commands (not logged) |

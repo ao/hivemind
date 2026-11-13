@@ -345,12 +345,12 @@ func TestFlagValueParseErrorNamesSource(t *testing.T) {
 }
 
 func TestYAMLScalarNumbersAndDurations(t *testing.T) {
-	file := "cluster-port: 4499\nreconcile-interval: 7s\n"
+	file := "cluster-port: 4499\nreconcile-interval: 4s\n"
 	cfg, err := Load(nil, testOpts(map[string]string{"HOME": "/home/t"}, file))
 	if err != nil {
 		t.Fatal(err)
 	}
-	if cfg.ClusterPort != 4499 || cfg.ReconcileInterval != 7*time.Second {
+	if cfg.ClusterPort != 4499 || cfg.ReconcileInterval != 4*time.Second {
 		t.Errorf("got port %d interval %s", cfg.ClusterPort, cfg.ReconcileInterval)
 	}
 }

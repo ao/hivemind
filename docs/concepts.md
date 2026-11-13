@@ -45,7 +45,7 @@ A node is lost when its lease is more than 15 s old. The 15 s is fixed. The serv
 
 Two things follow from that:
 
-- Keep `--reconcile-interval` on workers well below 15 s. A longer interval makes every worker look lost.
+- `--reconcile-interval` is at most 5 s, so a worker can miss two passes before its 15 s lease runs out. A longer value is refused at start-up.
 - A worker that cannot reach the server for 15 s is treated as lost, and its replicas are placed again.
 
 ## Placement

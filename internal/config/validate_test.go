@@ -1,6 +1,7 @@
 package config
 
 import (
+	"github.com/ao/hivemind/internal/scheduler"
 	"strings"
 	"testing"
 	"time"
@@ -94,8 +95,8 @@ func TestValidate(t *testing.T) {
 		{"metrics missing port", func(c *Config) { c.MetricsAddr = "127.0.0.1" }, "must be host:port"},
 
 		// cluster port
-		{"cluster port 0", func(c *Config) { c.ClusterPort = 0 }, "not in 1-65535"},
-		{"cluster port too big", func(c *Config) { c.ClusterPort = 65536 }, "not in 1-65535"},
+		{"cluster port 0", func(c *Config) { c.ClusterPort = 0 }, "not in 1-65534"},
+		{"cluster port too big", func(c *Config) { c.ClusterPort = 65536 }, "not in 1-65534"},
 
 		// log settings
 		{"log level debug ok", func(c *Config) { c.LogLevel = "debug" }, ""},
@@ -109,6 +110,10 @@ func TestValidate(t *testing.T) {
 		// durations
 		{"reconcile zero rejected", func(c *Config) { c.ReconcileInterval = 0 }, "must be positive"},
 		{"reconcile negative rejected", func(c *Config) { c.ReconcileInterval = -time.Second }, "must be positive"},
+		{"reconcile 5s ok", func(c *Config) { c.ReconcileInterval = 5 * time.Second }, ""},
+		{"reconcile above the lease budget rejected", func(c *Config) { c.ReconcileInterval = 6 * time.Second }, "longer than 5s"},
+		{"cluster port 65534 ok", func(c *Config) { c.ClusterPort = 65534 }, ""},
+		{"cluster port 65535 leaves no join port", func(c *Config) { c.ClusterPort = 65535 }, "not in 1-65534"},
 
 		// server and data dir
 		{"server http ok", func(c *Config) { c.Server = "http://10.0.0.5:4483" }, ""},
@@ -163,5 +168,12 @@ func TestLoadRejectsInvalid(t *testing.T) {
 	if _, err := Load(nil, opts); err == nil || !strings.Contains(err.Error(),
 		"--api-addr 0.0.0.0:4483 needs --api-tls-cert and --api-tls-key, or bind 127.0.0.1") {
 		t.Fatalf("Load should fail with the fix-it message, got %v", err)
+	}
+}
+
+// The reconcile bound must leave room for two missed passes within the lease.
+func TestMaxReconcileIntervalFitsTheLease(t *testing.T) {
+	if 3*MaxReconcileInterval > scheduler.DefaultLeaseTimeout {
+		t.Fatalf("3 x %s exceeds the %s lease timeout", MaxReconcileInterval, scheduler.DefaultLeaseTimeout)
 	}
 }

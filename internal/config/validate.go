@@ -8,6 +8,7 @@ import (
 	"net/url"
 	"strconv"
 	"strings"
+	"time"
 )
 
 // Validate reports every rule the config breaks, joined into one error.
@@ -53,8 +54,9 @@ func (c *Config) Validate() error {
 		}
 	}
 
-	if c.ClusterPort < 1 || c.ClusterPort > 65535 {
-		fail("--cluster-port %d is not in 1-65535", c.ClusterPort)
+	// The join listener takes the next port, so the cluster port stops at 65534.
+	if c.ClusterPort < 1 || c.ClusterPort > 65534 {
+		fail("--cluster-port %d is not in 1-65534 (the join listener uses the next port)", c.ClusterPort)
 	}
 
 	switch c.LogLevel {
@@ -70,6 +72,8 @@ func (c *Config) Validate() error {
 
 	if c.ReconcileInterval <= 0 {
 		fail("--reconcile-interval must be positive, got %s", c.ReconcileInterval)
+	} else if c.ReconcileInterval > MaxReconcileInterval {
+		fail("--reconcile-interval %s is longer than %s: each pass renews the node's lease, and a node that misses its lease for 15 s is treated as lost", c.ReconcileInterval, MaxReconcileInterval)
 	}
 	if c.MinReady < 0 {
 		fail("--min-ready must not be negative, got %s", c.MinReady)
@@ -127,3 +131,9 @@ func validHostname(s string) bool {
 	}
 	return true
 }
+
+// MaxReconcileInterval bounds --reconcile-interval. A worker renews its lease
+// once per reconcile pass and the server treats a node as lost after 15 s
+// without a renewal (scheduler.DefaultLeaseTimeout), so a pass at most every
+// 5 s survives two missed passes.
+const MaxReconcileInterval = 5 * time.Second

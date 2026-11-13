@@ -263,7 +263,7 @@ func settings(opts Options) []setting {
 		str("metrics-addr", "separate loopback address for /metrics, host:port; empty means API only", "",
 			func(c *Config) *string { return &c.MetricsAddr },
 			func(f *fileConfig) *string { return f.MetricsAddr }),
-		dur("reconcile-interval", "how often the agent reconciles containers", "2s",
+		dur("reconcile-interval", "how often the agent reconciles containers and renews its lease (at most 5s)", "2s",
 			func(c *Config) *time.Duration { return &c.ReconcileInterval },
 			func(f *fileConfig) *string { return f.ReconcileInterval }),
 		dur("min-ready", "how long a node must be ready before it gets new replicas; 0s means no wait", "30s",
