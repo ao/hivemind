@@ -2,9 +2,7 @@ package main
 
 import (
 	"context"
-	"crypto/rand"
 	"crypto/tls"
-	"encoding/hex"
 	"errors"
 	"fmt"
 	"io"
@@ -22,6 +20,7 @@ import (
 
 	"github.com/ao/hivemind/internal/agent"
 	"github.com/ao/hivemind/internal/auth"
+	"github.com/ao/hivemind/internal/cluster"
 	"github.com/ao/hivemind/internal/config"
 	"github.com/ao/hivemind/internal/logging"
 	"github.com/ao/hivemind/internal/pki"
@@ -152,9 +151,9 @@ func removeCA(dir string) {
 	_ = os.Remove(filepath.Join(dir, pki.CACertFile))
 }
 
-// joinIssuer returns the function that issues join tokens for the cluster CA
-// in dir. It returns nil when the directory has no CA.
-func joinIssuer(dir string, st *store.Store) (func(time.Duration) (string, time.Time, error), error) {
+// loadClusterCA reads the cluster CA from dir. It returns nil, and no error,
+// when the directory has no CA.
+func loadClusterCA(dir string) (*pki.CA, error) {
 	ca, err := pki.LoadCA(dir)
 	if errors.Is(err, fs.ErrNotExist) {
 		return nil, nil
@@ -162,19 +161,18 @@ func joinIssuer(dir string, st *store.Store) (func(time.Duration) (string, time.
 	if err != nil {
 		return nil, fmt.Errorf("cluster CA in %s: %w", dir, err)
 	}
+	return ca, nil
+}
+
+// joinIssuer returns the function that issues join tokens for ca.
+func joinIssuer(ca *pki.CA, st *store.Store) func(time.Duration) (string, time.Time, error) {
 	tokens := pki.NewTokens(st.JoinTokens())
 	return func(ttl time.Duration) (string, time.Time, error) {
 		return tokens.Issue(ca.Fingerprint(), ttl)
-	}, nil
+	}
 }
 
-func newNodeID() (string, error) {
-	var b [6]byte
-	if _, err := rand.Read(b[:]); err != nil {
-		return "", err
-	}
-	return "node-" + hex.EncodeToString(b[:]), nil
-}
+func newNodeID() (string, error) { return cluster.NewNodeID() }
 
 // serverURL is the URL a client on this machine uses for the API address.
 // A wildcard bind is reached on loopback.
@@ -312,9 +310,16 @@ func runServe(ctx context.Context, cfg *config.Config, log *slog.Logger, rt runt
 	if err != nil {
 		return err
 	}
-	issue, err := joinIssuer(cfg.DataDir, st)
+	ca, err := loadClusterCA(cfg.DataDir)
 	if err != nil {
 		return err
+	}
+	if cfg.Advertise != "" && ca == nil {
+		return fmt.Errorf("--advertise is set, but %s has no cluster CA: run hivemind init first", cfg.DataDir)
+	}
+	var issue func(time.Duration) (string, time.Time, error)
+	if ca != nil {
+		issue = joinIssuer(ca, st)
 	}
 	api, err := server.New(server.Config{Store: st, Runtime: rt, NodeID: cl.NodeID, Auth: authn,
 		Trigger: ag.Trigger, Logger: log.With("component", "api"), Metrics: m, IssueJoinToken: issue})
@@ -341,6 +346,22 @@ func runServe(ctx context.Context, cfg *config.Config, log *slog.Logger, rt runt
 		mhs = server.NewHTTPServer(api.MetricsHandler(), log)
 	}
 
+	// The cluster listeners open only with --advertise, on that address only.
+	var nodes *cluster.Cluster
+	if cfg.Advertise != "" {
+		c, err := cluster.Listen(cluster.Config{Store: st, CA: ca, Tokens: pki.NewTokens(st.JoinTokens()),
+			Advertise: cfg.Advertise, Port: cfg.ClusterPort, LocalNodeID: cl.NodeID,
+			Logger: log.With("component", "cluster")})
+		if err != nil {
+			ln.Close()
+			if mln != nil {
+				mln.Close()
+			}
+			return err
+		}
+		nodes = c
+	}
+
 	agentCtx, stopAgent := context.WithCancel(context.Background())
 	var wg sync.WaitGroup
 	wg.Add(1)
@@ -349,7 +370,15 @@ func runServe(ctx context.Context, cfg *config.Config, log *slog.Logger, rt runt
 		_ = ag.Run(agentCtx)
 	}()
 
-	serveErr := make(chan error, 2)
+	serveErr := make(chan error, 3)
+	if nodes != nil {
+		log.Info("cluster listening", "node_addr", nodes.NodeAddr(), "join_addr", nodes.JoinAddr())
+		go func() {
+			if err := nodes.Serve(); err != nil {
+				serveErr <- fmt.Errorf("cluster listener: %w", err)
+			}
+		}()
+	}
 	go func() {
 		var err error
 		if tlsCfg != nil {
@@ -377,6 +406,11 @@ func runServe(ctx context.Context, cfg *config.Config, log *slog.Logger, rt runt
 	defer cancel()
 	if err := hs.Shutdown(sctx); err != nil && !errors.Is(err, http.ErrServerClosed) {
 		log.Warn("API shutdown", "err", err)
+	}
+	if nodes != nil {
+		if err := nodes.Shutdown(); err != nil {
+			log.Warn("cluster shutdown", "err", err)
+		}
 	}
 	if mhs != nil {
 		if err := mhs.Shutdown(sctx); err != nil && !errors.Is(err, http.ErrServerClosed) {
