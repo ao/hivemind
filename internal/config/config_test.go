@@ -352,3 +352,12 @@ func TestYAMLScalarNumbersAndDurations(t *testing.T) {
 		t.Errorf("got port %d interval %s", cfg.ClusterPort, cfg.ReconcileInterval)
 	}
 }
+
+func TestFileTooLarge(t *testing.T) {
+	var fc fileConfig
+	data := []byte("log-level: info\n# " + strings.Repeat("x", maxFileSize) + "\n")
+	err := decodeFile(data, "big.yaml", &fc)
+	if err == nil || !strings.Contains(err.Error(), "limit") {
+		t.Fatalf("err = %v, want a size-limit error", err)
+	}
+}
