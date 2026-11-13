@@ -10,7 +10,7 @@ GOBUILD := CGO_ENABLED=0 go build -trimpath -ldflags "$(LDFLAGS)"
 # The six release platforms: the node runs on Linux; the other platforms get the client CLI.
 PLATFORMS := linux/amd64 linux/arm64 darwin/amd64 darwin/arm64 windows/amd64 windows/arm64
 
-.PHONY: all build build-all smoke test vet fmt clean help
+.PHONY: all build build-all smoke test vet fmt docs quickstart-check clean help
 
 all: vet test build
 
@@ -40,6 +40,15 @@ vet:
 fmt:
 	gofmt -l -w .
 
+# Regenerate docs/cli.md from the command definitions. TestCLIDocIsCurrent
+# fails until the regenerated file is committed.
+docs:
+	go run ./cmd/hivemind gen-docs > docs/cli.md.tmp && mv docs/cli.md.tmp docs/cli.md
+
+# Run the quick start from the README against a one-node cluster in Docker-in-Docker.
+quickstart-check:
+	./scripts/quickstart-check.sh
+
 clean:
 	rm -rf bin dist
 
@@ -50,4 +59,6 @@ help:
 	@echo "test       go test -race ./..."
 	@echo "vet        go vet ./..."
 	@echo "fmt        gofmt -w ."
+	@echo "docs       regenerate docs/cli.md from the command definitions"
+	@echo "quickstart-check  run the README quick start against a node in Docker (needs Docker)"
 	@echo "clean      remove bin/ and dist/"
