@@ -1,5 +1,7 @@
 #!/usr/bin/env bash
-# Runs the Docker runtime integration tests against a real Docker daemon.
+# Runs the integration tests against a real Docker daemon: the agent's
+# single-node reconcile tests first, then the Docker runtime tests. The runtime
+# tests end by killing the daemon, so they go last.
 #
 # It starts docker:dind with --privileged, with its API on a unix socket in a
 # named volume. It publishes no ports, and it listens on no TCP socket. The
@@ -86,7 +88,10 @@ docker run -d --name "$gocont" --network "container:$dind" \
 	-e GOTOOLCHAIN=local \
 	-e "DOCKER_HOST=unix://$sock" \
 	"$GO_IMAGE" \
-	bash -c 'go test -race -count=1 -tags integration -v ./internal/runtime/...' >/dev/null
+	bash -c 'rc=0
+		go test -race -count=1 -tags integration -v ./internal/agent/... || rc=1
+		go test -race -count=1 -tags integration -v ./internal/runtime/... || rc=1
+		exit $rc' >/dev/null
 
 # The daemon test blocks in a call and then writes $marker. Kill the daemon's
 # container then, so the call fails the way a daemon crash would. The loop ends
