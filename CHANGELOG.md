@@ -2,24 +2,62 @@
 
 All notable changes to this project will be documented in this file. See [Conventional Commits](https://conventionalcommits.org) for commit guidelines.
 
+## [2.0.0] - Unreleased
+
+Version 2 is a rewrite. It is not compatible with 1.x: the command line, the API, the data directory and the feature set all differ. v1 data is not migrated, so start v2 in a new data directory. See [docs/upgrading.md](docs/upgrading.md).
+
+### Added
+
+- Subcommands: `init`, `serve`, `deploy`, `status`, `logs`, `scale`, `delete` and `version`. `join` exists and exits with an error.
+- App spec in YAML or JSON, with validation of names, images, ports, volumes, resources and health checks.
+- Docker Engine runtime, over the Engine API v1.44: pull, create, start, stop, remove, inspect, list by label, logs and exec.
+- Single-node agent that starts, stops and replaces containers to match the spec. Containers carry the labels `hivemind.app`, `hivemind.replica` and `hivemind.generation`.
+- HTTP, TCP and exec health checks, and restarts with exponential backoff from 1 second to 5 minutes.
+- `init` creates an admin token, stored as a SHA-256 digest. Every API route except `GET /healthz` needs it.
+- Prometheus metrics at `/metrics`, and an optional loopback listener for them.
+- Logs with `log/slog`, as text or JSON. Tokens, cookies and private keys are redacted.
+- Settings from flags, `HIVEMIND_*` variables and a YAML file, in that order of precedence.
+- A client config that `init` writes, so the CLI on the same machine needs no token in the environment.
+- Command reference in `docs/cli.md`, generated from the command definitions.
+- Release builds for six platforms, and `SHA256SUMS`. The node runs on Linux amd64 and arm64.
+
+### Changed
+
+- The API listens on `127.0.0.1:4483` by default, not on all interfaces.
+- Authentication is mandatory.
+- Go 1.26 is required to build. The module declared 1.22 before.
+- The SQLite store uses WAL mode, and each change is one transaction.
+
+### Removed
+
+- The web UI, the v1 `/api/` routes, the containerd runtime and the memberlist membership.
+- Security (RBAC, secrets, network policy, IPAM, tenants, scanning, storage encryption, ACLs and QoS), resilience (circuit breaker, Redis storage, bulkhead, retry and fallback), service discovery (DNS and proxy), tenants, zero-downtime and canary deployment endpoints, and volume backup and snapshots.
+
+### Known limits
+
+- One node. Multi-node operation, `join`, rescheduling after a node is lost, and rolling updates are not built. A spec change replaces every replica at once.
+- Two apps that publish the same host port can leave one of them running without its port, and `status` reports it as running.
+- `resources` are stored and not applied.
+- Restart counts and health are in `/metrics`, not in `status`.
+
 ## [1.0.1](https://github.com/ao/hivemind/compare/v1.0.0...v1.0.1) (2025-08-07)
 
 
-### 🐛 Bug Fixes
+### Bug Fixes
 
 * Update development roadmap to reflect current implementation status and feature completion ([e5ab046](https://github.com/ao/hivemind/commit/e5ab046f92846bd72b04ea5de09efd9470c8ee0d))
 
 ## 1.0.0 (2025-08-07)
 
 
-### 🚀 Features
+### Features
 
 * Implement Proxy Server with service discovery and metrics tracking ([9ca7b91](https://github.com/ao/hivemind/commit/9ca7b9122add16de63908caedeb2815702f2ea9a))
 * Implement TenantQuotaEnforcer for managing tenant resource quotas ([f35b0ee](https://github.com/ao/hivemind/commit/f35b0ee4431820f2c5864dc97138b50f3a70e34c))
 * Update implementation status and complete Proxy Server in Service Discovery ([36c007f](https://github.com/ao/hivemind/commit/36c007f3c611af8e74bf99be3dfccee4aafee03f))
 
 
-### 🐛 Bug Fixes
+### Bug Fixes
 
 * Enhance unit test coverage reporting and add gosec installation step ([695cf82](https://github.com/ao/hivemind/commit/695cf823429963405cfea99c2cde42e670b527d9))
 * Improve test workflow by simplifying unit test command and enhancing gosec installation with error handling ([0cb037d](https://github.com/ao/hivemind/commit/0cb037de847ce48b903bfac392150cd0d53b1e01))
@@ -28,6 +66,6 @@ All notable changes to this project will be documented in this file. See [Conven
 * Update test workflow to use Makefile commands and improve test node creation to avoid network timeouts ([dbe424b](https://github.com/ao/hivemind/commit/dbe424bbee7753bf0d7bb1978bd8b5a0e1a53238))
 
 
-### ♻️ Code Refactoring
+### Code Refactoring
 
 * Organize network policy management and initialization tests ([fd6a02a](https://github.com/ao/hivemind/commit/fd6a02afe9a924d7a989b4b89052d23451af10e3))
