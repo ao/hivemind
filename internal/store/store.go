@@ -95,6 +95,20 @@ type Status struct {
 	Generation  int
 	State       string // the engine's state, or "pending" or "unknown"
 	Error       string
+	// RestartCount is how many times the agent restarted this container
+	// since it was created: after an exit, or after failing its health check.
+	// It resets after 10 minutes of healthy running.
+	RestartCount int
+	// Health is "" when the replica has no health check, otherwise "starting",
+	// "healthy" or "unhealthy".
+	Health string
+	// Ready is true when the container is running and passes its health
+	// check, or has none. A rolling update waits for this.
+	Ready bool
+	// CrashLooping is true while a restart is scheduled after a failure.
+	CrashLooping bool
+	// NextRestart is when the scheduled restart is due. Zero when none is.
+	NextRestart time.Time
 	UpdatedAt   time.Time // set by the store
 }
 
@@ -584,9 +598,14 @@ func (s *Store) ReportStatus(ctx context.Context, nodeID string, st []Status) er
 			return err
 		}
 		for _, x := range st {
-			if _, err := tx.ExecContext(ctx, `INSERT INTO container_status (node_id, name, app, idx, generation, container_id, state, error, updated_at)
-				VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-				nodeID, x.Name, x.App, x.Replica, x.Generation, x.ContainerID, x.State, x.Error, now); err != nil {
+			if x.RestartCount < 0 {
+				return fmt.Errorf("%w: restart count must not be negative, got %d for %s", ErrInvalid, x.RestartCount, x.Name)
+			}
+			if _, err := tx.ExecContext(ctx, `INSERT INTO container_status (node_id, name, app, idx, generation, container_id, state, error, updated_at,
+				restart_count, health, ready, crash_looping, next_restart)
+				VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+				nodeID, x.Name, x.App, x.Replica, x.Generation, x.ContainerID, x.State, x.Error, now,
+				x.RestartCount, x.Health, x.Ready, x.CrashLooping, nanos(x.NextRestart)); err != nil {
 				return err
 			}
 		}
@@ -612,8 +631,19 @@ func (s *Store) ListStatus(ctx context.Context, app string) ([]Status, error) {
 	if app != "" {
 		where, args = `app = ?`, []any{app}
 	}
-	rows, err := s.db.QueryContext(ctx, `SELECT node_id, name, container_id, app, idx, generation, state, error, updated_at
-		FROM container_status WHERE `+where+` ORDER BY app, idx, name`, args...)
+	return queryStatus(ctx, s.db, where+` ORDER BY app, idx, name`, args...)
+}
+
+// StatusForNode returns what one node last reported, sorted by app, replica
+// and name. An agent reads it at start-up to recover its restart counts.
+func (s *Store) StatusForNode(ctx context.Context, nodeID string) ([]Status, error) {
+	return queryStatus(ctx, s.db, `node_id = ? ORDER BY app, idx, name`, nodeID)
+}
+
+func queryStatus(ctx context.Context, q querier, where string, args ...any) ([]Status, error) {
+	rows, err := q.QueryContext(ctx, `SELECT node_id, name, container_id, app, idx, generation, state, error, updated_at,
+		restart_count, health, ready, crash_looping, next_restart
+		FROM container_status WHERE `+where, args...)
 	if err != nil {
 		return nil, err
 	}
@@ -621,12 +651,26 @@ func (s *Store) ListStatus(ctx context.Context, app string) ([]Status, error) {
 	var out []Status
 	for rows.Next() {
 		var x Status
-		var updated int64
-		if err := rows.Scan(&x.NodeID, &x.Name, &x.ContainerID, &x.App, &x.Replica, &x.Generation, &x.State, &x.Error, &updated); err != nil {
+		var updated, next int64
+		var ready, crash int
+		if err := rows.Scan(&x.NodeID, &x.Name, &x.ContainerID, &x.App, &x.Replica, &x.Generation, &x.State, &x.Error, &updated,
+			&x.RestartCount, &x.Health, &ready, &crash, &next); err != nil {
 			return nil, err
 		}
 		x.UpdatedAt = time.Unix(0, updated)
+		x.Ready, x.CrashLooping = ready == 1, crash == 1
+		if next != 0 {
+			x.NextRestart = time.Unix(0, next)
+		}
 		out = append(out, x)
 	}
 	return out, rows.Err()
+}
+
+// nanos returns t as unix nanoseconds, or 0 for the zero time.
+func nanos(t time.Time) int64 {
+	if t.IsZero() {
+		return 0
+	}
+	return t.UnixNano()
 }

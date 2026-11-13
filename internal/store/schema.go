@@ -57,6 +57,15 @@ CREATE TABLE container_status (
 ) STRICT;
 CREATE INDEX container_status_app ON container_status(app, idx);
 `,
+	// 2: health and restart state for each reported container. next_restart is
+	// unix nanoseconds, or 0 when no restart is scheduled.
+	`
+ALTER TABLE container_status ADD COLUMN restart_count INTEGER NOT NULL DEFAULT 0 CHECK (restart_count >= 0);
+ALTER TABLE container_status ADD COLUMN health TEXT NOT NULL DEFAULT '';
+ALTER TABLE container_status ADD COLUMN ready INTEGER NOT NULL DEFAULT 0 CHECK (ready IN (0, 1));
+ALTER TABLE container_status ADD COLUMN crash_looping INTEGER NOT NULL DEFAULT 0 CHECK (crash_looping IN (0, 1));
+ALTER TABLE container_status ADD COLUMN next_restart INTEGER NOT NULL DEFAULT 0;
+`,
 }
 
 // SchemaVersion is the schema version this build writes.

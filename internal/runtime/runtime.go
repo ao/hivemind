@@ -132,6 +132,13 @@ type Container struct {
 	ExitCode      int
 	OOMKilled     bool
 	RestartPolicy string
+	// IPAddress is the container's address on its Docker network. Empty when
+	// it has none, as for a container that was never started.
+	IPAddress string
+	// StartedAt and FinishedAt are zero when the container has not started
+	// or has not stopped. Inspect fills them; List does not.
+	StartedAt  time.Time
+	FinishedAt time.Time
 }
 
 // Running reports whether the container is running.
@@ -171,6 +178,11 @@ type Runtime interface {
 	// labels. A key with an empty value matches any value. Stopped containers
 	// are included.
 	List(ctx context.Context, labels map[string]string) ([]Container, error)
+	// Exec runs cmd in a running container and returns its exit code. It
+	// returns ctx.Err() when ctx ends first; the process is then left to the
+	// engine, which ends it with the container. A non-running container is
+	// an error wrapping ErrConflict.
+	Exec(ctx context.Context, id string, cmd []string) (int, error)
 	// Logs writes the container's stdout to stdout and its stderr to stderr.
 	// Each may be the same writer. With opts.Follow it returns when the
 	// container exits, or with ctx.Err() when ctx is cancelled.

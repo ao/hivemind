@@ -198,6 +198,15 @@ func (f *fakeRuntime) List(_ context.Context, labels map[string]string) ([]runti
 	return out, nil
 }
 
+func (f *fakeRuntime) Exec(_ context.Context, id string, _ []string) (int, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if err := f.begin("exec", id); err != nil {
+		return 0, err
+	}
+	return 0, nil
+}
+
 func (f *fakeRuntime) Logs(context.Context, string, runtime.LogOptions, io.Writer, io.Writer) error {
 	return nil
 }

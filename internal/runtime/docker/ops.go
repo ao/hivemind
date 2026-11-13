@@ -219,15 +219,23 @@ func (c *Client) Inspect(ctx context.Context, id string) (runtime.Container, err
 			Labels map[string]string `json:"Labels"`
 		} `json:"Config"`
 		State struct {
-			Status    string `json:"Status"`
-			ExitCode  int    `json:"ExitCode"`
-			OOMKilled bool   `json:"OOMKilled"`
+			Status     string    `json:"Status"`
+			ExitCode   int       `json:"ExitCode"`
+			OOMKilled  bool      `json:"OOMKilled"`
+			StartedAt  time.Time `json:"StartedAt"`
+			FinishedAt time.Time `json:"FinishedAt"`
 		} `json:"State"`
 		HostConfig struct {
 			RestartPolicy struct {
 				Name string `json:"Name"`
 			} `json:"RestartPolicy"`
 		} `json:"HostConfig"`
+		NetworkSettings struct {
+			IPAddress string `json:"IPAddress"`
+			Networks  map[string]struct {
+				IPAddress string `json:"IPAddress"`
+			} `json:"Networks"`
+		} `json:"NetworkSettings"`
 	}
 	if err := json.NewDecoder(resp.Body).Decode(&b); err != nil {
 		return runtime.Container{}, c.readError(ctx, op, err)
@@ -241,6 +249,9 @@ func (c *Client) Inspect(ctx context.Context, id string) (runtime.Container, err
 		ExitCode:      b.State.ExitCode,
 		OOMKilled:     b.State.OOMKilled,
 		RestartPolicy: b.HostConfig.RestartPolicy.Name,
+		IPAddress:     ipAddress(b.NetworkSettings.IPAddress, b.NetworkSettings.Networks),
+		StartedAt:     b.State.StartedAt,
+		FinishedAt:    b.State.FinishedAt,
 	}, nil
 }
 
@@ -337,6 +348,69 @@ func (c *Client) Logs(ctx context.Context, id string, opts runtime.LogOptions, s
 	return &runtime.Error{Op: op, Message: "writing the log output", Cause: err}
 }
 
+// Exec runs cmd in a running container. The process's output is discarded:
+// probes need the exit code only. The stream is read to its end, which the
+// daemon closes when the process exits, and then the exit code is asked for.
+// A cancelled context closes the connection; the process is then ended by the
+// daemon, not by hivemind.
+func (c *Client) Exec(ctx context.Context, id string, cmd []string) (int, error) {
+	const op = "exec"
+	p, err := containerPath(op, id)
+	if err != nil {
+		return 0, err
+	}
+	if len(cmd) == 0 {
+		return 0, &runtime.Error{Op: op, Err: runtime.ErrInvalid, Message: "command is empty"}
+	}
+	resp, err := c.call(ctx, op, http.MethodPost, p+"/exec", nil, execCreateRequest{
+		Cmd:          cmd,
+		AttachStdout: true,
+		AttachStderr: true,
+	})
+	if err != nil {
+		return 0, err
+	}
+	var created struct {
+		ID string `json:"Id"`
+	}
+	err = json.NewDecoder(resp.Body).Decode(&created)
+	resp.Body.Close()
+	if err != nil {
+		return 0, c.readError(ctx, op, err)
+	}
+	if created.ID == "" {
+		return 0, &runtime.Error{Op: op, Message: "the daemon returned no exec ID"}
+	}
+
+	resp, err = c.call(ctx, op, http.MethodPost, "/exec/"+url.PathEscape(created.ID)+"/start", nil,
+		execStartRequest{Detach: false, Tty: false})
+	if err != nil {
+		return 0, err
+	}
+	_, err = io.Copy(io.Discard, resp.Body)
+	resp.Body.Close()
+	if err != nil {
+		return 0, c.readError(ctx, op, err)
+	}
+
+	resp, err = c.call(ctx, op, http.MethodGet, "/exec/"+url.PathEscape(created.ID)+"/json", nil, nil)
+	if err != nil {
+		return 0, err
+	}
+	defer resp.Body.Close()
+	var info struct {
+		Running  bool `json:"Running"`
+		ExitCode int  `json:"ExitCode"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&info); err != nil {
+		return 0, c.readError(ctx, op, err)
+	}
+	if info.Running {
+		return 0, &runtime.Error{Op: op, Message: "the exec is still running after its output ended"}
+	}
+	return info.ExitCode, nil
+}
+
 // readTracker remembers the last error its reader returned, so a failed
 // write can be told apart from a failed read.
 type readTracker struct {
@@ -350,6 +424,27 @@ func (t *readTracker) Read(p []byte) (int, error) {
 		t.err = err
 	}
 	return n, err
+}
+
+// ipAddress returns the container's address. The daemon's legacy top-level
+// field comes first; otherwise the first network by name that has an address.
+func ipAddress(legacy string, networks map[string]struct {
+	IPAddress string `json:"IPAddress"`
+}) string {
+	if legacy != "" {
+		return legacy
+	}
+	names := make([]string, 0, len(networks))
+	for n := range networks {
+		names = append(names, n)
+	}
+	slices.Sort(names)
+	for _, n := range names {
+		if ip := networks[n].IPAddress; ip != "" {
+			return ip
+		}
+	}
+	return ""
 }
 
 // Request bodies for POST /containers/create. Field names are the engine's.
@@ -378,6 +473,17 @@ type mount struct {
 	Type   string `json:"Type"`
 	Source string `json:"Source"`
 	Target string `json:"Target"`
+}
+
+type execCreateRequest struct {
+	Cmd          []string `json:"Cmd"`
+	AttachStdout bool     `json:"AttachStdout"`
+	AttachStderr bool     `json:"AttachStderr"`
+}
+
+type execStartRequest struct {
+	Detach bool `json:"Detach"`
+	Tty    bool `json:"Tty"`
 }
 
 type restartPolicy struct {
