@@ -298,7 +298,7 @@ func TestIntegrationLogsReturnWhatContainerPrinted(t *testing.T) {
 	id := itCreate(t, c, runtime.ContainerConfig{
 		Name:    itName("logs"),
 		Image:   alpineImage,
-		Command: []string{"sh", "-c", "echo first-line; echo second-line >&2; echo third-line"},
+		Command: []string{"sh", "-c", "echo first-line; echo second-line >&2; sleep 1; echo third-line"},
 		App:     "logs",
 	})
 	if err := c.Start(itCtx(t), id); err != nil {
@@ -319,6 +319,8 @@ func TestIntegrationLogsReturnWhatContainerPrinted(t *testing.T) {
 
 	out.Reset()
 	errOut.Reset()
+	// stdout and stderr reach the daemon through separate pipes, so their
+	// relative order is only defined across the sleep in the command.
 	if err := c.Logs(itCtx(t), id, runtime.LogOptions{Tail: 1}, &out, &errOut); err != nil {
 		t.Fatal(err)
 	}

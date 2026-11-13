@@ -113,9 +113,9 @@ func TestParseImage(t *testing.T) {
 		"localhost:5000/app:dev":           "localhost:5000/app:dev",
 		"localhost/app":                    "localhost/app:latest",
 		"registry.example.com:443/a/b/c:1": "registry.example.com:443/a/b/c:1",
-		"nginx@sha256:" + strings.Repeat("a", 64):       "docker.io/library/nginx@sha256:" + strings.Repeat("a", 64),
-		"nginx:1.2@sha256:" + strings.Repeat("0", 64):   "docker.io/library/nginx:1.2@sha256:" + strings.Repeat("0", 64),
-		"my_org/my-app.v2__x:Tag_1.2-rc": "docker.io/my_org/my-app.v2__x:Tag_1.2-rc",
+		"nginx@sha256:" + strings.Repeat("a", 64):     "docker.io/library/nginx@sha256:" + strings.Repeat("a", 64),
+		"nginx:1.2@sha256:" + strings.Repeat("0", 64): "docker.io/library/nginx:1.2@sha256:" + strings.Repeat("0", 64),
+		"my_org/my-app.v2__x:Tag_1.2-rc":              "docker.io/my_org/my-app.v2__x:Tag_1.2-rc",
 	}
 	for in, want := range cases {
 		img, err := ParseImage(in)
