@@ -79,7 +79,6 @@ var precedenceCases = []precedenceCase{
 	{"reconcile-interval", "3s", "4s", "5s", "2s"},
 	{"min-ready", "5s", "6s", "7s", "30s"},
 	{"server", "http://127.0.0.1:1", "http://127.0.0.1:2", "http://127.0.0.1:3", "http://127.0.0.1:4483"},
-	{"token", "tok-a", "tok-b", "tok-c", ""},
 }
 
 // TestPrecedence checks flag > env > file > default for every field, one
@@ -361,5 +360,33 @@ func TestFileTooLarge(t *testing.T) {
 	err := decodeFile(data, "big.yaml", &fc)
 	if err == nil || !strings.Contains(err.Error(), "limit") {
 		t.Fatalf("err = %v, want a size-limit error", err)
+	}
+}
+
+// A token in the config file is refused with a message that says where it
+// goes instead, and the message never echoes the value.
+func TestTokenInFileIsRefused(t *testing.T) {
+	_, err := Load(nil, testOpts(map[string]string{"HOME": "/home/t"}, "token: "+testToken+"\n"))
+	if err == nil || !strings.Contains(err.Error(), "does not belong in the config file") {
+		t.Fatalf("Load with a token in the file: %v", err)
+	}
+	if strings.Contains(err.Error(), testToken) {
+		t.Fatalf("the error echoes the token: %v", err)
+	}
+}
+
+// The token flag still beats the environment.
+func TestTokenFlagBeatsEnv(t *testing.T) {
+	opts := testOpts(map[string]string{"HOME": "/home/t", "HIVEMIND_TOKEN": "tok-env"}, "")
+	fl := newFlags(t, opts)
+	if err := fl.Set("token", "tok-flag"); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := resolve(fl, opts)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Token.Value() != "tok-flag" {
+		t.Fatalf("token %q, want the flag's", cfg.Token.Value())
 	}
 }

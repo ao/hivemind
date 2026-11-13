@@ -1,6 +1,6 @@
 # Changelog
 
-All notable changes to this project will be documented in this file. See [Conventional Commits](https://conventionalcommits.org) for commit guidelines.
+Notable changes to hivemind, newest first. Versions follow [Semantic Versioning](https://semver.org). A release is cut by pushing a `v*` tag; its notes are the matching section below.
 
 ## [2.0.0] - Unreleased
 
@@ -32,6 +32,7 @@ Version 2 is a rewrite. It is not compatible with 1.x: the command line, the API
 
 - The API listens on `127.0.0.1:4483` by default, not on all interfaces.
 - Authentication is mandatory.
+- The YAML config file refuses a `token` key. Pass the API token with `--token` or `HIVEMIND_TOKEN`, or let the client read the token file that `init` wrote.
 - Go 1.26 is required to build. The module declared 1.22 before.
 - The SQLite store uses WAL mode, and each change is one transaction.
 - `init` and `serve` refuse a v1 data directory and point to docs/upgrading.md.

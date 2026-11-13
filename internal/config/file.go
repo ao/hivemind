@@ -44,5 +44,11 @@ func decodeFile(data []byte, name string, fc *fileConfig) error {
 	if err := dec.Decode(fc); err != nil && !errors.Is(err, io.EOF) {
 		return fmt.Errorf("%s: %w", name, err)
 	}
+	// The file is decoded into the token field only so that this error can name
+	// it: a config file is easy to copy, share or commit, so it is no place for
+	// a credential.
+	if fc.Token != nil {
+		return fmt.Errorf("%s: token: the API token does not belong in the config file; set HIVEMIND_TOKEN or --token, or let the client read the token file that init wrote", name)
+	}
 	return nil
 }

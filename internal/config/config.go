@@ -274,8 +274,7 @@ func settings(opts Options) []setting {
 			func(f *fileConfig) *string { return f.Server }),
 		{
 			name:  "token",
-			usage: "API token for the client commands (not logged)",
-			file:  func(f *fileConfig) *string { return f.Token },
+			usage: "API token for the client commands (not logged; never read from the config file)",
 			set:   func(c *Config, v string) error { c.Token = Secret(v); return nil },
 		},
 	}
