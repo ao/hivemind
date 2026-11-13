@@ -42,7 +42,8 @@ type Volume struct {
 	Path string `json:"path" yaml:"path"`
 }
 
-// Resources are what one replica reserves on its node.
+// Resources are what one replica reserves on its node, and its limits: CPU
+// in CPUs and Memory in bytes. Zero means no reservation and no limit.
 type Resources struct {
 	CPU    float64  `json:"cpu,omitempty" yaml:"cpu,omitempty"`
 	Memory ByteSize `json:"memory,omitempty" yaml:"memory,omitempty"`
@@ -86,6 +87,18 @@ const (
 	maxPathLen   = 1024
 	DefaultBind  = "127.0.0.1"
 	defaultProto = "tcp"
+)
+
+// The smallest limits a container engine accepts. A nonzero resources.cpu or
+// resources.memory below these is rejected here, rather than by every create
+// on the node.
+const (
+	// MinCPU is 0.01 CPUs. Docker turns a CPU limit into a CFS quota per
+	// 100ms period, and the kernel's smallest quota is 1ms.
+	MinCPU = 0.01
+	// MinMemory is 6Mi, Docker's minimum memory limit (linuxMinMemory in the
+	// daemon; "the minimum allowed value is 6m" in the docker run docs).
+	MinMemory = 6 << 20
 )
 
 var (
@@ -226,9 +239,13 @@ func (a *App) Validate() error {
 
 	if a.Resources.CPU < 0 || a.Resources.CPU > maxCPU || a.Resources.CPU != a.Resources.CPU {
 		add("resources.cpu: must be between 0 and %d", maxCPU)
+	} else if a.Resources.CPU > 0 && a.Resources.CPU < MinCPU {
+		add("resources.cpu: must be 0 (no limit) or at least %g", MinCPU)
 	}
 	if a.Resources.Memory < 0 || a.Resources.Memory > maxMemory {
 		add("resources.memory: must be between 0 and 1Ti")
+	} else if a.Resources.Memory > 0 && a.Resources.Memory < MinMemory {
+		add("resources.memory: must be 0 (no limit) or at least 6Mi")
 	}
 
 	if h := a.Health; h != nil {

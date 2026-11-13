@@ -138,7 +138,7 @@ func (a *Agent) supervise(ctx context.Context, as store.Assignment, c runtime.Co
 		}
 		rs.restarts++
 		a.clearSchedule(rs, st)
-		log.Warn("restarted exited container", "restarts", rs.restarts, "exit_code", ci.ExitCode)
+		log.Warn("restarted exited container", "restarts", rs.restarts, "exit_code", ci.ExitCode, "oom_killed", ci.OOMKilled)
 		st.State = "running"
 		afterStart(as, st)
 

@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
+	"math"
 	"net"
 	"net/http"
 	"net/http/httptest"
@@ -332,6 +333,78 @@ func TestCreateRequestBody(t *testing.T) {
 		if !ck.ok {
 			t.Errorf("%s: body = %s", ck.name, reqs[0].Body)
 		}
+	}
+}
+
+func TestCreateResourceLimits(t *testing.T) {
+	tests := []struct {
+		name   string
+		cpu    float64
+		memory int64
+		// want is the HostConfig fields in the body; a missing key was left
+		// out of the JSON.
+		want map[string]int64
+	}{
+		{name: "no limits", want: map[string]int64{}},
+		{name: "half a cpu", cpu: 0.5, want: map[string]int64{"NanoCpus": 500_000_000}},
+		{name: "two cpus", cpu: 2, want: map[string]int64{"NanoCpus": 2_000_000_000}},
+		{name: "a third of a cpu rounds", cpu: 1.0 / 3, want: map[string]int64{"NanoCpus": 333_333_333}},
+		{name: "smallest cpu", cpu: 0.01, want: map[string]int64{"NanoCpus": 10_000_000}},
+		{name: "memory without swap", memory: 256 << 20, want: map[string]int64{"Memory": 256 << 20, "MemorySwap": 256 << 20}},
+		{name: "both", cpu: 1.5, memory: 1 << 30, want: map[string]int64{"NanoCpus": 1_500_000_000, "Memory": 1 << 30, "MemorySwap": 1 << 30}},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			c, fd := newFake(t, func(w http.ResponseWriter, ex exchange) {
+				writeJSON(w, http.StatusCreated, map[string]any{"Id": "c0ffee"})
+			})
+			_, err := c.Create(context.Background(), runtime.ContainerConfig{
+				Name: "web", Image: "nginx", App: "web", CPU: tc.cpu, Memory: tc.memory,
+			})
+			requireNoErr(t, err)
+			var body struct {
+				HostConfig map[string]json.RawMessage
+			}
+			if err := json.Unmarshal(fd.requests()[0].Body, &body); err != nil {
+				t.Fatal(err)
+			}
+			for _, k := range []string{"NanoCpus", "Memory", "MemorySwap"} {
+				raw, present := body.HostConfig[k]
+				want, wantPresent := tc.want[k]
+				if present != wantPresent {
+					t.Errorf("%s present = %v, want %v: %s", k, present, wantPresent, fd.requests()[0].Body)
+					continue
+				}
+				if !present {
+					continue
+				}
+				var got int64
+				if err := json.Unmarshal(raw, &got); err != nil || got != want {
+					t.Errorf("%s = %s, want %d", k, raw, want)
+				}
+			}
+		})
+	}
+}
+
+func TestCreateRejectsResourcesWithoutRequest(t *testing.T) {
+	tests := map[string]runtime.ContainerConfig{
+		"negative cpu":         {CPU: -1},
+		"cpu below minimum":    {CPU: 0.001},
+		"cpu not a number":     {CPU: math.NaN()},
+		"negative memory":      {Memory: -1},
+		"memory below minimum": {Memory: 4 << 20},
+	}
+	for name, cfg := range tests {
+		t.Run(name, func(t *testing.T) {
+			c, fd := newFake(t, func(w http.ResponseWriter, ex exchange) {})
+			cfg.Name, cfg.Image, cfg.App = "web", "nginx", "web"
+			_, err := c.Create(context.Background(), cfg)
+			requireIs(t, err, runtime.ErrInvalid)
+			if n := len(fd.requests()); n != 0 {
+				t.Fatalf("%d requests sent", n)
+			}
+		})
 	}
 }
 

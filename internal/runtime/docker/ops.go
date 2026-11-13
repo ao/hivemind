@@ -89,7 +89,8 @@ func (c *Client) Pull(ctx context.Context, ref string) error {
 }
 
 // Create makes a container with the hivemind labels, a restart policy of
-// "no", and the requested ports and volumes. Ports default to 127.0.0.1.
+// "no", the requested ports and volumes, and the CPU and memory limits.
+// Ports default to 127.0.0.1.
 func (c *Client) Create(ctx context.Context, cfg runtime.ContainerConfig) (string, error) {
 	const op = "create"
 	cfg, err := runtime.Prepare(cfg)
@@ -129,6 +130,9 @@ func (c *Client) Create(ctx context.Context, cfg runtime.ContainerConfig) (strin
 			PortBindings:  bindings,
 			Mounts:        mounts,
 			RestartPolicy: restartPolicy{Name: "no"},
+			NanoCpus:      nanoCPUs(cfg.CPU),
+			Memory:        cfg.Memory,
+			MemorySwap:    cfg.Memory,
 		},
 	}
 	resp, err := c.call(ctx, op, http.MethodPost, "/containers/create",
@@ -458,10 +462,34 @@ type createRequest struct {
 	HostConfig   hostConfig          `json:"HostConfig"`
 }
 
+// hostConfig is the part of HostConfig hivemind sets. The resource fields are
+// from the API's Resources definition (v1.44):
+//   - NanoCpus: "CPU quota in units of 10^-9 CPUs."
+//   - Memory: "Memory limit in bytes."
+//   - MemorySwap: "Total memory limit (memory + swap). Set as -1 to enable
+//     unlimited swap."
+//
+// Zero leaves a field unset, which is no limit. MemorySwap is set equal to
+// Memory: left unset, Docker lets the container use as much swap as its
+// memory limit on a host with swap, so the limit would be twice what the spec
+// says ("If --memory-swap is unset, and --memory is set, the container can
+// use as much swap as the --memory setting"; set to the same value, "the
+// container doesn't have access to swap", from the Docker docs' resource
+// constraints page). On a kernel without swap accounting Docker ignores
+// MemorySwap and warns; the memory limit still holds.
 type hostConfig struct {
 	PortBindings  map[string][]portBinding `json:"PortBindings,omitempty"`
 	Mounts        []mount                  `json:"Mounts,omitempty"`
 	RestartPolicy restartPolicy            `json:"RestartPolicy"`
+	NanoCpus      int64                    `json:"NanoCpus,omitempty"`
+	Memory        int64                    `json:"Memory,omitempty"`
+	MemorySwap    int64                    `json:"MemorySwap,omitempty"`
+}
+
+// nanoCPUs converts a CPU limit in CPUs to the engine's units, rounded to the
+// nearest whole unit.
+func nanoCPUs(cpu float64) int64 {
+	return int64(math.Round(cpu * 1e9))
 }
 
 type portBinding struct {

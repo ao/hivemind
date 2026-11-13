@@ -268,6 +268,36 @@ func TestGenerationChangeReplaces(t *testing.T) {
 	}
 }
 
+// Resources reach the container as limits, and a change to them is a rollout
+// to a new generation that carries the new limits.
+func TestResourcesAreContainerLimits(t *testing.T) {
+	e := newEnv(t)
+	if err := e.st.UpsertNode(ctxT(t), store.Node{ID: nodeID, Name: "one", CPU: 4, Memory: 8 << 30}); err != nil {
+		t.Fatal(err)
+	}
+	app := web(1)
+	app.Resources = spec.Resources{CPU: 0.5, Memory: 64 << 20}
+	e.put(app)
+	e.reconcile()
+	c, ok := e.running()["hivemind-web-0-g1"]
+	if !ok || c.cfg.CPU != 0.5 || c.cfg.Memory != 64<<20 {
+		t.Fatalf("container config: %+v", c.cfg)
+	}
+
+	app.Resources.Memory = 128 << 20
+	if a := e.put(app); a.Generation != 2 {
+		t.Fatalf("a memory change gave generation %d, want 2", a.Generation)
+	}
+	if err := e.st.AdvanceRollouts(ctxT(e.t)); err != nil {
+		t.Fatal(err)
+	}
+	e.reconcile()
+	c, ok = e.running()["hivemind-web-0-g2"]
+	if !ok || c.cfg.CPU != 0.5 || c.cfg.Memory != 128<<20 {
+		t.Fatalf("after the change: running %v, config %+v", names(e.running()), c.cfg)
+	}
+}
+
 func TestScaleDown(t *testing.T) {
 	e := newEnv(t)
 	app := web(3)

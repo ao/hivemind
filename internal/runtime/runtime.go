@@ -105,6 +105,11 @@ type ContainerConfig struct {
 	Env     map[string]string
 	Ports   []PortBinding
 	Volumes []VolumeMount
+	// CPU is the limit in CPUs, such as 0.5. Zero means no limit.
+	CPU float64
+	// Memory is the limit in bytes. Zero means no limit. Swap is not allowed
+	// on top of it.
+	Memory int64
 	// App, Replica and Generation become the hivemind.* labels.
 	App        string
 	Replica    int
@@ -193,7 +198,8 @@ type Runtime interface {
 var containerNameRE = regexp.MustCompile(`^[a-zA-Z0-9][a-zA-Z0-9_.-]{0,127}$`)
 
 // Prepare returns a copy of cfg with defaults filled in and every field
-// checked. It applies the spec rules for env, ports, volumes and commands, so
+// checked. It applies the spec rules for env, ports, volumes, resources and
+// commands, so
 // every implementation accepts and rejects the same configurations. Errors
 // wrap ErrInvalid.
 func Prepare(cfg ContainerConfig) (ContainerConfig, error) {
@@ -209,7 +215,8 @@ func Prepare(cfg ContainerConfig) (ContainerConfig, error) {
 	}
 	cfg.Image = img.String()
 
-	a := spec.App{Name: cfg.App, Image: cfg.Image, Replicas: 1, Command: cfg.Command, Env: cfg.Env}
+	a := spec.App{Name: cfg.App, Image: cfg.Image, Replicas: 1, Command: cfg.Command, Env: cfg.Env,
+		Resources: spec.Resources{CPU: cfg.CPU, Memory: spec.ByteSize(cfg.Memory)}}
 	for _, p := range cfg.Ports {
 		a.Ports = append(a.Ports, spec.Port{Bind: p.HostIP, Host: p.HostPort, Container: p.ContainerPort, Protocol: p.Protocol})
 	}

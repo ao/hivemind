@@ -360,6 +360,8 @@ func containerConfig(as store.Assignment) runtime.ContainerConfig {
 		Image:      as.Spec.Image,
 		Command:    as.Spec.Command,
 		Env:        as.Spec.Env,
+		CPU:        as.Spec.Resources.CPU,
+		Memory:     int64(as.Spec.Resources.Memory),
 		App:        as.App,
 		Replica:    as.Index,
 		Generation: as.Generation,

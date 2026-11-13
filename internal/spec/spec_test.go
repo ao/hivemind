@@ -70,6 +70,8 @@ func TestValidateRejects(t *testing.T) {
 		{"volume with replicas", func(a *App) { a.Replicas = 2; a.Volumes = []Volume{{Name: "d", Path: "/d"}} }, "only 1 replica"},
 		{"cpu", func(a *App) { a.Resources.CPU = -1 }, "cpu"},
 		{"memory", func(a *App) { a.Resources.Memory = -1 }, "memory"},
+		{"cpu below minimum", func(a *App) { a.Resources.CPU = 0.005 }, "at least 0.01"},
+		{"memory below minimum", func(a *App) { a.Resources.Memory = 6<<20 - 1 }, "at least 6Mi"},
 		{"two checks", func(a *App) { a.Health.TCP = &TCPCheck{Port: 80} }, "exactly one"},
 		{"no check", func(a *App) { a.Health.HTTP = nil }, "exactly one"},
 		{"check path", func(a *App) { a.Health.HTTP.Path = "x y" }, "path"},
@@ -101,6 +103,28 @@ func TestTemplateIgnoresReplicas(t *testing.T) {
 	b.Image = "nginx:1.27"
 	if a.Template() == b.Template() {
 		t.Fatal("image change did not change the template")
+	}
+	// Resources are container limits, so a change to them is a new template
+	// and a rolling update.
+	c, d := valid(), valid()
+	d.Resources.CPU = 1
+	if c.Template() == d.Template() {
+		t.Fatal("cpu change did not change the template")
+	}
+	d = valid()
+	d.Resources.Memory = 512 << 20
+	if c.Template() == d.Template() {
+		t.Fatal("memory change did not change the template")
+	}
+}
+
+func TestResourceMinimums(t *testing.T) {
+	for _, r := range []Resources{{}, {CPU: MinCPU}, {Memory: MinMemory}, {CPU: 0.01, Memory: 6 << 20}} {
+		a := valid()
+		a.Resources = r
+		if err := a.Validate(); err != nil {
+			t.Errorf("%+v rejected: %v", r, err)
+		}
 	}
 }
 
