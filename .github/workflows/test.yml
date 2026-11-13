@@ -6,6 +6,8 @@ on:
   pull_request:
   workflow_call:
 
+# Every job reads the repository and nothing else. Values from the event or the
+# matrix reach a step through env:, never through ${{ }} inside run:.
 permissions:
   contents: read
 
@@ -13,6 +15,7 @@ jobs:
   unit:
     name: Unit tests (race)
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-go@v5
@@ -22,10 +25,23 @@ jobs:
       - run: go vet ./...
       - run: go test -race -count=1 ./...
 
+  # Pinned, so a new check does not turn the build red without a change here.
+  staticcheck:
+    name: staticcheck
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - run: go run honnef.co/go/tools/cmd/staticcheck@2026.2.2 ./...
+
   # Every release platform compiles with CGO disabled.
   build:
     name: Build ${{ matrix.goos }}/${{ matrix.goarch }}
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     strategy:
       matrix:
         include:
@@ -44,13 +60,15 @@ jobs:
         env:
           GOOS: ${{ matrix.goos }}
           GOARCH: ${{ matrix.goarch }}
+          EXT: ${{ matrix.ext }}
           CGO_ENABLED: '0'
-        run: go build -trimpath -o "hivemind${{ matrix.ext }}" ./cmd/hivemind
+        run: go build -trimpath -o "hivemind${EXT}" ./cmd/hivemind
 
   # Runs the binary built on each runner, from an empty directory.
   smoke:
     name: Smoke ${{ matrix.name }}
     runs-on: ${{ matrix.runner }}
+    timeout-minutes: 15
     strategy:
       matrix:
         include:
@@ -78,10 +96,85 @@ jobs:
           "$RUNNER_TEMP/hivemind$ext" version
           "$RUNNER_TEMP/hivemind$ext" --help
 
-  # The binary in an empty image: no libc, no shell.
+  # The binary in an empty image: no libc, no shell. init and serve run too,
+  # and serve answers /healthz from a Docker-in-Docker daemon.
   scratch:
-    name: Scratch image
+    name: Scratch image and serve
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@v4
       - run: ./scripts/scratch-smoke.sh
+
+  # The one-node integration suite, against Docker-in-Docker on this runner.
+  integration-one-node:
+    name: Integration (one node)
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+      - run: ./scripts/integration-docker.sh
+
+  # The README quick start, run against a one-node cluster.
+  quickstart:
+    name: Quick start
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+      - run: ./scripts/quickstart-check.sh
+
+  # Every fuzz target, for 60 seconds each. The list is kept in step with
+  # `grep -rn "^func Fuzz" --include=*_test.go`.
+  fuzz:
+    name: Fuzz ${{ matrix.target }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { pkg: ./internal/config, target: FuzzLoadFile }
+          - { pkg: ./internal/auth, target: FuzzParseBearer }
+          - { pkg: ./internal/runtime/docker, target: FuzzStdCopy }
+          - { pkg: ./internal/spec, target: FuzzAppJSON }
+          - { pkg: ./internal/spec, target: FuzzParseImage }
+          - { pkg: ./internal/scheduler, target: FuzzPlace }
+          - { pkg: ./internal/server, target: FuzzDecodeApp }
+          - { pkg: ./internal/pki, target: FuzzParseJoinToken }
+          - { pkg: ./internal/pki, target: FuzzParseNodeURI }
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - name: Fuzz for 60 seconds
+        env:
+          FUZZ_PKG: ${{ matrix.pkg }}
+          FUZZ_TARGET: ${{ matrix.target }}
+        run: go test -run='^$' -fuzz="^${FUZZ_TARGET}\$" -fuzztime=60s "$FUZZ_PKG"
+
+  # The multi-node suite comes with scripts/integration-cluster.sh. hashFiles is
+  # not allowed in a job's if:, so a small job reports whether the script is in
+  # the tree, and the cluster job is skipped until it is.
+  cluster-script:
+    name: Check for the cluster script
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      present: ${{ steps.check.outputs.present || 'false' }}
+    steps:
+      - uses: actions/checkout@v4
+      - id: check
+        if: hashFiles('scripts/integration-cluster.sh') != ''
+        run: echo "present=true" >> "$GITHUB_OUTPUT"
+
+  integration-cluster:
+    name: Integration (cluster)
+    needs: cluster-script
+    if: needs.cluster-script.outputs.present == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+      - run: ./scripts/integration-cluster.sh

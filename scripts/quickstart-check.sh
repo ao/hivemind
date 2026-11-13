@@ -257,8 +257,8 @@ docker run --rm --name "$gocont" --network "container:$dind" \
 	-e GOMODCACHE=/cache/mod \
 	-e GOCACHE=/cache/build \
 	-e GOFLAGS=-buildvcs=false \
-	-e GOPROXY=direct \
-	-e GOSUMDB=off \
+	-e GOPROXY="${GOPROXY:-https://proxy.golang.org,direct}" \
+	-e GOSUMDB="${GOSUMDB:-sum.golang.org}" \
 	-e GOTOOLCHAIN=local \
 	"$GO_IMAGE" \
 	bash /src/scripts/quickstart-check.sh --inside || rc=$?
