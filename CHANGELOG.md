@@ -28,6 +28,10 @@ Version 2 is a rewrite. It is not compatible with 1.x: the command line, the API
 - Settings from flags, `HIVEMIND_*` variables and a YAML file, in that order of precedence.
 - A client config that `init` writes, so the CLI on the same machine needs no token in the environment.
 - Command reference in `docs/cli.md`, generated from the command definitions.
+- `nodes` lists the nodes, with capacity, lease age, ready or lost, and replica count. `node remove <id>` takes a node out of the cluster: its replicas are placed again, and a replica with a volume waits with no node and a reason. It refuses the server's own node, and a node that still renews its lease unless `--force` is given. The API routes are `GET /v1/nodes` and `DELETE /v1/nodes/{id}`.
+- A denylist of removed node IDs, checked on every node API request after the TLS handshake. A removed node's certificate gets 403, the store refuses its ID, and join never issues it again. A running worker that is removed logs it and exits. Schema version 6 adds the table.
+- `--ca-cert`, `HIVEMIND_CA_CERT` and a `ca-cert` key in the client config: a PEM file of certificates the CLI trusts for an https API, instead of the system roots. `init --api-tls-cert` records that certificate there.
+- `POST /v1/session` and `DELETE /v1/session`: log in with the admin token to get an `HttpOnly`, `SameSite=Strict` session cookie and a CSRF token, and log out. Unsafe cookie requests need the CSRF token. Failed logins are limited to 5 per source address in 10 minutes.
 - Release builds for six platforms, and `SHA256SUMS`. The node runs on Linux amd64 and arm64.
 
 ### Changed
@@ -48,12 +52,12 @@ Version 2 is a rewrite. It is not compatible with 1.x: the command line, the API
 
 ### Known limits
 
-- Node certificates cannot be revoked or renewed, and there is no command to remove a node. A certificate lasts 365 days.
+- Node certificates cannot be renewed, and there is no revocation list: removing the node is the only revocation. A certificate lasts 365 days.
+- A removed worker's containers keep running until they are removed by hand.
 - A replica with a volume is never moved. Its app is down while its node is lost.
 - Two apps that publish the same host port are both accepted. The second one's replicas go where the port is free, and any that cannot go stay `pending` with the reason until it is.
 - `hivemind logs` cannot read replicas that run on a worker.
 - hivemind never deletes a volume. Volumes of deleted apps stay on their node until removed with `docker volume rm`.
-- The CLI cannot trust a private CA for an API served with TLS.
 - A rolling update on one node replaces each replica in place, so that replica is down while it moves.
 - Tests run three nodes in Docker. Larger clusters have not been tested.
 

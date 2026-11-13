@@ -82,9 +82,11 @@ hivemind join 10.0.0.5 --token hivemind-join-v1.<fingerprint>.<secret>
 
 A token works once, and it expires after 24 hours. `hivemind join-token --ttl 1h` sets a shorter lifetime, up to 168 hours. Deploy as before. The NODE column of `hivemind status` shows where each replica runs.
 
+`hivemind nodes` lists the nodes. To take a machine out of the cluster, stop hivemind on it, then run `hivemind node remove <id>` on the server. Its replicas are placed on other nodes, and the server refuses its certificate from then on. See [concepts](docs/concepts.md#removing-a-node).
+
 ## Network and authentication
 
-- The API listens on `127.0.0.1:4483`. Every route except `GET /healthz` needs the admin token that `init` prints. A non-loopback `--api-addr` needs TLS as well.
+- The API listens on `127.0.0.1:4483`. Every route except `GET /healthz` needs the admin token that `init` prints. A non-loopback `--api-addr` needs TLS as well. With a certificate from a private CA, give the CLI that CA with `--ca-cert` or `HIVEMIND_CA_CERT`.
 - `serve --advertise` opens two more ports, on that address only. Port 4484 is the node API. It accepts only a machine that holds a certificate from the cluster CA. Port 4485 takes join requests, and each one needs a join token.
 - Nothing else listens. Container ports are published on `127.0.0.1` unless the spec names another address.
 
@@ -93,14 +95,13 @@ A token works once, and it expires after 24 hours. `hivemind join-token --ttl 1h
 ## Limits
 
 - The server is one machine. If it goes down, running containers keep running, but nothing new is placed and lost nodes are not rescheduled.
-- A node's certificate cannot be revoked or renewed, and there is no command to remove a node. A certificate lasts 365 days. See [security](docs/security.md#no-revocation-yet).
+- A node's certificate cannot be renewed, and the only way to revoke one is to remove the node. A certificate lasts 365 days. See [security](docs/security.md#revocation-by-removal).
 - A replica with a volume stays on its node. If that node is lost, the app is down until the node returns.
 - `deploy` does not reject a host port that another app already publishes. The second app's replicas go where the port is free. Any that cannot go stay `pending`, with the reason. See [concepts](docs/concepts.md#placement).
 - `hivemind logs` cannot read replicas that run on a worker. Use `docker logs` on that machine.
 - hivemind never deletes a volume, including when its app is deleted. Remove unused volumes with `docker volume rm` on the node.
 - In a rolling update on one node, each replica is down while its new container starts. With a second eligible node, the new copy starts there first. See [concepts](docs/concepts.md#rolling-updates).
-- The CLI cannot trust a private CA for an API served with TLS.
-- There is no web UI. The CLI and the HTTP API are the interfaces.
+- There is no web UI. The CLI and the HTTP API are the interfaces. The API has login and logout routes for a browser session, with a CSRF token.
 
 ## Documentation
 

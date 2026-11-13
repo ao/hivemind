@@ -81,6 +81,20 @@ When a lost node comes back, it registers again if needed, then asks for its ass
 
 Fencing does not reach a node that is cut off but still running. Hivemind cannot stop a container on a machine it cannot reach. While the link is down, the old copy of a moved replica keeps running there, and two copies can answer on different machines for that time. A node that was powered off has no copy running, so there is nothing to stop.
 
+## Removing a node
+
+`hivemind nodes` lists the nodes, with each one's lease age and state: `ready` while its lease is current, `lost` after 15 s without renewal. `hivemind node remove <id>` takes a node out of the cluster for good. Stop hivemind on the machine first.
+
+- The server's own node cannot be removed.
+- A node that still renews its lease is refused, unless `--force` is given. This follows `docker node rm`, which refuses a node that is not down. A running node that is removed keeps its containers running beside the copies placed elsewhere, so the refusal keeps that from happening by mistake.
+- Each replica on the node that should run loses the node and is placed again, as after a node loss. A replica with a volume is not moved: its data is a Docker volume on the removed node, and a copy elsewhere would start empty. It waits with no node, and its `DETAIL` in `status` says so. It is placed again, with an empty volume, after a deploy that changes the app's spec, such as one with a new volume name. Deleting the app also clears it.
+- The node's row, its reported container status, its rollout surges and its replicas marked for removal are deleted. A rollout whose surge was on the node pauses at its deadline.
+- The node's ID goes on the server's list of removed nodes, which is kept for good. The server refuses the node's certificate from then on (see [security](security.md#revocation-by-removal)), refuses the ID if the node registers again, and never issues the ID to a joining machine.
+
+A worker that is still running when it is removed gets `403` on its next call to the server, within one reconcile interval. It logs that it was removed and exits with an error, rather than retrying: the removal is final, so a retry could never succeed, and an exit shows up in the service manager and the log. It leaves its containers running. Their replicas already run elsewhere, and the worker does not remove a user's containers on the strength of one reply. Remove them by hand with `docker rm -f $(docker ps -aq --filter label=hivemind.app)`. Starting the worker again fails at once. To bring the machine back, run `hivemind join` with an empty data directory and a new join token. It gets a new node ID.
+
+There is no drain. Nomad's `node eligibility` and `node drain` stop new placements on a running node and move its work off before it goes; here a node is either in the cluster or removed.
+
 ## Rolling updates
 
 A change to an app's spec, other than its replica count, starts a rollout. The rollout moves the replicas to the new generation, one at a time. The rules come from the store's rollout code (`internal/store/rollout.go`).
@@ -192,12 +206,13 @@ The API token, the admin token and the file modes are described in [security](se
 
 - The API listens on `127.0.0.1:4483`. An address that is not loopback needs `--api-tls-cert` and `--api-tls-key`, or the server refuses to start.
 - `init` generates an admin token: 32 bytes from `crypto/rand`, with the prefix `hm_`. It prints the token once, and writes it to `<data-dir>/admin.token` with mode 0600. The server stores only its SHA-256 digest, in the database.
-- Every route except `GET /healthz` needs the token as `Authorization: Bearer`. The check is in constant time. See [the API](api.md#authentication).
+- Every route except `GET /healthz` needs the token as `Authorization: Bearer`, or a session cookie from `POST /v1/session`. The check is in constant time. A cookie request that changes anything also needs the session's CSRF token. See [the API](api.md#authentication).
+- With `--api-tls-cert`, the CLI trusts the system's roots, or the certificates in `--ca-cert`. See [the API](api.md#tls).
 - `init` refuses to run when a cluster already exists, and it never overwrites the token file or the CA.
 - Logs are redacted by the logger (`internal/logging`). It masks the value of any attribute whose key contains `token`, `secret`, `password`, `passwd`, `authorization`, `cookie`, `session`, `csrf`, `privatekey`, `apikey`, `credential` or `env`, with dashes, underscores and case ignored. It also masks any value of the config's secret type, and any string that holds an admin token (`hm_` and 43 characters), a join token, a bearer credential or a PEM private key. Session IDs, CSRF tokens and environment values cannot be recognised by their shape, so the code that logs must not pass them in. The logger writes text by default, or JSON with `--log-format json`.
 - The metrics listener, `--metrics-addr`, must be a loopback address, and it needs the token too.
 
-The web UI is not built. The `auth` package has code for UI sessions, and no route uses it. The TLS flags apply to the API only.
+The web UI is not built. The API has the login and logout routes a browser would use. The TLS flags apply to the API only.
 
 ## Data directories
 
