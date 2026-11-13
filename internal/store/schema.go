@@ -66,6 +66,16 @@ ALTER TABLE container_status ADD COLUMN ready INTEGER NOT NULL DEFAULT 0 CHECK (
 ALTER TABLE container_status ADD COLUMN crash_looping INTEGER NOT NULL DEFAULT 0 CHECK (crash_looping IN (0, 1));
 ALTER TABLE container_status ADD COLUMN next_restart INTEGER NOT NULL DEFAULT 0;
 `,
+	// 3: the cluster record that init writes: the admin token's SHA-256
+	// digest (never the token) and the ID of the local node.
+	`
+CREATE TABLE cluster (
+	id               INTEGER PRIMARY KEY CHECK (id = 1),
+	admin_token_hash BLOB NOT NULL CHECK (length(admin_token_hash) = 32),
+	node_id          TEXT NOT NULL CHECK (node_id != ''),
+	created_at       INTEGER NOT NULL
+) STRICT;
+`,
 }
 
 // SchemaVersion is the schema version this build writes.

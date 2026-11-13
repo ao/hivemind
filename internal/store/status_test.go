@@ -83,7 +83,7 @@ func TestMigrationTwoKeepsSchemaOneStatus(t *testing.T) {
 		t.Fatalf("migration 2: %v", err)
 	}
 	var version int
-	if err := db.QueryRow(`SELECT version FROM schema_version`).Scan(&version); err != nil || version != 2 {
+	if err := db.QueryRow(`SELECT version FROM schema_version`).Scan(&version); err != nil || version != SchemaVersion {
 		t.Fatalf("version %d: %v", version, err)
 	}
 	var state string
