@@ -12,7 +12,7 @@ Version 2 is a rewrite. It is not compatible with 1.x: the command line, the API
 - App spec in YAML or JSON, with validation of names, images, ports, volumes, resources and health checks.
 - Docker Engine runtime, over the Engine API v1.44: pull, create, start, stop, remove, inspect, list by label, logs and exec.
 - Single-node agent that starts, stops and replaces containers to match the spec. Containers carry the labels `hivemind.app`, `hivemind.replica` and `hivemind.generation`.
-- HTTP, TCP and exec health checks, and restarts with exponential backoff from 1 second to 5 minutes.
+- HTTP, TCP and exec health checks, and restarts with exponential backoff from 1 second to 5 minutes. `status` shows each replica's health, restart count and crash loop.
 - Rolling updates: a spec change moves the replicas one at a time. A move waits for its replica to be ready, has a deadline, and pauses the rollout with a reason on failure. Rolling back is deploying the old spec. `status` and the API report an unfinished rollout.
 - `init` creates an admin token, stored as a SHA-256 digest. Every API route except `GET /healthz` needs it.
 - Prometheus metrics at `/metrics`, and an optional loopback listener for them.
@@ -37,9 +37,8 @@ Version 2 is a rewrite. It is not compatible with 1.x: the command line, the API
 ### Known limits
 
 - One node. Multi-node operation, `join` and rescheduling after a node is lost are not built. A rolling update on one node replaces each replica in place, so that replica is down while it moves.
-- Two apps that publish the same host port can leave one of them running without its port, and `status` reports it as running.
+- Two apps that publish the same host port are both accepted. The second one's replica stays `pending` with the engine's error until the port is free.
 - `resources` are stored and not applied.
-- Restart counts and health are in `/metrics`, not in `status`.
 
 ## [1.0.1](https://github.com/ao/hivemind/compare/v1.0.0...v1.0.1) (2025-08-07)
 

@@ -99,12 +99,12 @@ A write that changes the spec other than the replica count starts a rollout, whi
   "running": 2,
   "replicas": [
     {"index": 0, "node_id": "node-<12 hex digits>", "generation": 1, "desired": "running",
-     "state": "running", "container_id": "<the engine's 64-character ID>", "error": ""}
+     "state": "running", "container_id": "<the engine's 64-character ID>", "restarts": 0, "ready": true}
   ]
 }
 ```
 
-The fields of each replica are `index`, `node_id`, `generation`, `desired` (`running` or `removed`), `pending_reason` (only when set), `state`, `container_id` (only when set) and `error` (only when set). `state` is the engine's state of the container: `created`, `running`, `paused`, `restarting`, `exited`, `dead` or `removing`. A replica with no container yet is `pending`. If the agent could not list containers, it is `unknown`.
+The fields of each replica are `index`, `node_id`, `generation`, `desired` (`running` or `removed`), `pending_reason` (only when set), `state`, `container_id` (only when set), `error` (only when set), `restarts`, `health` (`starting`, `healthy` or `unhealthy`; only when the app has a health check), `ready`, `crash_looping` (only when set) and `next_restart` (RFC 3339, only while a restart is scheduled). `state` is the engine's state of the container: `created`, `running`, `paused`, `restarting`, `exited`, `dead` or `removing`. A replica with no container yet is `pending`. If the agent could not list containers, it is `unknown`.
 
 `running` counts the replicas whose container is running at the current generation.
 

@@ -80,13 +80,13 @@ The agent restarts a container that exits, whatever its exit code, and a contain
 
 The restart policy in the container itself is `no`. The agent is the only thing that restarts a container. A container that exits while `serve` is down is not restarted until `serve` runs again.
 
-Status reports the state of each replica, its node, its generation and its last error. It does not show the restart count, the health or the crash loop. The restart count and the ready count are in [`/metrics`](api.md#metrics). Showing them in status is on the roadmap.
+Status reports the state of each replica, its node, its generation, its health, its restart count and its last error. While a restart waits out its backoff, the replica is crash-looping and status gives the time of the next restart: `hivemind status` prints "crash-looping, next restart in 40s".
 
 ## Ports
 
 A port in the spec is published on a host address. The default address is `127.0.0.1`, so a port is reachable from the machine only. Write `0.0.0.0:8080:80` or another address to publish it elsewhere. The protocol is `tcp` by default, and `udp` is allowed. An IPv6 address goes in brackets, such as `[::1]:8080:80`.
 
-Two apps on one node should not publish the same host port, and nothing stops them from doing it. In a test on Docker 29 (`docker:dind`, one node, 2026-11-13), the second app's first start failed with `port is already allocated`, and the agent logged that once. On the next pass the container started anyway, without its published port, and `status` showed it `running` with no error. Until the scheduler's host-port check is wired in, check the ports you publish.
+Two apps on one node should not publish the same host port, and `deploy` does not stop it yet. Docker refuses the second bind with `port is already allocated`. The agent then removes that container, and the replica stays `pending` with the error in status. Each pass tries again with a new container, so the replica starts, with its port published, once the port is free. A container whose start failed is never started again, because Docker can let a second start succeed without the published port.
 
 There is no overlay network and no DNS. A container gets an address on its Docker network, which other containers on the same node can reach, but nothing finds it by name.
 
