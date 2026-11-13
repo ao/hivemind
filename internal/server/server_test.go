@@ -534,3 +534,49 @@ func TestHTTPServerTimeouts(t *testing.T) {
 		t.Fatalf("missing timeout: %+v", s)
 	}
 }
+
+// A spec change shows an unfinished rollout in status until every replica
+// runs the new generation and is ready.
+func TestStatusShowsRollout(t *testing.T) {
+	h := newHarness(t)
+	ctx := context.Background()
+	wantStatus(t, h.do(t, "PUT", "/v1/apps/web", `{"image":"nginx:1.27","replicas":1}`), http.StatusCreated)
+	report := func(gen int) {
+		t.Helper()
+		name := fmt.Sprintf("hivemind-web-0-g%d", gen)
+		if err := h.store.ReportStatus(ctx, testNode, []store.Status{
+			{Name: name, ContainerID: name, App: "web", Replica: 0, Generation: gen, State: "running", Ready: true},
+		}); err != nil {
+			t.Fatal(err)
+		}
+		if err := h.store.AdvanceRollouts(ctx); err != nil {
+			t.Fatal(err)
+		}
+	}
+	status := func() AppStatus {
+		t.Helper()
+		rec := h.do(t, "GET", "/v1/apps/web/status", "")
+		wantStatus(t, rec, http.StatusOK)
+		var as AppStatus
+		if err := json.Unmarshal(rec.Body.Bytes(), &as); err != nil {
+			t.Fatal(err)
+		}
+		return as
+	}
+	report(1)
+	if as := status(); as.Rollout != nil {
+		t.Fatalf("rollout before any change: %+v", as.Rollout)
+	}
+
+	wantStatus(t, h.do(t, "PUT", "/v1/apps/web", `{"image":"nginx:1.28","replicas":1}`), http.StatusOK)
+	report(1)
+	as := status()
+	if as.Rollout == nil || as.Rollout.Target != 2 || as.Rollout.State != "in_progress" {
+		t.Fatalf("rollout during the update: %+v", as.Rollout)
+	}
+
+	report(2)
+	if as := status(); as.Rollout != nil {
+		t.Fatalf("rollout after every replica moved: %+v", as.Rollout)
+	}
+}

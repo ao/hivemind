@@ -406,6 +406,23 @@ func TestCLIOneNode(t *testing.T) {
 		t.Fatalf("logs -f after SIGINT: %v\n%s", err, fout.String())
 	}
 
+	// A spec change rolls out through serve's rollout controller: both
+	// replicas end on generation 2 and the rollout clears from status.
+	c.ok("deploy", "--name", "web", "--image", "nginx:alpine", "--replicas", "2", "--env", "MODE=rolled")
+	rolled := func() bool {
+		a, ok := find(c.status(), "web")
+		if !ok || a.Generation != 2 || a.Rollout != nil || a.Running != 2 || len(a.Replicas) != 2 {
+			return false
+		}
+		for _, r := range a.Replicas {
+			if r.Generation != 2 || r.State != "running" {
+				return false
+			}
+		}
+		return len(containers(t, rt, "web")) == 2
+	}
+	waitFor(t, 3*time.Minute, rolled, "the rollout to generation 2", srvOut)
+
 	// Scale up, then down.
 	if out := c.ok("scale", "web", "3"); out != "web: 3 replicas\n" {
 		t.Fatalf("scale: %q", out)

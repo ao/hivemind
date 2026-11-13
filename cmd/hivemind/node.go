@@ -256,8 +256,18 @@ func runServe(ctx context.Context, cfg *config.Config, log *slog.Logger, rt runt
 		return err
 	}
 	m := server.NewMetrics()
+	// After each agent pass, which has just reported status, the rollout
+	// controller moves the next replica or checks a deadline. The agent passes
+	// on every interval, so deadlines are checked even when nothing reports.
+	agentLog := log.With("component", "agent")
+	onPass := func(d time.Duration, err error) {
+		m.ObserveReconcile(d, err)
+		if aerr := st.AdvanceRollouts(context.Background()); aerr != nil {
+			agentLog.Warn("advance rollouts", "err", aerr)
+		}
+	}
 	ag, err := agent.New(agent.Config{NodeID: cl.NodeID, Runtime: rt, Source: st,
-		Interval: cfg.ReconcileInterval, Logger: log.With("component", "agent"), OnPass: m.ObserveReconcile})
+		Interval: cfg.ReconcileInterval, Logger: agentLog, OnPass: onPass})
 	if err != nil {
 		return err
 	}

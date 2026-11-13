@@ -59,6 +59,17 @@ type AppStatus struct {
 	Desired    int             `json:"desired"`
 	Running    int             `json:"running"`
 	Replicas   []ReplicaStatus `json:"replicas"`
+	// Rollout is set while a template change is rolling out, or after one stopped.
+	Rollout *RolloutStatus `json:"rollout,omitempty"`
+}
+
+// RolloutStatus is an unfinished rollout of an app to a new generation.
+type RolloutStatus struct {
+	Target int    `json:"target"`
+	State  string `json:"state"`
+	Reason string `json:"reason,omitempty"`
+	// Moving is the replica being moved, or -1.
+	Moving int `json:"moving"`
 }
 
 // ErrorBody is every error reply.
@@ -274,6 +285,14 @@ func (s *Server) statusOf(r *http.Request, app string) ([]AppStatus, error) {
 				as.Running++
 			}
 			as.Replicas = append(as.Replicas, rs)
+		}
+		ro, err := s.cfg.Store.GetRollout(ctx, a.Spec.Name)
+		switch {
+		case errors.Is(err, store.ErrNoRollout):
+		case err != nil:
+			return nil, err
+		case ro.State != store.RolloutDone:
+			as.Rollout = &RolloutStatus{Target: ro.Target, State: string(ro.State), Reason: ro.Reason, Moving: ro.Moving}
 		}
 		out = append(out, as)
 	}

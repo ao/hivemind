@@ -212,6 +212,15 @@ func printStatus(out io.Writer, apps []server.AppStatus) {
 		fmt.Fprintf(tw, "%s\t%s\t%d\t%d\t%d\n", a.Name, a.Image, a.Generation, a.Desired, a.Running)
 	}
 	tw.Flush()
+	for _, a := range apps {
+		if ro := a.Rollout; ro != nil {
+			if ro.Reason != "" {
+				fmt.Fprintf(out, "%s: %s\n", a.Name, ro.Reason)
+			} else {
+				fmt.Fprintf(out, "%s: rolling out generation %d\n", a.Name, ro.Target)
+			}
+		}
+	}
 	fmt.Fprintln(out)
 	tw = tabwriter.NewWriter(out, 0, 4, 2, ' ', 0)
 	fmt.Fprintln(tw, "APP\tREPLICA\tNODE\tGENERATION\tSTATE\tCONTAINER\tDETAIL")
