@@ -5,16 +5,23 @@ on:
   push:
     tags: ['v*']
 
+# Every job reads the repository. The draft job also needs contents: write to
+# create the release, and it gets that alone.
 permissions:
   contents: read
 
 jobs:
+  # All of test.yml, including the integration, quick start, scratch and fuzz
+  # jobs. A reusable workflow call cannot set timeout-minutes; each job in
+  # test.yml sets its own.
   test:
     uses: ./.github/workflows/test.yml
 
   build:
+    name: Build ${{ matrix.goos }}/${{ matrix.goarch }}
     needs: test
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     strategy:
       matrix:
         include:
@@ -33,12 +40,15 @@ jobs:
         env:
           GOOS: ${{ matrix.goos }}
           GOARCH: ${{ matrix.goarch }}
+          EXT: ${{ matrix.ext }}
+          REF_NAME: ${{ github.ref_name }}
+          COMMIT: ${{ github.sha }}
           CGO_ENABLED: '0'
         run: |
           mkdir -p dist
           go build -trimpath \
-            -ldflags "-s -w -X main.version=${GITHUB_REF_NAME} -X main.commit=${GITHUB_SHA::12}" \
-            -o "dist/hivemind-${GOOS}-${GOARCH}${{ matrix.ext }}" ./cmd/hivemind
+            -ldflags "-s -w -X main.version=${REF_NAME} -X main.commit=${COMMIT:0:12}" \
+            -o "dist/hivemind-${GOOS}-${GOARCH}${EXT}" ./cmd/hivemind
       - uses: actions/upload-artifact@v4
         with:
           name: hivemind-${{ matrix.goos }}-${{ matrix.goarch }}
@@ -46,8 +56,10 @@ jobs:
           retention-days: 7
 
   draft-release:
+    name: Draft release
     needs: build
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     permissions:
       contents: write
     steps:
@@ -56,14 +68,33 @@ jobs:
         with:
           path: dist/
           merge-multiple: true
+      - name: Check the binaries
+        run: |
+          cd dist
+          count=$(find . -maxdepth 1 -type f -name 'hivemind-*' | wc -l)
+          [ "$count" = 6 ] || { echo "found $count binaries, want 6" >&2; exit 1; }
       - name: Checksums
         run: cd dist && sha256sum hivemind-* > SHA256SUMS && cat SHA256SUMS
       - name: Release notes from CHANGELOG.md
+        env:
+          REF_NAME: ${{ github.ref_name }}
         run: |
-          v="${GITHUB_REF_NAME#v}"
-          awk -v v="$v" '$0 ~ "^## \\[?"v"\\]?" {on=1; next} on && /^## / {exit} on {print}' CHANGELOG.md > notes.md
+          v="${REF_NAME#v}"
+          # The section header is "## [2.0.0] - date" or "## 2.0.0 (date)". Compare the
+          # version exactly, so 2.0.0 does not match 2.0.0-rc.1.
+          awk -v v="$v" '
+            /^## / {
+              if (on) exit
+              h = $2
+              sub(/^\[/, "", h)
+              sub(/\]$/, "", h)
+              if (h == v) on = 1
+              next
+            }
+            on { print }' CHANGELOG.md > notes.md
           test -s notes.md || { echo "CHANGELOG.md has no section for $v"; exit 1; }
       - name: Create draft release
         env:
           GH_TOKEN: ${{ github.token }}
-        run: gh release create "$GITHUB_REF_NAME" --draft --verify-tag --title "$GITHUB_REF_NAME" --notes-file notes.md dist/*
+          REF_NAME: ${{ github.ref_name }}
+        run: gh release create "$REF_NAME" --draft --verify-tag --title "$REF_NAME" --notes-file notes.md dist/*
