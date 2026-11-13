@@ -293,7 +293,9 @@ func TestCLIOneNode(t *testing.T) {
 	if out := c.ok("version"); !strings.HasPrefix(out, "hivemind ") {
 		t.Fatalf("version: %q", out)
 	}
-	c.fails("not implemented", "join")
+	// join needs a server address and a token; it refuses before it connects.
+	c.fails("accepts 1 arg", "join")
+	c.fails("--token is required", "join", "127.0.0.1")
 
 	// init prints the token once and refuses a second run.
 	out := c.ok("init")
