@@ -66,7 +66,7 @@ hivemind delete web
 ## Limits
 
 - One machine. `hivemind join` exits with an error. Node-to-node traffic, placement across machines and rescheduling after a machine is lost are not built.
-- A change to an app's spec other than its replica count replaces every replica at once. Rolling updates are in progress on another branch.
+- A change to an app's spec other than its replica count is a rolling update: one replica at a time. On one node every move is in place, so the replica being moved is down while its new container starts. A rollout that fails pauses and says why. See [concepts](docs/concepts.md#rolling-updates).
 - Ports are published on host ports, and nothing checks for a clash when you deploy. When two apps publish the same host port, the second one can run without its port published, and `status` still reports it as running. See [concepts](docs/concepts.md#ports).
 - `resources` are stored in the spec but not applied to containers.
 - There is no web UI. The CLI and the HTTP API are the interfaces.

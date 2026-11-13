@@ -69,6 +69,8 @@ An app that has been deleted is treated as missing by every route, even before i
 
 A write returns once the store has the change. The containers follow on the next reconcile pass, which the server triggers at once. Poll `/v1/apps/{name}/status` to see the replicas run.
 
+A write that changes the spec other than the replica count starts a rollout, which moves the replicas one at a time. The write returns before any replica has moved. Watch the `rollout` field in `/v1/apps/{name}/status` until it disappears.
+
 ## Objects
 
 `AppView` is what the app routes return:
@@ -105,6 +107,19 @@ A write returns once the store has the change. The containers follow on the next
 The fields of each replica are `index`, `node_id`, `generation`, `desired` (`running` or `removed`), `pending_reason` (only when set), `state`, `container_id` (only when set) and `error` (only when set). `state` is the engine's state of the container: `created`, `running`, `paused`, `restarting`, `exited`, `dead` or `removing`. A replica with no container yet is `pending`. If the agent could not list containers, it is `unknown`.
 
 `running` counts the replicas whose container is running at the current generation.
+
+While a rollout is in progress, or after it has paused, the app status has a `rollout` object. It is omitted otherwise:
+
+```json
+"rollout": {"target": 2, "state": "in_progress", "reason": "", "moving": 0}
+```
+
+- `target` is the generation the rollout moves the replicas to.
+- `state` is `in_progress` or `paused`. A finished rollout is not reported.
+- `reason` is set when the rollout is paused. It is a sentence such as `rollout to generation 3 stopped: replica 0 is not ready after 1m0s`.
+- `moving` is the index of the replica being moved, or -1 between moves.
+
+A paused rollout stays paused until a spec with another template is deployed. Rolling back is deploying the old spec.
 
 ### App spec
 
@@ -151,6 +166,8 @@ The log is `text/plain`. Standard output and standard error are both written to 
 | `hivemind_http_requests_total` | counter | `method`, `route`, `code` | Requests by method, route pattern and status |
 
 `route` is the route pattern, such as `/v1/apps/{name}`, or `unmatched`. A client cannot make the label set grow.
+
+There are no metrics for rollouts yet. `GET /v1/apps/{name}/status` reports them.
 
 `--metrics-addr` starts a second listener on a loopback address. It serves `GET /metrics` only, and it needs the token too.
 

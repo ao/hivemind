@@ -25,7 +25,9 @@ Replica placement is trivial today. Every replica goes to the node that runs the
 
 Each app has a generation number, which starts at 1. It goes up when anything in the spec changes, except the replica count. Changing the image, the environment, the ports, the health check, the resources or the volumes all count. Deleting an app and deploying it again under the same name gives it a higher generation, so the old containers are replaced.
 
-A replica's container is named for its generation, `hivemind-<app>-<replica>-g<generation>`. The agent keeps a container only when its generation matches the one the server wants. A container of an older generation is removed.
+Each replica has its own generation. A change to the spec sets the app's generation, but the replicas keep their old generation until a rollout moves them, one at a time (see [Rolling updates](#rolling-updates)). The app's `generation` in `status` is the newest one, and each replica row shows the generation its container is at.
+
+A replica's container is named for its generation, `hivemind-<app>-<replica>-g<generation>`. The agent keeps a container only when its generation matches the one the server wants for that replica. A container of an older generation is removed once the replica has moved on.
 
 Scaling does not change the generation. Scaling up starts the new replicas at the current generation. Scaling down marks the high-numbered replicas for removal.
 
@@ -45,7 +47,22 @@ The agent runs a pass every 2 seconds (`--reconcile-interval`), and a pass also 
 
 A failed replica does not stop the pass. The error goes in the status, and the next pass tries again. If the server cannot be read, the pass changes nothing, so containers keep running.
 
-A spec change is not a rolling update. Step 3 removes every container of the old generation before step 4 starts the new ones, so all replicas of an app are down while the new ones are created and started. Rolling updates are on another branch.
+## Rolling updates
+
+A change to an app's spec, other than its replica count, starts a rollout. The rollout moves the replicas to the new generation, one at a time. The rules come from the store's rollout code (`internal/store/rollout.go`).
+
+- One move runs at a time. A move starts only when the previous one has finished, so at most one replica is being moved and at most one extra copy runs.
+- A move has two forms. A surge places the new copy on another registered node, beside the old one, and the replica moves there once the new copy is ready. This needs a node that has renewed its lease in the last 15 seconds and has the app's host ports free. In place stops the old container and starts the new one on the same node, so that replica is down while it starts.
+- The next move starts only when the replica in flight reports ready at the new generation.
+- A move has a deadline: the health check's start period, plus its retries at its interval, plus 30 seconds. An app with no health check gets 2 minutes. A move that is not ready by then pauses the rollout. A move whose container is crash-looping pauses it too.
+- A pause undoes the move in flight. An in-place move goes back to the old generation, and a surge is removed. The other replicas are not touched. The rollout stays paused, with a reason, until you deploy a spec with another template.
+- Rolling back is deploying the old spec again. It is a new generation, so it is a rollout like any other.
+- Deploying another template during a rollout abandons the move in flight, removes its surge, and starts again from the state the replicas are in.
+- A rollout ends when every replica runs the target generation. Its state then drops out of `status`.
+
+This build runs one node, and the only node is the local one. So every move is in place: while a replica moves, it is `pending`, and the others keep running. Surges need a second registered node, and `serve` does not join one yet.
+
+`hivemind status` prints a line for each app with a rollout in progress or paused, such as `web: rolling out generation 2`, or the pause reason. The API reports the same thing as the `rollout` field of an app's status. See [the API](api.md#objects).
 
 ## Health checks and restarts
 
@@ -98,7 +115,7 @@ With one node, every volume is on that node, so nothing needs pinning yet. The p
 - Every route except `GET /healthz` needs the token as `Authorization: Bearer`. The check is in constant time. See [the API](api.md#authentication).
 - `init` refuses to run when a cluster already exists, and it never overwrites the token file.
 - The data directory is mode 0700. The database file is mode 0600, because specs hold environment variables, which can be secrets.
-- Logs leave out tokens, cookies, CSRF tokens, private keys and environment values. The redaction is in the logger, and the code that logs is written not to pass them in.
+- Logs are redacted by the logger (`internal/logging`). It masks the value of any attribute whose key contains `token`, `secret`, `password`, `passwd`, `authorization`, `cookie`, `session`, `csrf`, `privatekey`, `apikey`, `credential` or `env`, with dashes, underscores and case ignored. It also masks any value of the config's secret type, and any string that holds an admin token (`hm_` and 43 characters), a join token, a bearer credential or a PEM private key. Session IDs, CSRF tokens and environment values cannot be recognised by their shape, so the code that logs must not pass them in. The logger writes text by default, or JSON with `--log-format json`.
 - The metrics listener, `--metrics-addr`, must be a loopback address, and it needs the token too.
 
 Not built yet: the node-to-node listener and its mutual TLS (`--advertise`, port 4484, and the join tokens), the web UI with its login and CSRF forms, and any use of the TLS flags beyond the API. The `pki` and `auth` packages contain code for the UI sessions and the cluster CA, but no route or listener uses them.

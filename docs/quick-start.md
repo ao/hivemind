@@ -119,7 +119,18 @@ worker  1        node-ea6188a5133b  1           running  b49469bbab0e  -
 
 Scaling does not change the generation. Scaling down removes the highest-numbered replicas.
 
-## 7. Delete the apps
+## 7. Change an app
+
+Deploy the same name again with a different spec to change it. A change to the image, the environment, the ports or the other settings is a rolling update: replicas move to the new spec one at a time. To change `web`'s environment, for example:
+
+```sh
+hivemind deploy --name web --image nginx:alpine --port 127.0.0.1:8080:80 --env MODE=prod
+hivemind status web
+```
+
+While the rollout runs, `status` prints a line such as `web: rolling out generation 2`. On one node, each replica is down while it is replaced, so `web` is unavailable for a few seconds at a time. If a replica does not become ready, the rollout pauses and `status` shows the reason. Deploying the old spec again rolls back.
+
+## 8. Delete the apps
 
 ```sh
 hivemind delete worker
