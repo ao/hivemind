@@ -50,6 +50,9 @@ type Config struct {
 	// Metrics receives the request counts and holds the reconcile counters
 	// that GET /metrics reports. Nil means a new, private set.
 	Metrics *Metrics
+	// IssueJoinToken makes a join token that expires after ttl. Nil means
+	// this server has no cluster CA, and POST /v1/join-tokens answers 503.
+	IssueJoinToken func(ttl time.Duration) (token string, expires time.Time, err error)
 }
 
 // Server serves the API.
@@ -107,6 +110,7 @@ func (s *Server) routes() {
 	r.HandleFunc("GET /v1/apps/{name}/status", s.appStatus)
 	r.HandleFunc("GET /v1/apps/{name}/logs", s.appLogs)
 	r.HandleFunc("GET /v1/status", s.status)
+	r.HandleFunc("POST /v1/join-tokens", s.postJoinToken)
 	r.HandleFunc("GET /metrics", s.metricsHandler)
 }
 

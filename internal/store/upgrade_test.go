@@ -38,10 +38,15 @@ func seedSchema(t *testing.T, db *sql.DB, k int) {
 		exec(`INSERT INTO cluster (id, admin_token_hash, node_id, created_at)
 			VALUES (1, zeroblob(32), 'node-1', 100)`)
 	}
+	if k >= 4 {
+		// From version 4 on, every write of an app also writes its spec for
+		// the generation, as PutApp does.
+		exec(`INSERT INTO app_specs (app, generation, spec) VALUES ('web', 1, ?)`, string(specJSON))
+	}
 }
 
 // TestOpenMigratesStoresFromEarlierSchemas builds a store at schema version
-// 1, 2 and 3 with the migrations of that version, seeds it, and opens it with
+// 1 to SchemaVersion-1 with the migrations of that version, seeds it, and opens it with
 // this build. Every row must survive, the new schema must be complete, and
 // the version must be the current one.
 func TestOpenMigratesStoresFromEarlierSchemas(t *testing.T) {

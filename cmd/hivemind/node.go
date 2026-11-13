@@ -24,6 +24,7 @@ import (
 	"github.com/ao/hivemind/internal/auth"
 	"github.com/ao/hivemind/internal/config"
 	"github.com/ao/hivemind/internal/logging"
+	"github.com/ao/hivemind/internal/pki"
 	"github.com/ao/hivemind/internal/runtime"
 	"github.com/ao/hivemind/internal/runtime/docker"
 	"github.com/ao/hivemind/internal/server"
@@ -99,11 +100,21 @@ func runInit(cmd *cobra.Command, flags *pflag.FlagSet, clientConfigFlag string) 
 	if err != nil {
 		return err
 	}
+	// The cluster CA signs node certificates. Its key is mode 0600 and never
+	// leaves this data directory.
+	if _, err := pki.CreateCA(dir); err != nil {
+		if errors.Is(err, pki.ErrCAExists) {
+			return fmt.Errorf("a cluster CA already exists in %s; refusing to overwrite it", dir)
+		}
+		return err
+	}
 	if err := auth.WriteAdminToken(dir, token); err != nil {
+		removeCA(dir)
 		return err
 	}
 	if err := st.InitCluster(ctx, store.Cluster{AdminTokenHash: auth.HashToken(token), NodeID: nodeID}); err != nil {
 		_ = os.Remove(tokenPath)
+		removeCA(dir)
 		if errors.Is(err, store.ErrClusterExists) {
 			return fmt.Errorf("a cluster already exists in %s; refusing to overwrite it", dir)
 		}
@@ -132,6 +143,29 @@ func runInit(cmd *cobra.Command, flags *pflag.FlagSet, clientConfigFlag string) 
 	fmt.Fprintf(out, "\nStart the node with `hivemind serve`. From another shell or machine, use\n\n")
 	fmt.Fprintf(out, "    export HIVEMIND_SERVER=%s\n    export HIVEMIND_TOKEN=<the token above>\n", serverURL(cfg))
 	return nil
+}
+
+// removeCA deletes the CA files init created, after a failed init, so the
+// data directory holds no key without its cluster.
+func removeCA(dir string) {
+	_ = os.Remove(filepath.Join(dir, pki.CAKeyFile))
+	_ = os.Remove(filepath.Join(dir, pki.CACertFile))
+}
+
+// joinIssuer returns the function that issues join tokens for the cluster CA
+// in dir. It returns nil when the directory has no CA.
+func joinIssuer(dir string, st *store.Store) (func(time.Duration) (string, time.Time, error), error) {
+	ca, err := pki.LoadCA(dir)
+	if errors.Is(err, fs.ErrNotExist) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, fmt.Errorf("cluster CA in %s: %w", dir, err)
+	}
+	tokens := pki.NewTokens(st.JoinTokens())
+	return func(ttl time.Duration) (string, time.Time, error) {
+		return tokens.Issue(ca.Fingerprint(), ttl)
+	}, nil
 }
 
 func newNodeID() (string, error) {
@@ -278,8 +312,12 @@ func runServe(ctx context.Context, cfg *config.Config, log *slog.Logger, rt runt
 	if err != nil {
 		return err
 	}
+	issue, err := joinIssuer(cfg.DataDir, st)
+	if err != nil {
+		return err
+	}
 	api, err := server.New(server.Config{Store: st, Runtime: rt, NodeID: cl.NodeID, Auth: authn,
-		Trigger: ag.Trigger, Logger: log.With("component", "api"), Metrics: m})
+		Trigger: ag.Trigger, Logger: log.With("component", "api"), Metrics: m, IssueJoinToken: issue})
 	if err != nil {
 		return err
 	}

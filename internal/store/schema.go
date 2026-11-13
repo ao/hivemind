@@ -115,6 +115,22 @@ CREATE TABLE rollouts (
 	updated_at INTEGER NOT NULL
 ) STRICT;
 `,
+	// 5: join tokens, and the time a node became ready. A token row holds the
+	// SHA-256 of the token's secret, its expiry in unix nanoseconds, and when
+	// it was used (0 if not). ready_since is when the node last became ready:
+	// when it first registered, or when its lease renewed after lapsing. 0
+	// means always ready, which is the cluster's own node. Placement waits
+	// MinReady after ready_since.
+	`
+CREATE TABLE join_tokens (
+	hash     BLOB PRIMARY KEY CHECK (length(hash) = 32),
+	expires  INTEGER NOT NULL,
+	used_at  INTEGER NOT NULL DEFAULT 0 CHECK (used_at >= 0)
+) STRICT;
+CREATE INDEX join_tokens_expires ON join_tokens(expires);
+
+ALTER TABLE nodes ADD COLUMN ready_since INTEGER NOT NULL DEFAULT 0;
+`,
 }
 
 // SchemaVersion is the schema version this build writes.
