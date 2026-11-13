@@ -90,10 +90,34 @@ type PortBinding struct {
 	Protocol string
 }
 
-// VolumeMount mounts a named volume into the container.
+// VolumeMount mounts one of the app's volumes into the container. Name is
+// the name in the app spec; the engine's volume is VolumeName(App, Name).
 type VolumeMount struct {
 	Name string
 	Path string
+}
+
+// LabelVolume is set on each volume hivemind creates, with the volume's name
+// in the spec. LabelApp is set on it too.
+const LabelVolume = "hivemind.volume"
+
+// VolumeName is the engine's name for an app's volume:
+// "hivemind-<app>_<volume>". Scoping the name to the app keeps two apps that
+// use the same volume name on one node from sharing data.
+//
+// App and volume names are lowercase letters, digits and dashes, at most 32
+// characters (spec.ValidName). The underscore can't occur in either, so no
+// two pairs give the same name: app "a-b" with volume "c" is hivemind-a-b_c,
+// and app "a" with volume "b-c" is hivemind-a_b-c. The result starts with a
+// letter, uses only characters Docker allows in a volume name
+// ([a-zA-Z0-9][a-zA-Z0-9_.-]+), and is at most 74 characters.
+func VolumeName(app, volume string) string {
+	return "hivemind-" + app + "_" + volume
+}
+
+// VolumeLabels returns the labels for an app's volume.
+func VolumeLabels(app, volume string) map[string]string {
+	return map[string]string{LabelApp: app, LabelVolume: volume}
 }
 
 // ContainerConfig describes one replica to create.
@@ -167,7 +191,9 @@ type Runtime interface {
 	// so "nginx" is pulled as docker.io/library/nginx:latest.
 	Pull(ctx context.Context, image string) error
 	// Create makes a container without starting it, and returns its ID. The
-	// restart policy is always "no": the agent is the supervisor.
+	// restart policy is always "no": the agent is the supervisor. Each volume
+	// is mounted as VolumeName(cfg.App, v.Name), created with VolumeLabels
+	// if it does not exist yet.
 	Create(ctx context.Context, cfg ContainerConfig) (string, error)
 	// Start starts a created or stopped container. Starting a running
 	// container is not an error.
@@ -175,7 +201,8 @@ type Runtime interface {
 	// Stop sends SIGTERM and waits up to timeout before SIGKILL. Stopping a
 	// stopped container is not an error.
 	Stop(ctx context.Context, id string, timeout time.Duration) error
-	// Remove deletes a container. Named volumes are kept.
+	// Remove deletes a container. Named volumes are kept: no Runtime method
+	// deletes a volume.
 	Remove(ctx context.Context, id string, force bool) error
 	// Inspect returns one container.
 	Inspect(ctx context.Context, id string) (Container, error)

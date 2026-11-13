@@ -114,9 +114,19 @@ func (c *Client) Create(ctx context.Context, cfg runtime.ContainerConfig) (strin
 			HostPort: strconv.Itoa(p.HostPort),
 		})
 	}
+	// A mount of type "volume" makes the engine create a missing volume with
+	// the given name and options, labels included, as part of this request.
+	// That is one call with no window between creating and mounting, and the
+	// engine handles two creates of one name. An existing volume is mounted
+	// as it is; its labels are not changed.
 	mounts := make([]mount, 0, len(cfg.Volumes))
 	for _, v := range cfg.Volumes {
-		mounts = append(mounts, mount{Type: "volume", Source: v.Name, Target: v.Path})
+		mounts = append(mounts, mount{
+			Type:          "volume",
+			Source:        runtime.VolumeName(cfg.App, v.Name),
+			Target:        v.Path,
+			VolumeOptions: &volumeOptions{Labels: runtime.VolumeLabels(cfg.App, v.Name)},
+		})
 	}
 
 	body := createRequest{
@@ -498,9 +508,17 @@ type portBinding struct {
 }
 
 type mount struct {
-	Type   string `json:"Type"`
-	Source string `json:"Source"`
-	Target string `json:"Target"`
+	Type          string         `json:"Type"`
+	Source        string         `json:"Source"`
+	Target        string         `json:"Target"`
+	VolumeOptions *volumeOptions `json:"VolumeOptions,omitempty"`
+}
+
+// volumeOptions is the Mount's "optional configuration for the volume type".
+// Labels is "user-defined key/value metadata", applied when the mount creates
+// the volume.
+type volumeOptions struct {
+	Labels map[string]string `json:"Labels,omitempty"`
 }
 
 type execCreateRequest struct {

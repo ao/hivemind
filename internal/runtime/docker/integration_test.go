@@ -151,7 +151,8 @@ func TestIntegrationLifecycle(t *testing.T) {
 	ctx := itCtx(t)
 	app := itName("life")
 	vol := itName("vol")
-	t.Cleanup(func() { itRawAPI(t, c, http.MethodDelete, "/volumes/"+vol) })
+	engineVol := runtime.VolumeName(app, vol)
+	t.Cleanup(func() { itRawAPI(t, c, http.MethodDelete, "/volumes/"+engineVol) })
 
 	itPull(t, c, alpineImage)
 	id, err := c.Create(ctx, runtime.ContainerConfig{
@@ -214,8 +215,8 @@ func TestIntegrationLifecycle(t *testing.T) {
 	}
 
 	// Remove keeps named volumes: the engine still knows the volume.
-	if code, body := itRawAPI(t, c, http.MethodGet, "/volumes/"+vol); code != http.StatusOK {
-		t.Fatalf("volume %s after container removal: HTTP %d %s", vol, code, body)
+	if code, body := itRawAPI(t, c, http.MethodGet, "/volumes/"+engineVol); code != http.StatusOK {
+		t.Fatalf("volume %s after container removal: HTTP %d %s", engineVol, code, body)
 	}
 }
 

@@ -302,8 +302,11 @@ func TestCreateRequestBody(t *testing.T) {
 		Tty          bool
 		ExposedPorts map[string]struct{}
 		HostConfig   struct {
-			PortBindings  map[string][]struct{ HostIp, HostPort string }
-			Mounts        []struct{ Type, Source, Target string }
+			PortBindings map[string][]struct{ HostIp, HostPort string }
+			Mounts       []struct {
+				Type, Source, Target string
+				VolumeOptions        struct{ Labels map[string]string }
+			}
 			RestartPolicy struct{ Name string }
 		}
 	}
@@ -325,8 +328,14 @@ func TestCreateRequestBody(t *testing.T) {
 			body.HostConfig.PortBindings["80/tcp"][0].HostPort == "8080"},
 		{"explicit bind kept", len(body.HostConfig.PortBindings["53/udp"]) == 1 &&
 			body.HostConfig.PortBindings["53/udp"][0].HostIp == "192.168.1.5"},
-		{"named volume", len(body.HostConfig.Mounts) == 1 &&
-			body.HostConfig.Mounts[0] == struct{ Type, Source, Target string }{"volume", "data", "/usr/share/data"}},
+		{"volume scoped to the app", len(body.HostConfig.Mounts) == 1 &&
+			body.HostConfig.Mounts[0].Type == "volume" &&
+			body.HostConfig.Mounts[0].Source == "hivemind-web_data" &&
+			body.HostConfig.Mounts[0].Target == "/usr/share/data"},
+		{"volume labels", len(body.HostConfig.Mounts) == 1 &&
+			len(body.HostConfig.Mounts[0].VolumeOptions.Labels) == 2 &&
+			body.HostConfig.Mounts[0].VolumeOptions.Labels[runtime.LabelApp] == "web" &&
+			body.HostConfig.Mounts[0].VolumeOptions.Labels[runtime.LabelVolume] == "data"},
 		{"restart policy no", body.HostConfig.RestartPolicy.Name == "no"},
 	}
 	for _, ck := range checks {
