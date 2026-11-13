@@ -65,7 +65,8 @@ func TestJoinTokenSecretsAreRandom(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		if len(tok.Secret) != 32 || seen[s] {
+		// Secret is a [32]byte, so len is a constant: compare it to zero instead.
+		if tok.Secret == ([32]byte{}) || seen[s] {
 			t.Fatalf("secret repeated or short: %q", s)
 		}
 		seen[s] = true
