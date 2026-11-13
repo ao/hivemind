@@ -263,7 +263,9 @@ func (fakeRuntime) Logs(_ context.Context, _ string, _ runtime.LogOptions, stdou
 func TestClientAgainstAPI(t *testing.T) {
 	home := isolate(t)
 	ctx := context.Background()
-	st, err := store.Open(ctx, filepath.Join(home, "d", storeFileName))
+	// n1 is not the cluster's own node, so it would wait MinReady before it
+	// takes a replica. This test needs the replica placed on n1 at once.
+	st, err := store.Open(ctx, filepath.Join(home, "d", storeFileName), store.WithMinReady(0))
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -108,13 +108,14 @@ func (s *Server) writeMetrics(r *http.Request, b *bytes.Buffer) error {
 		return err
 	}
 
+	// As in the status route, a report counts only for the node it came from.
 	type key struct {
-		app      string
-		idx, gen int
+		node, app string
+		idx, gen  int
 	}
 	byKey := map[key]store.Status{}
 	for _, x := range sts {
-		byKey[key{x.App, x.Replica, x.Generation}] = x
+		byKey[key{x.NodeID, x.App, x.Replica, x.Generation}] = x
 	}
 	type counts struct{ running, ready int }
 	perApp := map[string]*counts{}
@@ -132,7 +133,10 @@ func (s *Server) writeMetrics(r *http.Request, b *bytes.Buffer) error {
 		if c == nil || rp.Desired != store.Running {
 			continue
 		}
-		x, ok := byKey[key{rp.App, rp.Index, rp.Generation}]
+		if rp.NodeID == "" {
+			continue
+		}
+		x, ok := byKey[key{rp.NodeID, rp.App, rp.Index, rp.Generation}]
 		if !ok {
 			continue
 		}

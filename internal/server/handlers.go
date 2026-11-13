@@ -270,13 +270,16 @@ func (s *Server) statusOf(r *http.Request, app string) ([]AppStatus, error) {
 	if err != nil {
 		return nil, err
 	}
+	// A container report is matched by node as well as by replica and
+	// generation. A lost node's last report must not describe a replica that
+	// has moved, or that is pending on another node.
 	type key struct {
-		app      string
-		idx, gen int
+		node, app string
+		idx, gen  int
 	}
 	byKey := map[key]store.Status{}
 	for _, st := range sts {
-		byKey[key{st.App, st.Replica, st.Generation}] = st
+		byKey[key{st.NodeID, st.App, st.Replica, st.Generation}] = st
 	}
 	out := make([]AppStatus, 0, len(apps))
 	for _, a := range apps {
@@ -288,12 +291,14 @@ func (s *Server) statusOf(r *http.Request, app string) ([]AppStatus, error) {
 			}
 			rs := ReplicaStatus{Index: rp.Index, NodeID: rp.NodeID, Generation: rp.Generation, Desired: string(rp.Desired),
 				PendingReason: rp.PendingReason, State: "pending"}
-			if st, ok := byKey[key{rp.App, rp.Index, rp.Generation}]; ok {
-				rs.State, rs.ContainerID, rs.Error = st.State, st.ContainerID, st.Error
-				rs.Restarts, rs.Health, rs.Ready, rs.CrashLooping = st.RestartCount, st.Health, st.Ready, st.CrashLooping
-				if !st.NextRestart.IsZero() {
-					nr := st.NextRestart.UTC()
-					rs.NextRestart = &nr
+			if rp.NodeID != "" {
+				if st, ok := byKey[key{rp.NodeID, rp.App, rp.Index, rp.Generation}]; ok {
+					rs.State, rs.ContainerID, rs.Error = st.State, st.ContainerID, st.Error
+					rs.Restarts, rs.Health, rs.Ready, rs.CrashLooping = st.RestartCount, st.Health, st.Ready, st.CrashLooping
+					if !st.NextRestart.IsZero() {
+						nr := st.NextRestart.UTC()
+						rs.NextRestart = &nr
+					}
 				}
 			}
 			if rp.Desired == store.Running && rs.State == "running" {
