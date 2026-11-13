@@ -30,6 +30,7 @@ const (
 	envServer               = "HIVEMIND_SERVER"
 	envToken                = "HIVEMIND_TOKEN"
 	envClientConfig         = "HIVEMIND_CLIENT_CONFIG"
+	envCACert               = "HIVEMIND_CA_CERT"
 
 	requestTimeout  = 60 * time.Second
 	maxClientConfig = 64 << 10
@@ -40,10 +41,13 @@ const (
 var errUnauthorized = errors.New("unauthorized")
 
 // clientConfig is the file init writes for the CLI. It names the token file
-// rather than holding the token, so the secret lives in one place.
+// rather than holding the token, so the secret lives in one place. CACert
+// names a PEM file of certificates to trust for an https server, instead of
+// the system's roots.
 type clientConfig struct {
 	Server    string `yaml:"server,omitempty"`
 	TokenFile string `yaml:"token-file,omitempty"`
+	CACert    string `yaml:"ca-cert,omitempty"`
 }
 
 // clientConfigPath returns the explicit path, then HIVEMIND_CLIENT_CONFIG,
@@ -111,6 +115,7 @@ type clientFlags struct {
 	server       string
 	token        string
 	clientConfig string
+	caCert       string
 	json         bool
 }
 
@@ -120,6 +125,7 @@ func addClientFlags(cmd *cobra.Command) *clientFlags {
 	fl.StringVar(&f.server, "server", "", "server URL (env "+envServer+"; default from the client config, then "+defaultServer+")")
 	fl.StringVar(&f.token, "token", "", "API token (env "+envToken+"; default from the client config's token file)")
 	fl.StringVar(&f.clientConfig, "client-config", "", "client config file (env "+envClientConfig+"; default "+defaultClientConfigHint+")")
+	fl.StringVar(&f.caCert, "ca-cert", "", "PEM file of the CA certificates to trust for an https server, instead of the system's (env "+envCACert+"; default from the client config)")
 	fl.BoolVar(&f.json, "json", false, "print JSON instead of a table")
 	return f
 }
@@ -128,7 +134,10 @@ func addClientFlags(cmd *cobra.Command) *clientFlags {
 type apiClient struct {
 	base  string
 	token string
-	http  *http.Client
+	// caPath is the --ca-cert file, or "" for the system's roots. Errors
+	// name it.
+	caPath string
+	http   *http.Client
 }
 
 // client resolves the server and token: flag, then environment, then the
@@ -164,9 +173,22 @@ func (f *clientFlags) client() (*apiClient, error) {
 		return nil, fmt.Errorf("no API token: pass --token, set %s, or run `hivemind init` on this machine", envToken)
 	}
 
+	caPath := firstNonEmpty(f.caCert, os.Getenv(envCACert))
+	if caPath == "" && cc.CACert != "" {
+		caPath = cc.CACert
+		if !filepath.IsAbs(caPath) {
+			caPath = filepath.Join(filepath.Dir(ccPath), caPath)
+		}
+	}
+	tlsCfg, err := apiTLSConfig(u, caPath)
+	if err != nil {
+		return nil, err
+	}
+
 	tr := http.DefaultTransport.(*http.Transport).Clone()
 	tr.ResponseHeaderTimeout = requestTimeout
-	return &apiClient{base: strings.TrimRight(srv, "/"), token: token, http: &http.Client{Transport: tr}}, nil
+	tr.TLSClientConfig = tlsCfg
+	return &apiClient{base: strings.TrimRight(srv, "/"), token: token, caPath: caPath, http: &http.Client{Transport: tr}}, nil
 }
 
 func firstNonEmpty(vs ...string) string {
@@ -202,6 +224,9 @@ func (c *apiClient) send(ctx context.Context, method, path string, body any) (*h
 	if err != nil {
 		if ctx.Err() != nil {
 			return nil, ctx.Err()
+		}
+		if msg := tlsReason(err, c.caPath); msg != "" {
+			return nil, fmt.Errorf("cannot reach hivemind at %s: %s", c.base, msg)
 		}
 		return nil, fmt.Errorf("cannot reach hivemind at %s: %s", c.base, reachReason(err))
 	}

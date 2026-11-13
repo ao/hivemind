@@ -45,6 +45,7 @@ hivemind delete <app> [flags]
 
 | Flag | Type | Default | Environment | Description |
 |---|---|---|---|---|
+| `--ca-cert` | string | - | - | PEM file of the CA certificates to trust for an https server, instead of the system's (env HIVEMIND_CA_CERT; default from the client config) |
 | `--client-config` | string | - | `HIVEMIND_CLIENT_CONFIG` | client config file (env HIVEMIND_CLIENT_CONFIG; default $XDG_CONFIG_HOME/hivemind/config.yaml or ~/.config/hivemind/config.yaml) |
 | `--json` | bool | - | - | print JSON instead of a table |
 | `--server` | string | - | `HIVEMIND_SERVER` | server URL (env HIVEMIND_SERVER; default from the client config, then http://127.0.0.1:4483) |
@@ -66,6 +67,7 @@ hivemind deploy [flags]
 
 | Flag | Type | Default | Environment | Description |
 |---|---|---|---|---|
+| `--ca-cert` | string | - | - | PEM file of the CA certificates to trust for an https server, instead of the system's (env HIVEMIND_CA_CERT; default from the client config) |
 | `--client-config` | string | - | `HIVEMIND_CLIENT_CONFIG` | client config file (env HIVEMIND_CLIENT_CONFIG; default $XDG_CONFIG_HOME/hivemind/config.yaml or ~/.config/hivemind/config.yaml) |
 | `--env` | string, repeatable | - | - | environment variable, KEY=VALUE (repeatable) |
 | `-f`, `--file` | string | - | - | app spec file, YAML or JSON (- for standard input) |
@@ -83,7 +85,9 @@ Create a cluster on this machine. init creates the data directory (mode 0700),
 generates the admin token, writes it to <data-dir>/admin.token (mode 0600) and
 stores only its SHA-256 digest in the cluster database. The token is printed
 once. init also writes a client config that points the CLI at this server and
-at the token file. It refuses to run if a cluster already exists.
+at the token file. With --api-tls-cert, the client config also names that
+certificate as ca-cert, so the CLI on this machine trusts it. init refuses to
+run if a cluster already exists.
 
 ```
 hivemind init [flags]
@@ -166,6 +170,7 @@ hivemind join-token [flags]
 
 | Flag | Type | Default | Environment | Description |
 |---|---|---|---|---|
+| `--ca-cert` | string | - | - | PEM file of the CA certificates to trust for an https server, instead of the system's (env HIVEMIND_CA_CERT; default from the client config) |
 | `--client-config` | string | - | `HIVEMIND_CLIENT_CONFIG` | client config file (env HIVEMIND_CLIENT_CONFIG; default $XDG_CONFIG_HOME/hivemind/config.yaml or ~/.config/hivemind/config.yaml) |
 | `--json` | bool | - | - | print JSON instead of a table |
 | `--server` | string | - | `HIVEMIND_SERVER` | server URL (env HIVEMIND_SERVER; default from the client config, then http://127.0.0.1:4483) |
@@ -182,6 +187,7 @@ hivemind logs <app> [replica] [flags]
 
 | Flag | Type | Default | Environment | Description |
 |---|---|---|---|---|
+| `--ca-cert` | string | - | - | PEM file of the CA certificates to trust for an https server, instead of the system's (env HIVEMIND_CA_CERT; default from the client config) |
 | `--client-config` | string | - | `HIVEMIND_CLIENT_CONFIG` | client config file (env HIVEMIND_CLIENT_CONFIG; default $XDG_CONFIG_HOME/hivemind/config.yaml or ~/.config/hivemind/config.yaml) |
 | `-f`, `--follow` | bool | - | - | keep printing new lines |
 | `--json` | bool | - | - | print JSON instead of a table |
@@ -199,6 +205,7 @@ hivemind scale <app> <replicas> [flags]
 
 | Flag | Type | Default | Environment | Description |
 |---|---|---|---|---|
+| `--ca-cert` | string | - | - | PEM file of the CA certificates to trust for an https server, instead of the system's (env HIVEMIND_CA_CERT; default from the client config) |
 | `--client-config` | string | - | `HIVEMIND_CLIENT_CONFIG` | client config file (env HIVEMIND_CLIENT_CONFIG; default $XDG_CONFIG_HOME/hivemind/config.yaml or ~/.config/hivemind/config.yaml) |
 | `--json` | bool | - | - | print JSON instead of a table |
 | `--server` | string | - | `HIVEMIND_SERVER` | server URL (env HIVEMIND_SERVER; default from the client config, then http://127.0.0.1:4483) |
@@ -256,6 +263,7 @@ hivemind status [app] [flags]
 
 | Flag | Type | Default | Environment | Description |
 |---|---|---|---|---|
+| `--ca-cert` | string | - | - | PEM file of the CA certificates to trust for an https server, instead of the system's (env HIVEMIND_CA_CERT; default from the client config) |
 | `--client-config` | string | - | `HIVEMIND_CLIENT_CONFIG` | client config file (env HIVEMIND_CLIENT_CONFIG; default $XDG_CONFIG_HOME/hivemind/config.yaml or ~/.config/hivemind/config.yaml) |
 | `--json` | bool | - | - | print JSON instead of a table |
 | `--server` | string | - | `HIVEMIND_SERVER` | server URL (env HIVEMIND_SERVER; default from the client config, then http://127.0.0.1:4483) |

@@ -43,7 +43,7 @@ func isolate(t *testing.T) string {
 	t.Setenv("HOME", home)
 	t.Setenv("XDG_CONFIG_HOME", filepath.Join(home, ".config"))
 	t.Setenv("XDG_STATE_HOME", filepath.Join(home, ".local", "state"))
-	for _, k := range []string{envServer, envToken, envClientConfig, "HIVEMIND_DATA_DIR", "HIVEMIND_CONFIG", "HIVEMIND_API_ADDR"} {
+	for _, k := range []string{envServer, envToken, envClientConfig, envCACert, "HIVEMIND_DATA_DIR", "HIVEMIND_CONFIG", "HIVEMIND_API_ADDR"} {
 		t.Setenv(k, "")
 		os.Unsetenv(k)
 	}

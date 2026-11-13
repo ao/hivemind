@@ -90,7 +90,9 @@ func initCmd() *cobra.Command {
 generates the admin token, writes it to <data-dir>/admin.token (mode 0600) and
 stores only its SHA-256 digest in the cluster database. The token is printed
 once. init also writes a client config that points the CLI at this server and
-at the token file. It refuses to run if a cluster already exists.`,
+at the token file. With --api-tls-cert, the client config also names that
+certificate as ca-cert, so the CLI on this machine trusts it. init refuses to
+run if a cluster already exists.`,
 		Args: cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			return runInit(cmd, cmd.Flags(), clientConfig)
@@ -174,6 +176,17 @@ func runInit(cmd *cobra.Command, flags *pflag.FlagSet, clientConfigFlag string) 
 		fmt.Fprintf(out, "No client config written: %v\n", err)
 	} else {
 		cc := clientConfig{Server: serverURL(cfg), TokenFile: tokenPath}
+		if cfg.APITLSCert != "" {
+			// The CLI trusts the API's own certificate file. A certificate
+			// in the trust pool is accepted as a root, so this works for a
+			// self-signed certificate and for one from a private CA.
+			if cc.CACert, err = filepath.Abs(cfg.APITLSCert); err != nil {
+				return err
+			}
+			if note := certNameNote(cc.CACert, cc.Server); note != "" {
+				fmt.Fprintln(out, note)
+			}
+		}
 		switch err := writeClientConfig(ccPath, cc); {
 		case err == nil:
 			fmt.Fprintf(out, "The CLI on this machine reads the server address and token file from %s.\n", ccPath)
@@ -185,6 +198,9 @@ func runInit(cmd *cobra.Command, flags *pflag.FlagSet, clientConfigFlag string) 
 	}
 	fmt.Fprintf(out, "\nStart the node with `hivemind serve`. From another shell or machine, use\n\n")
 	fmt.Fprintf(out, "    export HIVEMIND_SERVER=%s\n    export HIVEMIND_TOKEN=<the token above>\n", serverURL(cfg))
+	if cfg.APITLSCert != "" {
+		fmt.Fprintf(out, "    export %s=<a copy of %s, or the CA that signed it>\n", envCACert, cfg.APITLSCert)
+	}
 	return nil
 }
 

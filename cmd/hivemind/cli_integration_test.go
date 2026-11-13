@@ -9,6 +9,8 @@ package main
 import (
 	"bytes"
 	"context"
+	"crypto/tls"
+	"crypto/x509"
 	"encoding/json"
 	"fmt"
 	"net"
@@ -35,6 +37,8 @@ type cli struct {
 	bin  string
 	env  []string
 	port int
+	// tls, when set, is how serve's health check reaches an https API.
+	tls *tls.Config
 }
 
 type result struct {
@@ -122,9 +126,14 @@ func (c *cli) serve() (*exec.Cmd, *syncBuf) {
 	c.t.Helper()
 	cmd, buf := c.start("serve")
 	url := fmt.Sprintf("http://127.0.0.1:%d/healthz", c.port)
+	hc := http.DefaultClient
+	if c.tls != nil {
+		url = fmt.Sprintf("https://127.0.0.1:%d/healthz", c.port)
+		hc = &http.Client{Transport: &http.Transport{TLSClientConfig: c.tls}}
+	}
 	deadline := time.Now().Add(30 * time.Second)
 	for time.Now().Before(deadline) {
-		resp, err := http.Get(url)
+		resp, err := hc.Get(url)
 		if err == nil {
 			resp.Body.Close()
 			if resp.StatusCode == 200 {
@@ -269,12 +278,7 @@ func TestCLIOneNode(t *testing.T) {
 	})
 
 	tmp := t.TempDir()
-	bin := filepath.Join(tmp, "hivemind")
-	build := exec.Command("go", "build", "-trimpath", "-o", bin, ".")
-	build.Env = append(os.Environ(), "CGO_ENABLED=0")
-	if out, err := build.CombinedOutput(); err != nil {
-		t.Fatalf("go build with CGO_ENABLED=0: %v\n%s", err, out)
-	}
+	bin := buildBinary(t, tmp)
 
 	home := filepath.Join(tmp, "home")
 	port, mport := freePort(t), freePort(t)
@@ -531,4 +535,79 @@ func waitFor(t *testing.T, d time.Duration, cond func() bool, what string, out *
 		}
 		time.Sleep(200 * time.Millisecond)
 	}
+}
+
+// buildBinary builds the hivemind binary into dir, static, as a release does.
+func buildBinary(t *testing.T, dir string) string {
+	t.Helper()
+	bin := filepath.Join(dir, "hivemind")
+	build := exec.Command("go", "build", "-trimpath", "-o", bin, ".")
+	build.Env = append(os.Environ(), "CGO_ENABLED=0")
+	if out, err := build.CombinedOutput(); err != nil {
+		t.Fatalf("go build with CGO_ENABLED=0: %v\n%s", err, out)
+	}
+	return bin
+}
+
+// TestCLIPrivateCA serves the API over TLS on 127.0.0.1 with a certificate
+// from a CA made in the test, and drives the real binary against it: the
+// client config that init writes trusts the certificate, --ca-cert with the
+// CA works, and the system roots, another CA and a name the certificate does
+// not carry are refused with an error that says why.
+func TestCLIPrivateCA(t *testing.T) {
+	host := os.Getenv("DOCKER_HOST")
+	if host == "" {
+		t.Fatal("DOCKER_HOST is not set: run scripts/integration-docker.sh")
+	}
+	tmp := t.TempDir()
+	bin := buildBinary(t, tmp)
+
+	ca := newTestCA(t, "hivemind test CA")
+	certPEM, keyPEM := ca.issue(t, []net.IP{net.ParseIP("127.0.0.1")})
+	caFile := writeFile(t, filepath.Join(tmp, "ca.crt"), ca.pem)
+	certFile := writeFile(t, filepath.Join(tmp, "api.crt"), certPEM)
+	keyFile := writeFile(t, filepath.Join(tmp, "api.key"), keyPEM)
+	otherFile := writeFile(t, filepath.Join(tmp, "other.crt"), newTestCA(t, "another CA").pem)
+
+	pool := x509.NewCertPool()
+	pool.AddCert(ca.cert)
+	home := filepath.Join(tmp, "home")
+	port := freePort(t)
+	c := &cli{t: t, bin: bin, port: port, tls: &tls.Config{RootCAs: pool, MinVersion: tls.VersionTLS12}, env: []string{
+		"PATH=" + os.Getenv("PATH"),
+		"HOME=" + home,
+		"XDG_CONFIG_HOME=" + filepath.Join(home, ".config"),
+		"HIVEMIND_DATA_DIR=" + filepath.Join(tmp, "data"),
+		"HIVEMIND_API_ADDR=127.0.0.1:" + strconv.Itoa(port),
+		"HIVEMIND_API_TLS_CERT=" + certFile,
+		"HIVEMIND_API_TLS_KEY=" + keyFile,
+		"HIVEMIND_DOCKER_HOST=" + host,
+	}}
+	out := c.ok("init")
+	token := regexp.MustCompile(`hm_[A-Za-z0-9_-]{43}`).FindString(out)
+	cc, err := os.ReadFile(filepath.Join(home, ".config", "hivemind", "config.yaml"))
+	if err != nil || !strings.Contains(string(cc), "ca-cert: "+certFile) || !strings.Contains(string(cc), "server: https://127.0.0.1:") {
+		t.Fatalf("client config after init with --api-tls-cert: %v\n%s", err, cc)
+	}
+
+	srv, srvOut := c.serve()
+	if ls := listeners(t, port); len(ls) != 1 || !strings.HasPrefix(ls[0], "0100007F:") {
+		t.Fatalf("API listeners on port %d: %v, want only 127.0.0.1", port, ls)
+	}
+	byIP := fmt.Sprintf("https://127.0.0.1:%d", port)
+
+	// The client config written by init.
+	if out := c.ok("status"); !strings.Contains(out, "No apps.") {
+		t.Fatalf("status with the init client config: %q", out)
+	}
+	// --ca-cert with the CA, and no client config.
+	noConfig := []string{"--client-config", writeFile(t, filepath.Join(tmp, "empty.yaml"), nil), "--token", token}
+	if out := c.ok(append([]string{"status", "--server", byIP, "--ca-cert", caFile}, noConfig...)...); !strings.Contains(out, "No apps.") {
+		t.Fatalf("status --ca-cert: %q", out)
+	}
+	c.fails("signed by an unknown authority; pass --ca-cert", append([]string{"status", "--server", byIP}, noConfig...)...)
+	c.fails("is not signed by a CA in "+otherFile, append([]string{"status", "--server", byIP, "--ca-cert", otherFile}, noConfig...)...)
+	c.fails("does not name localhost", append([]string{"status", "--server", fmt.Sprintf("https://localhost:%d", port), "--ca-cert", caFile}, noConfig...)...)
+	c.fails("applies to an https server", append([]string{"status", "--server", fmt.Sprintf("http://127.0.0.1:%d", port), "--ca-cert", caFile}, noConfig...)...)
+	stop(t, srv, srvOut)
 }
