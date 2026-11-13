@@ -39,7 +39,7 @@ func TestIntegrationHostPortClashStaysPending(t *testing.T) {
 		}
 	})
 
-	st, err := store.Open(ctx, filepath.Join(t.TempDir(), "data", "hivemind.db"))
+	st, err := store.Open(ctx, filepath.Join(t.TempDir(), "data", "hivemind.db"), store.WithMinReady(0))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -65,8 +65,15 @@ func TestIntegrationHostPortClashStaysPending(t *testing.T) {
 		t.Fatal(err)
 	}
 	a.Trigger()
-	// Several passes: the second app reports the clash and never runs.
+	// The clash is caught by placement (the replica stays unassigned with
+	// the scheduler's reason) or, if it got through, by the engine (the agent
+	// reports "port is already allocated" and removes the container). Either
+	// way the second app must never run.
 	itWait(t, "the clash reported", time.Minute, func() bool {
+		reps, err := st.Replicas(ctx, second)
+		if err == nil && len(reps) == 1 && strings.Contains(reps[0].PendingReason, "in use") {
+			return true
+		}
 		sts, err := st.ListStatus(ctx, second)
 		return err == nil && len(sts) == 1 && strings.Contains(sts[0].Error, "already")
 	})
@@ -77,8 +84,7 @@ func TestIntegrationHostPortClashStaysPending(t *testing.T) {
 		}
 		time.Sleep(200 * time.Millisecond)
 	}
-	sts, _ := st.ListStatus(ctx, second)
-	if len(sts) != 1 || sts[0].State != "pending" || sts[0].ContainerID != "" {
+	if sts, _ := st.ListStatus(ctx, second); len(sts) > 0 && (sts[0].State != "pending" || sts[0].ContainerID != "") {
 		t.Fatalf("status of the second app during the clash: %+v", sts)
 	}
 

@@ -709,7 +709,12 @@ func (s *Store) ReportStatus(ctx context.Context, nodeID string, st []Status) er
 			nodeID); err != nil {
 			return err
 		}
-		return purgeDeleted(ctx, tx)
+		if err := purgeDeleted(ctx, tx); err != nil {
+			return err
+		}
+		// Purged replicas free their host ports and capacity, so a replica that
+		// was pending on them can be placed now rather than at the next sweep.
+		return s.placePending(ctx, tx)
 	})
 }
 

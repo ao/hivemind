@@ -162,6 +162,16 @@ func TestRemovedReplicaStillHoldsItsPort(t *testing.T) {
 	if r := replicasOf(t, e.s, "b")[0]; r.NodeID != "" {
 		t.Fatalf("app b took port 9090 while a's container could still run: %+v", r)
 	}
+
+	// The node reports a's container gone: the port is free, and b is placed
+	// in the same report, without waiting for a sweep.
+	if err := e.s.ReportStatus(ctxT(t), "node-1", nil); err != nil {
+		t.Fatal(err)
+	}
+	if got := e.nodeOf("b", 0); got != "node-1" {
+		t.Fatalf("app b on %q after a's container was reported gone, want node-1", got)
+	}
+	checkInvariants(t, e.s)
 }
 
 // When a node's lease lapses, its replicas are placed on other nodes, and the
