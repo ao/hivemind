@@ -1,7 +1,9 @@
 #!/usr/bin/env bash
 # Runs the integration tests against a real Docker daemon: the agent's
-# reconcile and health tests first, then the health probes, then the Docker
-# runtime tests. The runtime tests end by killing the daemon, so they go last.
+# reconcile and health tests first, then the health probes, then the CLI
+# test, which builds the hivemind binary and drives every command against a
+# one-node cluster, then the Docker runtime tests. The runtime tests end by
+# killing the daemon, so they go last.
 #
 # It starts docker:dind with --privileged, with its API on a unix socket in a
 # named volume. It publishes no ports, and it listens on no TCP socket. The
@@ -91,6 +93,7 @@ docker run -d --name "$gocont" --network "container:$dind" \
 	bash -c 'rc=0
 		go test -race -count=1 -tags integration -v ./internal/agent/... || rc=1
 		go test -race -count=1 -tags integration -v ./internal/health/... || rc=1
+		go test -race -count=1 -tags integration -v ./cmd/hivemind/... || rc=1
 		go test -race -count=1 -tags integration -v ./internal/runtime/... || rc=1
 		exit $rc' >/dev/null
 
