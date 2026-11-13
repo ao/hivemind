@@ -23,6 +23,8 @@ import (
 	"github.com/ao/hivemind/internal/agent"
 	"github.com/ao/hivemind/internal/auth"
 	"github.com/ao/hivemind/internal/config"
+	"github.com/ao/hivemind/internal/logging"
+	"github.com/ao/hivemind/internal/runtime"
 	"github.com/ao/hivemind/internal/runtime/docker"
 	"github.com/ao/hivemind/internal/server"
 	"github.com/ao/hivemind/internal/store"
@@ -159,31 +161,61 @@ func serveCmd() *cobra.Command {
 		Short: "Run the server and the agent on this node",
 		Long: `Run the API server and the agent on this node. The API listens on --api-addr,
 127.0.0.1:4483 by default. A non-loopback address needs --api-tls-cert and
---api-tls-key. SIGINT or SIGTERM stops the server; containers keep running.`,
+--api-tls-key. SIGINT or SIGTERM stops the server; containers keep running.
+
+GET /metrics on the API serves Prometheus metrics and needs the admin token.
+--metrics-addr also serves it, and nothing else, on a separate loopback
+address; that listener needs the token too. Logs go to stderr at
+--log-level, as text or with --log-format json. Tokens, cookies, CSRF tokens,
+private keys and env values are not logged.`,
 		Args: cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			cfg, err := config.Load(cmd.Flags(), config.Options{})
 			if err != nil {
 				return err
 			}
-			return runServe(cmd.Context(), cfg, newLogger(cfg, cmd.ErrOrStderr()))
+			log, err := newLogger(cfg, cmd.ErrOrStderr())
+			if err != nil {
+				return err
+			}
+			slog.SetDefault(log)
+			rt, err := docker.New(cfg.DockerHost)
+			if err != nil {
+				return err
+			}
+			return runServe(cmd.Context(), cfg, log, rt)
 		},
 	}
 	config.Bind(cmd.Flags(), config.Options{})
 	return cmd
 }
 
-func newLogger(cfg *config.Config, w io.Writer) *slog.Logger {
-	var level slog.Level
-	_ = level.UnmarshalText([]byte(cfg.LogLevel))
-	opts := &slog.HandlerOptions{Level: level}
-	if cfg.LogFormat == "json" {
-		return slog.New(slog.NewJSONHandler(w, opts))
-	}
-	return slog.New(slog.NewTextHandler(w, opts))
+// newLogger is the server's logger: the level and format from the config,
+// with secrets redacted.
+func newLogger(cfg *config.Config, w io.Writer) (*slog.Logger, error) {
+	return logging.New(w, cfg.LogLevel, cfg.LogFormat)
 }
 
-func runServe(ctx context.Context, cfg *config.Config, log *slog.Logger) error {
+// listenMetrics opens the --metrics-addr listener. config.Validate already
+// requires a loopback host; this checks the address the socket was actually
+// bound to as well, because a host name such as localhost is resolved here.
+func listenMetrics(addr string) (net.Listener, error) {
+	ln, err := net.Listen("tcp", addr)
+	if err != nil {
+		return nil, fmt.Errorf("listen on --metrics-addr %s: %w", addr, err)
+	}
+	tcp, ok := ln.Addr().(*net.TCPAddr)
+	if !ok || !tcp.IP.IsLoopback() {
+		ln.Close()
+		return nil, fmt.Errorf("--metrics-addr %s bound %s, which is not a loopback address", addr, ln.Addr())
+	}
+	return ln, nil
+}
+
+func runServe(ctx context.Context, cfg *config.Config, log *slog.Logger, rt runtime.Runtime) error {
+	// The token prints as [redacted]: config.Secret masks itself, and the
+	// redacting handler masks it again.
+	log.Debug("resolved config", "config", cfg)
 	st, err := store.Open(ctx, filepath.Join(cfg.DataDir, storeFileName))
 	if err != nil {
 		return err
@@ -206,10 +238,6 @@ func runServe(ctx context.Context, cfg *config.Config, log *slog.Logger) error {
 		tlsCfg = &tls.Config{MinVersion: tls.VersionTLS12, Certificates: []tls.Certificate{cert}}
 	}
 
-	rt, err := docker.New(cfg.DockerHost)
-	if err != nil {
-		return err
-	}
 	info, err := rt.Info(ctx)
 	if err != nil {
 		return fmt.Errorf("cannot reach Docker at %s: %w", cfg.DockerHost, err)
@@ -227,13 +255,14 @@ func runServe(ctx context.Context, cfg *config.Config, log *slog.Logger) error {
 	if err != nil {
 		return err
 	}
+	m := server.NewMetrics()
 	ag, err := agent.New(agent.Config{NodeID: cl.NodeID, Runtime: rt, Source: st,
-		Interval: cfg.ReconcileInterval, Logger: log.With("component", "agent")})
+		Interval: cfg.ReconcileInterval, Logger: log.With("component", "agent"), OnPass: m.ObserveReconcile})
 	if err != nil {
 		return err
 	}
 	api, err := server.New(server.Config{Store: st, Runtime: rt, NodeID: cl.NodeID, Auth: authn,
-		Trigger: ag.Trigger, Logger: log.With("component", "api")})
+		Trigger: ag.Trigger, Logger: log.With("component", "api"), Metrics: m})
 	if err != nil {
 		return err
 	}
@@ -245,6 +274,18 @@ func runServe(ctx context.Context, cfg *config.Config, log *slog.Logger) error {
 	hs := server.NewHTTPServer(api.Handler(), log)
 	hs.TLSConfig = tlsCfg
 
+	// The metrics listener is plain HTTP on loopback and needs the admin
+	// token, like /metrics on the API.
+	var mln net.Listener
+	var mhs *http.Server
+	if cfg.MetricsAddr != "" {
+		if mln, err = listenMetrics(cfg.MetricsAddr); err != nil {
+			ln.Close()
+			return err
+		}
+		mhs = server.NewHTTPServer(api.MetricsHandler(), log)
+	}
+
 	agentCtx, stopAgent := context.WithCancel(context.Background())
 	var wg sync.WaitGroup
 	wg.Add(1)
@@ -253,14 +294,20 @@ func runServe(ctx context.Context, cfg *config.Config, log *slog.Logger) error {
 		_ = ag.Run(agentCtx)
 	}()
 
-	serveErr := make(chan error, 1)
+	serveErr := make(chan error, 2)
 	go func() {
+		var err error
 		if tlsCfg != nil {
-			serveErr <- hs.ServeTLS(ln, "", "")
+			err = hs.ServeTLS(ln, "", "")
 		} else {
-			serveErr <- hs.Serve(ln)
+			err = hs.Serve(ln)
 		}
+		serveErr <- fmt.Errorf("API server: %w", err)
 	}()
+	if mhs != nil {
+		go func() { serveErr <- fmt.Errorf("metrics server: %w", mhs.Serve(mln)) }()
+		log.Info("serving metrics", "addr", mln.Addr().String())
+	}
 	log.Info("hivemind serving", "addr", ln.Addr().String(), "tls", tlsCfg != nil, "node", cl.NodeID,
 		"docker", info.ServerVersion, "version", version)
 
@@ -268,14 +315,18 @@ func runServe(ctx context.Context, cfg *config.Config, log *slog.Logger) error {
 	select {
 	case <-ctx.Done():
 		log.Info("shutting down")
-	case err := <-serveErr:
-		runErr = fmt.Errorf("API server: %w", err)
+	case runErr = <-serveErr:
 	}
 	api.CloseStreams()
 	sctx, cancel := context.WithTimeout(context.Background(), shutdownTimeout)
 	defer cancel()
 	if err := hs.Shutdown(sctx); err != nil && !errors.Is(err, http.ErrServerClosed) {
 		log.Warn("API shutdown", "err", err)
+	}
+	if mhs != nil {
+		if err := mhs.Shutdown(sctx); err != nil && !errors.Is(err, http.ErrServerClosed) {
+			log.Warn("metrics shutdown", "err", err)
+		}
 	}
 	stopAgent()
 	wg.Wait()

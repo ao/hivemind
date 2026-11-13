@@ -24,6 +24,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/ao/hivemind/internal/metrics"
 	"github.com/ao/hivemind/internal/runtime"
 	"github.com/ao/hivemind/internal/runtime/docker"
 	"github.com/ao/hivemind/internal/server"
@@ -276,7 +277,7 @@ func TestCLIOneNode(t *testing.T) {
 	}
 
 	home := filepath.Join(tmp, "home")
-	port := freePort(t)
+	port, mport := freePort(t), freePort(t)
 	c := &cli{t: t, bin: bin, port: port, env: []string{
 		"PATH=" + os.Getenv("PATH"),
 		"HOME=" + home,
@@ -285,6 +286,7 @@ func TestCLIOneNode(t *testing.T) {
 		"HIVEMIND_API_ADDR=127.0.0.1:" + strconv.Itoa(port),
 		"HIVEMIND_DOCKER_HOST=" + host,
 		"HIVEMIND_RECONCILE_INTERVAL=1s",
+		"HIVEMIND_METRICS_ADDR=127.0.0.1:" + strconv.Itoa(mport),
 	}}
 	serverURL := fmt.Sprintf("http://127.0.0.1:%d", port)
 
@@ -311,6 +313,15 @@ func TestCLIOneNode(t *testing.T) {
 	if ls := listeners(t, port); len(ls) != 1 || !strings.HasPrefix(ls[0], "0100007F:") {
 		t.Fatalf("API listeners on port %d: %v, want only 127.0.0.1", port, ls)
 	}
+	if ls := listeners(t, mport); len(ls) != 1 || !strings.HasPrefix(ls[0], "0100007F:") {
+		t.Fatalf("metrics listeners on port %d: %v, want only 127.0.0.1", mport, ls)
+	}
+	metricsURLs := []string{serverURL + "/metrics", fmt.Sprintf("http://127.0.0.1:%d/metrics", mport)}
+	for _, u := range metricsURLs {
+		if code, _ := scrape(t, u, ""); code != http.StatusUnauthorized {
+			t.Fatalf("%s without a token: %d, want 401", u, code)
+		}
+	}
 	if out := c.ok("status"); !strings.Contains(out, "No apps.") {
 		t.Fatalf("empty status: %q", out)
 	}
@@ -332,6 +343,29 @@ func TestCLIOneNode(t *testing.T) {
 	}
 	c.fails("invalid app spec", "deploy", "--name", "bad", "--image", "Nginx:")
 	c.waitRunning(rt, "web", 2)
+	// Both metrics endpoints report what status reports.
+	for _, u := range metricsURLs {
+		code, got := scrape(t, u, token)
+		if code != http.StatusOK {
+			t.Fatalf("%s: %d", u, code)
+		}
+		for k, want := range map[string]float64{
+			metrics.Key("hivemind_apps"):                           1,
+			metrics.Key("hivemind_replicas_desired", "app", "web"): 2,
+			metrics.Key("hivemind_replicas_running", "app", "web"): 2,
+			metrics.Key("hivemind_replicas_ready", "app", "web"):   2,
+		} {
+			if got[k] != want {
+				t.Errorf("%s: %s = %v, want %v", u, k, got[k], want)
+			}
+		}
+		if got[metrics.Key("hivemind_reconcile_duration_seconds_count")] < 1 {
+			t.Errorf("%s: no reconcile passes counted", u)
+		}
+		if _, ok := got[metrics.Key("hivemind_http_requests_total", "method", "PUT", "route", "/v1/apps/{name}", "code", "201")]; !ok {
+			t.Errorf("%s: the deploy request is not counted", u)
+		}
+	}
 	table := c.ok("status")
 	if n := strings.Count(table, " running "); n < 2 || !strings.Contains(table, "nginx:alpine") {
 		t.Fatalf("status table shows %d running replicas:\n%s", n, table)
@@ -413,6 +447,9 @@ func TestCLIOneNode(t *testing.T) {
 		t.Fatalf("ticker after serve stopped: %+v, before %+v", after, before)
 	}
 
+	// The second serve logs JSON at debug level.
+	firstOut := srvOut.String()
+	c.env = append(c.env, "HIVEMIND_LOG_FORMAT=json", "HIVEMIND_LOG_LEVEL=debug")
 	srv, srvOut = c.serve()
 	time.Sleep(3 * time.Second) // a few reconcile passes
 	c.waitRunning(rt, "ticker", 1)
@@ -427,9 +464,43 @@ func TestCLIOneNode(t *testing.T) {
 	stop(t, srv, srvOut)
 
 	// The server log never holds the token or an env value.
-	if s := srvOut.String(); strings.Contains(s, token) || strings.Contains(s, "MODE=test") {
-		t.Fatalf("serve output contains a secret:\n%s", s)
+	for _, s := range []string{firstOut, srvOut.String()} {
+		if strings.Contains(s, token) || strings.Contains(s, "MODE=test") {
+			t.Fatalf("serve output contains a secret:\n%s", s)
+		}
 	}
+	jsonOut := strings.TrimSpace(srvOut.String())
+	if !strings.Contains(jsonOut, `"level":"DEBUG"`) {
+		t.Errorf("no debug lines in the JSON log:\n%s", jsonOut)
+	}
+	for _, line := range strings.Split(jsonOut, "\n") {
+		if !json.Valid([]byte(line)) {
+			t.Errorf("serve --log-format json wrote a line that is not JSON: %q", line)
+		}
+	}
+}
+
+// scrape fetches a metrics URL with the token, if one is given, and parses
+// the body when the status is 200.
+func scrape(t *testing.T, url, token string) (int, map[string]float64) {
+	t.Helper()
+	req, _ := http.NewRequest("GET", url, nil)
+	if token != "" {
+		req.Header.Set("Authorization", "Bearer "+token)
+	}
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("GET %s: %v", url, err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return resp.StatusCode, nil
+	}
+	got, err := metrics.Parse(resp.Body)
+	if err != nil {
+		t.Fatalf("%s: %v", url, err)
+	}
+	return resp.StatusCode, got
 }
 
 func waitFor(t *testing.T, d time.Duration, cond func() bool, what string, out *syncBuf) {
