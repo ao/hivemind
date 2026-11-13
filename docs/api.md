@@ -36,7 +36,7 @@ Every error is a JSON object with one field:
 |---|---|
 | 400 | Invalid JSON, an unknown field, an empty body, an invalid app spec, an invalid name or query value |
 | 401 | No valid token |
-| 404 | No such app, or no container for the replica on this node. Unknown routes give `{"error":"not found"}` |
+| 404 | No such app, or no container for the replica on the server's node. Unknown routes give `{"error":"not found"}` |
 | 405 | Wrong method for a known path: `{"error":"method not allowed"}` |
 | 413 | Request body over 1 MiB |
 | 500 | Unexpected failure. The message is `internal error`, and the details go to the server log |
@@ -48,6 +48,22 @@ Every error is a JSON object with one field:
 - Request headers are at most 64 KiB.
 - The server gives 10 seconds to read the headers, 30 seconds to read a request, 60 seconds to write a response, and holds an idle connection for 120 seconds. A followed log stream lifts the write deadline, and it ends when the server shuts down.
 - `replica` in a logs request is 0 to 99. `tail` is 0 to 100000, and 0 means all lines.
+
+## Join tokens
+
+`POST /v1/join-tokens` issues a token for one machine to join the cluster with `hivemind join`. It needs the admin token like every other route. It needs the cluster CA that `init` creates. Without the CA, the route answers 503 and says to run `hivemind init`. A token can be used only while the server runs with `--advertise`, which opens the join listener.
+
+The body is optional. `ttl` is a Go duration such as `"1h"`. It defaults to `24h`, and it must be above zero and at most `168h`. Any other value gets 400.
+
+```json
+{"token": "hivemind-join-v1.<64 hex digits>.<43 characters>", "expires_at": "2026-11-14T10:00:00Z"}
+```
+
+The token is shown once. The server keeps a SHA-256 hash of its secret, and a token works once, before it expires. The token carries the CA fingerprint, so the joining machine trusts only this cluster's CA. `hivemind join-token` calls this route and prints the token. See [concepts](concepts.md#joining-a-machine) for the join flow.
+
+## Node API (internal)
+
+Workers talk to the server over a second API, on the cluster port that `serve --advertise` opens. It has routes for a worker to join, register, read its assignments and report its containers. It is internal. Its routes, bodies and errors may change in any release, so this document does not describe them. The listeners and the trust model are in [security](security.md).
 
 ## Routes
 
@@ -63,6 +79,7 @@ Every error is a JSON object with one field:
 | `GET /v1/apps/{name}/status` | none | 200, `AppStatus` | Replicas of one app |
 | `GET /v1/apps/{name}/logs` | none | 200, `text/plain` | Log of one replica's container |
 | `GET /v1/status` | none | 200, a list of `AppStatus` | Replicas of every app |
+| `POST /v1/join-tokens` | `{"ttl": "1h"}`, optional | 201, `{"token", "expires_at"}` | Issue a token that lets one machine join. See [join tokens](#join-tokens) |
 | `GET /metrics` | none | 200, Prometheus text | Metrics |
 
 An app that has been deleted is treated as missing by every route, even before its containers are gone.
@@ -147,7 +164,7 @@ The spec is the JSON form of the YAML file that `deploy -f` reads. Unknown field
 - `tail` (default 0): the number of lines from the end. 0 returns the whole log.
 - `follow` (default false): keep the stream open until the client disconnects, or the container exits.
 
-The log is `text/plain`. Standard output and standard error are both written to the body. The server reads the replica's container on this node. It picks the running container, or else the one with the highest generation. A replica that has no container on this node gets `404`.
+The log is `text/plain`. Standard output and standard error are both written to the body. The server reads the replica's container on its own node. It picks the running container, or else the one with the highest generation. A replica that has no container on the server's node gets `404`, and that includes every replica placed on a worker. A worker has no API, so read those logs with `docker logs` on the worker.
 
 ## Metrics
 

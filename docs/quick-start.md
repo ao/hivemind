@@ -145,7 +145,9 @@ The app is hidden at once. Its containers stop and are removed on the next pass,
 
 ## Next
 
-- [Concepts](concepts.md) explains generations, reconcile, health checks, restarts and the security defaults.
+- [Concepts](concepts.md) explains generations, reconcile, health checks, restarts, placement and the security defaults.
+- [Add a machine](../README.md#add-a-machine) joins a worker to this server.
+- [Security](security.md) lists every listener and file.
 - [CLI reference](cli.md) lists every flag.
 - [HTTP API](api.md) describes the routes that the CLI calls.
 - The [README's limits](../README.md#limits) say what the current build does not do.

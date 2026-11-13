@@ -12,6 +12,8 @@ Use a new data directory for v2: point `--data-dir` or `HIVEMIND_DATA_DIR` at an
 
 The v2 store has a schema version. A store written by a newer build is refused with an error that says so. Each release from v2.0.0 on adds its migrations after the existing ones, and a store from an earlier release is migrated forward on `serve` and `init` with its data kept.
 
+A v2 data directory made by a development build from before the cluster CA was added has no CA. `serve --advertise` refuses it, and `init` will not run again on it because the cluster exists. Use a new data directory.
+
 ## Command line
 
 v1 was one command with flags, such as `hivemind --runtime docker`. v2 has subcommands. Each one has its own flags, and the full list is in [cli.md](cli.md).
@@ -23,8 +25,9 @@ v1 was one command with flags, such as `hivemind --runtime docker`. v2 has subco
 | (no init step) | `hivemind init` once, before `serve` |
 | `--data-dir`, `HIVEMIND_DATA_DIR` | The same names. The directory layout is new |
 | (none) | `hivemind deploy`, `status`, `logs`, `scale`, `delete` |
+| (none) | `hivemind serve --advertise` opens the node listeners. `hivemind join-token` and `hivemind join` add a worker |
 
-`hivemind join` is in the command list, but it exits with an error. Multi-node clusters are not built.
+`join` runs a worker's agent in the foreground. See the [README](../README.md#add-a-machine) for the steps.
 
 ## API and web UI
 
@@ -34,7 +37,7 @@ v2 serves the API on `127.0.0.1:4483`, and every route except `GET /healthz` nee
 
 ## Networking
 
-v1 bound `*:7946` for its membership protocol (memberlist). v2 has no membership protocol. Its only listener is the API on `127.0.0.1:4483`. The cluster listener on port 4484 is not started by this build.
+v1 bound `*:7946` for its membership protocol (memberlist). v2 has no membership protocol. Its API listens on `127.0.0.1:4483`, and nothing else listens unless the server runs with `--advertise`. With `--advertise`, v2 opens two ports on that address only: 4484 for the node API and 4485 for joins. See [security](security.md#listeners).
 
 ## Removed
 
