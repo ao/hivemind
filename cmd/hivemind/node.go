@@ -192,12 +192,20 @@ func serverURL(cfg *config.Config) string {
 }
 
 func serveCmd() *cobra.Command {
+	var role string
 	cmd := &cobra.Command{
 		Use:   "serve",
 		Short: "Run the server and the agent on this node",
 		Long: `Run the API server and the agent on this node. The API listens on --api-addr,
 127.0.0.1:4483 by default. A non-loopback address needs --api-tls-cert and
 --api-tls-key. SIGINT or SIGTERM stops the server; containers keep running.
+
+--advertise <addr> also opens the cluster listeners, on that address only: the
+node listener on --cluster-port (4484) and the join listener on the port above
+it. Other machines join with hivemind join.
+
+--role worker runs only the agent, for a machine that joined with hivemind
+join. It has no API listener. --role server is the default.
 
 GET /metrics on the API serves Prometheus metrics and needs the admin token.
 --metrics-addr also serves it, and nothing else, on a separate loopback
@@ -215,6 +223,16 @@ private keys and env values are not logged.`,
 				return err
 			}
 			slog.SetDefault(log)
+			switch role {
+			case "server":
+			case "worker":
+				if cfg.Advertise != "" {
+					return errors.New("--advertise does not apply to a worker, which runs no listener")
+				}
+				return runWorkerServe(cmd.Context(), cfg, log)
+			default:
+				return fmt.Errorf("--role %q must be server or worker", role)
+			}
 			rt, err := docker.New(cfg.DockerHost)
 			if err != nil {
 				return err
@@ -223,6 +241,7 @@ private keys and env values are not logged.`,
 		},
 	}
 	config.Bind(cmd.Flags(), config.Options{})
+	cmd.Flags().StringVar(&role, "role", "server", "server (API, scheduler and agent) or worker (agent only, after hivemind join)")
 	return cmd
 }
 
@@ -421,15 +440,4 @@ func runServe(ctx context.Context, cfg *config.Config, log *slog.Logger, rt runt
 	wg.Wait()
 	log.Info("stopped")
 	return runErr
-}
-
-func joinCmd() *cobra.Command {
-	return &cobra.Command{
-		Use:                "join",
-		Short:              "Join another node's cluster (not implemented in this build)",
-		DisableFlagParsing: true,
-		RunE: func(*cobra.Command, []string) error {
-			return errors.New("join is not implemented in this build: it runs single-node clusters only")
-		},
-	}
 }

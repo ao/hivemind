@@ -27,7 +27,8 @@ hivemind
 | `delete` | Delete an app and stop its containers |
 | `deploy` | Create or update an app |
 | `init` | Create a cluster on this machine |
-| `join` | Join another node's cluster (not implemented in this build) |
+| `join` | Join a cluster as a worker, then run its agent |
+| `join-token` | Print a token that lets another machine join this cluster |
 | `logs` | Print a replica's container log |
 | `scale` | Set an app's replica count |
 | `serve` | Run the server and the agent on this node |
@@ -102,17 +103,74 @@ hivemind init [flags]
 | `--log-format` | string | `text` | `HIVEMIND_LOG_FORMAT` | log format: text or json |
 | `--log-level` | string | `info` | `HIVEMIND_LOG_LEVEL` | log level: debug, info, warn or error |
 | `--metrics-addr` | string | - | `HIVEMIND_METRICS_ADDR` | separate loopback address for /metrics, host:port; empty means API only |
+| `--min-ready` | string | `30s` | - | how long a node must be ready before it gets new replicas; 0s means no wait |
 | `--reconcile-interval` | string | `2s` | `HIVEMIND_RECONCILE_INTERVAL` | how often the agent reconciles containers |
 | `--server` | string | `http://127.0.0.1:4483` | `HIVEMIND_SERVER` | server URL for the client commands |
 | `--token` | string | - | `HIVEMIND_TOKEN` | API token for the client commands (not logged) |
 
 ### hivemind join
 
-Join another node's cluster (not implemented in this build)
+Join a cluster as a worker node and run its agent in the foreground.
+
+  hivemind join 10.0.0.5 --token <token>
+
+<server> is the server's address, host or host:port, where the port is its
+cluster port (4484 by default). The worker generates a key and a certificate
+request, presents the join token to the server's join port (the cluster port
+plus one), and checks the reply against the CA fingerprint in the token. It
+then stores its key (mode 0600), its certificate, the cluster CA and its node
+ID in the data directory, and starts the agent.
+
+The token is single use and expires; get one with hivemind join-token on the
+server. --token is read from the flag only, not from HIVEMIND_TOKEN, which is
+the admin token.
+
+A joined machine keeps its state. After a restart, run
+"hivemind serve --role worker" with the same data directory. A worker has no
+API listener, so --advertise does not apply to it.
 
 ```
-hivemind join
+hivemind join <server> [flags]
 ```
+
+| Flag | Type | Default | Environment | Description |
+|---|---|---|---|---|
+| `--api-addr` | string | `127.0.0.1:4483` | `HIVEMIND_API_ADDR` | address of the API, host:port |
+| `--api-tls-cert` | string | - | `HIVEMIND_API_TLS_CERT` | TLS certificate for the API (PEM) |
+| `--api-tls-key` | string | - | `HIVEMIND_API_TLS_KEY` | TLS private key for the API (PEM) |
+| `--cluster-port` | string | `4484` | `HIVEMIND_CLUSTER_PORT` | port of the node-to-node listener; not used in this build |
+| `--config` | string | - | `HIVEMIND_CONFIG` | YAML config file (default <data-dir>/hivemind.yaml) |
+| `--data-dir` | string | see description | `HIVEMIND_DATA_DIR` | directory for node state. The default is /var/lib/hivemind for root, and $XDG_STATE_HOME/hivemind or ~/.local/state/hivemind for other users. |
+| `--docker-host` | string | `unix:///var/run/docker.sock` | `HIVEMIND_DOCKER_HOST` | Docker Engine endpoint |
+| `--log-format` | string | `text` | `HIVEMIND_LOG_FORMAT` | log format: text or json |
+| `--log-level` | string | `info` | `HIVEMIND_LOG_LEVEL` | log level: debug, info, warn or error |
+| `--metrics-addr` | string | - | `HIVEMIND_METRICS_ADDR` | separate loopback address for /metrics, host:port; empty means API only |
+| `--min-ready` | string | `30s` | - | how long a node must be ready before it gets new replicas; 0s means no wait |
+| `--reconcile-interval` | string | `2s` | `HIVEMIND_RECONCILE_INTERVAL` | how often the agent reconciles containers |
+| `--server` | string | `http://127.0.0.1:4483` | `HIVEMIND_SERVER` | server URL for the client commands |
+| `--token` | string | - | `HIVEMIND_TOKEN` | join token from hivemind join-token on the server |
+
+### hivemind join-token
+
+Print a join token. Run "hivemind join <server>:<cluster-port> --token <token>"
+on the other machine. The token is single use, and it expires after --ttl
+(default 24h, at most 168h). Its text carries the cluster CA's fingerprint, so
+the joining machine only trusts this cluster's CA.
+
+The token goes to standard output alone, so scripts can capture it. The
+expiry goes to standard error. With --json, both go to standard output as JSON.
+
+```
+hivemind join-token [flags]
+```
+
+| Flag | Type | Default | Environment | Description |
+|---|---|---|---|---|
+| `--client-config` | string | - | `HIVEMIND_CLIENT_CONFIG` | client config file (env HIVEMIND_CLIENT_CONFIG; default $XDG_CONFIG_HOME/hivemind/config.yaml or ~/.config/hivemind/config.yaml) |
+| `--json` | bool | - | - | print JSON instead of a table |
+| `--server` | string | - | `HIVEMIND_SERVER` | server URL (env HIVEMIND_SERVER; default from the client config, then http://127.0.0.1:4483) |
+| `--token` | string | - | `HIVEMIND_TOKEN` | API token (env HIVEMIND_TOKEN; default from the client config's token file) |
+| `--ttl` | string | - | - | how long the token lasts, such as 1h (default 24h0m0s) |
 
 ### hivemind logs
 
@@ -152,6 +210,13 @@ Run the API server and the agent on this node. The API listens on --api-addr,
 127.0.0.1:4483 by default. A non-loopback address needs --api-tls-cert and
 --api-tls-key. SIGINT or SIGTERM stops the server; containers keep running.
 
+--advertise <addr> also opens the cluster listeners, on that address only: the
+node listener on --cluster-port (4484) and the join listener on the port above
+it. Other machines join with hivemind join.
+
+--role worker runs only the agent, for a machine that joined with hivemind
+join. It has no API listener. --role server is the default.
+
 GET /metrics on the API serves Prometheus metrics and needs the admin token.
 --metrics-addr also serves it, and nothing else, on a separate loopback
 address; that listener needs the token too. Logs go to stderr at
@@ -175,7 +240,9 @@ hivemind serve [flags]
 | `--log-format` | string | `text` | `HIVEMIND_LOG_FORMAT` | log format: text or json |
 | `--log-level` | string | `info` | `HIVEMIND_LOG_LEVEL` | log level: debug, info, warn or error |
 | `--metrics-addr` | string | - | `HIVEMIND_METRICS_ADDR` | separate loopback address for /metrics, host:port; empty means API only |
+| `--min-ready` | string | `30s` | - | how long a node must be ready before it gets new replicas; 0s means no wait |
 | `--reconcile-interval` | string | `2s` | `HIVEMIND_RECONCILE_INTERVAL` | how often the agent reconciles containers |
+| `--role` | string | `server` | - | server (API, scheduler and agent) or worker (agent only, after hivemind join) |
 | `--server` | string | `http://127.0.0.1:4483` | `HIVEMIND_SERVER` | server URL for the client commands |
 | `--token` | string | - | `HIVEMIND_TOKEN` | API token for the client commands (not logged) |
 

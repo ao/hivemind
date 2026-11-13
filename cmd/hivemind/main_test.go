@@ -176,11 +176,23 @@ func TestServeWithoutInit(t *testing.T) {
 	}
 }
 
-func TestJoinNotImplemented(t *testing.T) {
+// join refuses bad input before it opens a connection.
+func TestJoinRejectsBadInputBeforeTheNetwork(t *testing.T) {
 	isolate(t)
-	_, _, err := run(t, "", "join", "--token", "x", "10.0.0.1")
-	if err == nil || !strings.Contains(err.Error(), "not implemented") {
-		t.Fatalf("err = %v", err)
+	cases := []struct {
+		args []string
+		want string
+	}{
+		{[]string{"join", "10.0.0.1"}, "--token is required"},
+		{[]string{"join", "--token", "x", "10.0.0.1"}, "malformed"},
+		{[]string{"join", "--token", "x", "--advertise", "10.0.0.2", "10.0.0.1"}, "does not apply"},
+		{[]string{"join", "--token", "x", "10.0.0.1:65535"}, "join port"},
+	}
+	for _, c := range cases {
+		_, _, err := run(t, "", c.args...)
+		if err == nil || !strings.Contains(err.Error(), c.want) {
+			t.Errorf("%v: err = %v, want %q", c.args, err, c.want)
+		}
 	}
 }
 
