@@ -85,7 +85,7 @@ func newCluster(t *testing.T) *cluster {
 
 	ctx, cancel := context.WithCancel(context.Background())
 	c.ctx = ctx
-	st, err := store.Open(ctx, filepath.Join(t.TempDir(), "data", "hivemind.db"))
+	st, err := store.Open(ctx, filepath.Join(t.TempDir(), "data", "hivemind.db"), store.WithMinReady(0))
 	if err != nil {
 		cancel()
 		t.Fatal(err)

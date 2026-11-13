@@ -24,6 +24,7 @@ type fileConfig struct {
 	LogFormat         *string `yaml:"log-format"`
 	MetricsAddr       *string `yaml:"metrics-addr"`
 	ReconcileInterval *string `yaml:"reconcile-interval"`
+	MinReady          *string `yaml:"min-ready"`
 	Server            *string `yaml:"server"`
 	Token             *string `yaml:"token"`
 }

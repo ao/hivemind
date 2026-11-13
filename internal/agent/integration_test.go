@@ -136,7 +136,7 @@ func TestIntegrationSingleNode(t *testing.T) {
 	})
 
 	path := filepath.Join(t.TempDir(), "data", "hivemind.db")
-	st, err := store.Open(ctx, path)
+	st, err := store.Open(ctx, path, store.WithMinReady(0))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -197,7 +197,7 @@ func TestIntegrationSingleNode(t *testing.T) {
 		t.Fatal(err)
 	}
 	restarted := time.Now()
-	st, err = store.Open(ctx, path)
+	st, err = store.Open(ctx, path, store.WithMinReady(0))
 	if err != nil {
 		t.Fatal(err)
 	}

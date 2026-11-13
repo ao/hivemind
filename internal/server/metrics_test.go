@@ -35,7 +35,10 @@ func newMetricsEnv(t *testing.T) *metricsEnv {
 	t.Helper()
 	ctx := context.Background()
 	t0 := time.Date(2026, 11, 13, 12, 0, 0, 0, time.UTC)
-	st, err := store.Open(ctx, filepath.Join(t.TempDir(), "hivemind.db"), store.WithClock(func() time.Time { return t0 }))
+	// The checks expect every replica on testNode, so placement is pinned to
+	// the first node rather than spread by the scheduler.
+	st, err := store.Open(ctx, filepath.Join(t.TempDir(), "hivemind.db"), store.WithClock(func() time.Time { return t0 }),
+		store.WithMinReady(0), store.WithPlacement(store.FirstNode))
 	if err != nil {
 		t.Fatal(err)
 	}

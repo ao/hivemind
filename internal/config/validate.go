@@ -71,6 +71,9 @@ func (c *Config) Validate() error {
 	if c.ReconcileInterval <= 0 {
 		fail("--reconcile-interval must be positive, got %s", c.ReconcileInterval)
 	}
+	if c.MinReady < 0 {
+		fail("--min-ready must not be negative, got %s", c.MinReady)
+	}
 
 	if c.Server != "" {
 		u, err := url.Parse(c.Server)

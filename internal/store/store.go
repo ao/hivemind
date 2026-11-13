@@ -19,6 +19,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/ao/hivemind/internal/scheduler"
 	"github.com/ao/hivemind/internal/spec"
 
 	_ "modernc.org/sqlite" // registers the "sqlite" driver
@@ -81,6 +82,11 @@ type Node struct {
 	CPU       int
 	Memory    int64 // bytes
 	LastLease time.Time
+	// ReadySince is when the node last became ready: when it first
+	// registered, or when its lease renewed after lapsing. Placement waits
+	// MinReady after it. The cluster's own node is always ready since the
+	// start of time.
+	ReadySince time.Time
 }
 
 // Status is one container as a node last reported it. A replica that has no
@@ -113,16 +119,17 @@ type Status struct {
 }
 
 // PlaceFunc picks the node for one replica. nodes is every registered node,
-// sorted by ID. placed is every running replica that already has a node,
-// the app's other replicas included. An error leaves the replica pending,
-// with the error text as its reason.
-//
-// The multi-node scheduler replaces this function; the store only calls it.
-type PlaceFunc func(nodes []Node, placed []Assignment, app spec.App, replica int) (string, error)
+// sorted by ID, with LastLease and ReadySince set. placed is every
+// assignment that holds a node or a surge, the app's other replicas
+// included, since their host ports and capacity are in use. now is the
+// store's clock. An error leaves the replica pending, with the error text
+// as its reason.
+type PlaceFunc func(nodes []Node, placed []Assignment, app spec.App, replica int, now time.Time) (string, error)
 
-// FirstNode places every replica on the first node by ID. On a single node
-// that is the local node.
-func FirstNode(nodes []Node, _ []Assignment, _ spec.App, _ int) (string, error) {
+// FirstNode places every replica on the first node by ID. It ignores
+// capacity, ports and readiness. Tests use it to choose a node; the server
+// uses the scheduler.
+func FirstNode(nodes []Node, _ []Assignment, _ spec.App, _ int, _ time.Time) (string, error) {
 	if len(nodes) == 0 {
 		return "", errors.New("no nodes are registered")
 	}
@@ -132,17 +139,29 @@ func FirstNode(nodes []Node, _ []Assignment, _ spec.App, _ int) (string, error) 
 // Option configures Open.
 type Option func(*Store)
 
-// WithPlacement sets the placement function. The default is FirstNode.
+// WithPlacement sets the placement function. The default is the scheduler.
 func WithPlacement(p PlaceFunc) Option { return func(s *Store) { s.place = p } }
 
 // WithClock sets the time source, for tests.
 func WithClock(now func() time.Time) Option { return func(s *Store) { s.now = now } }
 
+// WithMinReady sets how long a node must have been ready before it gets new
+// replicas. The default is scheduler.DefaultMinReady (30 s). Zero means no
+// wait; tests that place replicas straight after registering a node use it.
+func WithMinReady(d time.Duration) Option {
+	return func(s *Store) {
+		s.minReady = d
+		s.minReadySet = true
+	}
+}
+
 // Store is the desired-state database. It is safe for concurrent use.
 type Store struct {
-	db    *sql.DB
-	place PlaceFunc
-	now   func() time.Time
+	db          *sql.DB
+	place       PlaceFunc
+	now         func() time.Time
+	minReady    time.Duration
+	minReadySet bool
 }
 
 // Open opens or creates the store at path and applies any pending migrations.
@@ -166,9 +185,15 @@ func Open(ctx context.Context, path string, opts ...Option) (*Store, error) {
 	// sees a half-applied change from this process. Other processes are kept
 	// out by SQLite's locks and wait up to busy_timeout.
 	db.SetMaxOpenConns(1)
-	s := &Store{db: db, place: FirstNode, now: time.Now}
+	s := &Store{db: db, now: time.Now}
 	for _, o := range opts {
 		o(s)
+	}
+	if !s.minReadySet {
+		s.minReady = scheduler.DefaultMinReady
+	}
+	if s.place == nil {
+		s.place = s.schedulerPlace
 	}
 	if err := s.init(ctx); err != nil {
 		db.Close()
@@ -375,13 +400,15 @@ func (s *Store) placePending(ctx context.Context, tx *sql.Tx) error {
 	if err != nil {
 		return err
 	}
-	placed, err := queryAssignments(ctx, tx, `r.desired = 'running' AND r.node_id IS NOT NULL`)
+	// Every replica that still has a container on a node holds its host
+	// ports and capacity, marked for removal or not, and so does every surge.
+	placed, err := placedOn(ctx, tx)
 	if err != nil {
 		return err
 	}
 	now := s.now().UnixNano()
 	for _, p := range pending {
-		id, perr := s.place(slices.Clone(nodes), slices.Clone(placed), p.Spec, p.Index)
+		id, perr := s.place(slices.Clone(nodes), slices.Clone(placed), p.Spec, p.Index, s.now())
 		if perr == nil && !slices.ContainsFunc(nodes, func(n Node) bool { return n.ID == id }) {
 			perr = fmt.Errorf("placement chose unknown node %q", id)
 		}
@@ -585,9 +612,12 @@ func (s *Store) UpsertNode(ctx context.Context, n Node) error {
 		return fmt.Errorf("%w: node needs an ID and non-negative capacity", ErrInvalid)
 	}
 	return s.tx(ctx, func(tx *sql.Tx) error {
-		if _, err := tx.ExecContext(ctx, `INSERT INTO nodes (id, name, cpu, memory, last_lease) VALUES (?, ?, ?, ?, ?)
-			ON CONFLICT (id) DO UPDATE SET name = excluded.name, cpu = excluded.cpu, memory = excluded.memory, last_lease = excluded.last_lease`,
-			n.ID, n.Name, n.CPU, n.Memory, s.now().UnixNano()); err != nil {
+		now := s.now().UnixNano()
+		if _, err := tx.ExecContext(ctx, `INSERT INTO nodes (id, name, cpu, memory, last_lease, ready_since)
+			VALUES (?, ?, ?, ?, ?, CASE WHEN ? = (SELECT node_id FROM cluster WHERE id = 1) THEN 0 ELSE ? END)
+			ON CONFLICT (id) DO UPDATE SET name = excluded.name, cpu = excluded.cpu, memory = excluded.memory,
+				ready_since = `+readySinceExpr+`, last_lease = excluded.last_lease`,
+			n.ID, n.Name, n.CPU, n.Memory, now, n.ID, now, now-int64(scheduler.DefaultLeaseTimeout), now); err != nil {
 			return err
 		}
 		return s.placePending(ctx, tx)
@@ -612,7 +642,7 @@ func (s *Store) GetNode(ctx context.Context, id string) (Node, error) {
 func (s *Store) ListNodes(ctx context.Context) ([]Node, error) { return listNodes(ctx, s.db) }
 
 func listNodes(ctx context.Context, q querier) ([]Node, error) {
-	rows, err := q.QueryContext(ctx, `SELECT id, name, cpu, memory, last_lease FROM nodes ORDER BY id`)
+	rows, err := q.QueryContext(ctx, `SELECT id, name, cpu, memory, last_lease, ready_since FROM nodes ORDER BY id`)
 	if err != nil {
 		return nil, err
 	}
@@ -620,11 +650,11 @@ func listNodes(ctx context.Context, q querier) ([]Node, error) {
 	var out []Node
 	for rows.Next() {
 		var n Node
-		var lease int64
-		if err := rows.Scan(&n.ID, &n.Name, &n.CPU, &n.Memory, &lease); err != nil {
+		var lease, ready int64
+		if err := rows.Scan(&n.ID, &n.Name, &n.CPU, &n.Memory, &lease, &ready); err != nil {
 			return nil, err
 		}
-		n.LastLease = time.Unix(0, lease)
+		n.LastLease, n.ReadySince = time.Unix(0, lease), time.Unix(0, ready)
 		out = append(out, n)
 	}
 	return out, rows.Err()
@@ -644,7 +674,9 @@ func (s *Store) ReportStatus(ctx context.Context, nodeID string, st []Status) er
 	}
 	return s.tx(ctx, func(tx *sql.Tx) error {
 		now := s.now().UnixNano()
-		res, err := tx.ExecContext(ctx, `UPDATE nodes SET last_lease = ? WHERE id = ?`, now, nodeID)
+		res, err := tx.ExecContext(ctx, `UPDATE nodes SET last_lease = ?,
+			ready_since = `+readySinceExpr+` WHERE id = ?`,
+			now, now-int64(scheduler.DefaultLeaseTimeout), now, nodeID)
 		if err != nil {
 			return err
 		}

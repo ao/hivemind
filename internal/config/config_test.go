@@ -51,6 +51,7 @@ func fieldValues(c *Config) map[string]string {
 		"log-format":         c.LogFormat,
 		"metrics-addr":       c.MetricsAddr,
 		"reconcile-interval": c.ReconcileInterval.String(),
+		"min-ready":          c.MinReady.String(),
 		"server":             c.Server,
 		"token":              c.Token.Value(),
 	}
@@ -76,6 +77,7 @@ var precedenceCases = []precedenceCase{
 	{"log-format", "json", "text", "json", "text"},
 	{"metrics-addr", "127.0.0.1:9101", "127.0.0.1:9102", "127.0.0.1:9103", ""},
 	{"reconcile-interval", "3s", "4s", "5s", "2s"},
+	{"min-ready", "5s", "6s", "7s", "30s"},
 	{"server", "http://127.0.0.1:1", "http://127.0.0.1:2", "http://127.0.0.1:3", "http://127.0.0.1:4483"},
 	{"token", "tok-a", "tok-b", "tok-c", ""},
 }

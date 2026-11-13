@@ -37,6 +37,50 @@ const storeFileName = "hivemind.db"
 // shutdownTimeout bounds how long serve waits for requests in flight.
 const shutdownTimeout = 10 * time.Second
 
+// sweepInterval is how often the server checks leases, places pending
+// replicas, advances rollouts and prunes expired join tokens.
+const sweepInterval = 5 * time.Second
+
+// sweep runs the server's periodic work until ctx ends. A node whose lease
+// has lapsed is released: its replicas are placed on other nodes, and volume
+// replicas wait for it. Each node is logged once when it is lost.
+func sweep(ctx context.Context, st *store.Store, log *slog.Logger, every time.Duration) {
+	t := time.NewTicker(every)
+	defer t.Stop()
+	lost := map[string]bool{}
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-t.C:
+		}
+		nodes, err := st.ReconcileNodes(ctx)
+		if err != nil {
+			if ctx.Err() == nil {
+				log.Warn("node sweep", "err", err)
+			}
+		}
+		now := make(map[string]bool, len(nodes))
+		for _, id := range nodes {
+			now[id] = true
+			if !lost[id] {
+				log.Warn("node lost: its replicas are placed again, and volume replicas wait for it", "node", id)
+			}
+		}
+		lost = now
+		if n, err := st.PruneJoinTokens(ctx, time.Now()); err != nil {
+			if ctx.Err() == nil {
+				log.Warn("pruning join tokens", "err", err)
+			}
+		} else if n > 0 {
+			log.Info("pruned expired join tokens", "count", n)
+		}
+		if err := st.AdvanceRollouts(ctx); err != nil && ctx.Err() == nil {
+			log.Warn("advance rollouts", "err", err)
+		}
+	}
+}
+
 func initCmd() *cobra.Command {
 	var clientConfig string
 	cmd := &cobra.Command{
@@ -274,7 +318,7 @@ func runServe(ctx context.Context, cfg *config.Config, log *slog.Logger, rt runt
 	if err := upgrade.CheckDataDir(cfg.DataDir); err != nil {
 		return err
 	}
-	st, err := store.Open(ctx, filepath.Join(cfg.DataDir, storeFileName))
+	st, err := store.Open(ctx, filepath.Join(cfg.DataDir, storeFileName), store.WithMinReady(cfg.MinReady))
 	if err != nil {
 		return err
 	}
@@ -383,10 +427,14 @@ func runServe(ctx context.Context, cfg *config.Config, log *slog.Logger, rt runt
 
 	agentCtx, stopAgent := context.WithCancel(context.Background())
 	var wg sync.WaitGroup
-	wg.Add(1)
+	wg.Add(2)
 	go func() {
 		defer wg.Done()
 		_ = ag.Run(agentCtx)
+	}()
+	go func() {
+		defer wg.Done()
+		sweep(agentCtx, st, log.With("component", "sweep"), sweepInterval)
 	}()
 
 	serveErr := make(chan error, 3)

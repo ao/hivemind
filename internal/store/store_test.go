@@ -34,10 +34,12 @@ func openT(t *testing.T, path string, opts ...Option) *Store {
 	return s
 }
 
-// newT opens a store in a fresh directory with one node registered.
+// newT opens a store in a fresh directory with one node registered. Its
+// nodes take replicas at once: the MinReady wait is tested on its own, with
+// the scheduler, in placement_test.go.
 func newT(t *testing.T, opts ...Option) *Store {
 	t.Helper()
-	s := openT(t, filepath.Join(t.TempDir(), "data", "hivemind.db"), opts...)
+	s := openT(t, filepath.Join(t.TempDir(), "data", "hivemind.db"), append([]Option{WithMinReady(0)}, opts...)...)
 	if err := s.UpsertNode(ctxT(t), Node{ID: node1, Name: "one", CPU: 4, Memory: 8 << 30}); err != nil {
 		t.Fatal(err)
 	}
@@ -551,7 +553,7 @@ func TestScale(t *testing.T) {
 }
 
 func TestPendingUntilANodeRegisters(t *testing.T) {
-	s := openT(t, filepath.Join(t.TempDir(), "hivemind.db"))
+	s := openT(t, filepath.Join(t.TempDir(), "hivemind.db"), WithMinReady(0))
 	ctx := ctxT(t)
 	mustPut(t, s, web(2))
 	for _, r := range replicasOf(t, s, "web") {
@@ -582,7 +584,7 @@ func TestPendingUntilANodeRegisters(t *testing.T) {
 
 func TestPlacementFunction(t *testing.T) {
 	var calls int
-	place := func(nodes []Node, placed []Assignment, app spec.App, replica int) (string, error) {
+	place := func(nodes []Node, placed []Assignment, app spec.App, replica int, _ time.Time) (string, error) {
 		calls++
 		if replica == 1 {
 			return "", errors.New("no node has port 8080 free")
@@ -617,7 +619,7 @@ func TestPlacementFunction(t *testing.T) {
 func TestFailedChangeRollsBack(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	place := func(nodes []Node, _ []Assignment, _ spec.App, _ int) (string, error) {
+	place := func(nodes []Node, _ []Assignment, _ spec.App, _ int, _ time.Time) (string, error) {
 		cancel()
 		return nodes[0].ID, nil
 	}
@@ -681,7 +683,7 @@ func TestReportStatus(t *testing.T) {
 func TestReopenKeepsData(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "hivemind.db")
 	ctx := ctxT(t)
-	s, err := Open(ctx, path)
+	s, err := Open(ctx, path, WithMinReady(0))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -699,7 +701,7 @@ func TestReopenKeepsData(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	s2 := openT(t, path)
+	s2 := openT(t, path, WithMinReady(0))
 	checkInvariants(t, s2)
 	a, err := s2.GetApp(ctx, "web")
 	if err != nil || a.Generation != 2 || a.Spec.Replicas != 2 || a.Spec.Env["A"] != "2" {

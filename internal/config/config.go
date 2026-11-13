@@ -64,6 +64,7 @@ type Config struct {
 	LogFormat         string        `json:"log_format"`
 	MetricsAddr       string        `json:"metrics_addr"`
 	ReconcileInterval time.Duration `json:"reconcile_interval"`
+	MinReady          time.Duration `json:"min_ready"`
 	Server            string        `json:"server"`
 	Token             Secret        `json:"token"`
 }
@@ -265,6 +266,9 @@ func settings(opts Options) []setting {
 		dur("reconcile-interval", "how often the agent reconciles containers", "2s",
 			func(c *Config) *time.Duration { return &c.ReconcileInterval },
 			func(f *fileConfig) *string { return f.ReconcileInterval }),
+		dur("min-ready", "how long a node must be ready before it gets new replicas; 0s means no wait", "30s",
+			func(c *Config) *time.Duration { return &c.MinReady },
+			func(f *fileConfig) *string { return f.MinReady }),
 		str("server", "server URL for the client commands", "http://127.0.0.1:4483",
 			func(c *Config) *string { return &c.Server },
 			func(f *fileConfig) *string { return f.Server }),

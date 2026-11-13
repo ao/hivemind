@@ -81,7 +81,7 @@ func newEnv(t *testing.T) *env {
 }
 
 func (e *env) openStore() {
-	st, err := store.Open(ctxT(e.t), e.path)
+	st, err := store.Open(ctxT(e.t), e.path, store.WithMinReady(0))
 	if err != nil {
 		e.t.Fatal(err)
 	}

@@ -299,8 +299,13 @@ func (s *Store) startMove(ctx context.Context, tx *sql.Tx, r rolloutRow, a spec.
 	}
 	all = append(all, surges...)
 
+	// A replica with a volume is pinned to the node its volume is on, so it is
+	// never surged: a copy elsewhere would start with an empty volume.
 	var candidates []Node
 	for _, n := range nodes {
+		if len(a.Volumes) > 0 {
+			break
+		}
 		if n.ID == rep.NodeID || now-n.LastLease.UnixNano() > int64(scheduler.DefaultLeaseTimeout) {
 			continue
 		}
@@ -311,7 +316,7 @@ func (s *Store) startMove(ctx context.Context, tx *sql.Tx, r rolloutRow, a spec.
 	}
 	surgeNode := ""
 	if len(candidates) > 0 {
-		id, err := s.place(slices.Clone(candidates), slices.Clone(placed), a, rep.Index)
+		id, err := s.place(slices.Clone(candidates), slices.Clone(placed), a, rep.Index, s.now())
 		if err == nil && slices.ContainsFunc(candidates, func(n Node) bool { return n.ID == id }) {
 			surgeNode = id
 		}

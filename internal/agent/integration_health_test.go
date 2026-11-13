@@ -33,7 +33,7 @@ func itHealthSetup(t *testing.T, rt *docker.Client) (*store.Store, string) {
 		}
 	})
 	ctx := context.Background()
-	st, err := store.Open(ctx, filepath.Join(t.TempDir(), "data", "hivemind.db"))
+	st, err := store.Open(ctx, filepath.Join(t.TempDir(), "data", "hivemind.db"), store.WithMinReady(0))
 	if err != nil {
 		t.Fatal(err)
 	}

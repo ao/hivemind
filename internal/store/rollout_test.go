@@ -29,11 +29,11 @@ type rolloutEnv struct {
 
 // placeBlockerOnB puts the app "blocker" on nodeB and every other app on the
 // first node, so a test can choose where a conflicting app runs.
-func placeBlockerOnB(nodes []Node, placed []Assignment, app spec.App, idx int) (string, error) {
+func placeBlockerOnB(nodes []Node, placed []Assignment, app spec.App, idx int, now time.Time) (string, error) {
 	if app.Name == "blocker" {
 		return nodeB, nil
 	}
-	return FirstNode(nodes, placed, app, idx)
+	return FirstNode(nodes, placed, app, idx, now)
 }
 
 func newRolloutEnv(t *testing.T, nodes ...string) *rolloutEnv {

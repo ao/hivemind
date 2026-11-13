@@ -131,7 +131,9 @@ const testNode = "node-1"
 func newHarness(t *testing.T) *harness {
 	t.Helper()
 	ctx := context.Background()
-	st, err := store.Open(ctx, filepath.Join(t.TempDir(), "data", "hivemind.db"))
+	// The test node is not the cluster's own node, so it would wait MinReady
+	// before taking replicas. The harness wants them placed at once.
+	st, err := store.Open(ctx, filepath.Join(t.TempDir(), "data", "hivemind.db"), store.WithMinReady(0))
 	if err != nil {
 		t.Fatal(err)
 	}
