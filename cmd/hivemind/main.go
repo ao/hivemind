@@ -50,6 +50,7 @@ func newRoot(stdin io.Reader, stdout, stderr io.Writer) *cobra.Command {
 		logsCmd(),
 		scaleCmd(),
 		deleteCmd(),
+		genDocsCmd(),
 	)
 	return root
 }
