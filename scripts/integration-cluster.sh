@@ -22,6 +22,11 @@
 #     pending with the host-port reason
 #   - Task 10: the worker starts again with its data directory. No replica of
 #     any app is duplicated, and each app is back at its replica count
+#   - node removal: removing w1 while it runs is refused without --force.
+#     With --force, its spread replica moves to another node, its web replica
+#     waits on the host port, hivemind nodes no longer lists it, its worker
+#     exits with the removal message, the server logs the refused request,
+#     and starting the worker again fails at once
 #
 # It publishes no ports. On exit it removes the containers, the network and the
 # volumes it created, also after a failure or Ctrl-C. The Go build cache volume
@@ -174,5 +179,48 @@ cl_note "after the return: web and spread at their replica counts, no duplicate 
 cl_check_server_listeners
 cl_check_worker_listeners
 cl_note "listeners unchanged after the restart"
+
+# worker_stopped NODE: no hivemind process runs in NODE.
+worker_stopped() { ! docker exec "$1" pgrep -x hivemind >/dev/null 2>&1; }
+
+# Node removal. w1 still renews its lease, so a plain remove is refused.
+if out=$(docker exec "$S" hivemind node remove "$W1_ID" 2>&1); then
+	cl_fail "removing a running worker without --force succeeded: $out"
+fi
+grep -q -- "--force" <<<"$out" || cl_fail "the refusal does not mention --force: $out"
+cl_note "node remove without --force refused: $out"
+out=$(docker exec "$S" hivemind node remove "$W1_ID" --force 2>&1) || cl_fail "node remove --force $W1_ID: $out"
+removed_at=$(date +%s)
+cl_note "removed $W1 ($W1_ID) at $(date -u +%T): $out"
+
+wait_for 30 spread_off "$W1_ID" ||
+	cl_fail "spread replicas did not move off the removed $W1_ID within 30 s: $(app_rows spread | tr '\n' ';')"
+cl_note "spread moved off $W1_ID within $(($(date +%s) - removed_at)) s"
+rows=$(app_rows web)
+[ "$(awk '$3 == "running"' <<<"$rows" | wc -l)" -eq 2 ] && [ "$(awk '$3 == "pending" && /in use/' <<<"$rows" | wc -l)" -eq 2 ] ||
+	cl_fail "web is not at two running and two pending on the host port after the removal: $(tr '\n' ';' <<<"$rows")"
+if docker exec "$S" hivemind nodes | grep -q "$W1_ID"; then
+	cl_fail "hivemind nodes still lists $W1_ID: $(docker exec "$S" hivemind nodes | tr '\n' ';')"
+fi
+
+# The removed worker gets 403 on its next call, and exits.
+wait_for 30 worker_stopped "$W1" || cl_fail "the worker on $W1 still runs 30 s after its removal"
+docker exec "$W1" grep -q "was removed from the cluster" /var/log/hivemind.log ||
+	cl_fail "the worker on $W1 did not log its removal"
+docker exec "$S" grep -q "request from a removed node refused" /var/log/hivemind.log ||
+	cl_fail "the server did not log a refused request from $W1_ID"
+if out=$(docker exec "$W1" hivemind serve --role worker 2>&1); then
+	cl_fail "the removed worker started again: $out"
+fi
+grep -q "was removed from the cluster" <<<"$out" || cl_fail "a restart of the removed worker failed for another reason: $out"
+cl_note "the removed worker exited, and a restart is refused: $(tail -n 1 <<<"$out")"
+
+# Its containers are left running, as documented; remove them by hand, then
+# no replica is duplicated and spread is at its replica count.
+[ -n "$(docker exec "$W1" docker ps -q --filter label=hivemind.app)" ] || cl_fail "the removed worker stopped its containers"
+docker exec "$W1" sh -c 'docker rm -f $(docker ps -aq --filter label=hivemind.app)' >/dev/null
+wait_for 60 no_duplicates || cl_fail "a replica is duplicated after the removal: $( (containers_of web; containers_of spread) | sort | tr '\n' ';')"
+[ "$(count_running spread)" -eq 3 ] || cl_fail "spread is not at three running replicas after the removal"
+cl_note "after the removal: spread at three running replicas, no duplicates"
 
 cl_note "all cluster checks passed"

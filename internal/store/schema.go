@@ -131,6 +131,21 @@ CREATE INDEX join_tokens_expires ON join_tokens(expires);
 
 ALTER TABLE nodes ADD COLUMN ready_since INTEGER NOT NULL DEFAULT 0;
 `,
+	// 6: node removal. removed_nodes is the denylist of node IDs that were
+	// removed: the node API refuses their certificates, and no node is
+	// registered or joined under one again. replicas.held marks a volume
+	// replica whose node was removed: it has no node, and placement leaves it
+	// alone, because its data was on that node. A deploy that changes its
+	// generation clears the mark.
+	`
+CREATE TABLE removed_nodes (
+	id         TEXT PRIMARY KEY CHECK (id != ''),
+	name       TEXT NOT NULL,
+	removed_at INTEGER NOT NULL
+) STRICT;
+
+ALTER TABLE replicas ADD COLUMN held INTEGER NOT NULL DEFAULT 0 CHECK (held IN (0, 1));
+`,
 }
 
 // SchemaVersion is the schema version this build writes.

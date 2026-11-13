@@ -338,6 +338,10 @@ func runWorker(ctx context.Context, cfg *config.Config, log *slog.Logger, rt run
 		if err == nil {
 			break
 		}
+		if errors.Is(err, nodeapi.ErrNodeRemoved) {
+			log.Error("the server says this node was removed from the cluster; stopping", "node", w.state.NodeID)
+			return removedError(w.state.NodeID)
+		}
 		if ctx.Err() != nil {
 			return nil
 		}
@@ -349,13 +353,32 @@ func runWorker(ctx context.Context, cfg *config.Config, log *slog.Logger, rt run
 		}
 	}
 	log.Info("worker running", "node", w.state.NodeID, "server", w.state.Server)
+	// A removal is final, so the worker stops at the first refusal that says
+	// so, rather than retrying for ever. Its containers are left running.
+	runCtx, stop := context.WithCancelCause(ctx)
+	defer stop(nil)
 	ag, err := agent.New(agent.Config{NodeID: w.state.NodeID, Runtime: rt,
-		Source: workerSource{client: client, register: register}, Interval: cfg.ReconcileInterval,
+		Source: workerSource{client: client, register: register, onRemoved: stop}, Interval: cfg.ReconcileInterval,
 		Logger: log.With("component", "agent")})
 	if err != nil {
 		return err
 	}
-	return ag.Run(ctx)
+	err = ag.Run(runCtx)
+	if errors.Is(context.Cause(runCtx), nodeapi.ErrNodeRemoved) {
+		log.Error("the server says this node was removed from the cluster; stopping", "node", w.state.NodeID)
+		return removedError(w.state.NodeID)
+	}
+	return err
+}
+
+// removedError is what a worker exits with once the server says it was
+// removed. The server refuses the node's certificate for good, so retrying
+// cannot help. The containers are not touched: the server has already placed
+// their replicas elsewhere, and the operator decides when they stop.
+func removedError(id string) error {
+	return fmt.Errorf("node %s was removed from the cluster, and the server refuses its certificate; "+
+		"its containers are still running on this machine (remove them with: docker rm -f $(docker ps -aq --filter label=hivemind.app)); "+
+		"to join again, use an empty --data-dir and a new join token", id)
 }
 
 // workerClient is what the worker's agent reads and reports through.
@@ -366,27 +389,40 @@ type workerClient interface {
 
 // workerSource is the agent's Source for a worker. A server that has lost
 // the node's row answers reports with ErrNotRegistered; the worker registers
-// again and reports once more.
+// again and reports once more. A server that says the node was removed makes
+// the source call onRemoved, which stops the worker.
 type workerSource struct {
-	client   workerClient
-	register func(context.Context) error
+	client    workerClient
+	register  func(context.Context) error
+	onRemoved func(error)
+}
+
+// check passes err through, and calls onRemoved when it says the node was
+// removed.
+func (w workerSource) check(err error) error {
+	if errors.Is(err, nodeapi.ErrNodeRemoved) && w.onRemoved != nil {
+		w.onRemoved(err)
+	}
+	return err
 }
 
 func (w workerSource) AssignmentsForNode(ctx context.Context, id string) ([]store.Assignment, error) {
-	return w.client.AssignmentsForNode(ctx, id)
+	as, err := w.client.AssignmentsForNode(ctx, id)
+	return as, w.check(err)
 }
 
 func (w workerSource) ReportStatus(ctx context.Context, id string, st []store.Status) error {
 	err := w.client.ReportStatus(ctx, id, st)
 	if !errors.Is(err, nodeapi.ErrNotRegistered) {
-		return err
+		return w.check(err)
 	}
 	if rerr := w.register(ctx); rerr != nil {
-		return errors.Join(err, rerr)
+		return w.check(errors.Join(err, rerr))
 	}
-	return w.client.ReportStatus(ctx, id, st)
+	return w.check(w.client.ReportStatus(ctx, id, st))
 }
 
 func (w workerSource) StatusForNode(ctx context.Context, id string) ([]store.Status, error) {
-	return w.client.StatusForNode(ctx, id)
+	sts, err := w.client.StatusForNode(ctx, id)
+	return sts, w.check(err)
 }

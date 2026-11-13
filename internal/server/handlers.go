@@ -448,6 +448,8 @@ func (s *Server) fail(w http.ResponseWriter, r *http.Request, err error) {
 		writeError(w, http.StatusNotFound, err.Error())
 	case errors.Is(err, store.ErrInvalid):
 		writeError(w, http.StatusBadRequest, err.Error())
+	case errors.Is(err, store.ErrConflict):
+		writeError(w, http.StatusConflict, err.Error())
 	case errors.Is(err, runtime.ErrUnavailable):
 		s.log.Error("container engine unavailable", "method", r.Method, "path", r.URL.Path, "err", err)
 		writeError(w, http.StatusServiceUnavailable, "the container engine is unavailable")

@@ -162,6 +162,8 @@ func (s *Server) routes() {
 	r.HandleFunc("GET /v1/apps/{name}/logs", s.appLogs)
 	r.HandleFunc("GET /v1/status", s.status)
 	r.HandleFunc("POST /v1/join-tokens", s.postJoinToken)
+	r.HandleFunc("GET /v1/nodes", s.listNodes)
+	r.HandleFunc("DELETE /v1/nodes/{id}", s.removeNode)
 	r.HandleFunc("GET /metrics", s.metricsHandler)
 }
 

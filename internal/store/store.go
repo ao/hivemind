@@ -33,6 +33,11 @@ var (
 	ErrInvalid = errors.New("invalid")
 	// ErrNewerSchema means the file was written by a newer hivemind.
 	ErrNewerSchema = errors.New("store schema is newer than this build")
+	// ErrConflict means the request is refused in the current state, such
+	// as removing a node that still renews its lease.
+	ErrConflict = errors.New("conflict")
+	// ErrNodeRemoved means the node ID is on the denylist of removed nodes.
+	ErrNodeRemoved = errors.New("node was removed from the cluster")
 )
 
 // Desired is what the server wants for one replica.
@@ -363,13 +368,14 @@ func (s *Store) syncReplicas(ctx context.Context, tx *sql.Tx, app string, n, gen
 				VALUES (?, ?, NULL, ?, 'running', '', ?)
 				ON CONFLICT (app, idx) DO UPDATE SET
 					generation = CASE WHEN replicas.node_id IS NULL THEN excluded.generation ELSE replicas.generation END,
+					held = CASE WHEN replicas.node_id IS NULL AND replicas.generation != excluded.generation THEN 0 ELSE replicas.held END,
 					desired = 'running', updated_at = excluded.updated_at
 				WHERE replicas.desired != 'running' OR (replicas.node_id IS NULL AND replicas.generation != excluded.generation)`,
 				app, i, gen, now)
 		} else {
 			_, err = tx.ExecContext(ctx, `INSERT INTO replicas (app, idx, node_id, generation, desired, pending_reason, updated_at)
 				VALUES (?, ?, NULL, ?, 'running', '', ?)
-				ON CONFLICT (app, idx) DO UPDATE SET generation = excluded.generation, desired = 'running', updated_at = excluded.updated_at
+				ON CONFLICT (app, idx) DO UPDATE SET generation = excluded.generation, desired = 'running', held = 0, updated_at = excluded.updated_at
 				WHERE replicas.generation != excluded.generation OR replicas.desired != 'running'`,
 				app, i, gen, now)
 		}
@@ -390,9 +396,10 @@ func (s *Store) syncReplicas(ctx context.Context, tx *sql.Tx, app string, n, gen
 	return err
 }
 
-// placePending gives a node to every running replica that has none.
+// placePending gives a node to every running replica that has none, except
+// held replicas: their volume was on a removed node.
 func (s *Store) placePending(ctx context.Context, tx *sql.Tx) error {
-	pending, err := queryAssignments(ctx, tx, `r.desired = 'running' AND r.node_id IS NULL`)
+	pending, err := queryAssignments(ctx, tx, `r.desired = 'running' AND r.node_id IS NULL AND r.held = 0`)
 	if err != nil || len(pending) == 0 {
 		return err
 	}
@@ -606,12 +613,19 @@ func (s *Store) AssignmentsForNode(ctx context.Context, nodeID string) ([]Assign
 }
 
 // UpsertNode registers a node or updates its name and capacity, renews its
-// lease, and places pending replicas.
+// lease, and places pending replicas. A node that was removed is refused with
+// ErrNodeRemoved, in the same transaction, so a request that raced the
+// removal cannot bring the node back.
 func (s *Store) UpsertNode(ctx context.Context, n Node) error {
 	if n.ID == "" || n.CPU < 0 || n.Memory < 0 {
 		return fmt.Errorf("%w: node needs an ID and non-negative capacity", ErrInvalid)
 	}
 	return s.tx(ctx, func(tx *sql.Tx) error {
+		if removed, err := isRemoved(ctx, tx, n.ID); err != nil {
+			return err
+		} else if removed {
+			return fmt.Errorf("node %q: %w", n.ID, ErrNodeRemoved)
+		}
 		now := s.now().UnixNano()
 		if _, err := tx.ExecContext(ctx, `INSERT INTO nodes (id, name, cpu, memory, last_lease, ready_since)
 			VALUES (?, ?, ?, ?, ?, CASE WHEN ? = (SELECT node_id FROM cluster WHERE id = 1) THEN 0 ELSE ? END)
@@ -681,6 +695,11 @@ func (s *Store) ReportStatus(ctx context.Context, nodeID string, st []Status) er
 			return err
 		}
 		if n, _ := res.RowsAffected(); n == 0 {
+			if removed, err := isRemoved(ctx, tx, nodeID); err != nil {
+				return err
+			} else if removed {
+				return fmt.Errorf("node %q: %w", nodeID, ErrNodeRemoved)
+			}
 			return fmt.Errorf("node %q: %w", nodeID, ErrNotFound)
 		}
 		if _, err := tx.ExecContext(ctx, `DELETE FROM container_status WHERE node_id = ?`, nodeID); err != nil {

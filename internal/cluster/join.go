@@ -10,6 +10,7 @@ import (
 	"github.com/ao/hivemind/internal/nodeapi"
 	"github.com/ao/hivemind/internal/pki"
 	"github.com/ao/hivemind/internal/ratelimit"
+	"github.com/ao/hivemind/internal/store"
 )
 
 // errJoinRefused is the one message for every token failure. It does not say
@@ -67,7 +68,7 @@ func join(cfg Config, limiter *ratelimit.FailLimiter, log *slog.Logger, w http.R
 		return
 	}
 
-	id, err := NewNodeID()
+	id, err := freshNodeID(r, cfg)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "internal error")
 		log.Error("node ID", "err", err)
@@ -86,4 +87,34 @@ func join(cfg Config, limiter *ratelimit.FailLimiter, log *slog.Logger, w http.R
 	certPEM := pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: der})
 	writeJSON(w, http.StatusOK, nodeapi.JoinReply{NodeID: id, CertPEM: string(certPEM), CAPEM: string(cfg.CA.CertPEM)})
 	log.Info("node joined", "node", id, "remote", src)
+}
+
+// newNodeID is NewNodeID. A test replaces it to force a clash.
+var newNodeID = NewNodeID
+
+// freshNodeID returns a new node ID that no registered node holds and that is
+// not on the denylist of removed nodes. IDs are 48 random bits, so a clash is
+// rare. The check makes sure a removed node's ID is never issued again: the
+// node that got it would be refused, and the removed node's certificate names
+// the same ID.
+func freshNodeID(r *http.Request, cfg Config) (string, error) {
+	for range 8 {
+		id, err := newNodeID()
+		if err != nil {
+			return "", err
+		}
+		removed, err := cfg.Store.IsNodeRemoved(r.Context(), id)
+		if err != nil {
+			return "", err
+		}
+		if removed {
+			continue
+		}
+		if _, err := cfg.Store.GetNode(r.Context(), id); errors.Is(err, store.ErrNotFound) {
+			return id, nil
+		} else if err != nil {
+			return "", err
+		}
+	}
+	return "", errors.New("no unused node ID after 8 tries")
 }

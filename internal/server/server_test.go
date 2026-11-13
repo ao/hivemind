@@ -217,6 +217,7 @@ func TestEveryRouteNeedsToken(t *testing.T) {
 			t.Fatalf("pattern %q has no method", p)
 		}
 		path = strings.ReplaceAll(path, "{name}", "web")
+		path = strings.ReplaceAll(path, "{id}", testNode)
 		for _, hdr := range []string{"", "Bearer nope", "Bearer " + other, "Basic " + h.token} {
 			req := httptest.NewRequest(method, path, strings.NewReader(nginx2))
 			if hdr != "" {
@@ -242,6 +243,10 @@ func TestEveryRouteNeedsToken(t *testing.T) {
 	// Nothing was created by the unauthenticated PUT and POST.
 	if apps, _ := h.store.ListApps(context.Background()); len(apps) != 0 {
 		t.Fatalf("unauthenticated requests created %d apps", len(apps))
+	}
+	// Nor was the node removed by the unauthenticated DELETE.
+	if removed, _ := h.store.IsNodeRemoved(context.Background(), testNode); removed {
+		t.Fatal("an unauthenticated request removed a node")
 	}
 	// Unknown paths and methods also need the token.
 	for _, mp := range [][2]string{{"GET", "/v1/nope"}, {"PATCH", "/v1/apps/web"}, {"HEAD", "/healthz"}, {"POST", "/healthz"}} {

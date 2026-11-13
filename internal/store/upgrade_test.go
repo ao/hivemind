@@ -124,6 +124,15 @@ func TestOpenMigratesStoresFromEarlierSchemas(t *testing.T) {
 				t.Fatalf("GetCluster: %+v, %v", cl, err)
 			}
 
+			// Migration 6 adds an empty denylist, and no replica is held.
+			if removed, err := s.IsNodeRemoved(ctx, "node-1"); err != nil || removed {
+				t.Fatalf("IsNodeRemoved after migration: %v, %v", removed, err)
+			}
+			var held int
+			if err := s.db.QueryRow(`SELECT count(*) FROM replicas WHERE held != 0`).Scan(&held); err != nil || held != 0 {
+				t.Fatalf("held replicas after migration: %d, %v", held, err)
+			}
+
 			// The migrated store takes writes that use the new schema.
 			mustPut(t, s, web(3))
 			if app, _ := s.GetApp(ctx, "web"); app.Spec.Replicas != 3 {

@@ -21,6 +21,7 @@ type nodeAPI struct {
 }
 
 // nodeRoutes returns the handler of the mTLS listener. It has no join route.
+// Every request passes the denylist check first.
 func nodeRoutes(cfg Config, log *slog.Logger) http.Handler {
 	a := &nodeAPI{st: cfg.Store, log: log}
 	mux := http.NewServeMux()
@@ -28,7 +29,37 @@ func nodeRoutes(cfg Config, log *slog.Logger) http.Handler {
 	mux.HandleFunc("GET "+nodeapi.Prefix+"/nodes/{id}/assignments", a.assignments)
 	mux.HandleFunc("POST "+nodeapi.Prefix+"/nodes/{id}/status", a.postStatus)
 	mux.HandleFunc("GET "+nodeapi.Prefix+"/nodes/{id}/status", a.getStatus)
-	return mux
+	return a.denyRemoved(mux)
+}
+
+// denyRemoved refuses, with 403, every request whose client certificate names
+// a node that was removed. There is no certificate revocation list: a removed
+// node's certificate still verifies against the CA, so the TLS handshake
+// succeeds and this check is what makes the certificate useless. It runs on
+// every request, before routing, so no route can forget it. The store refuses
+// the ID as well when a node registers or reports, so a request that races a
+// removal cannot bring the node back.
+func (a *nodeAPI) denyRemoved(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		id, err := pki.RequestNodeID(r)
+		if err != nil {
+			// The listener requires a verified certificate that names a
+			// node, so this does not happen; refuse it all the same.
+			writeError(w, http.StatusForbidden, "the client certificate names no node")
+			return
+		}
+		removed, err := a.st.IsNodeRemoved(r.Context(), id)
+		if err != nil {
+			a.fail(w, r, err)
+			return
+		}
+		if removed {
+			a.log.Warn("request from a removed node refused", "node", id, "remote", r.RemoteAddr, "path", r.URL.Path)
+			writeError(w, http.StatusForbidden, nodeapi.RemovedMessage)
+			return
+		}
+		next.ServeHTTP(w, r)
+	})
 }
 
 // node returns the node ID in the path once the certificate has been checked
@@ -126,6 +157,8 @@ func (a *nodeAPI) getStatus(w http.ResponseWriter, r *http.Request) {
 // to the log only.
 func (a *nodeAPI) fail(w http.ResponseWriter, r *http.Request, err error) {
 	switch {
+	case errors.Is(err, store.ErrNodeRemoved):
+		writeError(w, http.StatusForbidden, nodeapi.RemovedMessage)
 	case errors.Is(err, store.ErrNotFound):
 		writeError(w, http.StatusNotFound, "this node is not registered")
 	case errors.Is(err, store.ErrInvalid):

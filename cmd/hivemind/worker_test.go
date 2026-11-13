@@ -14,8 +14,11 @@ import (
 	"testing"
 	"time"
 
+	"github.com/ao/hivemind/internal/cluster"
+	"github.com/ao/hivemind/internal/config"
 	"github.com/ao/hivemind/internal/nodeapi"
 	"github.com/ao/hivemind/internal/pki"
+	"github.com/ao/hivemind/internal/spec"
 	"github.com/ao/hivemind/internal/store"
 )
 
@@ -251,4 +254,84 @@ func (f *fakeWorkerClient) ReportStatus(context.Context, string, []store.Status)
 
 func (f *fakeWorkerClient) StatusForNode(context.Context, string) ([]store.Status, error) {
 	return nil, nil
+}
+
+// ErrNodeRemoved from any call stops the worker; other errors do not.
+func TestWorkerSourceStopsOnRemoval(t *testing.T) {
+	var got error
+	c := &fakeWorkerClient{reportErrs: []error{errors.New("connection refused"), nodeapi.ErrNodeRemoved}}
+	src := workerSource{client: c, register: func(context.Context) error { return nil }, onRemoved: func(err error) { got = err }}
+	_ = src.ReportStatus(context.Background(), "node-a", nil)
+	if got != nil {
+		t.Fatalf("onRemoved called for an unrelated error: %v", got)
+	}
+	_ = src.ReportStatus(context.Background(), "node-a", nil)
+	if !errors.Is(got, nodeapi.ErrNodeRemoved) {
+		t.Fatalf("onRemoved got %v, want ErrNodeRemoved", got)
+	}
+}
+
+// A running worker whose node is removed stops with an error that says so,
+// within a few passes, and leaves its containers alone. Started again, it
+// stops at once, at registration.
+func TestWorkerExitsWhenRemoved(t *testing.T) {
+	ctx := context.Background()
+	dir := t.TempDir()
+	ca, err := pki.CreateCA(filepath.Join(dir, "ca"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	st, err := store.Open(ctx, filepath.Join(dir, "hivemind.db"), store.WithMinReady(0))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+	quiet := slog.New(slog.NewTextHandler(io.Discard, nil))
+	cl, err := cluster.Listen(cluster.Config{Store: st, CA: ca, Tokens: pki.NewTokens(st.JoinTokens()),
+		Advertise: "127.0.0.1", Port: 0, LocalNodeID: "node-server", Logger: quiet})
+	if err != nil {
+		t.Fatal(err)
+	}
+	go func() { _ = cl.Serve() }()
+	defer cl.Shutdown()
+
+	wdir := filepath.Join(dir, "worker")
+	key, der := issueForNode(t, ca, "node-w1")
+	if err := saveWorkerState(wdir, workerState{NodeID: "node-w1", Server: cl.NodeAddr(), Joined: time.Now()}, key, pemEncodeCert(der), ca.CertPEM); err != nil {
+		t.Fatal(err)
+	}
+	rt := newMemRuntime()
+	if _, err := st.PutApp(ctx, spec.App{Name: "web", Image: "nginx:alpine", Replicas: 1}); err != nil {
+		t.Fatal(err)
+	}
+	cfg := &config.Config{DataDir: wdir, ReconcileInterval: 100 * time.Millisecond}
+	logs := &syncLog{}
+	done := make(chan error, 1)
+	go func() { done <- runWorker(ctx, cfg, slog.New(slog.NewTextHandler(logs, nil)), rt) }()
+
+	// The worker registers, takes the replica and runs it.
+	waitUntil(t, "the worker running the replica", func() bool { return rt.running("web") == 1 })
+	if _, err := st.RemoveNode(ctx, "node-w1", true); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case err := <-done:
+		if err == nil || !strings.Contains(err.Error(), "node node-w1 was removed from the cluster") || !strings.Contains(err.Error(), "still running") {
+			t.Fatalf("worker exit: %v", err)
+		}
+	case <-time.After(15 * time.Second):
+		t.Fatal("the worker did not stop within 15 s of its removal")
+	}
+	if !strings.Contains(logs.String(), "removed from the cluster") {
+		t.Fatalf("the worker log does not say it was removed:\n%s", logs.String())
+	}
+	if rt.running("web") != 1 {
+		t.Fatal("the worker stopped its container on removal")
+	}
+
+	start := time.Now()
+	err = runWorker(ctx, cfg, quiet, rt)
+	if err == nil || !strings.Contains(err.Error(), "was removed from the cluster") || time.Since(start) > 5*time.Second {
+		t.Fatalf("restarted worker: %v after %s", err, time.Since(start))
+	}
 }

@@ -30,6 +30,8 @@ hivemind
 | `join` | Join a cluster as a worker, then run its agent |
 | `join-token` | Print a token that lets another machine join this cluster |
 | `logs` | Print a replica's container log |
+| `node` | Manage one node |
+| `nodes` | List the nodes in the cluster |
 | `scale` | Set an app's replica count |
 | `serve` | Run the server and the agent on this node |
 | `status` | Show apps, their replicas and container state |
@@ -193,6 +195,67 @@ hivemind logs <app> [replica] [flags]
 | `--json` | bool | - | - | print JSON instead of a table |
 | `--server` | string | - | `HIVEMIND_SERVER` | server URL (env HIVEMIND_SERVER; default from the client config, then http://127.0.0.1:4483) |
 | `--tail` | int | - | - | print only the last N lines (0 for all) |
+| `--token` | string | - | `HIVEMIND_TOKEN` | API token (env HIVEMIND_TOKEN; default from the client config's token file) |
+
+### hivemind node
+
+Manage one node
+
+```
+hivemind node
+```
+
+| Command | Description |
+|---|---|
+| `remove` | Remove a node from the cluster for good |
+
+#### hivemind node remove
+
+Remove a node from the cluster for good. Stop hivemind on the node first.
+
+The server's own node cannot be removed. A node that still renews its lease,
+because hivemind runs on it, is refused unless --force is given.
+
+On removal, the node's replicas are placed on other nodes. A replica with a
+volume is not moved: its data was on the removed node. It waits with no node,
+and its reason in status says so, until a deploy changes the app's spec (for
+example, a new volume name) or the app is deleted.
+
+The node's ID goes on the server's list of removed nodes. The server refuses
+its certificate on the node API from then on, and never issues the ID again.
+A removed worker that is still running stops with an error; its containers
+keep running until they are removed by hand. To bring the machine back, join
+it again with an empty data directory and a new join token.
+
+```
+hivemind node remove <id> [flags]
+```
+
+| Flag | Type | Default | Environment | Description |
+|---|---|---|---|---|
+| `--ca-cert` | string | - | - | PEM file of the CA certificates to trust for an https server, instead of the system's (env HIVEMIND_CA_CERT; default from the client config) |
+| `--client-config` | string | - | `HIVEMIND_CLIENT_CONFIG` | client config file (env HIVEMIND_CLIENT_CONFIG; default $XDG_CONFIG_HOME/hivemind/config.yaml or ~/.config/hivemind/config.yaml) |
+| `--force` | bool | - | - | remove the node even though it still renews its lease |
+| `--json` | bool | - | - | print JSON instead of a table |
+| `--server` | string | - | `HIVEMIND_SERVER` | server URL (env HIVEMIND_SERVER; default from the client config, then http://127.0.0.1:4483) |
+| `--token` | string | - | `HIVEMIND_TOKEN` | API token (env HIVEMIND_TOKEN; default from the client config's token file) |
+
+### hivemind nodes
+
+List the nodes: ID, name, CPU and memory as each node's Docker daemon reports
+them, the age of its lease, whether it is ready or lost, and how many replicas
+are placed on it. A node is lost when its lease is more than 15 s old.
+
+```
+hivemind nodes [flags]
+```
+
+| Flag | Type | Default | Environment | Description |
+|---|---|---|---|---|
+| `--ca-cert` | string | - | - | PEM file of the CA certificates to trust for an https server, instead of the system's (env HIVEMIND_CA_CERT; default from the client config) |
+| `--client-config` | string | - | `HIVEMIND_CLIENT_CONFIG` | client config file (env HIVEMIND_CLIENT_CONFIG; default $XDG_CONFIG_HOME/hivemind/config.yaml or ~/.config/hivemind/config.yaml) |
+| `--json` | bool | - | - | print JSON instead of a table |
+| `--server` | string | - | `HIVEMIND_SERVER` | server URL (env HIVEMIND_SERVER; default from the client config, then http://127.0.0.1:4483) |
 | `--token` | string | - | `HIVEMIND_TOKEN` | API token (env HIVEMIND_TOKEN; default from the client config's token file) |
 
 ### hivemind scale

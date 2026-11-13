@@ -26,6 +26,15 @@ const clientTimeout = 30 * time.Second
 // when the server's database was replaced. A worker registers again.
 var ErrNotRegistered = errors.New("this node is not registered with the server")
 
+// RemovedMessage is the error text the node API sends, with 403, to a node
+// that was removed from the cluster. ErrNodeRemoved is what the client returns
+// for it. A removed node can never be accepted again: its ID is on the
+// server's denylist.
+const RemovedMessage = "this node was removed from the cluster"
+
+// ErrNodeRemoved means the server refused the node because it was removed.
+var ErrNodeRemoved = errors.New(RemovedMessage)
+
 // Client calls the node routes of one server with a node certificate. It is
 // safe for concurrent use. It implements the agent's Source: assignments, status
 // reports and the status a node last reported.
@@ -145,6 +154,9 @@ func statusError(resp *http.Response) error {
 	}
 	if resp.StatusCode == http.StatusNotFound {
 		return fmt.Errorf("%w: %s", ErrNotRegistered, msg)
+	}
+	if resp.StatusCode == http.StatusForbidden && e.Error == RemovedMessage {
+		return ErrNodeRemoved
 	}
 	return fmt.Errorf("the server refused the request (%s): %s", resp.Status, msg)
 }
