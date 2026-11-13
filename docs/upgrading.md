@@ -6,9 +6,11 @@ Version 2 is a new implementation, not an update to v1. The command line, the AP
 
 v1 data is not migrated. In v1.0.2, `deploy` wrote a record to the database and never started a container (see [ASSESSMENT.md](ASSESSMENT.md)), so there is no container state to carry over.
 
-Use a new data directory for v2: point `--data-dir` or `HIVEMIND_DATA_DIR` at an empty directory, then run `hivemind init`. v2 does not yet check for a v1 data directory, and it has not been tested against one. Do not point v2 at a v1 directory.
+Use a new data directory for v2: point `--data-dir` or `HIVEMIND_DATA_DIR` at an empty directory, then run `hivemind init`.
 
-The v2 schema has a version number, and a newer schema is refused. Migrations from v2.0.0 on are planned (task 18 in the plan), but none exist yet.
+`hivemind init` and `hivemind serve` refuse a v1 data directory. A directory counts as v1 when it holds `app.db` or `storage.db` with v1 tables in it. The error names the file and points here. The check only reads the directory, so a refused command leaves it unchanged. v2 never creates those two file names; its store is `hivemind.db`.
+
+The v2 store has a schema version. A store written by a newer build is refused with an error that says so. Each release from v2.0.0 on adds its migrations after the existing ones, and a store from an earlier release is migrated forward on `serve` and `init` with its data kept.
 
 ## Command line
 

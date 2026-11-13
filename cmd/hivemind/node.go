@@ -28,6 +28,7 @@ import (
 	"github.com/ao/hivemind/internal/runtime/docker"
 	"github.com/ao/hivemind/internal/server"
 	"github.com/ao/hivemind/internal/store"
+	"github.com/ao/hivemind/internal/upgrade"
 )
 
 // storeFileName is the SQLite file inside the data directory.
@@ -63,6 +64,9 @@ func runInit(cmd *cobra.Command, flags *pflag.FlagSet, clientConfigFlag string) 
 		return err
 	}
 	dir := cfg.DataDir
+	if err := upgrade.CheckDataDir(dir); err != nil {
+		return err
+	}
 	if err := os.MkdirAll(dir, 0o700); err != nil {
 		return fmt.Errorf("create data directory: %w", err)
 	}
@@ -216,6 +220,9 @@ func runServe(ctx context.Context, cfg *config.Config, log *slog.Logger, rt runt
 	// The token prints as [redacted]: config.Secret masks itself, and the
 	// redacting handler masks it again.
 	log.Debug("resolved config", "config", cfg)
+	if err := upgrade.CheckDataDir(cfg.DataDir); err != nil {
+		return err
+	}
 	st, err := store.Open(ctx, filepath.Join(cfg.DataDir, storeFileName))
 	if err != nil {
 		return err

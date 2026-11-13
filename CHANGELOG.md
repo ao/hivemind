@@ -28,6 +28,7 @@ Version 2 is a rewrite. It is not compatible with 1.x: the command line, the API
 - Authentication is mandatory.
 - Go 1.26 is required to build. The module declared 1.22 before.
 - The SQLite store uses WAL mode, and each change is one transaction.
+- `init` and `serve` refuse a v1 data directory and point to docs/upgrading.md.
 
 ### Removed
 
