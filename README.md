@@ -97,8 +97,7 @@ A token works once, and it expires after 24 hours. `hivemind join-token --ttl 1h
 - A replica with a volume stays on its node. If that node is lost, the app is down until the node returns.
 - `deploy` does not reject a host port that another app already publishes. The second app's replicas go where the port is free. Any that cannot go stay `pending`, with the reason. See [concepts](docs/concepts.md#placement).
 - `hivemind logs` cannot read replicas that run on a worker. Use `docker logs` on that machine.
-- `resources` count against a node's capacity during placement, but containers get no CPU or memory limit.
-- Volume names are not scoped to an app. Two apps that use one volume name on a node share its data.
+- hivemind never deletes a volume, including when its app is deleted. Remove unused volumes with `docker volume rm` on the node.
 - In a rolling update on one node, each replica is down while its new container starts. With a second eligible node, the new copy starts there first. See [concepts](docs/concepts.md#rolling-updates).
 - The CLI cannot trust a private CA for an API served with TLS.
 - There is no web UI. The CLI and the HTTP API are the interfaces.

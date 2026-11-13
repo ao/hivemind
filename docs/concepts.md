@@ -163,13 +163,22 @@ A volume is a Docker named volume on the node where the replica runs, mounted at
 
 The replica stays on the node where it was first placed. If that node is lost, the replica is not moved, and the app is down until the node returns (see [Node loss and rescheduling](#node-loss-and-rescheduling)).
 
-Volume names are not scoped to an app. The Docker volume is named by the name in the spec, so two apps that use the same volume name on one node share the data. On different nodes they get different volumes. Choose names that are unique on the node.
+Volume names are scoped to the app. The Docker volume for volume `data` of app `web` is `hivemind-web_data`, so two apps that both use a volume called `data` get separate volumes and never see each other's files. App and volume names can't contain `_`, so no two pairs of names map to the same Docker volume. Docker creates the volume the first time a container mounts it, with the labels `hivemind.app` and `hivemind.volume`, so `docker volume ls --filter label=hivemind.app=web` lists an app's volumes. A volume that already exists is mounted as it is, and keeps its labels.
 
-Deleting an app removes its containers and keeps the named volumes. A deploy that uses the same volume name on the same node finds the data again.
+Deleting an app removes its containers and keeps its volumes. hivemind never deletes a volume. Deploying an app with the same name and volume name on the same node mounts the same volume and finds the data again. To free the space, remove the volume with `docker volume rm` on the node.
 
 ## Resources
 
-`resources.cpu` and `resources.memory` are checked for range and stored with the spec. Placement counts them against each node's CPU and memory, so a node is not given more replicas than its totals allow. They are not applied to the container: a replica has no Docker CPU or memory limit.
+`resources.cpu` and `resources.memory` do two things. Placement counts them against each node's CPU and memory, so a node is not given more replicas than its totals allow. The agent applies them to each container as limits.
+
+- `cpu` is a number of CPUs, such as `0.5`. It becomes Docker's `NanoCpus` (CPUs times 10^9), the same limit as `docker run --cpus`. A container over its limit is throttled, not killed.
+- `memory` becomes Docker's `Memory`. `MemorySwap` is set to the same value, so the container gets no swap on top of its limit. Left unset, Docker would let it use as much swap as its memory limit again. A container that goes over the limit is killed by the kernel's OOM killer. It exits with code 137, and the agent restarts it with the same backoff as any other exit, so `status` shows its restart count going up.
+- 0, or leaving a field out, means no limit and no reservation.
+- The smallest nonzero values are `0.01` CPUs and `6Mi` of memory, the smallest Docker accepts. Smaller values are rejected when the spec is validated.
+
+Changing either value changes the app's template, so it is a rolling update, like a change to the image or the environment.
+
+On a kernel without swap accounting, Docker ignores `MemorySwap` and logs a warning. The memory limit still holds, but the container can use swap beyond it if the host has swap.
 
 The totals are what the node reports, and a worker reports its own. Placement trusts those figures. A worker that reports more capacity than it has will be given more replicas.
 

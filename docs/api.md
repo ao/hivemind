@@ -150,8 +150,8 @@ The spec is the JSON form of the YAML file that `deploy -f` reads. Unknown field
 | `command` | list of strings | Up to 64 arguments, each up to 4096 bytes |
 | `env` | object | Keys match `[A-Za-z_][A-Za-z0-9_]*`. Up to 128 variables and 64 KiB in total |
 | `ports` | list | Up to 32. Each has `host` and `container` (1 to 65535), `bind` (an IP address, default `127.0.0.1`), `protocol` (`tcp` or `udp`, default `tcp`) |
-| `volumes` | list | Up to 16. Each has `name` and an absolute `path` other than `/`. An app with volumes has one replica |
-| `resources` | object | `cpu` (0 to 1024) and `memory` (0 to 1Ti). Stored, not applied |
+| `volumes` | list | Up to 16. Each has `name` and an absolute `path` other than `/`. An app with volumes has one replica. The Docker volume is named `hivemind-<app>_<name>` |
+| `resources` | object | `cpu` (0, or 0.01 to 1024) and `memory` (0, or 6Mi to 1Ti). Counted by placement and applied as container limits. 0 means no limit |
 | `health` | object | Exactly one of `http` (`path`, default `/`; `port`), `tcp` (`port`) or `exec` (a list of arguments). Also `interval` (default `10s`), `timeout` (default `2s`), `retries` (1 to 10, default 3) and `start_period` (default 0). Durations are strings such as `5s` |
 
 `memory` takes a whole number of bytes, or a string such as `512Mi` or `2G`. The suffixes `k`, `M`, `G` and `T` are powers of 1000, and `Ki`, `Mi`, `Gi` and `Ti` are powers of 1024.

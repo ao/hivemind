@@ -44,7 +44,7 @@ Reconciliation. The server turns each app spec into replica assignments. Each ag
 
 Networking. Container ports are published on the node's host ports. A replica that publishes host port N can't share a node with another replica that publishes N, and the scheduler enforces this. There is no overlay network.
 
-Volumes. Volumes are Docker named volumes on one node. An app with a volume is pinned to the node where its volume lives and is never moved automatically.
+Volumes. Volumes are Docker named volumes on one node, scoped to their app: volume `data` of app `web` is `hivemind-web_data`. An app with a volume is pinned to the node where its volume lives and is never moved automatically. hivemind never deletes a volume.
 
 Security defaults.
 - The API and UI listen on `127.0.0.1:4483`.
