@@ -613,3 +613,66 @@ func waitFor(t *testing.T, cond func() bool) {
 		time.Sleep(5 * time.Millisecond)
 	}
 }
+
+// A start refused with a conflict (a host port already allocated) must not
+// leave a container that a later pass could start without its ports: the
+// container is removed, the replica is reported pending with the error, and
+// the next pass creates a fresh one.
+func TestStartConflictDiscardsContainer(t *testing.T) {
+	e := newEnv(t)
+	e.put(web(1))
+	e.rt.setFail(func(op, _ string) error {
+		if op == "start" {
+			return &runtime.Error{Op: "start", Err: runtime.ErrConflict, Message: "port is already allocated"}
+		}
+		return nil
+	})
+	if err := e.agent.Reconcile(ctxT(t)); !errors.Is(err, runtime.ErrConflict) {
+		t.Fatalf("Reconcile: %v, want ErrConflict", err)
+	}
+	if snap := e.rt.snapshot(); len(snap) != 0 {
+		t.Fatalf("containers left after a refused start: %v", names(snap))
+	}
+	st := e.status("web")
+	if len(st) != 1 || st[0].State != "pending" || st[0].ContainerID != "" || !strings.Contains(st[0].Error, "port is already allocated") {
+		t.Fatalf("status after the refused start: %+v", st)
+	}
+
+	// Still refused on the next pass: still nothing left behind.
+	_ = e.agent.Reconcile(ctxT(t))
+	if snap := e.rt.snapshot(); len(snap) != 0 {
+		t.Fatalf("containers left after a second refused start: %v", names(snap))
+	}
+
+	e.rt.setFail(nil)
+	e.rt.counts(true)
+	e.reconcile()
+	c := e.rt.counts(false)
+	snap := e.rt.snapshot()
+	if c["create"] != 1 || len(snap) != 1 || snap["hivemind-web-0-g1"].State != "running" {
+		t.Fatalf("after the port is free: create %d, containers %v", c["create"], names(snap))
+	}
+}
+
+// An exited container whose restart is refused with a conflict is removed,
+// not kept for a later start without its ports.
+func TestRestartConflictDiscardsContainer(t *testing.T) {
+	e := newEnv(t)
+	e.put(web(1))
+	e.reconcile()
+	e.rt.exit("hivemind-web-0-g1", 1)
+	e.clock.Advance(time.Minute)
+	e.rt.setFail(func(op, _ string) error {
+		if op == "start" {
+			return &runtime.Error{Op: "start", Err: runtime.ErrConflict, Message: "port is already allocated"}
+		}
+		return nil
+	})
+	_ = e.agent.Reconcile(ctxT(t))
+	if snap := e.rt.snapshot(); len(snap) != 0 {
+		t.Fatalf("containers left after a refused restart: %v", names(snap))
+	}
+	if st := e.status("web"); len(st) != 1 || st[0].State != "pending" || st[0].ContainerID != "" {
+		t.Fatalf("status after the refused restart: %+v", st)
+	}
+}

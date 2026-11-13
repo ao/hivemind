@@ -308,11 +308,32 @@ func (a *Agent) create(ctx context.Context, as store.Assignment) (string, string
 		return "", "pending", fmt.Errorf("%s: %w", cfg.Name, err)
 	}
 	log.Info("created container", "container", shortID(id))
-	if err := a.cfg.Runtime.Start(ctx, id); err != nil {
+	if discarded, err := a.startOrDiscard(ctx, id); err != nil {
+		if discarded {
+			return "", "pending", fmt.Errorf("%s: %w", cfg.Name, err)
+		}
 		return id, "created", fmt.Errorf("%s: %w", cfg.Name, err)
 	}
 	log.Info("started container", "container", shortID(id))
 	return id, "running", nil
+}
+
+// startOrDiscard starts a container. When the engine refuses with a conflict,
+// such as "port is already allocated", the container is removed: after a
+// failed start Docker can let a later start succeed without the published
+// ports, and the replica would then look running while unreachable. The next
+// pass creates a fresh container with the full port spec. discarded reports
+// whether the container was removed.
+func (a *Agent) startOrDiscard(ctx context.Context, id string) (discarded bool, err error) {
+	err = a.cfg.Runtime.Start(ctx, id)
+	if err == nil || !errors.Is(err, runtime.ErrConflict) {
+		return false, err
+	}
+	if rerr := a.cfg.Runtime.Remove(ctx, id, true); rerr != nil && !errors.Is(rerr, runtime.ErrNotFound) {
+		a.log.Warn("removing a container that failed to start", "container", shortID(id), "err", rerr)
+		return false, err
+	}
+	return true, err
 }
 
 // remove stops a container and deletes it. A container that is already gone

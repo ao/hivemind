@@ -106,7 +106,10 @@ func (a *Agent) supervise(ctx context.Context, as store.Assignment, c runtime.Co
 	switch c.State {
 	case "created":
 		a.stopProbe(c.Name)
-		if err := a.cfg.Runtime.Start(ctx, c.ID); err != nil {
+		if discarded, err := a.startOrDiscard(ctx, c.ID); err != nil {
+			if discarded {
+				st.ContainerID, st.State = "", "pending"
+			}
 			return a.fail(st, c.Name, err)
 		}
 		log.Info("started container", "was", c.State)
@@ -127,7 +130,10 @@ func (a *Agent) supervise(ctx context.Context, as store.Assignment, c runtime.Co
 			a.schedule(rs, due, st)
 			return nil
 		}
-		if err := a.cfg.Runtime.Start(ctx, c.ID); err != nil {
+		if discarded, err := a.startOrDiscard(ctx, c.ID); err != nil {
+			if discarded {
+				st.ContainerID, st.State = "", "pending"
+			}
 			return a.fail(st, c.Name, err)
 		}
 		rs.restarts++
@@ -215,7 +221,7 @@ func (a *Agent) restartInPlace(ctx context.Context, c runtime.Container) error {
 	if err := a.cfg.Runtime.Stop(ctx, c.ID, a.cfg.StopTimeout); err != nil {
 		return err
 	}
-	if err := a.cfg.Runtime.Start(ctx, c.ID); err != nil {
+	if _, err := a.startOrDiscard(ctx, c.ID); err != nil {
 		return err
 	}
 	a.stopProbe(c.Name)
