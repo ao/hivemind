@@ -391,8 +391,8 @@ func containerState(ctx context.Context, tx *sql.Tx, node, app string, idx, gen 
 // querySurges returns surges matching where, joined with their app's spec.
 // Surge rows marked for removal are included, since their containers still run.
 func querySurges(ctx context.Context, q querier, where string, args ...any) ([]Assignment, error) {
-	rows, err := q.QueryContext(ctx, `SELECT s.app, s.idx, s.node_id, s.generation, s.desired, a.spec
-		FROM surges s JOIN apps a ON a.name = s.app WHERE `+where+` ORDER BY s.app, s.idx`, args...)
+	rows, err := q.QueryContext(ctx, `SELECT s.app, s.idx, s.node_id, s.generation, s.desired, p.spec
+		FROM surges s JOIN app_specs p ON p.app = s.app AND p.generation = s.generation WHERE `+where+` ORDER BY s.app, s.idx`, args...)
 	if err != nil {
 		return nil, err
 	}

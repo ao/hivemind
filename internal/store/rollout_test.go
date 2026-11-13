@@ -86,6 +86,21 @@ func (e *rolloutEnv) gens(app string) []int {
 	return out
 }
 
+// envA returns the A variable of the spec each assignment on node runs with,
+// in replica order.
+func (e *rolloutEnv) envA(node string) []string {
+	e.t.Helper()
+	as, err := e.s.AssignmentsForNode(e.ctx, node)
+	if err != nil {
+		e.t.Fatal(err)
+	}
+	var out []string
+	for _, a := range as {
+		out = append(out, a.Spec.Env["A"])
+	}
+	return out
+}
+
 // nodesOf returns the node of each replica of app, by index.
 func (e *rolloutEnv) nodesOf(app string) []string {
 	e.t.Helper()
@@ -160,6 +175,9 @@ func TestRolloutMovesOneReplicaAtATimeOnOneNode(t *testing.T) {
 	if g := e.gens("web"); !eqInts(g, []int{2, 1, 1}) {
 		t.Fatalf("first move: %v", g)
 	}
+	if env := e.envA(node1); !eqStrings(env, []string{"2", "1", "1"}) {
+		t.Fatalf("moved replica runs the new spec and the others the old one: %v", env)
+	}
 	if ro := e.rollout("web"); ro.Moving != 0 || ro.Since.IsZero() {
 		t.Fatalf("moving: %+v", ro)
 	}
@@ -222,6 +240,11 @@ func TestRolloutStopsOnCrashLoop(t *testing.T) {
 	// Replica 0 goes back to generation 1, and the others were never touched.
 	if g := e.gens("web"); !eqInts(g, []int{1, 1, 1}) {
 		t.Fatalf("after the stop: %v", g)
+	}
+	// Every replica runs its own generation's spec: the reverted replica
+	// does not pick up the new env.
+	if env := e.envA(node1); !eqStrings(env, []string{"1", "1", "1"}) {
+		t.Fatalf("specs after the stop: %v", env)
 	}
 	// A paused rollout does nothing on later calls, even after the deadline.
 	e.clock.Advance(time.Hour)

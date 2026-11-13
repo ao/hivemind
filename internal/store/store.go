@@ -296,6 +296,10 @@ func (s *Store) PutApp(ctx context.Context, a spec.App) (App, error) {
 		if err != nil {
 			return err
 		}
+		if _, err := tx.ExecContext(ctx, `INSERT INTO app_specs (app, generation, spec) VALUES (?, ?, ?)
+			ON CONFLICT (app, generation) DO UPDATE SET spec = excluded.spec`, c.Name, gen, string(specJSON)); err != nil {
+			return err
+		}
 		if err := s.syncReplicas(ctx, tx, c.Name, c.Replicas, gen, !recreate); err != nil {
 			return err
 		}
@@ -405,8 +409,8 @@ type querier interface {
 // queryAssignments returns the replicas of apps that are not deleted, or of
 // every app when the where clause allows it, joined with their app's spec.
 func queryAssignments(ctx context.Context, q querier, where string, args ...any) ([]Assignment, error) {
-	rows, err := q.QueryContext(ctx, `SELECT r.app, r.idx, COALESCE(r.node_id, ''), r.generation, r.desired, r.pending_reason, a.spec
-		FROM replicas r JOIN apps a ON a.name = r.app WHERE `+where+` ORDER BY r.app, r.idx`, args...)
+	rows, err := q.QueryContext(ctx, `SELECT r.app, r.idx, COALESCE(r.node_id, ''), r.generation, r.desired, r.pending_reason, p.spec
+		FROM replicas r JOIN app_specs p ON p.app = r.app AND p.generation = r.generation WHERE `+where+` ORDER BY r.app, r.idx`, args...)
 	if err != nil {
 		return nil, err
 	}
@@ -503,6 +507,10 @@ func (s *Store) Scale(ctx context.Context, name string, replicas int) (App, erro
 		now := s.now()
 		if _, err := tx.ExecContext(ctx, `UPDATE apps SET spec = ?, replicas = ?, updated_at = ? WHERE name = ?`,
 			string(specJSON), replicas, now.UnixNano(), name); err != nil {
+			return err
+		}
+		if _, err := tx.ExecContext(ctx, `UPDATE app_specs SET spec = ? WHERE app = ? AND generation = ?`,
+			string(specJSON), name, a.Generation); err != nil {
 			return err
 		}
 		if err := s.syncReplicas(ctx, tx, name, replicas, a.Generation, true); err != nil {

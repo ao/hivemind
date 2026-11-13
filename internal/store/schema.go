@@ -94,6 +94,16 @@ CREATE TABLE surges (
 ) STRICT;
 CREATE INDEX surges_node ON surges(node_id);
 
+-- The spec each generation runs with. A replica still on an old generation
+-- keeps running, and is restarted, from the spec of its own generation.
+CREATE TABLE app_specs (
+	app        TEXT NOT NULL REFERENCES apps(name) ON DELETE CASCADE,
+	generation INTEGER NOT NULL CHECK (generation >= 1),
+	spec       TEXT NOT NULL,
+	PRIMARY KEY (app, generation)
+) STRICT;
+INSERT INTO app_specs (app, generation, spec) SELECT name, generation, spec FROM apps;
+
 CREATE TABLE rollouts (
 	app        TEXT PRIMARY KEY REFERENCES apps(name) ON DELETE CASCADE,
 	target     INTEGER NOT NULL CHECK (target >= 1),
