@@ -51,6 +51,10 @@ type Config struct {
 	// Clock gives the time for restart backoff and health start periods.
 	// Nil means time.Now. Tests set it to a fake clock.
 	Clock func() time.Time
+	// OnPass, if set, is called after each pass that Run makes, with the
+	// wall time the pass took and its error. Metrics use it. A pass cut
+	// short by the end of Run is not reported.
+	OnPass func(d time.Duration, err error)
 }
 
 // Agent reconciles one node.
@@ -118,8 +122,13 @@ func (a *Agent) Run(ctx context.Context) error {
 	t := time.NewTicker(a.cfg.Interval)
 	defer t.Stop()
 	for {
-		if err := a.Reconcile(ctx); err != nil && ctx.Err() == nil {
+		start := time.Now()
+		err := a.Reconcile(ctx)
+		if err != nil && ctx.Err() == nil {
 			a.log.Warn("reconcile pass failed", "err", err)
+		}
+		if a.cfg.OnPass != nil && ctx.Err() == nil {
+			a.cfg.OnPass(time.Since(start), err)
 		}
 		// A container waiting out its backoff gets a pass when the wait ends,
 		// not at the next tick.

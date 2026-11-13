@@ -47,14 +47,20 @@ type Config struct {
 	Trigger func()
 	// Logger receives one line per request. Nil means slog.Default().
 	Logger *slog.Logger
+	// Metrics receives the request counts and holds the reconcile counters
+	// that GET /metrics reports. Nil means a new, private set.
+	Metrics *Metrics
 }
 
 // Server serves the API.
 type Server struct {
 	cfg           Config
 	log           *slog.Logger
+	metrics       *Metrics
 	router        *auth.Router
+	metricsRouter *auth.Router
 	handler       http.Handler
+	metricsOnly   http.Handler
 	streams       context.Context
 	cancelStreams context.CancelFunc
 }
@@ -71,11 +77,22 @@ func New(cfg Config) (*Server, error) {
 	if log == nil {
 		log = slog.Default()
 	}
-	s := &Server{cfg: cfg, log: log, router: auth.NewRouter()}
+	if cfg.Metrics == nil {
+		cfg.Metrics = NewMetrics()
+	}
+	s := &Server{cfg: cfg, log: log, metrics: cfg.Metrics, router: auth.NewRouter(), metricsRouter: auth.NewRouter()}
 	s.streams, s.cancelStreams = context.WithCancel(context.Background())
 	s.routes()
-	s.handler = s.logRequests(jsonErrors(cfg.Auth.Middleware(s.router)))
+	s.metricsRouter.HandleFunc("GET /metrics", s.metricsHandler)
+	s.handler = s.wrap(s.router)
+	s.metricsOnly = s.wrap(s.metricsRouter)
 	return s, nil
+}
+
+// wrap puts a router behind the request log and counter, the JSON error
+// rewriter and the admin-token check.
+func (s *Server) wrap(r *auth.Router) http.Handler {
+	return s.logRequests(r, jsonErrors(s.cfg.Auth.Middleware(r)))
 }
 
 func (s *Server) routes() {
@@ -90,13 +107,22 @@ func (s *Server) routes() {
 	r.HandleFunc("GET /v1/apps/{name}/status", s.appStatus)
 	r.HandleFunc("GET /v1/apps/{name}/logs", s.appLogs)
 	r.HandleFunc("GET /v1/status", s.status)
+	r.HandleFunc("GET /metrics", s.metricsHandler)
 }
 
 // Handler returns the API handler, with authentication and request logging.
 func (s *Server) Handler() http.Handler { return s.handler }
 
+// MetricsHandler returns a handler that serves only GET /metrics, for the
+// separate --metrics-addr listener. It needs the admin token like every API
+// route, and counts its requests in the same Metrics.
+func (s *Server) MetricsHandler() http.Handler { return s.metricsOnly }
+
 // Patterns returns every registered route pattern.
 func (s *Server) Patterns() []string { return s.router.Patterns() }
+
+// MetricsPatterns returns the route patterns of MetricsHandler.
+func (s *Server) MetricsPatterns() []string { return s.metricsRouter.Patterns() }
 
 // CloseStreams ends every followed log stream. Call it before
 // http.Server.Shutdown, which waits for active requests and would otherwise
@@ -138,19 +164,23 @@ func (w *statusWriter) Write(b []byte) (int, error) {
 
 func (w *statusWriter) Unwrap() http.ResponseWriter { return w.ResponseWriter }
 
-// logRequests logs the method, path, status and duration of each request.
-// It never logs headers, query strings or bodies, so no token or env value
-// reaches the log.
-func (s *Server) logRequests(next http.Handler) http.Handler {
+// logRequests logs the method, path, status and duration of each request,
+// and counts it by method, route pattern and status. It never logs headers,
+// query strings or bodies, so no token, cookie, CSRF token or env value
+// reaches the log. The route is looked up before the request is served,
+// because the auth check may answer before the router runs.
+func (s *Server) logRequests(router *auth.Router, next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		start := time.Now()
+		route := routeLabel(router, r)
 		sw := &statusWriter{ResponseWriter: w}
 		next.ServeHTTP(sw, r)
 		code := sw.code
 		if code == 0 {
 			code = http.StatusOK
 		}
-		s.log.Info("http request", "method", r.Method, "path", r.URL.Path, "status", code,
+		s.metrics.observeRequest(r.Method, route, code)
+		s.log.Info("http request", "method", r.Method, "path", r.URL.Path, "route", route, "status", code,
 			"duration", time.Since(start).Round(time.Microsecond))
 	})
 }
