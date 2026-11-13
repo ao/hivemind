@@ -580,3 +580,32 @@ func TestStatusShowsRollout(t *testing.T) {
 		t.Fatalf("rollout after every replica moved: %+v", as.Rollout)
 	}
 }
+
+// Restart count, health and crash-loop state reach the status API.
+func TestStatusShowsHealthAndRestarts(t *testing.T) {
+	h := newHarness(t)
+	ctx := context.Background()
+	wantStatus(t, h.do(t, "PUT", "/v1/apps/web", `{"image":"nginx:1.27","replicas":2}`), http.StatusCreated)
+	next := time.Date(2030, 1, 2, 3, 4, 5, 0, time.UTC)
+	if err := h.store.ReportStatus(ctx, testNode, []store.Status{
+		{Name: "hivemind-web-0-g1", ContainerID: "c0", App: "web", Replica: 0, Generation: 1, State: "running",
+			Health: "healthy", Ready: true, RestartCount: 1},
+		{Name: "hivemind-web-1-g1", ContainerID: "c1", App: "web", Replica: 1, Generation: 1, State: "exited",
+			RestartCount: 4, CrashLooping: true, NextRestart: next},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	rec := h.do(t, "GET", "/v1/apps/web/status", "")
+	wantStatus(t, rec, http.StatusOK)
+	var as AppStatus
+	if err := json.Unmarshal(rec.Body.Bytes(), &as); err != nil {
+		t.Fatal(err)
+	}
+	r0, r1 := as.Replicas[0], as.Replicas[1]
+	if r0.Health != "healthy" || !r0.Ready || r0.Restarts != 1 || r0.CrashLooping || r0.NextRestart != nil {
+		t.Fatalf("replica 0: %+v", r0)
+	}
+	if r1.Ready || r1.Restarts != 4 || !r1.CrashLooping || r1.NextRestart == nil || !r1.NextRestart.Equal(next) {
+		t.Fatalf("replica 1: %+v", r1)
+	}
+}

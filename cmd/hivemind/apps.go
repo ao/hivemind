@@ -12,6 +12,7 @@ import (
 	"strconv"
 	"strings"
 	"text/tabwriter"
+	"time"
 
 	"github.com/spf13/cobra"
 	"gopkg.in/yaml.v3"
@@ -223,7 +224,7 @@ func printStatus(out io.Writer, apps []server.AppStatus) {
 	}
 	fmt.Fprintln(out)
 	tw = tabwriter.NewWriter(out, 0, 4, 2, ' ', 0)
-	fmt.Fprintln(tw, "APP\tREPLICA\tNODE\tGENERATION\tSTATE\tCONTAINER\tDETAIL")
+	fmt.Fprintln(tw, "APP\tREPLICA\tNODE\tGENERATION\tSTATE\tHEALTH\tRESTARTS\tCONTAINER\tDETAIL")
 	for _, a := range apps {
 		for _, r := range a.Replicas {
 			state := r.State
@@ -231,8 +232,14 @@ func printStatus(out io.Writer, apps []server.AppStatus) {
 				state += " (removing)"
 			}
 			detail := firstNonEmpty(r.Error, r.PendingReason, "-")
-			fmt.Fprintf(tw, "%s\t%d\t%s\t%d\t%s\t%s\t%s\n", a.Name, r.Index, firstNonEmpty(r.NodeID, "-"), r.Generation,
-				state, firstNonEmpty(shortID(r.ContainerID), "-"), detail)
+			if r.CrashLooping {
+				detail = "crash-looping"
+				if r.NextRestart != nil {
+					detail += ", next restart in " + max(time.Until(*r.NextRestart), 0).Round(time.Second).String()
+				}
+			}
+			fmt.Fprintf(tw, "%s\t%d\t%s\t%d\t%s\t%s\t%d\t%s\t%s\n", a.Name, r.Index, firstNonEmpty(r.NodeID, "-"), r.Generation,
+				state, firstNonEmpty(r.Health, "-"), r.Restarts, firstNonEmpty(shortID(r.ContainerID), "-"), detail)
 		}
 	}
 	tw.Flush()

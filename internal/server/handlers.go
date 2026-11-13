@@ -49,6 +49,16 @@ type ReplicaStatus struct {
 	State         string `json:"state"`
 	ContainerID   string `json:"container_id,omitempty"`
 	Error         string `json:"error,omitempty"`
+	// Restarts counts the agent's restarts of this container after it exited or
+	// failed its health check.
+	Restarts int `json:"restarts"`
+	// Health is "", "starting", "healthy" or "unhealthy"; "" means no check.
+	Health string `json:"health,omitempty"`
+	Ready  bool   `json:"ready"`
+	// CrashLooping is set while a restart waits out its backoff, and
+	// NextRestart says when it is due.
+	CrashLooping bool       `json:"crash_looping,omitempty"`
+	NextRestart  *time.Time `json:"next_restart,omitempty"`
 }
 
 // AppStatus is one app's replicas.
@@ -280,6 +290,11 @@ func (s *Server) statusOf(r *http.Request, app string) ([]AppStatus, error) {
 				PendingReason: rp.PendingReason, State: "pending"}
 			if st, ok := byKey[key{rp.App, rp.Index, rp.Generation}]; ok {
 				rs.State, rs.ContainerID, rs.Error = st.State, st.ContainerID, st.Error
+				rs.Restarts, rs.Health, rs.Ready, rs.CrashLooping = st.RestartCount, st.Health, st.Ready, st.CrashLooping
+				if !st.NextRestart.IsZero() {
+					nr := st.NextRestart.UTC()
+					rs.NextRestart = &nr
+				}
 			}
 			if rp.Desired == store.Running && rs.State == "running" {
 				as.Running++
