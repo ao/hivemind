@@ -221,13 +221,18 @@ func TestIntegrationSingleNode(t *testing.T) {
 	}
 	t.Logf("restart: same 2 container IDs and StartedAt times after the new agent's passes")
 
-	// A spec change replaces both replicas with generation 2.
+	// A spec change is a rollout: the replicas move to generation 2 one at a
+	// time. The store's rollout controller is driven from the wait below.
 	app.Env = map[string]string{"VERSION": "2"}
 	if got, err := st.PutApp(ctx, app); err != nil || got.Generation != 2 {
 		t.Fatalf("PutApp: %+v %v", got, err)
 	}
 	a.Trigger()
 	took = itWait(t, "generation 2 running", 30*time.Second, func() bool {
+		if err := st.AdvanceRollouts(ctx); err != nil {
+			t.Errorf("AdvanceRollouts: %v", err)
+		}
+		a.Trigger()
 		all, r := itRunning(t, rt, appName)
 		return all == 2 && len(r) == 2 && r["0"].Labels[runtime.LabelGeneration] == "2" && r["1"].Labels[runtime.LabelGeneration] == "2"
 	})

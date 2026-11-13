@@ -244,6 +244,15 @@ func TestGenerationChangeReplaces(t *testing.T) {
 	if a := e.put(changed); a.Generation != 2 {
 		t.Fatalf("generation %d", a.Generation)
 	}
+	// The change starts a rollout. Until the store moves the replica to
+	// generation 2, the agent must keep the old container.
+	e.reconcile()
+	if _, ok := e.running()["hivemind-web-0-g1"]; !ok {
+		t.Fatal("old container removed before the rollout moved its replica")
+	}
+	if err := e.st.AdvanceRollouts(ctxT(e.t)); err != nil {
+		t.Fatal(err)
+	}
 	e.reconcile()
 	got := e.running()
 	if len(got) != 1 {
