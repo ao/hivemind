@@ -1,22 +1,23 @@
 #!/usr/bin/env bash
-# Reproduction: a reconcile pass longer than the 15 s lease makes a worker
-# that is up and reachable "lost", and its replicas are placed again.
+# Regression check: a reconcile pass longer than the 15 s lease must not make
+# a node that is up and reachable "lost".
 #
 #   SOAK_DIR=... scripts/soak/repro-slow-pass.sh
 #
-# The agent renews its node's lease only when a pass reports, at the end of
-# the pass (internal/agent/agent.go, Reconcile). A pass removes extra
-# containers one after another, each with docker stop and a 10 s grace
-# period. A container whose PID 1 ignores SIGTERM, such as busybox sleep,
-# takes the full 10 s. So a worker that has three such containers to remove
-# spends about 30 s in one pass without renewing its lease, and the server's
-# sweep marks it lost after 15 to 20 s, although nothing is wrong with it.
+# A pass removes extra containers one after another, each with docker stop and
+# a 10 s grace period. A container whose PID 1 ignores SIGTERM, such as busybox
+# sleep, takes the full 10 s, so a node with three of them to remove spends
+# about 30 s in one pass. Before 999840a the agent renewed its lease only when
+# a pass reported, at its end, so the server's sweep marked such a node lost
+# after 15 to 20 s and placed its replicas again. Since 999840a the agent also
+# renews the lease every 5 s on a timer.
 #
-# The script deploys app slowstop (busybox sleep, 3 replicas per node), waits
-# for it to run, deletes it, and watches hivemind nodes for 60 s. It exits 1
-# if any worker was marked lost (the bug), 0 if none was. Then it waits for
-# the cluster to converge again. Run it on a converged cluster with nothing
-# else in flight; it moves other apps' replicas when it reproduces.
+# The script deploys app slowstop (busybox sleep, 3 replicas per node when
+# every node is eligible), waits for it to run, deletes it, and watches
+# hivemind nodes for 60 s. It exits 1 if any node was marked lost, 0 if none
+# was. Then it waits for the cluster to converge again. Run it on a converged
+# cluster with nothing else in flight; on a build with the bug it moves other
+# apps' replicas.
 set -uo pipefail
 . "$(dirname "$0")/lib.sh"
 
