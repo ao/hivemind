@@ -24,6 +24,7 @@ import (
 	"github.com/ao/hivemind/internal/cluster"
 	"github.com/ao/hivemind/internal/config"
 	"github.com/ao/hivemind/internal/logging"
+	"github.com/ao/hivemind/internal/logrelay"
 	"github.com/ao/hivemind/internal/pki"
 	"github.com/ao/hivemind/internal/runtime"
 	"github.com/ao/hivemind/internal/runtime/docker"
@@ -405,9 +406,15 @@ func runServe(ctx context.Context, cfg *config.Config, log *slog.Logger, rt runt
 		_, err := backup.Write(ctx, w, backup.Options{DataDir: cfg.DataDir, Snapshot: st.SnapshotTo, HivemindVersion: version})
 		return err
 	}
+	// Workers exist only with the cluster listener, and their logs come
+	// through it.
+	var logs *logrelay.Relay
+	if cfg.Advertise != "" {
+		logs = logrelay.New(logrelay.Options{})
+	}
 	api, err := server.New(server.Config{Store: st, Runtime: rt, NodeID: cl.NodeID, Auth: authn,
 		Trigger: ag.Trigger, Logger: log.With("component", "api"), Metrics: m, IssueJoinToken: issue,
-		Backup: writeBackup})
+		Backup: writeBackup, Logs: logs})
 	if err != nil {
 		return err
 	}
@@ -447,7 +454,7 @@ func runServe(ctx context.Context, cfg *config.Config, log *slog.Logger, rt runt
 		}
 		c, err := cluster.Listen(cluster.Config{Store: st, CA: ca, Tokens: pki.NewTokens(st.JoinTokens()),
 			Advertise: cfg.Advertise, Port: cfg.ClusterPort, LocalNodeID: cl.NodeID,
-			Logger: log.With("component", "cluster"), NodeCertLifetime: lifetime})
+			Logger: log.With("component", "cluster"), NodeCertLifetime: lifetime, Logs: logs})
 		if err != nil {
 			ln.Close()
 			if mln != nil {

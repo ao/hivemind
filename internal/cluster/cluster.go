@@ -28,6 +28,7 @@ import (
 	"strconv"
 	"time"
 
+	"github.com/ao/hivemind/internal/logrelay"
 	"github.com/ao/hivemind/internal/pki"
 	"github.com/ao/hivemind/internal/ratelimit"
 	"github.com/ao/hivemind/internal/store"
@@ -72,6 +73,9 @@ type Config struct {
 	// Logger receives one line per join and per rejected node request. Nil
 	// means slog.Default().
 	Logger *slog.Logger
+	// Logs relays log requests to workers and their streams back. The API
+	// server must share it. Nil means a private relay, which no API uses.
+	Logs *logrelay.Relay
 	// NodeCertLifetime is the lifetime of the certificates the server
 	// issues: at join, at renewal, and its own. Zero means
 	// pki.NodeCertLifetime. Only tests set it.
@@ -92,6 +96,7 @@ func (cfg Config) now() func() time.Time {
 // Cluster is a pair of bound listeners, ready to serve.
 type Cluster struct {
 	log   *slog.Logger
+	logs  *logrelay.Relay
 	mtls  *http.Server
 	join  *http.Server
 	mln   net.Listener
@@ -157,7 +162,10 @@ func Listen(cfg Config) (*Cluster, error) {
 		return nil, fmt.Errorf("join listener on %s: %w", cfg.Advertise, err)
 	}
 
-	c := &Cluster{log: log, mln: mln, jln: jln, certs: certs}
+	if cfg.Logs == nil {
+		cfg.Logs = logrelay.New(logrelay.Options{})
+	}
+	c := &Cluster{log: log, logs: cfg.Logs, mln: mln, jln: jln, certs: certs}
 	c.ctx, c.stop = context.WithCancel(context.Background())
 	c.mtls = newHTTPServer(nodeRoutes(cfg, log))
 	c.join = newHTTPServer(joinRoutes(cfg, limiter, log))
@@ -224,9 +232,11 @@ func (c *Cluster) Serve() error {
 }
 
 // Shutdown closes both listeners and waits for requests in flight, up to
-// shutdownTimeout.
+// shutdownTimeout. It closes the log relay first, so log polls and streams end
+// at once instead of holding the shutdown.
 func (c *Cluster) Shutdown() error {
 	c.stop()
+	c.logs.Close()
 	ctx, cancel := context.WithTimeout(context.Background(), shutdownTimeout)
 	defer cancel()
 	return errors.Join(c.mtls.Shutdown(ctx), c.join.Shutdown(ctx))

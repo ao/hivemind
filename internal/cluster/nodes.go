@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"time"
 
+	"github.com/ao/hivemind/internal/logrelay"
 	"github.com/ao/hivemind/internal/nodeapi"
 	"github.com/ao/hivemind/internal/pki"
 	"github.com/ao/hivemind/internal/store"
@@ -17,8 +18,9 @@ import (
 // handler checks that the node in the certificate is the node in the path, so
 // a node can read and report for itself only.
 type nodeAPI struct {
-	st  *store.Store
-	log *slog.Logger
+	st   *store.Store
+	log  *slog.Logger
+	logs *logrelay.Relay
 	// ca, lifetime and now issue renewed certificates (renew.go).
 	ca       *pki.CA
 	lifetime time.Duration
@@ -30,13 +32,16 @@ type nodeAPI struct {
 // Every request passes the denylist check first, then the check that the
 // client certificate is valid now.
 func nodeRoutes(cfg Config, log *slog.Logger) http.Handler {
-	a := &nodeAPI{st: cfg.Store, log: log, ca: cfg.CA, lifetime: cfg.NodeCertLifetime, now: cfg.now(), certs: &certNotes{}}
+	a := &nodeAPI{st: cfg.Store, log: log, logs: cfg.Logs,
+		ca: cfg.CA, lifetime: cfg.NodeCertLifetime, now: cfg.now(), certs: &certNotes{}}
 	mux := http.NewServeMux()
 	mux.HandleFunc("POST "+nodeapi.Prefix+"/nodes/{id}/register", a.register)
 	mux.HandleFunc("GET "+nodeapi.Prefix+"/nodes/{id}/assignments", a.assignments)
 	mux.HandleFunc("POST "+nodeapi.Prefix+"/nodes/{id}/status", a.postStatus)
 	mux.HandleFunc("GET "+nodeapi.Prefix+"/nodes/{id}/status", a.getStatus)
 	mux.HandleFunc("POST "+nodeapi.Prefix+"/nodes/{id}/renew", a.renew)
+	mux.HandleFunc("GET "+nodeapi.Prefix+"/nodes/{id}/logs/requests", a.logRequests)
+	mux.HandleFunc("POST "+nodeapi.Prefix+"/nodes/{id}/logs/streams/{req}", a.logStream)
 	return a.denyRemoved(a.requireCurrentCert(mux))
 }
 

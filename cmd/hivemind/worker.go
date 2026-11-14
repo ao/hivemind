@@ -378,7 +378,18 @@ func runWorker(ctx context.Context, cfg *config.Config, log *slog.Logger, rt run
 	if err != nil {
 		return err
 	}
+	// Log requests come over a poll the worker makes, so it needs no listener.
+	logsDone := make(chan struct{})
+	go func() {
+		defer close(logsDone)
+		ls := &nodeapi.LogServer{Client: client, NodeID: w.state.NodeID, Runtime: rt, Logger: log.With("component", "logs")}
+		if err := ls.Run(runCtx); errors.Is(err, nodeapi.ErrNodeRemoved) {
+			stop(err)
+		}
+	}()
 	err = ag.Run(runCtx)
+	stop(nil)
+	<-logsDone
 	if errors.Is(context.Cause(runCtx), nodeapi.ErrNodeRemoved) {
 		log.Error("the server says this node was removed from the cluster; stopping", "node", w.state.NodeID)
 		return removedError(w.state.NodeID)

@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"github.com/ao/hivemind/internal/auth"
+	"github.com/ao/hivemind/internal/logrelay"
 	"github.com/ao/hivemind/internal/ratelimit"
 	"github.com/ao/hivemind/internal/runtime"
 	"github.com/ao/hivemind/internal/store"
@@ -42,9 +43,13 @@ const (
 type Config struct {
 	Store   *store.Store
 	Runtime runtime.Runtime
-	// NodeID is the local node. Logs are read from its runtime.
+	// NodeID is the local node. Logs of its replicas are read from Runtime.
 	NodeID string
-	Auth   *auth.Authenticator
+	// Logs relays log requests for replicas on other nodes to their workers.
+	// The cluster listener must share it. Nil means the server has no cluster
+	// listener, and the logs of those replicas cannot be read.
+	Logs *logrelay.Relay
+	Auth *auth.Authenticator
 	// Trigger, if set, is called after a change to desired state, so the
 	// local agent reconciles at once instead of at its next tick.
 	Trigger func()
@@ -186,10 +191,15 @@ func (s *Server) Patterns() []string { return s.router.Patterns() }
 // MetricsPatterns returns the route patterns of MetricsHandler.
 func (s *Server) MetricsPatterns() []string { return s.metricsRouter.Patterns() }
 
-// CloseStreams ends every followed log stream. Call it before
-// http.Server.Shutdown, which waits for active requests and would otherwise
-// wait for a stream that never ends.
-func (s *Server) CloseStreams() { s.cancelStreams() }
+// CloseStreams ends every followed log stream, and every log stream relayed
+// from a worker. Call it before http.Server.Shutdown, which waits for active
+// requests and would otherwise wait for a stream that never ends.
+func (s *Server) CloseStreams() {
+	s.cancelStreams()
+	if s.cfg.Logs != nil {
+		s.cfg.Logs.Close()
+	}
+}
 
 // NewHTTPServer returns an http.Server for h with the package's timeouts.
 func NewHTTPServer(h http.Handler, log *slog.Logger) *http.Server {

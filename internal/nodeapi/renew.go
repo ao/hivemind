@@ -53,8 +53,3 @@ func (c *Client) Renew(ctx context.Context, nodeID string, csr []byte) ([]byte, 
 	}
 	return []byte(reply.CertPEM), nil
 }
-
-// CloseIdleConnections closes the client's idle connections, so the next
-// request opens a new one. A worker calls it after it renews its
-// certificate, so the server sees the new certificate at once.
-func (c *Client) CloseIdleConnections() { c.http.CloseIdleConnections() }
