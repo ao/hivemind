@@ -93,7 +93,7 @@ echo "|---|---|---|---|---|---|---|---|---|---|---|"
 awk '
 function pct(a, b) { return b ? sprintf("%d/%d", a, b) : "-" }
 function f(k,   i) { for (i = 4; i <= NF; i++) if (index($i, k "=") == 1) return substr($i, length(k) + 2); return "" }
-function start(w, t, s) { open[w] = 1; ws[w] = t; wiso[w] = s; order[++nw] = w }
+function start(w, t, s) { if (open[w]) return; open[w] = 1; ws[w] = t; wiso[w] = s; order[++nw] = w }
 function stop(w, t) { open[w] = 0; we[w] = t }
 function q(w, p,   k, i, j, x, n) {
 	n = nl[w]; if (!n) return "-"

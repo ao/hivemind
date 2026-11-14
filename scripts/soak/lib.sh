@@ -9,15 +9,16 @@
 #               (default $SOAK_DIR/nodes)
 #   SSH_KEY     private key for the nodes (default ~/.ssh/soak)
 #   SSH_USER    login on the nodes, with passwordless sudo (default ec2-user)
+#   SOAK_LOG    the log (default $SOAK_DIR/soak.log)
 #
-# Every probe and event goes to $SOAK_DIR/soak.log as one line:
+# Every probe and event goes to $SOAK_LOG as one line:
 #   <UTC time, ms> <Unix time, ms> <kind> <fields...>
 # The times come from this machine's clock (CLOCK_REALTIME via date(1)).
 
 SOAK_REPO=$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)
 SOAK_DIR=${SOAK_DIR:?set SOAK_DIR to the run directory}
 NODES_FILE=${NODES_FILE:-$SOAK_DIR/nodes}
-LOG=$SOAK_DIR/soak.log
+LOG=${SOAK_LOG:-$SOAK_DIR/soak.log}
 SSH_KEY=${SSH_KEY:-$HOME/.ssh/soak}
 SSH_USER=${SSH_USER:-ec2-user}
 HM=/usr/local/bin/hivemind
@@ -269,7 +270,7 @@ EOF
 install_bin() {
 	local want got
 	want=$(sha256sum "$BIN" | cut -d' ' -f1)
-	SSH_TIMEOUT=120 on "$1" "cat > /tmp/hivemind.new && sudo install -m 0755 /tmp/hivemind.new $HM && rm -f /tmp/hivemind.new" <"$BIN"
+	SSH_TIMEOUT=120 on "$1" "cat > /tmp/hivemind.new && sudo install -m 0755 /tmp/hivemind.new $HM.new && sudo mv -f $HM.new $HM && rm -f /tmp/hivemind.new" <"$BIN"
 	got=$(on "$1" "sha256sum $HM" | cut -d' ' -f1)
 	[ "$got" = "$want" ] || die "$1: binary digest $got, want $want"
 }

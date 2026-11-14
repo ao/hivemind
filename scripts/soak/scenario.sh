@@ -12,6 +12,7 @@
 #   scenario.sh server-replace [SECS]         wait for the server machine to go and come
 #                                             back empty; install, restore, start; measured
 #   scenario.sh kv-check NAME                 read the kv value where kv runs
+#   scenario.sh upgrade                       install $BIN everywhere, restart the server, then the workers
 #   scenario.sh end NAME
 #
 # A fault that needs the machine's owner (power off, power on, a new machine)
@@ -330,6 +331,25 @@ server_replace() {
 	end_scenario "$name"
 }
 
+# upgrade: install $BIN on every node and restart hivemind, the server first,
+# as a user would with a new release.
+upgrade() {
+	local n i
+	ev scenario "upgrade begin binary_sha256=$(sha256sum "$BIN" | cut -d" " -f1)"
+	for n in "${NAMES[@]}"; do install_bin "$n" || die "installing on $n"; done
+	ev event "upgrade $SERVER restart"
+	on "$SERVER" "sudo systemctl restart hivemind" || die "restart on $SERVER"
+	wait_for 60 hm "$SERVER" status || die "the API did not come back"
+	ev event "upgrade api-up"
+	for ((i = 1; i < ${#NAMES[@]}; i++)); do
+		ev event "upgrade ${NAMES[$i]} restart"
+		on "${NAMES[$i]}" "sudo systemctl restart hivemind" || die "restart on ${NAMES[$i]}"
+	done
+	wait_for 300 converged_now || die "not converged after the upgrade"
+	for n in "${NAMES[@]}"; do ev machine "$n hivemind=\"$(on "$n" "$HM version" | tr "\n" " ")\""; done
+	end_scenario upgrade
+}
+
 kv_check() {
 	local st id n v
 	st=$(hm "$SERVER" status --json) || die "no status"
@@ -354,6 +374,7 @@ partition) partition "$@" ;;
 server-backup) server_backup ;;
 server-replace) server_replace "$@" ;;
 kv-check) kv_check "$@" ;;
+upgrade) upgrade ;;
 end) end_scenario "$@" ;;
 *)
 	sed -n '2,27p' "$0"
