@@ -8,13 +8,23 @@
 
 hivemind runs containers on a few Linux machines, using Docker Engine on each one. You describe an app with flags or a YAML file. hivemind keeps the requested number of replicas running, and starts a replacement when a container exits or fails its health check.
 
-This is version 2, a rewrite of version 1. Version 2.0.0 is not released yet. The current build runs one server and any number of workers. A worker joins with a token, and the server and the worker then talk over TLS with certificates from the cluster's own CA.
+Version 2 is a rewrite of version 1, and 2.0.0 is the current release. A cluster has one server and any number of workers. A worker joins with a token, and the server and the worker then talk over TLS with certificates from the cluster's own CA.
 
 hivemind is for 1 to 10 Linux machines on one network. It has one server, publishes container ports on host ports, and has no overlay network, no built-in DNS and no tenancy. Docker Swarm, Nomad and k3s do much more than that. hivemind is smaller to learn and run, and it is not a replacement for them. The automated cluster test runs three nodes.
 
 ## Install
 
-The first v2 release is pending. When it is published, its assets are named as the release workflow names them:
+Download a binary from the [latest release](https://github.com/ao/hivemind/releases/latest) and check it against `SHA256SUMS`. On Linux amd64 (use `arm64` on ARM):
+
+```sh
+curl -fLO https://github.com/ao/hivemind/releases/latest/download/hivemind-linux-amd64
+curl -fLO https://github.com/ao/hivemind/releases/latest/download/SHA256SUMS
+grep ' hivemind-linux-amd64$' SHA256SUMS | sha256sum -c -
+sudo install -m 0755 hivemind-linux-amd64 /usr/local/bin/hivemind
+hivemind version
+```
+
+The `grep … | sha256sum -c -` form works with GNU coreutils and with BusyBox (Alpine). Each release has these assets:
 
 ```
 hivemind-linux-amd64        node and client
