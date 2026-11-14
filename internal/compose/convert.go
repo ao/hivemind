@@ -490,7 +490,7 @@ func (c *converter) longPort(path string, v *node) spec.Port {
 	if !present(v, "published") {
 		c.add(path+".published", "required: hivemind publishes every port on a host port")
 	}
-	if !present(v, "host_ip") && port.Host > 0 {
+	if port.Bind == "" && port.Host > 0 {
 		port.Bind = spec.DefaultBind
 		c.note(path, "published on %s:%d only, the hivemind default; Compose would publish it on every interface. To publish elsewhere, set host_ip to 0.0.0.0 or another address",
 			spec.DefaultBind, port.Host)

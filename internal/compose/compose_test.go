@@ -89,6 +89,9 @@ func TestConvertSupported(t *testing.T) {
 		{name: "long port with no address", file: web("ports:\n  - target: 80\n    published: ${PORT}"),
 			edit:  func(a *spec.App) { a.Ports = []spec.Port{{Bind: "127.0.0.1", Host: 9090, Container: 80}} },
 			notes: []string{"services.web.ports[0]: published on 127.0.0.1:9090 only, the hivemind default; Compose would publish it on every interface. To publish elsewhere, set host_ip to 0.0.0.0 or another address"}},
+		{name: "long port with an empty address", file: web("ports: [{target: 80, published: 81, host_ip: ''}]"),
+			edit:  func(a *spec.App) { a.Ports = []spec.Port{{Bind: "127.0.0.1", Host: 81, Container: 80}} },
+			notes: []string{"services.web.ports[0]: published on 127.0.0.1:81 only, the hivemind default; Compose would publish it on every interface. To publish elsewhere, set host_ip to 0.0.0.0 or another address"}},
 		{name: "volumes", file: "volumes:\n  data:\n  logs: {}\n  cache: {x-size: 1}\nservices:\n  web:\n    image: nginx:1.27\n    volumes:\n      - data:/var/lib/data\n      - logs:/var/log/app:rw\n      - type: volume\n        source: cache\n        target: /cache\n        read_only: false\n        x-why: ignored\n",
 			edit: func(a *spec.App) {
 				a.Volumes = []spec.Volume{{Name: "data", Path: "/var/lib/data"}, {Name: "logs", Path: "/var/log/app"}, {Name: "cache", Path: "/cache"}}
