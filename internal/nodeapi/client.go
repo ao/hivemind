@@ -158,6 +158,9 @@ func statusError(resp *http.Response) error {
 	if resp.StatusCode == http.StatusForbidden && e.Error == RemovedMessage {
 		return ErrNodeRemoved
 	}
+	if resp.StatusCode == http.StatusUnauthorized && e.Error == CertInvalidMessage {
+		return ErrCertInvalid
+	}
 	return fmt.Errorf("the server refused the request (%s): %s", resp.Status, msg)
 }
 

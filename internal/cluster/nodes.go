@@ -5,6 +5,7 @@ import (
 	"errors"
 	"log/slog"
 	"net/http"
+	"time"
 
 	"github.com/ao/hivemind/internal/nodeapi"
 	"github.com/ao/hivemind/internal/pki"
@@ -18,18 +19,25 @@ import (
 type nodeAPI struct {
 	st  *store.Store
 	log *slog.Logger
+	// ca, lifetime and now issue renewed certificates (renew.go).
+	ca       *pki.CA
+	lifetime time.Duration
+	now      func() time.Time
+	certs    *certNotes
 }
 
 // nodeRoutes returns the handler of the mTLS listener. It has no join route.
-// Every request passes the denylist check first.
+// Every request passes the denylist check first, then the check that the
+// client certificate is valid now.
 func nodeRoutes(cfg Config, log *slog.Logger) http.Handler {
-	a := &nodeAPI{st: cfg.Store, log: log}
+	a := &nodeAPI{st: cfg.Store, log: log, ca: cfg.CA, lifetime: cfg.NodeCertLifetime, now: cfg.now(), certs: &certNotes{}}
 	mux := http.NewServeMux()
 	mux.HandleFunc("POST "+nodeapi.Prefix+"/nodes/{id}/register", a.register)
 	mux.HandleFunc("GET "+nodeapi.Prefix+"/nodes/{id}/assignments", a.assignments)
 	mux.HandleFunc("POST "+nodeapi.Prefix+"/nodes/{id}/status", a.postStatus)
 	mux.HandleFunc("GET "+nodeapi.Prefix+"/nodes/{id}/status", a.getStatus)
-	return a.denyRemoved(mux)
+	mux.HandleFunc("POST "+nodeapi.Prefix+"/nodes/{id}/renew", a.renew)
+	return a.denyRemoved(a.requireCurrentCert(mux))
 }
 
 // denyRemoved refuses, with 403, every request whose client certificate names

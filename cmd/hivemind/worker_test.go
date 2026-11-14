@@ -107,8 +107,11 @@ func TestWorkerStateRoundTrip(t *testing.T) {
 	if w.state.NodeID != "node-abc123" || w.state.Server != "10.0.0.5:4484" {
 		t.Fatalf("state %+v", w.state)
 	}
-	if w.tlsCfg == nil || len(w.tlsCfg.Certificates) != 1 {
+	if w.tlsCfg == nil || w.tlsCfg.GetClientCertificate == nil {
 		t.Fatal("no client certificate in the loaded config")
+	}
+	if c, err := w.tlsCfg.GetClientCertificate(nil); err != nil || c.Leaf == nil || len(c.Certificate) != 2 {
+		t.Fatalf("client certificate %v, %v", c, err)
 	}
 	for _, name := range []string{workerKeyFile, workerCertFile, pki.CACertFile, workerStateFile} {
 		if _, err := os.Stat(filepath.Join(dir, name)); err != nil {

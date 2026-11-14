@@ -428,9 +428,20 @@ func runServe(ctx context.Context, cfg *config.Config, log *slog.Logger, rt runt
 	// The cluster listeners open only with --advertise, on that address only.
 	var nodes *cluster.Cluster
 	if cfg.Advertise != "" {
+		lifetime, err := testCertLifetime()
+		if err != nil {
+			ln.Close()
+			if mln != nil {
+				mln.Close()
+			}
+			return err
+		}
+		if lifetime != 0 {
+			log.Warn("test build: node certificates are issued with a short lifetime", "lifetime", lifetime)
+		}
 		c, err := cluster.Listen(cluster.Config{Store: st, CA: ca, Tokens: pki.NewTokens(st.JoinTokens()),
 			Advertise: cfg.Advertise, Port: cfg.ClusterPort, LocalNodeID: cl.NodeID,
-			Logger: log.With("component", "cluster")})
+			Logger: log.With("component", "cluster"), NodeCertLifetime: lifetime})
 		if err != nil {
 			ln.Close()
 			if mln != nil {

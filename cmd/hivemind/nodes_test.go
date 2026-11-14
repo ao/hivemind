@@ -64,7 +64,7 @@ func TestNodesCommands(t *testing.T) {
 		found := false
 		for _, l := range lines[1:] {
 			f := strings.Fields(l)
-			if len(f) == 8 && f[0] == want[0] && f[1] == want[1] && f[2] == want[2] && f[3] == want[3] && f[4] == want[4] && f[6] == want[5] && f[7] == want[6] {
+			if len(f) == 9 && f[8] == "-" && f[0] == want[0] && f[1] == want[1] && f[2] == want[2] && f[3] == want[3] && f[4] == want[4] && f[6] == want[5] && f[7] == want[6] {
 				found = true
 			}
 		}

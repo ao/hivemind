@@ -125,6 +125,10 @@ func TestMetricsMatchStore(t *testing.T) {
 	}
 	e.m.ObserveReconcile(30*time.Millisecond, nil)
 	e.m.ObserveReconcile(2*time.Second, errors.New("boom"))
+	certExpiry := time.Unix(1_900_000_000, 0)
+	if err := e.st.RecordNodeCert(ctx, testNode, certExpiry); err != nil {
+		t.Fatal(err)
+	}
 
 	h := e.srv.Handler()
 	for _, p := range []string{"/v1/apps", "/v1/apps/web", "/v1/apps/api", "/v1/apps/nope", "/v1/apps/also-nope"} {
@@ -148,6 +152,7 @@ func TestMetricsMatchStore(t *testing.T) {
 		metrics.Key("hivemind_container_restarts_total", "app", "web", "replica", "2"):                          5,
 		metrics.Key("hivemind_node_lease_age_seconds", "node", testNode):                                        42.5,
 		metrics.Key("hivemind_node_lease_age_seconds", "node", oddNode):                                         42.5,
+		metrics.Key("hivemind_node_cert_expiry_timestamp_seconds", "node", testNode):                            1_900_000_000,
 		metrics.Key("hivemind_reconcile_duration_seconds_bucket", "le", "0.025"):                                0,
 		metrics.Key("hivemind_reconcile_duration_seconds_bucket", "le", "0.05"):                                 1,
 		metrics.Key("hivemind_reconcile_duration_seconds_bucket", "le", "1"):                                    1,
@@ -169,6 +174,10 @@ func TestMetricsMatchStore(t *testing.T) {
 			t.Errorf("%s = %v (present %v), want %v", k, g, ok, v)
 		}
 	}
+	// A node with no certificate record has no expiry series.
+	if _, ok := got[metrics.Key("hivemind_node_cert_expiry_timestamp_seconds", "node", oddNode)]; ok {
+		t.Error("a node without a certificate record has an expiry series")
+	}
 	// Nothing for the deleted app, and no series per raw path.
 	for k := range got {
 		if strings.Contains(k, `"gone"`) || strings.Contains(k, "nope") {
@@ -180,7 +189,8 @@ func TestMetricsMatchStore(t *testing.T) {
 	}
 	// Every family has HELP and TYPE, and the odd node ID is escaped on one line.
 	for _, fam := range []string{"hivemind_apps", "hivemind_replicas_desired", "hivemind_replicas_running", "hivemind_replicas_ready",
-		"hivemind_container_restarts_total", "hivemind_node_lease_age_seconds", "hivemind_reconcile_duration_seconds",
+		"hivemind_container_restarts_total", "hivemind_node_lease_age_seconds", "hivemind_node_cert_expiry_timestamp_seconds",
+		"hivemind_reconcile_duration_seconds",
 		"hivemind_reconcile_errors_total", "hivemind_http_requests_total"} {
 		if !strings.Contains(text, "# HELP "+fam+" ") || !strings.Contains(text, "# TYPE "+fam+" ") {
 			t.Errorf("family %s lacks HELP or TYPE", fam)

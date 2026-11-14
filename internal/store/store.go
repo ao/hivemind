@@ -92,6 +92,9 @@ type Node struct {
 	// MinReady after it. The cluster's own node is always ready since the
 	// start of time.
 	ReadySince time.Time
+	// CertNotAfter is when the node's certificate expires, as the server
+	// last recorded it. Zero means there is no record.
+	CertNotAfter time.Time
 }
 
 // Status is one container as a node last reported it. A replica that has no
@@ -656,7 +659,8 @@ func (s *Store) GetNode(ctx context.Context, id string) (Node, error) {
 func (s *Store) ListNodes(ctx context.Context) ([]Node, error) { return listNodes(ctx, s.db) }
 
 func listNodes(ctx context.Context, q querier) ([]Node, error) {
-	rows, err := q.QueryContext(ctx, `SELECT id, name, cpu, memory, last_lease, ready_since FROM nodes ORDER BY id`)
+	rows, err := q.QueryContext(ctx, `SELECT n.id, n.name, n.cpu, n.memory, n.last_lease, n.ready_since, coalesce(c.not_after, 0)
+		FROM nodes n LEFT JOIN node_certs c ON c.id = n.id ORDER BY n.id`)
 	if err != nil {
 		return nil, err
 	}
@@ -664,11 +668,14 @@ func listNodes(ctx context.Context, q querier) ([]Node, error) {
 	var out []Node
 	for rows.Next() {
 		var n Node
-		var lease, ready int64
-		if err := rows.Scan(&n.ID, &n.Name, &n.CPU, &n.Memory, &lease, &ready); err != nil {
+		var lease, ready, certNA int64
+		if err := rows.Scan(&n.ID, &n.Name, &n.CPU, &n.Memory, &lease, &ready, &certNA); err != nil {
 			return nil, err
 		}
 		n.LastLease, n.ReadySince = time.Unix(0, lease), time.Unix(0, ready)
+		if certNA != 0 {
+			n.CertNotAfter = time.Unix(0, certNA)
+		}
 		out = append(out, n)
 	}
 	return out, rows.Err()

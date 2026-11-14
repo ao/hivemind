@@ -246,6 +246,11 @@ List the nodes: ID, name, CPU and memory as each node's Docker daemon reports
 them, the age of its lease, whether it is ready or lost, and how many replicas
 are placed on it. A node is lost when its lease is more than 15 s old.
 
+CERT EXPIRES is when the node's certificate expires, as the server recorded it
+when it issued the certificate. A worker renews its certificate once two thirds
+of its lifetime have passed, so a date less than four months away means the
+node has not renewed. "-" means the server has no record yet.
+
 ```
 hivemind nodes [flags]
 ```

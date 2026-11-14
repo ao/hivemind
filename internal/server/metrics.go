@@ -180,6 +180,14 @@ func (s *Server) writeMetrics(r *http.Request, b *bytes.Buffer) error {
 		}
 		w.Sample("hivemind_node_lease_age_seconds", metrics.L("node", n.ID), age)
 	}
+	w.Family("hivemind_node_cert_expiry_timestamp_seconds",
+		"Unix time at which the node's certificate expires, as the server last recorded it. Nodes without a record are left out.",
+		metrics.TypeGauge)
+	for _, n := range nodes {
+		if !n.CertNotAfter.IsZero() {
+			w.Sample("hivemind_node_cert_expiry_timestamp_seconds", metrics.L("node", n.ID), float64(n.CertNotAfter.Unix()))
+		}
+	}
 
 	w.Family("hivemind_reconcile_duration_seconds", "Wall time of the local agent's reconcile passes.", metrics.TypeHistogram)
 	s.metrics.reconcile.Write(w, "hivemind_reconcile_duration_seconds")

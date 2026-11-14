@@ -55,6 +55,10 @@ type workerState struct {
 type joinedWorker struct {
 	state  workerState
 	tlsCfg *tls.Config
+	// ca and holder are for renewal: tlsCfg reads the client certificate
+	// from holder at each handshake.
+	ca     *pki.CA
+	holder *pki.CertHolder
 }
 
 func joinCmd() *cobra.Command {
@@ -246,6 +250,9 @@ func loadWorkerState(dir string) (*joinedWorker, error) {
 	if err != nil {
 		return nil, fmt.Errorf("%s: server %q: %w", workerStateFile, st.Server, err)
 	}
+	if err := recoverRenewal(dir); err != nil {
+		return nil, fmt.Errorf("finishing an interrupted certificate renewal: %w", err)
+	}
 
 	keyPath := filepath.Join(dir, workerKeyFile)
 	info, err := os.Lstat(keyPath)
@@ -294,6 +301,9 @@ func loadWorkerState(dir string) (*joinedWorker, error) {
 	if err != nil {
 		return nil, err
 	}
+	if id, err := pki.NodeIDFromCert(leaf); err == nil && id == st.NodeID && time.Now().After(leaf.NotAfter) {
+		return nil, certExpiredError(id, leaf.NotAfter)
+	}
 	pool := x509.NewCertPool()
 	pool.AddCert(caCert)
 	if _, err := leaf.Verify(x509.VerifyOptions{Roots: pool, KeyUsages: []x509.ExtKeyUsage{x509.ExtKeyUsageClientAuth}}); err != nil {
@@ -306,11 +316,12 @@ func loadWorkerState(dir string) (*joinedWorker, error) {
 	if err != nil {
 		return nil, err
 	}
-	tlsCfg, err := pki.ClientTLSConfig(ca, tlsCert, host)
+	holder := pki.NewCertHolder(tlsCert)
+	tlsCfg, err := pki.ClientTLSConfigFrom(ca, holder, host)
 	if err != nil {
 		return nil, err
 	}
-	return &joinedWorker{state: st, tlsCfg: tlsCfg}, nil
+	return &joinedWorker{state: st, tlsCfg: tlsCfg, ca: ca, holder: holder}, nil
 }
 
 // runWorker runs the agent for the joined node in dir until ctx ends. It
@@ -325,6 +336,10 @@ func runWorker(ctx context.Context, cfg *config.Config, log *slog.Logger, rt run
 	if err != nil {
 		return err
 	}
+	renewCtx, stopRenew := context.WithCancel(ctx)
+	defer stopRenew()
+	go (&renewer{dir: cfg.DataDir, nodeID: w.state.NodeID, ca: w.ca, holder: w.holder, client: client,
+		log: log.With("component", "renew"), now: time.Now}).run(renewCtx)
 	hostname, _ := os.Hostname()
 	register := func(ctx context.Context) error {
 		info, err := rt.Info(ctx)
