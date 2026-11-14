@@ -20,7 +20,7 @@ Notable changes to hivemind, newest first. Versions follow [Semantic Versioning]
 - Routing reverses part of the v2 scope (decision 2 in [PLAN.md](docs/PLAN.md)), which had host-port networking and no proxy. Host ports work as before, and an app without routes is unchanged, but hivemind now runs a reverse proxy when `--route-addr` is given.
 - The router is the one listener that may bind `0.0.0.0`. It has no authentication, because it serves the apps' public traffic. `--route-addr` has no default. Every other listener still refuses a wildcard.
 - A worker can read every routed host's TLS private key and the ACME account key over the node API, whether or not it runs a router. [docs/security.md](docs/security.md#what-a-compromised-worker-can-do) lists what that means for a compromised worker.
-- Workers older than 2.2 take no routed replicas, because they report no address. A worker's router needs a 2.2 server.
+- Workers older than 2.2 take no routed replicas, because they report no address. A rollout that adds routes to an app moves its replicas off such workers, rather than in place. A 2.2 worker whose server is older registers without its address, as that server's decoder refuses the field. A worker's router needs a 2.2 server.
 
 - `hivemind node remove` of a node that is ineligible and runs nothing, as after a drain, needs no `--force`, though the node still renews its lease.
 - `serve`, `init` and `join` no longer accept `--server`, and `serve` and `init` no longer accept `--token`. They never used them. `logs` no longer accepts `--json`, which it ignored. Passing one of these flags is now an error. `join --token` is unchanged.

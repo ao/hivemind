@@ -12,6 +12,7 @@ import (
 	"io/fs"
 	"log/slog"
 	"net"
+	"net/http"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -356,7 +357,8 @@ func runWorker(ctx context.Context, cfg *config.Config, log *slog.Logger, rt run
 		if err != nil {
 			return fmt.Errorf("reading the Docker host: %w", err)
 		}
-		return client.Register(ctx, w.state.NodeID, nodeapi.Register{Name: hostname, CPU: info.NCPU, Memory: info.MemTotal, Address: addr})
+		reg := nodeapi.Register{Name: hostname, CPU: info.NCPU, Memory: info.MemTotal, Address: addr}
+		return registerWith(ctx, client, w.state.NodeID, reg, log)
 	}
 	for {
 		var err error
@@ -431,6 +433,29 @@ func runWorker(ctx context.Context, cfg *config.Config, log *slog.Logger, rt run
 		return cause // the router failed
 	}
 	return err
+}
+
+// registrar is the part of the node API client that registers a node.
+type registrar interface {
+	Register(ctx context.Context, nodeID string, g nodeapi.Register) error
+}
+
+// registerWith registers the node. A server older than 2.2 refuses the
+// address field with 400, as it refuses any field it does not know, so a
+// refusal of a registration with an address is tried once more without it:
+// that server places no routed replicas anyway.
+func registerWith(ctx context.Context, c registrar, nodeID string, reg nodeapi.Register, log *slog.Logger) error {
+	err := c.Register(ctx, nodeID, reg)
+	var refused *nodeapi.RefusedError
+	if !errors.As(err, &refused) || refused.Code != http.StatusBadRequest || reg.Address == "" {
+		return err
+	}
+	reg.Address = ""
+	if err := c.Register(ctx, nodeID, reg); err != nil {
+		return err
+	}
+	log.Warn("the server refused this node's address, as a server older than 2.2 does; this node takes no routed replicas")
+	return nil
 }
 
 // removedError is what a worker exits with once the server says it was

@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"log/slog"
 	"net/http"
 	"path/filepath"
 	"strconv"
@@ -14,6 +15,7 @@ import (
 
 	"github.com/ao/hivemind/internal/auth"
 	"github.com/ao/hivemind/internal/config"
+	"github.com/ao/hivemind/internal/nodeapi"
 )
 
 func TestServerNodeAddress(t *testing.T) {
@@ -33,6 +35,46 @@ func TestServerNodeAddress(t *testing.T) {
 	}
 	if err := checkBoundAddress("[::1]:4484", "127.0.0.1"); err == nil || !strings.Contains(err.Error(), "give --advertise as an IP address") {
 		t.Errorf("a bound address unlike the node's: %v", err)
+	}
+}
+
+// fakeRegistrar refuses a registration with an address, as a 2.1 server's
+// decoder refuses a field it does not know, when old is set.
+type fakeRegistrar struct {
+	old   bool
+	calls []nodeapi.Register
+}
+
+func (f *fakeRegistrar) Register(_ context.Context, _ string, g nodeapi.Register) error {
+	f.calls = append(f.calls, g)
+	if f.old && g.Address != "" {
+		return &nodeapi.RefusedError{Code: http.StatusBadRequest, Status: "400 Bad Request", Message: "invalid request body"}
+	}
+	return nil
+}
+
+func TestRegisterFallsBackForAnOlderServer(t *testing.T) {
+	ctx := context.Background()
+	logs := &syncLog{}
+	log := slog.New(slog.NewTextHandler(logs, nil))
+	reg := nodeapi.Register{Name: "w", CPU: 2, Memory: 1 << 30, Address: "10.0.0.6"}
+
+	newer := &fakeRegistrar{}
+	if err := registerWith(ctx, newer, "node-w", reg, log); err != nil || len(newer.calls) != 1 || newer.calls[0].Address != "10.0.0.6" {
+		t.Fatalf("a 2.2 server: %v, %+v", err, newer.calls)
+	}
+	older := &fakeRegistrar{old: true}
+	if err := registerWith(ctx, older, "node-w", reg, log); err != nil || len(older.calls) != 2 || older.calls[1].Address != "" {
+		t.Fatalf("an older server: %v, %+v", err, older.calls)
+	}
+	if !strings.Contains(logs.String(), "takes no routed replicas") {
+		t.Errorf("the fallback was not logged: %s", logs.String())
+	}
+	// Without an address there is nothing to retry.
+	noAddr := &fakeRegistrar{old: true}
+	reg.Address = ""
+	if err := registerWith(ctx, noAddr, "node-w", reg, log); err != nil || len(noAddr.calls) != 1 {
+		t.Fatalf("no address: %v, %+v", err, noAddr.calls)
 	}
 }
 
