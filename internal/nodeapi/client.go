@@ -209,7 +209,19 @@ func statusError(resp *http.Response) error {
 	if resp.StatusCode == http.StatusUnauthorized && e.Error == CertInvalidMessage {
 		return ErrCertInvalid
 	}
-	return fmt.Errorf("the server refused the request (%s): %s", resp.Status, msg)
+	return &RefusedError{Code: resp.StatusCode, Status: resp.Status, Message: msg}
+}
+
+// RefusedError is a refusal from the server that has no error of its own:
+// the status and the server's message.
+type RefusedError struct {
+	Code    int
+	Status  string
+	Message string
+}
+
+func (e *RefusedError) Error() string {
+	return fmt.Sprintf("the server refused the request (%s): %s", e.Status, e.Message)
 }
 
 // Join presents token and csr to the join listener at addr, which is host:port
