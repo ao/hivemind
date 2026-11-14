@@ -41,6 +41,9 @@ var ErrNodeRemoved = errors.New(RemovedMessage)
 type Client struct {
 	base string
 	http *http.Client
+	// stream shares the transport but has no overall timeout, for the log
+	// poll, which sets its own, and for log streams, which run until ended.
+	stream *http.Client
 }
 
 // NewClient returns a client for the server at base, such as
@@ -51,8 +54,12 @@ func NewClient(base string, tlsCfg *tls.Config) (*Client, error) {
 		return nil, fmt.Errorf("server URL %q must start with https://", base)
 	}
 	tr := &http.Transport{TLSClientConfig: tlsCfg}
-	return &Client{base: strings.TrimRight(base, "/"), http: &http.Client{Transport: tr, Timeout: clientTimeout}}, nil
+	return &Client{base: strings.TrimRight(base, "/"), http: &http.Client{Transport: tr, Timeout: clientTimeout},
+		stream: &http.Client{Transport: tr}}, nil
 }
+
+// CloseIdleConnections closes the client's idle connections to the server.
+func (c *Client) CloseIdleConnections() { c.http.CloseIdleConnections() }
 
 // Register tells the server the node's name and capacity.
 func (c *Client) Register(ctx context.Context, nodeID string, g Register) error {
