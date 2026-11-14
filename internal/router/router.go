@@ -137,11 +137,18 @@ func New(cfg Config) (*Router, error) {
 	// the port 80 handler: it tries to bind ListenHost:AltHTTPPort, which is
 	// this same address, and on "address already in use" assumes the
 	// listener there answers challenges (robustTryListen in solvers.go).
-	rt.httpLn, err = net.Listen("tcp", net.JoinHostPort(ip.String(), strconv.Itoa(cfg.HTTPPort)))
+	//
+	// The network is the address's family: net.Listen("tcp", "0.0.0.0:443")
+	// would open a dual-stack socket on [::], which takes IPv6 as well.
+	network := "tcp4"
+	if !ip.Is4() {
+		network = "tcp6"
+	}
+	rt.httpLn, err = net.Listen(network, net.JoinHostPort(ip.String(), strconv.Itoa(cfg.HTTPPort)))
 	if err != nil {
 		return nil, fmt.Errorf("router: http listener: %w", err)
 	}
-	rt.tlsLn, err = net.Listen("tcp", net.JoinHostPort(ip.String(), strconv.Itoa(cfg.HTTPSPort)))
+	rt.tlsLn, err = net.Listen(network, net.JoinHostPort(ip.String(), strconv.Itoa(cfg.HTTPSPort)))
 	if err != nil {
 		rt.httpLn.Close()
 		return nil, fmt.Errorf("router: https listener: %w", err)
