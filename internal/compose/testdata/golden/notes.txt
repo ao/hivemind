@@ -1,0 +1,1 @@
+services.web.ports[0]: published on 127.0.0.1:8080 only, the hivemind default; Compose would publish it on every interface. To publish elsewhere, write "0.0.0.0:8080:80" or another address

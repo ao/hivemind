@@ -25,6 +25,7 @@ hivemind
 | Command | Description |
 |---|---|
 | `backup` | Write a backup of the server's state to a file |
+| `compose` | Convert a Docker Compose file to apps, and deploy or delete them |
 | `delete` | Delete an app and stop its containers |
 | `deploy` | Create or update an app |
 | `init` | Create a cluster on this machine |
@@ -74,6 +75,92 @@ hivemind backup <file> [flags]
 | `--client-config` | string | - | `HIVEMIND_CLIENT_CONFIG` | client config file (env HIVEMIND_CLIENT_CONFIG; default $XDG_CONFIG_HOME/hivemind/config.yaml or ~/.config/hivemind/config.yaml) |
 | `--data-dir` | string | see description | `HIVEMIND_DATA_DIR` | the server's data directory (env HIVEMIND_DATA_DIR; default /var/lib/hivemind for root, else ~/.local/state/hivemind). The default is /var/lib/hivemind for root, and $XDG_STATE_HOME/hivemind or ~/.local/state/hivemind for other users. |
 | `--json` | bool | - | - | print JSON instead of a table |
+| `--server` | string | - | `HIVEMIND_SERVER` | server URL (env HIVEMIND_SERVER; default from the client config, then http://127.0.0.1:4483) |
+| `--token` | string | - | `HIVEMIND_TOKEN` | API token (env HIVEMIND_TOKEN; default from the client config's token file) |
+
+### hivemind compose
+
+Turn each service in a Docker Compose file into an app:
+
+  hivemind compose convert compose.yaml   print the app specs
+  hivemind compose deploy compose.yaml    create or update the apps
+  hivemind compose delete compose.yaml    delete the apps
+
+Only part of Compose is read. Any other key is refused, with its path and a
+reason, and every refusal is listed in one error. Variables come from the
+environment, then from a .env file beside the compose file, and a variable
+that is not set and has no default is an error. A port with no address is
+published on 127.0.0.1, where Compose would publish it on every interface.
+Apps do not find each other by service name. See docs/compose.md.
+
+```
+hivemind compose
+```
+
+| Command | Description |
+|---|---|
+| `convert` | Print the app specs for a compose file |
+| `delete` | Delete the apps in a compose file |
+| `deploy` | Create or update the apps in a compose file |
+
+#### hivemind compose convert
+
+Print the app spec for each service in a compose file, as YAML, one
+document per service, sorted by name. Each document is a file that
+hivemind deploy -f reads. - reads the compose file from standard input, and
+the .env file from the working directory.
+
+Nothing is sent to the server. A note on standard error names each port that
+is published on 127.0.0.1 because the file gives it no address.
+
+```
+hivemind compose convert <file> [flags]
+```
+
+| Flag | Type | Default | Environment | Description |
+|---|---|---|---|---|
+| `--prefix` | string | - | - | name each app PREFIX-<service> instead of <service> |
+
+#### hivemind compose delete
+
+Delete the app for each service in a compose file, in name order, printing a
+line for each. Only the service names are read, so the file's variables need
+not be set, and keys that convert would refuse are ignored. An app that does
+not exist is reported as not found and skipped. Volumes are kept, as
+hivemind delete keeps them.
+
+```
+hivemind compose delete <file> [flags]
+```
+
+| Flag | Type | Default | Environment | Description |
+|---|---|---|---|---|
+| `--ca-cert` | string | - | - | PEM file of the CA certificates to trust for an https server, instead of the system's (env HIVEMIND_CA_CERT; default from the client config) |
+| `--client-config` | string | - | `HIVEMIND_CLIENT_CONFIG` | client config file (env HIVEMIND_CLIENT_CONFIG; default $XDG_CONFIG_HOME/hivemind/config.yaml or ~/.config/hivemind/config.yaml) |
+| `--json` | bool | - | - | print JSON instead of a table |
+| `--prefix` | string | - | - | name each app PREFIX-<service> instead of <service> |
+| `--server` | string | - | `HIVEMIND_SERVER` | server URL (env HIVEMIND_SERVER; default from the client config, then http://127.0.0.1:4483) |
+| `--token` | string | - | `HIVEMIND_TOKEN` | API token (env HIVEMIND_TOKEN; default from the client config's token file) |
+
+#### hivemind compose deploy
+
+Convert a compose file, check every app, and then create or update each one
+as hivemind deploy -f does, in name order, printing a line for each.
+
+Nothing is sent until every service converts and its spec is valid. If the
+server refuses an app, the command stops there: the apps before it stay
+deployed, and the error names them.
+
+```
+hivemind compose deploy <file> [flags]
+```
+
+| Flag | Type | Default | Environment | Description |
+|---|---|---|---|---|
+| `--ca-cert` | string | - | - | PEM file of the CA certificates to trust for an https server, instead of the system's (env HIVEMIND_CA_CERT; default from the client config) |
+| `--client-config` | string | - | `HIVEMIND_CLIENT_CONFIG` | client config file (env HIVEMIND_CLIENT_CONFIG; default $XDG_CONFIG_HOME/hivemind/config.yaml or ~/.config/hivemind/config.yaml) |
+| `--json` | bool | - | - | print JSON instead of a table |
+| `--prefix` | string | - | - | name each app PREFIX-<service> instead of <service> |
 | `--server` | string | - | `HIVEMIND_SERVER` | server URL (env HIVEMIND_SERVER; default from the client config, then http://127.0.0.1:4483) |
 | `--token` | string | - | `HIVEMIND_TOKEN` | API token (env HIVEMIND_TOKEN; default from the client config's token file) |
 

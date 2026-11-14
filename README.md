@@ -94,6 +94,10 @@ A token works once, and it expires after 24 hours. `hivemind join-token --ttl 1h
 
 `hivemind nodes` lists the nodes. To take a machine out of the cluster, stop hivemind on it, then run `hivemind node remove <id>` on the server. Its replicas are placed on other nodes, and the server refuses its certificate from then on. See [concepts](docs/concepts.md#removing-a-node).
 
+## Compose files
+
+In the unreleased 2.2.0, `hivemind compose deploy compose.yaml` makes an app of each service in a Docker Compose file, and `hivemind compose convert compose.yaml` prints the app specs instead. Only part of Compose is read, and any other key is refused with a reason. A port with no address is published on `127.0.0.1`, not on every interface as Compose does, and apps do not find each other by service name. See [docs/compose.md](docs/compose.md).
+
 ## Network and authentication
 
 - The API listens on `127.0.0.1:4483`. Every route except `GET /healthz` needs the admin token that `init` prints. A non-loopback `--api-addr` needs TLS as well. With a certificate from a private CA, give the CLI that CA with `--ca-cert` or `HIVEMIND_CA_CERT`.
@@ -117,6 +121,7 @@ A token works once, and it expires after 24 hours. `hivemind join-token --ttl 1h
 
 - [Quick start](docs/quick-start.md)
 - [Concepts](docs/concepts.md)
+- [Compose files](docs/compose.md)
 - [Security](docs/security.md)
 - [Backup and restore](docs/backup.md)
 - [CLI reference](docs/cli.md)

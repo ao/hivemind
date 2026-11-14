@@ -47,6 +47,7 @@ func newRoot(stdin io.Reader, stdout, stderr io.Writer) *cobra.Command {
 		joinCmd(),
 		joinTokenCmd(),
 		deployCmd(),
+		composeCmd(),
 		statusCmd(),
 		logsCmd(),
 		scaleCmd(),

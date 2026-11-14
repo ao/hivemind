@@ -131,6 +131,8 @@ On a single node every move is in place: the replica being moved is `pending` wh
 
 An app is a desired state: a container image, the command, environment, ports, volumes, resources, a health check, and a replica count. Replicas are numbered from 0 to the count minus one. The count is 1 by default and may be at most 100.
 
+`hivemind compose` makes one app of each service in a Docker Compose file. The CLI does the conversion, so the server stores and runs those apps like any other. See [Compose files](compose.md).
+
 The spec limits are checked on every write. Among them: names are up to 32 lowercase letters, digits and dashes, an image is up to 255 characters, there are at most 128 environment variables and 64 KiB of them in total, at most 32 ports and 16 volumes.
 
 ## Generations
