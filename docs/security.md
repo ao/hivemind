@@ -6,12 +6,20 @@ This lists every listener the code opens, what each one exposes, and the files h
 
 | Listener | Default bind | Auth | Exposes |
 |---|---|---|---|
-| API | `127.0.0.1:4483` (`--api-addr`) | Bearer admin token, compared in constant time, or a session cookie that the token bought at `POST /v1/session`. A cookie request to `POST`, `PUT`, `PATCH` or `DELETE` also needs the session's CSRF token. `GET /healthz` needs no token and returns only `{"status":"ok"}` | Apps and their specs, including environment values. Status. Logs of this server's containers. Join token issuance. Nodes, and their removal. Metrics. A backup of the data directory, with the CA private key and the admin token, sent only over TLS or to a loopback client |
+| API | `127.0.0.1:4483` (`--api-addr`) | Bearer admin token, compared in constant time, or a session cookie that the token bought at `POST /v1/session`. A cookie request to `POST`, `PUT`, `PATCH` or `DELETE` also needs the session's CSRF token. `GET /healthz` needs no token and returns only `{"status":"ok"}` | Apps and their specs, including environment values. Status. Logs of every node's containers. Join token issuance. Nodes, and their removal. Metrics. A backup of the data directory, with the CA private key and the admin token, sent only over TLS or to a loopback client |
 | Metrics | Off. `--metrics-addr` starts it, and it must be loopback | The admin token | Prometheus metrics only |
-| Node listener | Off. Starts with `--advertise` on that address, port 4484 (`--cluster-port`) | TLS 1.3, and a client certificate that chains to the cluster CA, names a node that was not removed, and is valid by the server's clock at each request. The node ID must match the one in the path | To a node: its own assignments, which include each replica's full spec and environment values. It can also report its own containers, register its own name and capacity, and get a new certificate for its own ID |
+| Node listener | Off. Starts with `--advertise` on that address, port 4484 (`--cluster-port`) | TLS 1.3, and a client certificate that chains to the cluster CA, names a node that was not removed, and is valid by the server's clock at each request. The node ID must match the one in the path | To a node: its own assignments, which include each replica's full spec and environment values. It can also report its own containers, register its own name and capacity, get a new certificate for its own ID, take the log requests queued for it, and send the logs it was asked for |
 | Join listener | Off. Starts with `--advertise` on that address, port 4485 | TLS 1.3 with the server certificate. No client certificate. The join token is the credential. Only `POST /join` is routed | The cluster CA certificate, and a node certificate for each valid token |
 
 Listeners bind to the advertise address only. A wildcard address is refused at startup, both by config validation and when the socket is bound. The worker opens no listener.
+
+### Logs from workers
+
+The worker has no listener, so the server cannot connect to it to ask for a log. The worker asks instead. It keeps one request open on the node listener, `GET /node/v1/nodes/{id}/logs/requests`, and the server answers it, within 25 seconds, with a log request or with nothing. When `hivemind logs` names a replica on that worker, the server queues a request with a random 128-bit ID for the replica's node. The worker takes it, reads the container's log from its own Docker daemon, and sends it back as the body of `POST /node/v1/nodes/{id}/logs/streams/{request}`. The server copies the body to the user's response as it arrives, so nothing waits in memory for the whole log.
+
+Both routes are on the node listener, behind its client certificate and the denylist, like every other node route, and the node ID in the path must be the one in the certificate. A node gets only the requests queued for its own ID. A stream for a request queued for another node gets `403`, and leaves that request as it was. A request ID that is not waiting for a stream gets `404`, so an ID that timed out, or one already used, cannot be replayed. Each node can have 16 log requests queued or streaming and 4 polls open at once. Past either cap, the API or the node gets `429`.
+
+Kubernetes and Nomad read logs the other way round. The kubelet serves logs on its own HTTPS port, and the API server connects to it. A Nomad client serves its own HTTP API, and a Nomad server that cannot reach a client forwards the request over the connection the client already holds to it. Both need a listener on the node, or a multiplexed connection. Here the worker dials every connection, each is an ordinary HTTPS request with a fixed timeout or a fixed end, and the worker still listens on nothing.
 
 The API TLS flags apply to the API only. The CLI checks a TLS API's certificate against the system's roots, or against the PEM file in `--ca-cert`, `HIVEMIND_CA_CERT` or the client config's `ca-cert`, and checks that it names the host in the server URL. It has no option to skip the check. Its minimum is TLS 1.2. See [the API](api.md#tls).
 
@@ -59,6 +67,8 @@ Assume an attacker has the worker's data directory, or root on the worker. The c
 - Register any name of up to 253 printable characters, and any capacity up to the limits the server checks: 1,048,576 CPUs and 2^50 bytes of memory. Placement trusts these figures, so the worker can attract more replicas, and so more environment values, than it has room for.
 - Run whatever its Docker daemon will run, which is the worker's own host.
 - Renew its own certificate, with a key of its choice, for as long as it is not removed. Removal stops that: the renewal route refuses a removed node like every other route.
+- Send any text as the log of a replica placed on it, or refuse to send it. Logs from a worker are what the worker says they are.
+- Hold 4 log polls and 16 log streams open on the server.
 
 The worker cannot do the following.
 
@@ -66,7 +76,7 @@ The worker cannot do the following.
 - Obtain a certificate for another node or for the server. It has no CA key, and the server ignores names and extensions in a certificate request. A renewal is issued for the ID in the certificate the worker presents, and the route checks that the ID in its path is that one.
 - Join another machine, or pose as the server. Its certificate names no host, so a machine that checks the server's name rejects it. It cannot issue join tokens.
 - Reach the API or the admin token, the CA key, or the database.
-- Read the status or logs of replicas on other machines.
+- Read the status or logs of replicas on other machines, or take or answer the log requests queued for another node.
 
 ## Revocation by removal
 

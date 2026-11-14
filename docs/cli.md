@@ -221,7 +221,12 @@ hivemind join-token [flags]
 
 ### hivemind logs
 
-Print the log of one replica's container, replica 0 by default. -f keeps the stream open until Ctrl-C.
+Print the log of one replica's container, replica 0 by default. -f keeps the
+stream open until Ctrl-C or until the container exits.
+
+The replica can run on any node. The server reads a worker's replica through
+that worker, which must be running and of this version: a worker that does not
+answer in 10 seconds is reported by its node ID.
 
 ```
 hivemind logs <app> [replica] [flags]

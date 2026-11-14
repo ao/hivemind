@@ -61,13 +61,15 @@ Every error is a JSON object with one field:
 | 400 | Invalid JSON, an unknown field, an empty body, an invalid app spec, an invalid name or query value |
 | 401 | No valid token or session |
 | 403 | A cookie request to an unsafe method without the session's CSRF token: `{"error":"csrf_token_invalid"}` |
-| 404 | No such app or node, or no container for the replica on the server's node. Unknown routes give `{"error":"not found"}` |
+| 404 | No such app or node, or no container for the replica on its node. Unknown routes give `{"error":"not found"}` |
 | 405 | Wrong method for a known path: `{"error":"method not allowed"}` |
 | 409 | Removing the server's own node, or a node that still renews its lease without `force=true` |
 | 413 | Request body over 1 MiB |
-| 429 | Too many failed logins from this address |
+| 429 | Too many failed logins from this address, or too many log streams open to one node |
 | 500 | Unexpected failure. The message is `internal error`, and the details go to the server log |
-| 503 | The container engine cannot be reached: `the container engine is unavailable` |
+| 502 | A worker could not read a log, or broke the stream before it started |
+| 503 | The container engine cannot be reached: `the container engine is unavailable`. For logs, also a lost node, the engine on the replica's node, or a server without `--advertise` |
+| 504 | A worker did not answer a log request in 10 seconds |
 
 ## Limits
 
@@ -116,7 +118,7 @@ The archive holds the CA private key, so the server sends it only over TLS, or t
 
 ## Node API (internal)
 
-Workers talk to the server over a second API, on the cluster port that `serve --advertise` opens. It has routes for a worker to join, register, read its assignments, report its containers and renew its certificate. It is internal. Its routes, bodies and errors may change in any release, so this document does not describe them, except that a removed node gets `403` on every one of them, and a certificate that has expired by the server's clock gets `401`. The listeners and the trust model are in [security](security.md).
+Workers talk to the server over a second API, on the cluster port that `serve --advertise` opens. It has routes for a worker to join, register, read its assignments, report its containers, renew its certificate, and take and answer log requests. It is internal. Its routes, bodies and errors may change in any release, so this document does not describe them, except that a removed node gets `403` on every one of them, and a certificate that has expired by the server's clock gets `401`. The listeners and the trust model are in [security](security.md).
 
 ## Routes
 
@@ -222,7 +224,17 @@ The spec is the JSON form of the YAML file that `deploy -f` reads. Unknown field
 - `tail` (default 0): the number of lines from the end. 0 returns the whole log.
 - `follow` (default false): keep the stream open until the client disconnects, or the container exits.
 
-The log is `text/plain`. Standard output and standard error are both written to the body. The server reads the replica's container on its own node. It picks the running container, or else the one with the highest generation. A replica that has no container on the server's node gets `404`, and that includes every replica placed on a worker. A worker has no API, so read those logs with `docker logs` on the worker.
+The log is `text/plain`. Standard output and standard error are both written to the body, in the order the engine wrote them. The node that runs the replica reads its container's log. It picks the running container, or else the one with the highest generation. A replica on the server's node, or with no node, is read on the server.
+
+A replica on a worker is read by that worker, which sends the log to the server as it reads it. Standard output and standard error stay separate frames on the way, and the body is the same as for a replica on the server. The worker has no listener: it takes the request over a poll it keeps open to the server. [Security](security.md#logs-from-workers) describes the routes. The errors that are particular to a worker:
+
+- `404` when the worker has no container for the replica.
+- `503` when the node is lost (its lease is more than 15 s old), when the container engine on the node is unavailable, or when the server runs without `--advertise` and so cannot reach workers.
+- `504` with `worker node-... did not answer within 10s; is it running?` when the worker did not take the request and start the stream in 10 seconds. A worker of version 2.0.0 does not take log requests, so this is the answer for its replicas too.
+- `429` when the node already has 16 log streams open.
+- `502` when the worker could not read the log for another reason.
+
+With `follow`, closing the request ends the worker's stream and the log read on the worker. The server copies a worker's stream to the response as it arrives and keeps none of it, so a user who reads slowly slows the worker down.
 
 ## Metrics
 
