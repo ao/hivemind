@@ -68,7 +68,9 @@ func NewClient(base string, tlsCfg *tls.Config) (*Client, error) {
 // swapTransport sends each request on the transport it holds.
 // ResetConnections replaces that transport, so no request made after a reset
 // reuses a connection opened before it.
-type swapTransport struct{ cur atomic.Pointer[http.Transport] }
+type swapTransport struct {
+	cur atomic.Pointer[http.Transport]
+}
 
 func (s *swapTransport) RoundTrip(r *http.Request) (*http.Response, error) {
 	return s.cur.Load().RoundTrip(r)
