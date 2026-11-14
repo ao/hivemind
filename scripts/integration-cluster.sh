@@ -17,6 +17,10 @@
 #   - Task 9: four replicas that publish host port 8080 land as three replicas
 #     on three different nodes, and the fourth stays pending with the
 #     host-port reason; each node answers on 127.0.0.1:8080
+#   - logs: hivemind logs on the server reads a spread replica on w1, with
+#     --tail and in full, stdout and stderr. With -f it shows a line written
+#     after it started, exits 0 on SIGINT, and the worker logs that its stream
+#     ended
 #   - Task 10: a worker is killed. Its replica of an app without ports runs on
 #     another node within 30 s. Its replica of the app with port 8080 stays
 #     pending with the host-port reason
@@ -172,6 +176,42 @@ cl_note "each node answers on 127.0.0.1:8080 for its web replica"
 # Task 10: spread has three replicas without ports, one per node.
 docker exec "$S" hivemind deploy --name spread --image nginx:alpine --replicas 3 >/dev/null || cl_fail "deploy spread"
 wait_for 90 spread_on_three || cl_fail "spread did not run on three nodes: $(app_rows spread | tr '\n' ';')"
+
+# Logs of a replica on a worker, read with hivemind logs on the server. The
+# marker requests go to nginx inside the replica's container. Each is a 404,
+# which nginx logs twice: the error on stderr and the access line on stdout.
+LOG_IDX=$(app_rows spread | awk -v n="$W1_ID" '$2 == n && $3 == "running" { print $1; exit }')
+[ -n "$LOG_IDX" ] || cl_fail "no spread replica runs on $W1_ID: $(app_rows spread | tr '\n' ';')"
+LOG_CTR=$(docker exec "$W1" docker ps -q --filter label=hivemind.app=spread --filter "label=hivemind.replica=$LOG_IDX")
+[ -n "$LOG_CTR" ] || cl_fail "no container for spread replica $LOG_IDX in $W1"
+mark() { docker exec "$W1" docker exec "$LOG_CTR" wget -q -O /dev/null "http://127.0.0.1/$1" || true; }
+streams_ended() { docker exec "$W1" grep -c 'log stream ended' /var/log/hivemind.log || true; }
+for i in 1 2 3 4 5 6; do mark "marker-$i"; done
+out=$(docker exec "$S" hivemind logs spread "$LOG_IDX" --tail 3 2>&1) || cl_fail "hivemind logs of a replica on $W1_ID: $out"
+[ "$(wc -l <<<"$out")" -eq 3 ] || cl_fail "--tail 3 printed $(wc -l <<<"$out") lines: $out"
+grep -q "GET /marker-6 " <<<"$out" || cl_fail "the tail of the log on $W1_ID has no marker-6: $out"
+grep -q "GET /marker-3 " <<<"$out" && cl_fail "--tail 3 printed marker-3, which is four lines from the end: $out"
+out=$(docker exec "$S" hivemind logs spread "$LOG_IDX" 2>&1) || cl_fail "hivemind logs without --tail: $out"
+for i in 1 2 3 4 5 6; do grep -q "GET /marker-$i " <<<"$out" || cl_fail "the full log has no marker-$i: $out"; done
+grep -q 'marker-6" failed' <<<"$out" || cl_fail "the full log has no stderr line for marker-6: $out"
+cl_note "hivemind logs on the server read spread replica $LOG_IDX on $W1_ID, with --tail 3 and in full, stdout and stderr"
+
+# Follow: a new line arrives through the stream, and SIGINT ends the command,
+# and the stream on the worker, which logs one line once its log read ends.
+before=$(streams_ended)
+docker exec -d "$S" sh -c "hivemind logs spread $LOG_IDX -f --tail 1 >/tmp/follow.out 2>&1; echo \"exit \$?\" >>/tmp/follow.out"
+wait_for 20 docker exec "$S" grep -q "GET /marker-6 " /tmp/follow.out || cl_fail "the followed log did not start: $(docker exec "$S" cat /tmp/follow.out)"
+mark marker-follow
+wait_for 20 docker exec "$S" grep -q "GET /marker-follow " /tmp/follow.out ||
+	cl_fail "the followed log did not show a new line: $(docker exec "$S" cat /tmp/follow.out)"
+[ "$(streams_ended)" -eq "$before" ] || cl_fail "the worker ended the followed stream before the user did"
+docker exec "$S" pkill -INT -f '^hivemind logs' || cl_fail "no hivemind logs process to stop"
+wait_for 10 docker exec "$S" grep -qx "exit 0" /tmp/follow.out ||
+	cl_fail "hivemind logs -f did not exit 0 on SIGINT: $(docker exec "$S" cat /tmp/follow.out)"
+stream_ended_since() { [ "$(streams_ended)" -gt "$before" ]; }
+wait_for 10 stream_ended_since ||
+	cl_fail "the worker's log stream did not end after SIGINT: $(docker exec "$W1" tail -n 5 /var/log/hivemind.log)"
+cl_note "hivemind logs -f followed a new line from $W1_ID, exited 0 on SIGINT, and the worker ended its stream"
 
 docker kill "$W2" >/dev/null
 killed_at=$(date +%s)
