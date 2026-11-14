@@ -173,6 +173,9 @@ func (s *Server) routes() {
 	r.HandleFunc("POST /v1/join-tokens", s.postJoinToken)
 	r.HandleFunc("GET /v1/nodes", s.listNodes)
 	r.HandleFunc("DELETE /v1/nodes/{id}", s.removeNode)
+	r.HandleFunc("POST /v1/nodes/{id}/eligibility", s.setEligibility)
+	r.HandleFunc("POST /v1/nodes/{id}/drain", s.postDrain)
+	r.HandleFunc("GET /v1/nodes/{id}/drain", s.getDrain)
 	r.HandleFunc("POST /v1/backup", s.postBackup)
 	r.HandleFunc("GET /metrics", s.metricsHandler)
 }
