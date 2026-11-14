@@ -39,6 +39,10 @@ type NodeView struct {
 	// Drain is the node's drain, in progress or finished. It is absent when
 	// the node has none.
 	Drain *DrainView `json:"drain,omitempty"`
+	// Address is the node's private address, where routed replicas publish
+	// their ports. It is absent for a node that reported none, which takes
+	// no routed replicas.
+	Address string `json:"address,omitempty"`
 }
 
 // EligibilityRequest is the body of POST /v1/nodes/{id}/eligibility.
@@ -167,7 +171,7 @@ func (s *Server) listNodes(w http.ResponseWriter, r *http.Request) {
 		}
 		v := NodeView{ID: n.ID, Name: n.Name, CPU: n.CPU, Memory: n.Memory, LastLease: n.LastLease.UTC(),
 			LeaseAgeSeconds: age.Seconds(), State: state, Server: n.ID == s.cfg.NodeID, Replicas: count[n.ID],
-			Eligible: n.Eligible}
+			Eligible: n.Eligible, Address: n.Address}
 		if !n.CertNotAfter.IsZero() {
 			t := n.CertNotAfter.UTC()
 			v.CertNotAfter = &t

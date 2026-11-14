@@ -16,6 +16,7 @@ import (
 
 	"github.com/ao/hivemind/internal/auth"
 	"github.com/ao/hivemind/internal/logrelay"
+	"github.com/ao/hivemind/internal/metrics"
 	"github.com/ao/hivemind/internal/ratelimit"
 	"github.com/ao/hivemind/internal/runtime"
 	"github.com/ao/hivemind/internal/store"
@@ -67,6 +68,9 @@ type Config struct {
 	// Backup writes a backup archive of the data directory to w. Nil means
 	// POST /v1/backup answers 503.
 	Backup func(ctx context.Context, w io.Writer) error
+	// RouterMetrics, if set, adds the metrics of this node's router to
+	// GET /metrics.
+	RouterMetrics func(w *metrics.Writer)
 }
 
 // Defaults for Config.LoginLimiter: an address may fail LoginFailLimit
@@ -176,6 +180,7 @@ func (s *Server) routes() {
 	r.HandleFunc("POST /v1/nodes/{id}/eligibility", s.setEligibility)
 	r.HandleFunc("POST /v1/nodes/{id}/drain", s.postDrain)
 	r.HandleFunc("GET /v1/nodes/{id}/drain", s.getDrain)
+	r.HandleFunc("GET /v1/routes", s.listRoutes)
 	r.HandleFunc("POST /v1/backup", s.postBackup)
 	r.HandleFunc("GET /metrics", s.metricsHandler)
 }

@@ -73,6 +73,11 @@ func fieldValues(c *Config) map[string]string {
 		"metrics-addr":       c.MetricsAddr,
 		"reconcile-interval": c.ReconcileInterval.String(),
 		"min-ready":          c.MinReady.String(),
+		"route-addr":         c.RouteAddr,
+		"route-http-port":    fmt.Sprint(c.RouteHTTPPort),
+		"route-https-port":   fmt.Sprint(c.RouteHTTPSPort),
+		"acme-email":         c.ACMEEmail,
+		"acme-ca":            c.ACMECA,
 		"server":             c.Server,
 		"token":              c.Token.Value(),
 	}
@@ -99,6 +104,11 @@ var precedenceCases = []precedenceCase{
 	{"metrics-addr", "127.0.0.1:9101", "127.0.0.1:9102", "127.0.0.1:9103", ""},
 	{"reconcile-interval", "3s", "4s", "5s", "2s"},
 	{"min-ready", "5s", "6s", "7s", "30s"},
+	{"route-addr", "0.0.0.0", "10.0.0.2", "10.0.0.3", ""},
+	{"route-http-port", "8080", "8081", "8082", "80"},
+	{"route-https-port", "8443", "8444", "8445", "443"},
+	{"acme-email", "a@example.com", "b@example.com", "c@example.com", ""},
+	{"acme-ca", "https://a.example/dir", "https://b.example/dir", "https://c.example/dir", DefaultACMECA},
 	{"server", "http://127.0.0.1:1", "http://127.0.0.1:2", "http://127.0.0.1:3", "http://127.0.0.1:4483"},
 }
 

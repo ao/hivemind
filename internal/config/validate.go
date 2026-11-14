@@ -79,6 +79,34 @@ func (c *Config) Validate() error {
 		fail("--min-ready must not be negative, got %s", c.MinReady)
 	}
 
+	// The router is the one listener that may bind every address: it serves
+	// the apps' public traffic. It has no default address.
+	if c.RouteAddr != "" {
+		if ip, err := netip.ParseAddr(c.RouteAddr); err != nil || ip.Zone() != "" {
+			fail("--route-addr %q must be an IP address, such as 0.0.0.0 or 10.0.0.5, without a port", c.RouteAddr)
+		}
+		if c.ACMEEmail == "" {
+			fail("--route-addr needs --acme-email, the contact of the ACME account that gets the routers' certificates")
+		}
+	}
+	if c.ACMEEmail != "" && !validEmail(c.ACMEEmail) {
+		fail("--acme-email %q is not an email address", c.ACMEEmail)
+	}
+	if u, err := url.Parse(c.ACMECA); err != nil || u.Scheme != "https" || u.Host == "" || u.User != nil {
+		fail("--acme-ca %q must be an https URL of an ACME directory", c.ACMECA)
+	}
+	for _, p := range []struct {
+		flag string
+		port int
+	}{{"--route-http-port", c.RouteHTTPPort}, {"--route-https-port", c.RouteHTTPSPort}} {
+		if p.port < 1 || p.port > 65535 {
+			fail("%s %d is not in 1-65535", p.flag, p.port)
+		}
+	}
+	if c.RouteHTTPPort == c.RouteHTTPSPort {
+		fail("--route-http-port and --route-https-port must differ, both are %d", c.RouteHTTPPort)
+	}
+
 	if c.Server != "" {
 		u, err := url.Parse(c.Server)
 		if err != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Host == "" {
@@ -111,6 +139,17 @@ func isLoopback(host string) bool {
 	}
 	ip, err := netip.ParseAddr(host)
 	return err == nil && ip.Unmap().IsLoopback()
+}
+
+// validEmail is a light check of an ACME contact: one @ with text on both
+// sides, a dot in the domain, no spaces or control characters, at most 254
+// bytes. The CA does its own check.
+func validEmail(s string) bool {
+	local, domain, ok := strings.Cut(s, "@")
+	if !ok || local == "" || len(s) > 254 || strings.Contains(domain, "@") || !strings.Contains(domain, ".") {
+		return false
+	}
+	return strings.IndexFunc(s, func(r rune) bool { return r <= ' ' || r == 0x7f }) < 0 && validHostname(domain)
 }
 
 // validHostname checks RFC 1123 host name syntax.

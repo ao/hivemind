@@ -228,12 +228,16 @@ func (rt *Router) Serve() error {
 }
 
 // Shutdown stops certificate work, closes the listeners and waits for
-// requests in flight, up to shutdownTimeout.
+// requests in flight, up to shutdownTimeout. It may be called on a router
+// that was never served.
 func (rt *Router) Shutdown() error {
 	rt.cancel()
 	ctx, cancel := context.WithTimeout(context.Background(), shutdownTimeout)
 	defer cancel()
 	err := errors.Join(rt.httpSrv.Shutdown(ctx), rt.tlsSrv.Shutdown(ctx))
+	// A listener that was never served is not closed by Shutdown.
+	_ = rt.httpLn.Close()
+	_ = rt.tlsLn.Close()
 	rt.cache.Stop()
 	return err
 }

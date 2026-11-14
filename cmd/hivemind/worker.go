@@ -82,7 +82,13 @@ the admin token.
 
 A joined machine keeps its state. After a restart, run
 "hivemind serve --role worker" with the same data directory. A worker has no
-API listener, so --advertise does not apply to it.`,
+API listener, so --advertise does not apply to it.
+
+The worker registers the local address of its connection to the server as
+its private address; its routed replicas publish their ports there.
+--route-addr <ip> also runs the HTTPS router on this machine, with
+--acme-email, as on serve. It reads the routing table and keeps its
+certificates through the server.`,
 		Args: cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			cfg, err := config.Load(cmd.Flags(), config.Options{})
@@ -342,15 +348,21 @@ func runWorker(ctx context.Context, cfg *config.Config, log *slog.Logger, rt run
 	go (&renewer{dir: cfg.DataDir, nodeID: w.state.NodeID, ca: w.ca, holder: w.holder, client: client,
 		log: log.With("component", "renew"), now: time.Now}).run(renewCtx)
 	hostname, _ := os.Hostname()
+	// addr is the node's private address, where its routed replicas publish
+	// their ports. It is found before the first registration, and kept.
+	var addr string
 	register := func(ctx context.Context) error {
 		info, err := rt.Info(ctx)
 		if err != nil {
 			return fmt.Errorf("reading the Docker host: %w", err)
 		}
-		return client.Register(ctx, w.state.NodeID, nodeapi.Register{Name: hostname, CPU: info.NCPU, Memory: info.MemTotal})
+		return client.Register(ctx, w.state.NodeID, nodeapi.Register{Name: hostname, CPU: info.NCPU, Memory: info.MemTotal, Address: addr})
 	}
 	for {
-		err := register(ctx)
+		var err error
+		if addr, err = workerAddress(ctx, client, w.state.NodeID, log); err == nil {
+			err = register(ctx)
+		}
 		if err == nil {
 			break
 		}
@@ -368,16 +380,35 @@ func runWorker(ctx context.Context, cfg *config.Config, log *slog.Logger, rt run
 		case <-time.After(registerRetry):
 		}
 	}
-	log.Info("worker running", "node", w.state.NodeID, "server", w.state.Server)
+	log.Info("worker running", "node", w.state.NodeID, "server", w.state.Server, "address", addr)
 	// A removal is final, so the worker stops at the first refusal that says
 	// so, rather than retrying for ever. Its containers are left running.
 	runCtx, stop := context.WithCancelCause(ctx)
 	defer stop(nil)
 	ag, err := agent.New(agent.Config{NodeID: w.state.NodeID, Runtime: rt,
 		Source: workerSource{client: client, register: register, onRemoved: stop}, Interval: cfg.ReconcileInterval,
-		Logger: log.With("component", "agent")})
+		Logger: log.With("component", "agent"), RouteBind: addr})
 	if err != nil {
 		return err
+	}
+	// The router reads the routing table and keeps its certificates through
+	// the node API, so it needs nothing from this machine but its listeners.
+	if cfg.RouteAddr != "" {
+		rtr, err := newRouter(cfg, log, nodeRoutes(client, w.state.NodeID), client.TLS(w.state.NodeID))
+		if err != nil {
+			return err
+		}
+		defer func() {
+			if err := rtr.Shutdown(); err != nil {
+				log.Warn("router shutdown", "err", err)
+			}
+		}()
+		go func() {
+			if err := rtr.Serve(); err != nil {
+				log.Error("router stopped", "err", err)
+				stop(fmt.Errorf("router: %w", err))
+			}
+		}()
 	}
 	// Log requests come over a poll the worker makes, so it needs no listener.
 	logsDone := make(chan struct{})
@@ -391,9 +422,13 @@ func runWorker(ctx context.Context, cfg *config.Config, log *slog.Logger, rt run
 	err = ag.Run(runCtx)
 	stop(nil)
 	<-logsDone
-	if errors.Is(context.Cause(runCtx), nodeapi.ErrNodeRemoved) {
+	cause := context.Cause(runCtx)
+	if errors.Is(cause, nodeapi.ErrNodeRemoved) {
 		log.Error("the server says this node was removed from the cluster; stopping", "node", w.state.NodeID)
 		return removedError(w.state.NodeID)
+	}
+	if err == nil && ctx.Err() == nil && cause != nil && !errors.Is(cause, context.Canceled) {
+		return cause // the router failed
 	}
 	return err
 }
