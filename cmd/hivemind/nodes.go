@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"io"
 	"net/url"
+	"strings"
 	"text/tabwriter"
 	"time"
 
@@ -78,11 +79,10 @@ func certExpiry(t *time.Time, now time.Time) string {
 		rel = "expired"
 	case left >= 48*time.Hour:
 		rel = fmt.Sprintf("in %dd", int(left.Hours()/24))
+	case left >= time.Minute:
+		rel = "in " + strings.TrimSuffix(left.Round(time.Minute).String(), "0s")
 	default:
-		rel = "in " + left.Round(time.Minute).String()
-		if left < time.Minute {
-			rel = "in " + left.Round(time.Second).String()
-		}
+		rel = "in " + left.Round(time.Second).String()
 	}
 	return t.UTC().Format("2006-01-02") + " (" + rel + ")"
 }
