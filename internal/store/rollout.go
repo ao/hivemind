@@ -286,13 +286,31 @@ func (s *Store) startMove(ctx context.Context, tx *sql.Tx, r rolloutRow, a spec.
 	if err != nil {
 		return err
 	}
-	if surgeNode != "" {
+	routable, err := nodeRoutable(ctx, tx, rep.NodeID)
+	if err != nil {
+		return err
+	}
+	switch {
+	case surgeNode != "":
 		if err := s.placeSurge(ctx, tx, rep.App, rep.Index, surgeNode, r.target); err != nil {
 			return err
 		}
-	} else if _, err := tx.ExecContext(ctx, `UPDATE replicas SET generation = ?, updated_at = ? WHERE app = ? AND idx = ?`,
-		r.target, now, rep.App, rep.Index); err != nil {
-		return err
+	case len(a.Routes) > 0 && !routable:
+		// The new generation has routes, and the replica's node reported no
+		// address: a worker older than 2.2, which cannot run it. The replica
+		// gives up the node and is placed again, on a node with an address.
+		if _, err := tx.ExecContext(ctx, `UPDATE replicas SET generation = ?, node_id = NULL, pending_reason = '', updated_at = ?
+			WHERE app = ? AND idx = ?`, r.target, now, rep.App, rep.Index); err != nil {
+			return err
+		}
+		if err := s.placePending(ctx, tx); err != nil {
+			return err
+		}
+	default:
+		if _, err := tx.ExecContext(ctx, `UPDATE replicas SET generation = ?, updated_at = ? WHERE app = ? AND idx = ?`,
+			r.target, now, rep.App, rep.Index); err != nil {
+			return err
+		}
 	}
 	_, err = tx.ExecContext(ctx, `UPDATE rollouts SET step_idx = ?, step_from = ?, step_since = ?, updated_at = ? WHERE app = ?`,
 		rep.Index, rep.Generation, now, now, rep.App)

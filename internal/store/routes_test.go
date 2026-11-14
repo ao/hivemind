@@ -258,6 +258,62 @@ func TestRoutedRolloutOnOneNode(t *testing.T) {
 	}
 }
 
+// noRoutesOn fails if any assignment of node carries routes: a worker older
+// than 2.2 cannot decode them.
+func (e *rolloutEnv) noRoutesOn(node string) {
+	e.t.Helper()
+	as, err := e.s.AssignmentsForNode(e.ctx, node)
+	if err != nil {
+		e.t.Fatal(err)
+	}
+	for _, a := range as {
+		if len(a.Spec.Routes) > 0 {
+			e.t.Fatalf("node %s, which has no address, was given a routed spec: %+v", node, a)
+		}
+	}
+}
+
+// A rollout that adds routes does not move a replica in place on a node
+// without an address: the replica is placed again where it can run.
+func TestRolloutThatAddsRoutesLeavesANodeWithoutAnAddress(t *testing.T) {
+	e := newRolloutEnv(t, node1)
+	e.put(routed("web", 1))
+	if got := e.nodesOf("web"); got[0] != node1 {
+		t.Fatalf("placement %v", got)
+	}
+	e.report(node1, container("web", 0, 1))
+	e.put(routed("web", 1, "www.example.com"))
+	e.advance()
+	e.noRoutesOn(node1)
+	reps := replicasOf(t, e.s, "web")
+	if reps[0].NodeID != "" || reps[0].Generation != 2 || !strings.Contains(reps[0].PendingReason, "private address") {
+		t.Fatalf("replica after the move: %+v", reps[0])
+	}
+	// A node with an address takes it.
+	e.renewAt(nodeB, "10.0.0.2")
+	if got := e.nodesOf("web"); got[0] != nodeB {
+		t.Fatalf("not placed on the node with an address: %v", got)
+	}
+	e.noRoutesOn(node1)
+}
+
+// An app put again after a delete, now with routes, leaves the nodes
+// without an address that ran it.
+func TestRecreatedRoutedAppLeavesANodeWithoutAnAddress(t *testing.T) {
+	e := newRolloutEnv(t, node1)
+	e.put(routed("web", 2))
+	if err := e.s.DeleteApp(e.ctx, "web"); err != nil {
+		t.Fatal(err)
+	}
+	e.put(routed("web", 2, "www.example.com"))
+	e.noRoutesOn(node1)
+	for _, r := range replicasOf(t, e.s, "web") {
+		if r.Desired == Running && r.NodeID != "" {
+			t.Fatalf("a routed replica kept a node without an address: %+v", r)
+		}
+	}
+}
+
 // A drain never surges onto the node it drains, routed app or not.
 func TestDrainOfARoutedAppLeavesTheNode(t *testing.T) {
 	e := newRolloutEnv(t)

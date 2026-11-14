@@ -66,11 +66,11 @@ func ValidTLSKey(key string) error {
 	parts := strings.Split(key, "/")
 	for _, p := range parts {
 		if p == "." || p == ".." || !tlsComponentRE.MatchString(p) {
-			return fmt.Errorf("%w: TLS storage key %q: components are letters, digits and _ @ . -, and not . or ..", ErrInvalid, truncKey(key))
+			return fmt.Errorf("%w: TLS storage key %q: each component is letters, digits and _ @ . - and is not a lone dot or two dots", ErrInvalid, truncKey(key))
 		}
 	}
 	if len(parts) < 2 || !slices.Contains(tlsRoots, parts[0]) {
-		return fmt.Errorf("%w: TLS storage key %q is outside certmagic's namespace (acme/, certificates/, ocsp/)", ErrInvalid, truncKey(key))
+		return fmt.Errorf("%w: TLS storage key %q is outside certmagic's namespace, which is acme, certificates and ocsp", ErrInvalid, truncKey(key))
 	}
 	return nil
 }

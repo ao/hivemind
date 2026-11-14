@@ -2,6 +2,7 @@ package store
 
 import (
 	"context"
+	"database/sql"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -48,6 +49,29 @@ func routable(nodes []Node, a spec.App) []Node {
 		}
 	}
 	return out
+}
+
+// nodeRoutable reports whether the node reported an address, and so can run
+// a routed replica.
+func nodeRoutable(ctx context.Context, tx *sql.Tx, id string) (bool, error) {
+	var addr string
+	err := tx.QueryRowContext(ctx, `SELECT address FROM nodes WHERE id = ?`, id).Scan(&addr)
+	if errors.Is(err, sql.ErrNoRows) {
+		return false, nil
+	}
+	return addr != "", err
+}
+
+// releaseUnroutable takes the running replicas of a routed app off nodes that
+// reported no address, so they are placed again where they can run. Without
+// it, a recreated app would get its routes on the nodes of its old replicas.
+func releaseUnroutable(ctx context.Context, tx *sql.Tx, a spec.App, now int64) error {
+	if len(a.Routes) == 0 {
+		return nil
+	}
+	_, err := tx.ExecContext(ctx, `UPDATE replicas SET node_id = NULL, pending_reason = '', updated_at = ?
+		WHERE app = ? AND desired = 'running' AND node_id IN (SELECT id FROM nodes WHERE address = '')`, now, a.Name)
+	return err
 }
 
 // checkNodeAddress checks a node address for the store: empty, or an IP

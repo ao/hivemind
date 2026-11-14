@@ -359,6 +359,13 @@ func (s *Store) PutApp(ctx context.Context, a spec.App) (App, error) {
 		if err := s.syncReplicas(ctx, tx, c.Name, c.Replicas, gen, !recreate); err != nil {
 			return err
 		}
+		if recreate {
+			// A recreate replaces the replicas in place, at once; a routed
+			// spec cannot go to a node that reported no address.
+			if err := releaseUnroutable(ctx, tx, c, now.UnixNano()); err != nil {
+				return err
+			}
+		}
 		switch {
 		case rolling:
 			if err := s.startRollout(ctx, tx, c.Name, gen); err != nil {
