@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"io"
 	"maps"
+	"slices"
 	"sync"
 	"time"
 
@@ -18,6 +19,7 @@ import (
 type fakeRuntime struct {
 	mu         sync.Mutex
 	next       int
+	nextPort   int                       // ephemeral host ports are 32768, 32769, ...
 	containers map[string]*fakeContainer // by ID
 	images     map[string]bool
 	calls      map[string]int
@@ -131,6 +133,17 @@ func (f *fakeRuntime) Start(_ context.Context, id string) error {
 	c.StartedAt = f.now()
 	c.FinishedAt = time.Time{}
 	c.IPAddress = "127.0.0.1"
+	// Like Docker, each start publishes the ports again, and an ephemeral
+	// binding gets a new port.
+	c.Ports = nil
+	for _, p := range c.cfg.Ports {
+		hp := p.HostPort
+		if p.Ephemeral {
+			f.nextPort++
+			hp = 32767 + f.nextPort
+		}
+		c.Ports = append(c.Ports, runtime.PortBinding{HostIP: p.HostIP, HostPort: hp, ContainerPort: p.ContainerPort, Protocol: p.Protocol})
+	}
 	return nil
 }
 
@@ -139,7 +152,7 @@ func (f *fakeRuntime) exit(id string, code int) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	if c := f.find(id); c != nil && c.State == "running" {
-		c.State, c.ExitCode, c.FinishedAt = "exited", code, f.now()
+		c.State, c.ExitCode, c.FinishedAt, c.Ports = "exited", code, f.now(), nil
 	}
 }
 
@@ -154,7 +167,7 @@ func (f *fakeRuntime) Stop(_ context.Context, id string, _ time.Duration) error 
 		return rtErr("stop", runtime.ErrNotFound)
 	}
 	if c.State == "running" {
-		c.State, c.FinishedAt = "exited", f.now()
+		c.State, c.FinishedAt, c.Ports = "exited", f.now(), nil
 	}
 	return nil
 }
@@ -188,6 +201,7 @@ func (f *fakeRuntime) Inspect(_ context.Context, id string) (runtime.Container, 
 	}
 	out := c.Container
 	out.Labels = maps.Clone(c.Labels)
+	out.Ports = slices.Clone(c.Ports)
 	return out, nil
 }
 
@@ -209,6 +223,7 @@ func (f *fakeRuntime) List(_ context.Context, labels map[string]string) ([]runti
 		if match {
 			x := c.Container
 			x.Labels = maps.Clone(c.Labels)
+			x.Ports = slices.Clone(c.Ports)
 			out = append(out, x)
 		}
 	}
