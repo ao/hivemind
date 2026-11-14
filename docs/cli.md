@@ -339,14 +339,103 @@ hivemind node
 
 | Command | Description |
 |---|---|
+| `drain` | Move a node's replicas to other nodes |
+| `eligibility` | Let a node take new replicas, or stop it taking them |
 | `remove` | Remove a node from the cluster for good |
+
+#### hivemind node drain
+
+Drain a node: make it ineligible for new replicas, then move each of its
+replicas to another node the way a rolling update moves one. A copy of the
+replica starts on another eligible node, and the replica moves there once the
+copy is ready and passes its health check. The node's agent then stops the old
+container. Each app has one replica moving at a time, so an app keeps its
+replica count running while another node has room for it.
+
+A replica that cannot move stays on the node, and the drain says why: it has a
+volume, whose data is on this node; its host port is in use on every other
+eligible node; no other node has room for it; or its app has a rollout in
+progress, which moves it instead. A replica whose copy crash-loops, or is not
+ready within the rollout deadline, stays until the drain's deadline.
+
+At --deadline the drain ends. A copy that is still starting takes its replica
+at once. Every other replica left on the node, except one with a volume, is
+stopped there and placed again, as when a node is lost; it waits as pending if
+no node can take it. A replica with a volume keeps running on the node.
+
+The command waits, and prints progress, until the drain is done. Ctrl-C stops
+the waiting, not the drain. --no-wait returns at once. drain on a node that is
+already draining waits for that drain, and --deadline sets a new deadline from
+now. A drain carries on across a restart of the server.
+
+A drained node stays in the cluster, ineligible, until "hivemind node
+eligibility --enable", which also cancels a drain in progress, or "hivemind
+node remove", which needs no --force once nothing runs on the node.
+
+The server's own node can be drained. Its replicas move to workers, and the
+server keeps serving the API and placing replicas.
+
+This follows Nomad's node drain command:
+https://developer.hashicorp.com/nomad/docs/commands/node/drain
+
+```
+hivemind node drain <id> [flags]
+```
+
+| Flag | Type | Default | Environment | Description |
+|---|---|---|---|---|
+| `--ca-cert` | string | - | - | PEM file of the CA certificates to trust for an https server, instead of the system's (env HIVEMIND_CA_CERT; default from the client config) |
+| `--client-config` | string | - | `HIVEMIND_CLIENT_CONFIG` | client config file (env HIVEMIND_CLIENT_CONFIG; default $XDG_CONFIG_HOME/hivemind/config.yaml or ~/.config/hivemind/config.yaml) |
+| `--deadline` | duration | `10m0s` | - | how long replicas may take to move; at the deadline the rest are stopped and placed again |
+| `--json` | bool | - | - | print JSON instead of a table |
+| `--no-wait` | bool | - | - | start the drain and return without waiting for it |
+| `--server` | string | - | `HIVEMIND_SERVER` | server URL (env HIVEMIND_SERVER; default from the client config, then http://127.0.0.1:4483) |
+| `--token` | string | - | `HIVEMIND_TOKEN` | API token (env HIVEMIND_TOKEN; default from the client config's token file) |
+
+#### hivemind node eligibility
+
+Make a node eligible or ineligible for new replicas.
+
+--disable stops the node from taking new replicas. It keeps the replicas it
+runs, and a rolling update does not place a new copy on it either. Use it to
+look at a node without new work arriving, or before draining several nodes, so
+that replicas drained from one do not move to another that is about to be
+drained. The server keeps the setting, so it holds across restarts of the
+server and of the node.
+
+--enable lets the node take new replicas again. Replicas that wait for a node
+may be placed on it at once; replicas that run elsewhere stay where they are.
+On a draining node, --enable cancels the drain: a copy that was starting on
+another node is removed, and its replica stays on this one.
+
+The server's own node can be made ineligible. It keeps serving the API and
+running its containers.
+
+This follows Nomad's node eligibility command:
+https://developer.hashicorp.com/nomad/docs/commands/node/eligibility
+
+```
+hivemind node eligibility <id> --enable|--disable [flags]
+```
+
+| Flag | Type | Default | Environment | Description |
+|---|---|---|---|---|
+| `--ca-cert` | string | - | - | PEM file of the CA certificates to trust for an https server, instead of the system's (env HIVEMIND_CA_CERT; default from the client config) |
+| `--client-config` | string | - | `HIVEMIND_CLIENT_CONFIG` | client config file (env HIVEMIND_CLIENT_CONFIG; default $XDG_CONFIG_HOME/hivemind/config.yaml or ~/.config/hivemind/config.yaml) |
+| `--disable` | bool | - | - | stop the node from taking new replicas |
+| `--enable` | bool | - | - | let the node take new replicas |
+| `--json` | bool | - | - | print JSON instead of a table |
+| `--server` | string | - | `HIVEMIND_SERVER` | server URL (env HIVEMIND_SERVER; default from the client config, then http://127.0.0.1:4483) |
+| `--token` | string | - | `HIVEMIND_TOKEN` | API token (env HIVEMIND_TOKEN; default from the client config's token file) |
 
 #### hivemind node remove
 
-Remove a node from the cluster for good. Stop hivemind on the node first.
+Remove a node from the cluster for good. Drain it, or stop hivemind on it,
+first.
 
 The server's own node cannot be removed. A node that still renews its lease,
-because hivemind runs on it, is refused unless --force is given.
+because hivemind runs on it, is refused unless --force is given, or it is
+ineligible and nothing runs on it, as after hivemind node drain.
 
 On removal, the node's replicas are placed on other nodes. A replica with a
 volume is not moved: its data was on the removed node. It waits with no node,
@@ -377,6 +466,10 @@ hivemind node remove <id> [flags]
 List the nodes: ID, name, CPU and memory as each node's Docker daemon reports
 them, the age of its lease, whether it is ready or lost, and how many replicas
 are placed on it. A node is lost when its lease is more than 15 s old.
+
+ELIGIBILITY is "eligible" for a node that takes new replicas, "ineligible" for
+one that does not (hivemind node eligibility), "draining" during a drain, and
+"drained" after one, until the node is made eligible again or removed.
 
 CERT EXPIRES is when the node's certificate expires, as the server recorded it
 when it issued the certificate. A worker renews its certificate once two thirds
