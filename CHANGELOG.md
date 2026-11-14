@@ -2,7 +2,7 @@
 
 Notable changes to hivemind, newest first. Versions follow [Semantic Versioning](https://semver.org). A release is cut by pushing a `v*` tag; its notes are the matching section below.
 
-## [2.0.0] - Unreleased
+## [2.0.0] - 2026-11-14
 
 Version 2 is a rewrite. It is not compatible with 1.x: the command line, the API, the data directory and the feature set all differ. v1 data is not migrated, so start v2 in a new data directory. See [docs/upgrading.md](docs/upgrading.md).
 
