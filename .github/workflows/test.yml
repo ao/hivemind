@@ -147,6 +147,9 @@ jobs:
           - { pkg: ./internal/server, target: FuzzDecodeApp }
           - { pkg: ./internal/pki, target: FuzzParseJoinToken }
           - { pkg: ./internal/pki, target: FuzzParseNodeURI }
+          - { pkg: ./internal/nodeapi, target: FuzzDecodeStatus }
+          - { pkg: ./internal/nodeapi, target: FuzzDecodeAssignments }
+          - { pkg: ./internal/nodeapi, target: FuzzDecodeRegister }
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-go@v5
