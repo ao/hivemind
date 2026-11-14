@@ -27,7 +27,7 @@ type fakeRenewServer struct {
 	ca     *pki.CA
 	issue  string // node ID to issue for; empty means the one asked for
 	calls  int
-	closed int
+	resets int
 	err    error
 }
 
@@ -47,7 +47,7 @@ func (f *fakeRenewServer) Renew(_ context.Context, nodeID string, csr []byte) ([
 	return pemEncodeCert(der), nil
 }
 
-func (f *fakeRenewServer) CloseIdleConnections() { f.closed++ }
+func (f *fakeRenewServer) ResetConnections() { f.resets++ }
 
 // joinedWithLifetime writes a worker's files for id, with a certificate that
 // was issued at issued and lasts lifetime.
@@ -119,8 +119,8 @@ func TestRenewerRenewsAtThresholdNotBefore(t *testing.T) {
 	if id, err := pki.NodeIDFromCert(newLeaf); err != nil || id != "node-abc123" {
 		t.Fatalf("renewed certificate names %q, %v", id, err)
 	}
-	if srv.closed != 1 {
-		t.Fatalf("idle connections closed %d times, want 1", srv.closed)
+	if srv.resets != 1 {
+		t.Fatalf("connections reset %d times, want 1", srv.resets)
 	}
 	if bytes.Equal(oldKey, readFile(t, filepath.Join(dir, workerKeyFile))) {
 		t.Fatal("the key was not rotated")

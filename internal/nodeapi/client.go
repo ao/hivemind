@@ -13,6 +13,7 @@ import (
 	"net"
 	"net/http"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"github.com/ao/hivemind/internal/pki"
@@ -40,11 +41,16 @@ var ErrNodeRemoved = errors.New(RemovedMessage)
 // reports and the status a node last reported.
 type Client struct {
 	base string
+	tr   *swapTransport
 	http *http.Client
 	// stream shares the transport but has no overall timeout, for the log
 	// poll, which sets its own, and for log streams, which run until ended.
 	stream *http.Client
 }
+
+// idleConnTimeout closes a pooled connection that has not been used for this
+// long. It is what closes the connections a ResetConnections leaves behind.
+const idleConnTimeout = 90 * time.Second
 
 // NewClient returns a client for the server at base, such as
 // https://10.0.0.5:4484. tlsCfg presents the node's certificate and trusts the
@@ -53,13 +59,39 @@ func NewClient(base string, tlsCfg *tls.Config) (*Client, error) {
 	if !strings.HasPrefix(base, "https://") {
 		return nil, fmt.Errorf("server URL %q must start with https://", base)
 	}
-	tr := &http.Transport{TLSClientConfig: tlsCfg}
-	return &Client{base: strings.TrimRight(base, "/"), http: &http.Client{Transport: tr, Timeout: clientTimeout},
-		stream: &http.Client{Transport: tr}}, nil
+	tr := &swapTransport{}
+	tr.cur.Store(&http.Transport{TLSClientConfig: tlsCfg, IdleConnTimeout: idleConnTimeout})
+	return &Client{base: strings.TrimRight(base, "/"), tr: tr,
+		http: &http.Client{Transport: tr, Timeout: clientTimeout}, stream: &http.Client{Transport: tr}}, nil
 }
+
+// swapTransport sends each request on the transport it holds.
+// ResetConnections replaces that transport, so no request made after a reset
+// reuses a connection opened before it.
+type swapTransport struct{ cur atomic.Pointer[http.Transport] }
+
+func (s *swapTransport) RoundTrip(r *http.Request) (*http.Response, error) {
+	return s.cur.Load().RoundTrip(r)
+}
+
+// CloseIdleConnections is what http.Client.CloseIdleConnections calls.
+func (s *swapTransport) CloseIdleConnections() { s.cur.Load().CloseIdleConnections() }
 
 // CloseIdleConnections closes the client's idle connections to the server.
 func (c *Client) CloseIdleConnections() { c.http.CloseIdleConnections() }
+
+// ResetConnections makes every later request open a new connection. A worker
+// calls it after it renews its certificate. A connection presents the
+// certificate it was opened with for as long as it lives, so closing only the
+// idle ones is not enough: the log poll has a request in flight nearly all the
+// time, and its connection would go back to the pool afterwards and carry the
+// old certificate until that expired, when the server refuses it. Requests in
+// flight finish on their old connections, which are never reused and close
+// after idleConnTimeout.
+func (c *Client) ResetConnections() {
+	old := c.tr.cur.Swap(c.tr.cur.Load().Clone())
+	old.CloseIdleConnections()
+}
 
 // Register tells the server the node's name and capacity.
 func (c *Client) Register(ctx context.Context, nodeID string, g Register) error {

@@ -39,7 +39,7 @@ func certExpiredError(id string, notAfter time.Time) error {
 // certRenewer is the part of the node API client a renewal uses.
 type certRenewer interface {
 	Renew(ctx context.Context, nodeID string, csr []byte) ([]byte, error)
-	CloseIdleConnections()
+	ResetConnections()
 }
 
 // renewer keeps a worker's certificate current. It renews once two thirds
@@ -94,9 +94,10 @@ func (r *renewer) renew(ctx context.Context) error {
 		return fmt.Errorf("saving the renewed certificate: %w", err)
 	}
 	r.holder.Store(cert)
-	// Open connections keep the old certificate. Close the idle ones, so
-	// the next request handshakes with the new one.
-	r.client.CloseIdleConnections()
+	// Open connections keep the old certificate, busy ones included, such
+	// as the log poll's. Move every later request to new connections, which
+	// handshake with the new one.
+	r.client.ResetConnections()
 	return nil
 }
 
