@@ -36,14 +36,14 @@ type fixture struct {
 	joinAddr string
 }
 
-func newFixture(t *testing.T, limiter *ratelimit.FailLimiter) *fixture {
+func newFixture(t *testing.T, limiter *ratelimit.FailLimiter, opts ...store.Option) *fixture {
 	t.Helper()
 	dir := t.TempDir()
 	ca, err := pki.CreateCA(filepath.Join(dir, "ca"))
 	if err != nil {
 		t.Fatal(err)
 	}
-	st, err := store.Open(context.Background(), filepath.Join(dir, "hivemind.db"))
+	st, err := store.Open(context.Background(), filepath.Join(dir, "hivemind.db"), opts...)
 	if err != nil {
 		t.Fatal(err)
 	}

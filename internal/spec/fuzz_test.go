@@ -13,6 +13,7 @@ func FuzzAppJSON(f *testing.F) {
 	f.Add([]byte(`{"name":"db","image":"postgres:16","volumes":[{"name":"pg","path":"/var/lib/postgresql/data"}],"resources":{"memory":"1Gi"}}`))
 	f.Add([]byte(`{"name":"x","image":"a/b:c","health":{"http":{"port":1,"path":"/h"},"interval":"1s","timeout":"1s"}}`))
 	f.Add([]byte(`{"replicas":-5,"env":{"":"\u0000"}}`))
+	f.Add([]byte(`{"name":"r","image":"nginx","replicas":3,"routes":[{"host":"WWW.Example.com.","port":80},{"host":"*.x.y","port":0}]}`))
 	f.Fuzz(func(t *testing.T, data []byte) {
 		var a App
 		if json.Unmarshal(data, &a) != nil {

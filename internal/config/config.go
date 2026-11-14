@@ -65,9 +65,17 @@ type Config struct {
 	MetricsAddr       string        `json:"metrics_addr"`
 	ReconcileInterval time.Duration `json:"reconcile_interval"`
 	MinReady          time.Duration `json:"min_ready"`
+	RouteAddr         string        `json:"route_addr"`
+	RouteHTTPPort     int           `json:"route_http_port"`
+	RouteHTTPSPort    int           `json:"route_https_port"`
+	ACMEEmail         string        `json:"acme_email"`
+	ACMECA            string        `json:"acme_ca"`
 	Server            string        `json:"server"`
 	Token             Secret        `json:"token"`
 }
+
+// DefaultACMECA is the default ACME directory: Let's Encrypt's production CA.
+const DefaultACMECA = "https://acme-v02.api.letsencrypt.org/directory"
 
 // Options injects the process environment so tests need no os.Setenv.
 // A nil field means the os package function.
@@ -278,6 +286,21 @@ func settings(opts Options) []setting {
 		dur("min-ready", "how long a node must be ready before it gets new replicas; 0s means no wait", "30s",
 			func(c *Config) *time.Duration { return &c.MinReady },
 			func(f *fileConfig) *string { return f.MinReady }),
+		str("route-addr", "IP address the HTTPS router listens on, such as 0.0.0.0 for every interface; empty means no router on this node", "",
+			func(c *Config) *string { return &c.RouteAddr },
+			func(f *fileConfig) *string { return f.RouteAddr }),
+		num("route-http-port", "port of the router's HTTP listener, for ACME HTTP-01 challenges and redirects to https", "80",
+			func(c *Config) *int { return &c.RouteHTTPPort },
+			func(f *fileConfig) *string { return f.RouteHTTPPort }),
+		num("route-https-port", "port of the router's HTTPS listener", "443",
+			func(c *Config) *int { return &c.RouteHTTPSPort },
+			func(f *fileConfig) *string { return f.RouteHTTPSPort }),
+		str("acme-email", "contact email of the ACME account; required with --route-addr, and setting it accepts the CA's terms", "",
+			func(c *Config) *string { return &c.ACMEEmail },
+			func(f *fileConfig) *string { return f.ACMEEmail }),
+		str("acme-ca", "ACME directory URL the routers get certificates from", DefaultACMECA,
+			func(c *Config) *string { return &c.ACMECA },
+			func(f *fileConfig) *string { return f.ACMECA }),
 		clientSetting(str("server", "server URL for the client commands", "http://127.0.0.1:4483",
 			func(c *Config) *string { return &c.Server },
 			func(f *fileConfig) *string { return f.Server })),

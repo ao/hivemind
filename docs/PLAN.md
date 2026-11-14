@@ -10,6 +10,8 @@ Answered by the owner on 2026-11-13:
 
 1. Licence: GPL-3.0. `LICENSE` stays; the README's "MIT" line is fixed.
 2. Scope: a single binary that runs containers on 1 to 10 Linux machines on one network, using Docker Engine, with one control-plane node, host-port networking, and no overlay network, built-in DNS or multi-tenancy. Docker Swarm, Nomad and k3s cover this ground and more; hivemind's case is that it is less to learn and run, and the README says so.
+
+   Amended on 2026-11-14 for 2.2: the owner reversed the "host ports, no proxy" part for HTTPS. A node with `--route-addr` runs a reverse proxy for the apps' routes, and routed apps publish ephemeral ports on the nodes' private addresses. Host ports are unchanged. See [routing](routing.md).
 3. Removed, because none of it works and none of it is on the core path (about 12,500 lines of Go, plus their docs):
    - `internal/security` (RBAC, secrets, network policy, IPAM, tenants, scanning, storage encryption, ACL and QoS);
    - `internal/resilience` (circuit breaker, Redis storage, bulkhead, retry, fallback);

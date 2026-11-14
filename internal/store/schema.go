@@ -199,6 +199,39 @@ CREATE TABLE drain_blocked (
 	PRIMARY KEY (node_id, app, idx)
 ) STRICT;
 `,
+	// 9: routing. nodes.address is the node's private address, where routed
+	// containers publish their ports; '' for a node that reported none (a
+	// worker older than 2.2). container_status.route_ports is the JSON list
+	// of the container ports a routed container publishes and the host port
+	// each got, or ''. app_hosts gives each route host to one app; the
+	// primary key is what makes a host belong to one app. tls_storage and
+	// tls_locks hold the routers' shared certificate and ACME state, and
+	// their locks: certmagic's Storage, backed by the store. A lock row is
+	// held by owner until expires (unix nanoseconds); an expired one is
+	// stale and may be taken.
+	`
+ALTER TABLE nodes ADD COLUMN address TEXT NOT NULL DEFAULT '';
+ALTER TABLE container_status ADD COLUMN route_ports TEXT NOT NULL DEFAULT '';
+
+CREATE TABLE app_hosts (
+	host TEXT PRIMARY KEY CHECK (host != ''),
+	app  TEXT NOT NULL REFERENCES apps(name) ON DELETE CASCADE,
+	port INTEGER NOT NULL CHECK (port BETWEEN 1 AND 65535)
+) STRICT;
+CREATE INDEX app_hosts_app ON app_hosts(app);
+
+CREATE TABLE tls_storage (
+	key      TEXT PRIMARY KEY CHECK (key != ''),
+	value    BLOB NOT NULL,
+	modified INTEGER NOT NULL
+) STRICT;
+
+CREATE TABLE tls_locks (
+	name    TEXT PRIMARY KEY CHECK (name != ''),
+	owner   TEXT NOT NULL CHECK (owner != ''),
+	expires INTEGER NOT NULL
+) STRICT;
+`,
 }
 
 // SchemaVersion is the schema version this build writes.

@@ -25,6 +25,16 @@ type App struct {
 	Volumes   []Volume          `json:"volumes,omitempty" yaml:"volumes,omitempty"`
 	Resources Resources         `json:"resources,omitempty" yaml:"resources,omitempty"`
 	Health    *Health           `json:"health,omitempty" yaml:"health,omitempty"`
+	Routes    []Route           `json:"routes,omitempty" yaml:"routes,omitempty"`
+}
+
+// Route sends HTTPS requests for Host, through the routers, to Port in the
+// app's containers. Host is an exact DNS name: no wildcard and no IP
+// address. A host belongs to one app at a time.
+type Route struct {
+	Host string `json:"host" yaml:"host"`
+	// Port is the container port, as in Port.Container.
+	Port int `json:"port" yaml:"port"`
 }
 
 // Port publishes a container port on the node.
@@ -89,6 +99,12 @@ const (
 	defaultProto = "tcp"
 )
 
+// Limits on routes. MaxRoutes is the most routes one app may have.
+const (
+	MaxRoutes  = 16
+	maxHostLen = 253
+)
+
 // The smallest limits a container engine accepts. A nonzero resources.cpu or
 // resources.memory below these is rejected here, rather than by every create
 // on the node.
@@ -130,6 +146,12 @@ func (a *App) Normalize() {
 	}
 	for i := range a.Volumes {
 		a.Volumes[i].Path = strings.TrimSpace(a.Volumes[i].Path)
+	}
+	for i := range a.Routes {
+		a.Routes[i].Host = NormalizeHost(a.Routes[i].Host)
+	}
+	if len(a.Routes) == 0 {
+		a.Routes = nil
 	}
 	if h := a.Health; h != nil {
 		if h.Interval == 0 {
@@ -293,7 +315,99 @@ func (a *App) Validate() error {
 			add("health.start_period: must be between 0 and 1h")
 		}
 	}
+
+	if len(a.Routes) > MaxRoutes {
+		add("routes: at most %d", MaxRoutes)
+	}
+	hosts := map[string]bool{}
+	for i, r := range a.Routes {
+		if err := ValidateHost(r.Host); err != nil {
+			add("routes[%d]: %v", i, err)
+		}
+		if !validPort(r.Port) {
+			add("routes[%d]: port must be a container port between 1 and 65535", i)
+		}
+		if hosts[r.Host] {
+			add("routes[%d]: host %q listed twice", i, r.Host)
+		}
+		hosts[r.Host] = true
+	}
 	return errors.Join(errs...)
+}
+
+// NormalizeHost returns a route host in the form Validate expects: trimmed,
+// lowercase, and without one trailing dot.
+func NormalizeHost(h string) string {
+	h = strings.ToLower(strings.TrimSpace(h))
+	return strings.TrimSuffix(h, ".")
+}
+
+// ValidateHost checks that h, normalised, can be a route host: a DNS name of
+// at least two labels, each of 1 to 63 letters, digits and dashes, not
+// starting or ending with a dash, at most 253 characters in all. Wildcards,
+// IP addresses, underscores and a numeric top-level label are refused: a
+// certificate authority issues for none of them over HTTP-01.
+func ValidateHost(h string) error {
+	switch {
+	case h == "":
+		return errors.New("host is required")
+	case len(h) > maxHostLen:
+		return fmt.Errorf("host is longer than %d characters", maxHostLen)
+	case strings.Contains(h, "*"):
+		return fmt.Errorf("host %q: wildcards are not supported; list each name", truncHost(h))
+	}
+	if _, err := netip.ParseAddr(strings.Trim(h, "[]")); err == nil {
+		return fmt.Errorf("host %q is an IP address; routes take DNS names", h)
+	}
+	labels := strings.Split(h, ".")
+	if len(labels) < 2 {
+		return fmt.Errorf("host %q needs at least two labels, such as www.example.com", truncHost(h))
+	}
+	for _, l := range labels {
+		if l == "" || len(l) > 63 || l[0] == '-' || l[len(l)-1] == '-' {
+			return fmt.Errorf("host %q: each label is 1 to 63 characters and does not start or end with a dash", truncHost(h))
+		}
+		for _, c := range l {
+			if !(c >= 'a' && c <= 'z' || c >= '0' && c <= '9' || c == '-') {
+				return fmt.Errorf("host %q: use lowercase letters, digits, dashes and dots", truncHost(h))
+			}
+		}
+	}
+	if tld := labels[len(labels)-1]; strings.Trim(tld, "0123456789") == "" {
+		return fmt.Errorf("host %q: the last label must not be all digits", truncHost(h))
+	}
+	return nil
+}
+
+// RouteHosts returns the hosts the app routes, in spec order.
+func (a App) RouteHosts() []string {
+	out := make([]string, 0, len(a.Routes))
+	for _, r := range a.Routes {
+		out = append(out, r.Host)
+	}
+	return out
+}
+
+// RoutePorts returns the distinct container ports the app's routes name,
+// sorted.
+func (a App) RoutePorts() []int {
+	seen := map[int]bool{}
+	var out []int
+	for _, r := range a.Routes {
+		if !seen[r.Port] {
+			seen[r.Port] = true
+			out = append(out, r.Port)
+		}
+	}
+	sort.Ints(out)
+	return out
+}
+
+func truncHost(h string) string {
+	if len(h) > 64 {
+		return h[:64] + "..."
+	}
+	return h
 }
 
 // Key identifies a published host port, for conflict checks: "8080/tcp".

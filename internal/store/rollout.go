@@ -26,7 +26,9 @@ import (
 //     is placed there as a surge row, beside the old copy. The replica only
 //     moves to the surge's node once the new copy is Ready, and then the old
 //     copy's node removes it. No replica is unavailable during a surge.
-//     Drains (drain.go) move replicas with the same surges.
+//     Drains (drain.go) move replicas with the same surges. A routed app
+//     publishes no fixed host port, so its surge may also go on the
+//     replica's own node, and a routed app on one node updates this way too.
 //   - In place. When no other node can take the replica, the replica's
 //     generation changes and its node replaces the old container: stop the
 //     old one, start the new one. One replica is unavailable for that time.
@@ -280,17 +282,35 @@ func (s *Store) startMove(ctx context.Context, tx *sql.Tx, r rolloutRow, a spec.
 	if err != nil {
 		return err
 	}
-	surgeNode, _, err := s.surgeNode(ctx, tx, a, rep, placed)
+	surgeNode, _, err := s.surgeNode(ctx, tx, a, rep, placed, true)
 	if err != nil {
 		return err
 	}
-	if surgeNode != "" {
+	routable, err := nodeRoutable(ctx, tx, rep.NodeID)
+	if err != nil {
+		return err
+	}
+	switch {
+	case surgeNode != "":
 		if err := s.placeSurge(ctx, tx, rep.App, rep.Index, surgeNode, r.target); err != nil {
 			return err
 		}
-	} else if _, err := tx.ExecContext(ctx, `UPDATE replicas SET generation = ?, updated_at = ? WHERE app = ? AND idx = ?`,
-		r.target, now, rep.App, rep.Index); err != nil {
-		return err
+	case len(a.Routes) > 0 && !routable:
+		// The new generation has routes, and the replica's node reported no
+		// address: a worker older than 2.2, which cannot run it. The replica
+		// gives up the node and is placed again, on a node with an address.
+		if _, err := tx.ExecContext(ctx, `UPDATE replicas SET generation = ?, node_id = NULL, pending_reason = '', updated_at = ?
+			WHERE app = ? AND idx = ?`, r.target, now, rep.App, rep.Index); err != nil {
+			return err
+		}
+		if err := s.placePending(ctx, tx); err != nil {
+			return err
+		}
+	default:
+		if _, err := tx.ExecContext(ctx, `UPDATE replicas SET generation = ?, updated_at = ? WHERE app = ? AND idx = ?`,
+			r.target, now, rep.App, rep.Index); err != nil {
+			return err
+		}
 	}
 	_, err = tx.ExecContext(ctx, `UPDATE rollouts SET step_idx = ?, step_from = ?, step_since = ?, updated_at = ? WHERE app = ?`,
 		rep.Index, rep.Generation, now, now, rep.App)
@@ -310,8 +330,15 @@ func (s *Store) startMove(ctx context.Context, tx *sql.Tx, r rolloutRow, a spec.
 // and nothing on it publishes a host port that a publishes. Placement then
 // chooses among those nodes, with placed counted against them. A replica with
 // a volume is never surged: a copy elsewhere would start with an empty
-// volume. When no node can take the surge, it returns "" and the reason.
-func (s *Store) surgeNode(ctx context.Context, tx *sql.Tx, a spec.App, rep Assignment, placed []Assignment) (string, string, error) {
+// volume.
+//
+// With sameNode, a routed app's surge may also go on rep's own node. Its
+// ports are ephemeral, so the new copy runs beside the old one there, and a
+// rollout on one node keeps the replica serving. Placement still prefers
+// another node, which has fewer of the app's replicas. A drain passes false:
+// its surge must leave the node. When no node can take the surge, it returns
+// "" and the reason.
+func (s *Store) surgeNode(ctx context.Context, tx *sql.Tx, a spec.App, rep Assignment, placed []Assignment, sameNode bool) (string, string, error) {
 	if len(a.Volumes) > 0 {
 		return "", "it has a volume, and its data is on this node", nil
 	}
@@ -326,8 +353,11 @@ func (s *Store) surgeNode(ctx context.Context, tx *sql.Tx, a spec.App, rep Assig
 	now := s.now()
 	var candidates []Node
 	portsInUse := false
-	for _, n := range nodes {
-		if n.ID == rep.NodeID || !n.Eligible || now.Sub(n.LastLease) > scheduler.DefaultLeaseTimeout {
+	for _, n := range routable(nodes, a) {
+		if n.ID == rep.NodeID && !(sameNode && len(a.Routes) > 0) {
+			continue
+		}
+		if !n.Eligible || now.Sub(n.LastLease) > scheduler.DefaultLeaseTimeout {
 			continue
 		}
 		if hostPortsTaken(a, n.ID, all) {

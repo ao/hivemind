@@ -13,6 +13,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net/netip"
 	"strings"
 	"time"
 	"unicode"
@@ -35,6 +36,10 @@ const (
 	MaxJoinBytes        = 16 << 10
 	MaxStatusBytes      = 1 << 20
 	MaxAssignmentsBytes = 16 << 20
+	MaxRoutesBytes      = 8 << 20
+	// MaxTLSRequestBytes fits a value of store.MaxTLSValueLen in base64,
+	// with room for the key and the JSON around it.
+	MaxTLSRequestBytes = 256 << 10
 )
 
 // Field limits.
@@ -48,6 +53,12 @@ const (
 	maxGeneration   = 1 << 31
 	maxReplicaIndex = 1 << 20
 	maxContainerLen = 128
+	maxRoutePorts   = 64
+	maxRoutes       = 10000
+	maxEndpoints    = 1000
+	maxTLSKeys      = 10000
+	maxTLSOwnerLen  = 64
+	maxTLSTTL       = int64(time.Hour / time.Millisecond)
 )
 
 // ErrInvalid means a message did not decode or validate. ErrTooLarge means it
@@ -71,11 +82,90 @@ func StatusPath(id string) string { return Prefix + "/nodes/" + id + "/status" }
 // between status reports.
 func LeasePath(id string) string { return Prefix + "/nodes/" + id + "/lease" }
 
-// Register is the body of POST register.
+// RoutesPath is the route a node's router reads the routing table from.
+func RoutesPath(id string) string { return Prefix + "/nodes/" + id + "/routes" }
+
+// TLSPath is the route of one TLS storage operation, such as load or lock.
+func TLSPath(id, op string) string { return Prefix + "/nodes/" + id + "/tls/" + op }
+
+// TLS storage operations: the methods of certmagic's Storage and Locker.
+const (
+	TLSLoad   = "load"
+	TLSStore  = "store"
+	TLSDelete = "delete"
+	TLSExists = "exists"
+	TLSList   = "list"
+	TLSStat   = "stat"
+	TLSLock   = "lock"
+	TLSRenew  = "renew"
+	TLSUnlock = "unlock"
+)
+
+// TLSOps lists every TLS storage operation.
+var TLSOps = []string{TLSLoad, TLSStore, TLSDelete, TLSExists, TLSList, TLSStat, TLSLock, TLSRenew, TLSUnlock}
+
+// Register is the body of POST register. Address is the node's private
+// address, where its routed containers publish their ports: the local
+// address of the worker's connection to the server. A worker older than 2.2
+// sends none, and takes no routed replicas.
 type Register struct {
-	Name   string `json:"name"`
-	CPU    int    `json:"cpu"`
-	Memory int64  `json:"memory"`
+	Name    string `json:"name"`
+	CPU     int    `json:"cpu"`
+	Memory  int64  `json:"memory"`
+	Address string `json:"address,omitempty"`
+}
+
+// RoutePort is a container port of a routed container and the host port it
+// is published on.
+type RoutePort struct {
+	Port     int `json:"port"`
+	HostPort int `json:"host_port"`
+}
+
+// Route is one host of the routing table and the address:port of each
+// replica that takes its traffic now.
+type Route struct {
+	Host      string   `json:"host"`
+	Endpoints []string `json:"endpoints"`
+}
+
+// RouteTable is the reply to GET routes.
+type RouteTable struct {
+	Routes []Route `json:"routes"`
+}
+
+// TLSRequest is the body of every TLS storage operation. Each one reads the
+// fields it needs: Key for the storage methods (a prefix for list), Value
+// for store, Recursive for list, and Name, Owner and TTLMillis for the
+// locks. Owner is a token the node chooses for one hold of a lock; the
+// server stores it with the node's ID, so a node can only renew or release
+// its own holds.
+type TLSRequest struct {
+	Key       string `json:"key,omitempty"`
+	Value     []byte `json:"value,omitempty"`
+	Recursive bool   `json:"recursive,omitempty"`
+	Name      string `json:"name,omitempty"`
+	Owner     string `json:"owner,omitempty"`
+	TTLMillis int64  `json:"ttl_ms,omitempty"`
+}
+
+// TLSReply is the reply to a TLS storage operation. Found is false for a
+// load, stat or list of a key that does not exist.
+type TLSReply struct {
+	Found    bool        `json:"found"`
+	Value    []byte      `json:"value,omitempty"`
+	Exists   bool        `json:"exists,omitempty"`
+	Keys     []string    `json:"keys,omitempty"`
+	Info     *TLSKeyInfo `json:"info,omitempty"`
+	Acquired bool        `json:"acquired,omitempty"`
+}
+
+// TLSKeyInfo is the reply to stat.
+type TLSKeyInfo struct {
+	Key      string    `json:"key"`
+	Modified time.Time `json:"modified"`
+	Size     int64     `json:"size"`
+	Terminal bool      `json:"terminal"`
 }
 
 // Assignment is one replica placed on a node, with the spec to run it from.
@@ -97,18 +187,19 @@ type AssignmentList struct {
 // Container is one container as the node last saw it. It mirrors
 // store.Status without the node ID, which the server takes from the path.
 type Container struct {
-	Name         string    `json:"name"`
-	ContainerID  string    `json:"container_id"`
-	App          string    `json:"app"`
-	Replica      int       `json:"replica"`
-	Generation   int       `json:"generation"`
-	State        string    `json:"state"`
-	Error        string    `json:"error,omitempty"`
-	RestartCount int       `json:"restart_count"`
-	Health       string    `json:"health,omitempty"`
-	Ready        bool      `json:"ready"`
-	CrashLooping bool      `json:"crash_looping"`
-	NextRestart  time.Time `json:"next_restart"`
+	Name         string      `json:"name"`
+	ContainerID  string      `json:"container_id"`
+	App          string      `json:"app"`
+	Replica      int         `json:"replica"`
+	Generation   int         `json:"generation"`
+	State        string      `json:"state"`
+	Error        string      `json:"error,omitempty"`
+	RestartCount int         `json:"restart_count"`
+	Health       string      `json:"health,omitempty"`
+	Ready        bool        `json:"ready"`
+	CrashLooping bool        `json:"crash_looping"`
+	NextRestart  time.Time   `json:"next_restart"`
+	RoutePorts   []RoutePort `json:"route_ports,omitempty"`
 }
 
 // StatusReport is the body of POST status, and the reply to GET status. A
@@ -174,6 +265,111 @@ func (g Register) Validate() error {
 	case g.Memory < 0 || g.Memory > maxMemory:
 		return fmt.Errorf("%w: memory %d is out of range", ErrInvalid, g.Memory)
 	}
+	if g.Address != "" {
+		if err := ValidateNodeAddress(g.Address); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// ValidateNodeAddress checks a worker's private address: an IP address in
+// canonical form, without a zone, that is not loopback, a wildcard or
+// multicast. Routers on other nodes must be able to reach it.
+func ValidateNodeAddress(s string) error {
+	ip, err := netip.ParseAddr(s)
+	switch {
+	case err != nil || ip.String() != s:
+		return fmt.Errorf("%w: node address %q is not an IP address in canonical form", ErrInvalid, truncate(s))
+	case ip.Zone() != "":
+		return fmt.Errorf("%w: node address %s has a zone", ErrInvalid, s)
+	case ip.IsLoopback() || ip.Unmap().IsLoopback():
+		return fmt.Errorf("%w: node address %s is loopback, which other nodes cannot reach", ErrInvalid, s)
+	case ip.IsUnspecified():
+		return fmt.Errorf("%w: node address %s is a wildcard", ErrInvalid, s)
+	case ip.IsMulticast():
+		return fmt.Errorf("%w: node address %s is multicast", ErrInvalid, s)
+	}
+	return nil
+}
+
+// Validate checks the routing table a server sent.
+func (t RouteTable) Validate() error {
+	if len(t.Routes) > maxRoutes {
+		return fmt.Errorf("%w: more than %d routes", ErrInvalid, maxRoutes)
+	}
+	seen := make(map[string]bool, len(t.Routes))
+	for _, r := range t.Routes {
+		if err := spec.ValidateHost(r.Host); err != nil {
+			return fmt.Errorf("%w: route: %v", ErrInvalid, err)
+		}
+		if seen[r.Host] {
+			return fmt.Errorf("%w: route %s is listed twice", ErrInvalid, r.Host)
+		}
+		seen[r.Host] = true
+		if len(r.Endpoints) > maxEndpoints {
+			return fmt.Errorf("%w: route %s has more than %d endpoints", ErrInvalid, r.Host, maxEndpoints)
+		}
+		for _, e := range r.Endpoints {
+			ap, err := netip.ParseAddrPort(e)
+			if err != nil || ap.Port() == 0 || ap.Addr().Zone() != "" || ap.Addr().IsUnspecified() {
+				return fmt.Errorf("%w: route %s has endpoint %q, which is not ip:port", ErrInvalid, r.Host, truncate(e))
+			}
+		}
+	}
+	return nil
+}
+
+// Validate checks a TLS storage request for op. The key rules are the
+// store's: keys stay in certmagic's namespace.
+func (r TLSRequest) Validate(op string) error {
+	wrap := func(err error) error {
+		if err == nil {
+			return nil
+		}
+		return fmt.Errorf("%w: %v", ErrInvalid, err)
+	}
+	switch op {
+	case TLSLoad, TLSStore:
+		if err := store.ValidTLSKey(r.Key); err != nil {
+			return wrap(err)
+		}
+		if len(r.Value) > store.MaxTLSValueLen {
+			return fmt.Errorf("%w: value is more than %d bytes", ErrInvalid, store.MaxTLSValueLen)
+		}
+	case TLSDelete, TLSExists, TLSList, TLSStat:
+		return wrap(store.ValidTLSPrefix(r.Key))
+	case TLSLock, TLSRenew, TLSUnlock:
+		if err := store.ValidTLSLockName(r.Name); err != nil {
+			return wrap(err)
+		}
+		if r.Owner == "" || len(r.Owner) > maxTLSOwnerLen || strings.IndexFunc(r.Owner, func(c rune) bool {
+			return !(c >= 'a' && c <= 'z' || c >= 'A' && c <= 'Z' || c >= '0' && c <= '9' || c == '-' || c == '_')
+		}) >= 0 {
+			return fmt.Errorf("%w: lock owner must be 1 to %d letters, digits, dashes and underscores", ErrInvalid, maxTLSOwnerLen)
+		}
+		if op != TLSUnlock && (r.TTLMillis < 1 || r.TTLMillis > maxTLSTTL) {
+			return fmt.Errorf("%w: lock lifetime must be 1 ms to 1 h", ErrInvalid)
+		}
+	default:
+		return fmt.Errorf("%w: unknown TLS storage operation %q", ErrInvalid, truncate(op))
+	}
+	return nil
+}
+
+// Validate checks a TLS storage reply.
+func (r TLSReply) Validate() error {
+	if len(r.Value) > store.MaxTLSValueLen {
+		return fmt.Errorf("%w: value is more than %d bytes", ErrInvalid, store.MaxTLSValueLen)
+	}
+	if len(r.Keys) > maxTLSKeys {
+		return fmt.Errorf("%w: more than %d keys", ErrInvalid, maxTLSKeys)
+	}
+	for _, k := range r.Keys {
+		if err := store.ValidTLSKey(k); err != nil {
+			return fmt.Errorf("%w: %v", ErrInvalid, err)
+		}
+	}
 	return nil
 }
 
@@ -216,6 +412,14 @@ func (s StatusReport) Validate() error {
 		default:
 			return fmt.Errorf("%w: container %s has health %q", ErrInvalid, c.Name, c.Health)
 		}
+		if len(c.RoutePorts) > maxRoutePorts {
+			return fmt.Errorf("%w: container %s has more than %d route ports", ErrInvalid, c.Name, maxRoutePorts)
+		}
+		for _, p := range c.RoutePorts {
+			if p.Port < 1 || p.Port > 65535 || p.HostPort < 1 || p.HostPort > 65535 {
+				return fmt.Errorf("%w: container %s has route port %d on host port %d", ErrInvalid, c.Name, p.Port, p.HostPort)
+			}
+		}
 	}
 	return nil
 }
@@ -244,9 +448,13 @@ func FromStore(as []store.Assignment) []Assignment {
 func (s StatusReport) ToStore() []store.Status {
 	out := make([]store.Status, 0, len(s.Containers))
 	for _, c := range s.Containers {
+		var rp []store.RoutePort
+		for _, p := range c.RoutePorts {
+			rp = append(rp, store.RoutePort{Port: p.Port, HostPort: p.HostPort})
+		}
 		out = append(out, store.Status{Name: c.Name, ContainerID: c.ContainerID, App: c.App, Replica: c.Replica,
 			Generation: c.Generation, State: c.State, Error: c.Error, RestartCount: c.RestartCount,
-			Health: c.Health, Ready: c.Ready, CrashLooping: c.CrashLooping, NextRestart: c.NextRestart})
+			Health: c.Health, Ready: c.Ready, CrashLooping: c.CrashLooping, NextRestart: c.NextRestart, RoutePorts: rp})
 	}
 	return out
 }
@@ -255,10 +463,27 @@ func (s StatusReport) ToStore() []store.Status {
 func StatusFromStore(sts []store.Status) StatusReport {
 	out := StatusReport{Containers: make([]Container, 0, len(sts))}
 	for _, x := range sts {
+		var rp []RoutePort
+		for _, p := range x.RoutePorts {
+			rp = append(rp, RoutePort{Port: p.Port, HostPort: p.HostPort})
+		}
 		out.Containers = append(out.Containers, Container{Name: x.Name, ContainerID: x.ContainerID, App: x.App,
 			Replica: x.Replica, Generation: x.Generation, State: x.State, Error: x.Error,
 			RestartCount: x.RestartCount, Health: x.Health, Ready: x.Ready, CrashLooping: x.CrashLooping,
-			NextRestart: x.NextRestart})
+			NextRestart: x.NextRestart, RoutePorts: rp})
+	}
+	return out
+}
+
+// RouteTableFromStore converts the store's routing table to the wire form.
+func RouteTableFromStore(rt []store.Route) RouteTable {
+	out := RouteTable{Routes: make([]Route, 0, len(rt))}
+	for _, r := range rt {
+		eps := r.Endpoints
+		if eps == nil {
+			eps = []string{}
+		}
+		out.Routes = append(out.Routes, Route{Host: r.Host, Endpoints: eps})
 	}
 	return out
 }

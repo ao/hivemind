@@ -70,6 +70,7 @@ The scheduler decides where each replica runs. Its input is the nodes, the repli
 - Only eligible nodes take new replicas. A node is eligible when its lease is current, it has been ready for `--min-ready` (see below), and it has not been made ineligible or drained (see [Draining a node](#draining-a-node)). The server's own node is always ready.
 - The CPU and memory the replica asks for must fit in what is left on the node, after the replicas already placed there. A node's totals are the CPU count and memory that its Docker daemon reports. A replica's `resources` are counted here, but the container gets no limit (see [Resources](#resources)).
 - Its host ports must not clash with the ports of replicas already on the node. Two ports clash when the number and protocol match and the bind addresses overlap. A wildcard address (`0.0.0.0` or `::`) overlaps every address. Two different specific addresses do not overlap. The default bind is `127.0.0.1`.
+- A replica of an app with `routes` goes only to a node that reported a private address (see [Routing](#routing)). A worker older than 2.2 reports none. Route ports are ephemeral, so they never clash.
 - Among the nodes that fit, it takes the one with the fewest replicas of the same app. Then the lowest load, which is the larger of the CPU and memory fractions in use. Then the fewest replicas overall, and then the lowest node ID.
 
 Placement never moves a replica that already has a node. Moves come only from node loss, rollouts and drains.
@@ -147,6 +148,8 @@ A change to an app's spec, other than its replica count, starts a rollout. The r
 
 On a single node every move is in place: the replica being moved is `pending` while its new container starts, and the others keep running. With a second node that is eligible and has the app's host ports free, the move becomes a surge. A [drain](#draining-a-node) moves replicas off a node with the same surges, at each replica's own generation.
 
+An app with routes and no host ports is the exception: its surge may go on the replica's own node too, since its route ports are ephemeral, so every move of a routed app is a surge, on one node as on several. Its new copy is in the routing table before the old one leaves it, and the old one keeps running for 5 seconds after that before it is stopped. See [routing](routing.md#rolling-updates).
+
 `hivemind status` prints a line for each app with a rollout in progress or paused, such as `web: rolling out generation 2`, or the pause reason. The API reports the same thing as the `rollout` field of an app's status. See [the API](api.md#objects).
 
 ## Apps and replicas
@@ -210,6 +213,10 @@ Replicas that publish the same host port cannot share a node. The scheduler enfo
 - A port held by something outside hivemind, such as another program on the machine, makes Docker refuse the bind with `port is already allocated`. The agent removes that container, and the replica stays `pending` with the error in status. Each pass tries again with a new container, so the replica starts, with its port published, once the port is free. A container whose start failed is never started again, because Docker can let a second start succeed without the published port.
 - Containers on different machines reach each other only through host ports. There is no overlay network and no DNS. A container gets an address on its Docker network, which other containers on the same node can reach, but nothing finds it by name.
 
+## Routing
+
+An app can name HTTPS routes: `routes: [{host: www.example.com, port: 80}]`. A node started with `--route-addr` runs a router, which serves each routed host on ports 80 and 443 with a certificate from an ACME CA, and sends each request to a Ready replica of its app on any node. A route's container port is published on an ephemeral host port on the node's private address, which the agent reports, and the server builds the routing table from those reports. A host belongs to one app at a time. This is the one place hivemind proxies traffic, and its one listener that may bind `0.0.0.0`. See [routing](routing.md).
+
 ## Volumes
 
 A volume is a Docker named volume on the node where the replica runs, mounted at an absolute path other than `/`. An app with volumes can have only one replica.
@@ -250,6 +257,7 @@ The API token, the admin token and the file modes are described in [security](se
 - `init` refuses to run when a cluster already exists, and it never overwrites the token file or the CA.
 - Logs are redacted by the logger (`internal/logging`). It masks the value of any attribute whose key contains `token`, `secret`, `password`, `passwd`, `authorization`, `cookie`, `session`, `csrf`, `privatekey`, `apikey`, `credential` or `env`, with dashes, underscores and case ignored. It also masks any value of the config's secret type, and any string that holds an admin token (`hm_` and 43 characters), a join token, a bearer credential or a PEM private key. Session IDs, CSRF tokens and environment values cannot be recognised by their shape, so the code that logs must not pass them in. The logger writes text by default, or JSON with `--log-format json`.
 - The metrics listener, `--metrics-addr`, must be a loopback address, and it needs the token too.
+- The router (`--route-addr`) is public and has no authentication: it serves the routed apps' own traffic. See [security](security.md#routing).
 
 The web UI is not built. The API has the login and logout routes a browser would use. The TLS flags apply to the API only.
 

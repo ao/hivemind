@@ -274,6 +274,12 @@ func (a *Agent) forget(kept map[string]bool) {
 			a.wakeAt = rs.nextRestart
 		}
 	}
+	// A routed container waiting out its drain is stopped when the wait ends.
+	for _, first := range a.unrouted {
+		if due := first.Add(a.cfg.RouteDrain); a.wakeAt.IsZero() || due.Before(a.wakeAt) {
+			a.wakeAt = due
+		}
+	}
 }
 
 // wake returns when a scheduled restart is next due, or zero if none is.
