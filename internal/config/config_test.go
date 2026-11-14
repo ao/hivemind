@@ -29,11 +29,32 @@ func testOpts(env map[string]string, file string) Options {
 	}
 }
 
+// newFlags binds the node settings, and registers server and token flags
+// as a client command does, since Load still reads them when they exist.
 func newFlags(t *testing.T, opts Options) *pflag.FlagSet {
 	t.Helper()
 	fl := pflag.NewFlagSet("test", pflag.ContinueOnError)
 	Bind(fl, opts)
+	fl.String("server", "", "")
+	fl.String("token", "", "")
 	return fl
+}
+
+// Bind registers no --server or --token: the node commands do not use them,
+// and the client commands register their own.
+func TestBindLeavesOutClientSettings(t *testing.T) {
+	fl := pflag.NewFlagSet("test", pflag.ContinueOnError)
+	Bind(fl, testOpts(map[string]string{"HOME": "/home/t"}, ""))
+	for _, name := range []string{"server", "token"} {
+		if fl.Lookup(name) != nil {
+			t.Errorf("Bind registered --%s", name)
+		}
+	}
+	for _, name := range []string{"data-dir", "api-addr", "min-ready"} {
+		if fl.Lookup(name) == nil {
+			t.Errorf("Bind did not register --%s", name)
+		}
+	}
 }
 
 // fieldValues renders every Config field by name. Tests compare these maps.

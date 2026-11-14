@@ -116,7 +116,8 @@ API listener, so --advertise does not apply to it.`,
 		},
 	}
 	config.Bind(cmd.Flags(), config.Options{})
-	cmd.Flags().Lookup("token").Usage = "join token from hivemind join-token on the server"
+	cmd.Flags().String("token", "", "join token from hivemind join-token on the server")
+	_ = cmd.Flags().SetAnnotation("token", noEnvAnnotation, []string{"true"})
 	cmd.Flags().Lookup("advertise").Hidden = true
 	return cmd
 }

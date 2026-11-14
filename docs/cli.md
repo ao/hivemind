@@ -8,9 +8,6 @@ YAML config file (`serve` and `init` read `<data-dir>/hivemind.yaml` unless `--c
 then the default. The client commands read the server address and token from their flags, then from
 `HIVEMIND_SERVER` and `HIVEMIND_TOKEN`, then from the client config that `init` writes.
 
-`init` and `serve` accept the client settings `--server` and `--token`. They do not use them.
-`logs` accepts `--json` and ignores it.
-
 Exit status is 0 on success and 1 on any error, including a bad flag or argument. Errors are written to
 standard error with an `error:` prefix.
 
@@ -238,8 +235,6 @@ hivemind init [flags]
 | `--metrics-addr` | string | - | `HIVEMIND_METRICS_ADDR` | separate loopback address for /metrics, host:port; empty means API only |
 | `--min-ready` | string | `30s` | - | how long a node must be ready before it gets new replicas; 0s means no wait |
 | `--reconcile-interval` | string | `2s` | `HIVEMIND_RECONCILE_INTERVAL` | how often the agent reconciles containers and renews its lease (at most 5s) |
-| `--server` | string | `http://127.0.0.1:4483` | `HIVEMIND_SERVER` | server URL for the client commands |
-| `--token` | string | - | `HIVEMIND_TOKEN` | API token for the client commands (not logged; never read from the config file) |
 
 ### hivemind join
 
@@ -280,8 +275,7 @@ hivemind join <server> [flags]
 | `--metrics-addr` | string | - | `HIVEMIND_METRICS_ADDR` | separate loopback address for /metrics, host:port; empty means API only |
 | `--min-ready` | string | `30s` | - | how long a node must be ready before it gets new replicas; 0s means no wait |
 | `--reconcile-interval` | string | `2s` | `HIVEMIND_RECONCILE_INTERVAL` | how often the agent reconciles containers and renews its lease (at most 5s) |
-| `--server` | string | `http://127.0.0.1:4483` | `HIVEMIND_SERVER` | server URL for the client commands |
-| `--token` | string | - | `HIVEMIND_TOKEN` | join token from hivemind join-token on the server |
+| `--token` | string | - | - | join token from hivemind join-token on the server |
 
 ### hivemind join-token
 
@@ -324,7 +318,6 @@ hivemind logs <app> [replica] [flags]
 | `--ca-cert` | string | - | - | PEM file of the CA certificates to trust for an https server, instead of the system's (env HIVEMIND_CA_CERT; default from the client config) |
 | `--client-config` | string | - | `HIVEMIND_CLIENT_CONFIG` | client config file (env HIVEMIND_CLIENT_CONFIG; default $XDG_CONFIG_HOME/hivemind/config.yaml or ~/.config/hivemind/config.yaml) |
 | `-f`, `--follow` | bool | - | - | keep printing new lines |
-| `--json` | bool | - | - | print JSON instead of a table |
 | `--server` | string | - | `HIVEMIND_SERVER` | server URL (env HIVEMIND_SERVER; default from the client config, then http://127.0.0.1:4483) |
 | `--tail` | int | - | - | print only the last N lines (0 for all) |
 | `--token` | string | - | `HIVEMIND_TOKEN` | API token (env HIVEMIND_TOKEN; default from the client config's token file) |
@@ -574,8 +567,6 @@ hivemind serve [flags]
 | `--min-ready` | string | `30s` | - | how long a node must be ready before it gets new replicas; 0s means no wait |
 | `--reconcile-interval` | string | `2s` | `HIVEMIND_RECONCILE_INTERVAL` | how often the agent reconciles containers and renews its lease (at most 5s) |
 | `--role` | string | `server` | - | server (API, scheduler and agent) or worker (agent only, after hivemind join) |
-| `--server` | string | `http://127.0.0.1:4483` | `HIVEMIND_SERVER` | server URL for the client commands |
-| `--token` | string | - | `HIVEMIND_TOKEN` | API token for the client commands (not logged; never read from the config file) |
 
 ### hivemind status
 

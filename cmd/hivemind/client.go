@@ -119,14 +119,22 @@ type clientFlags struct {
 	json         bool
 }
 
+// addClientFlags registers the connection flags and --json.
 func addClientFlags(cmd *cobra.Command) *clientFlags {
+	f := addConnFlags(cmd)
+	cmd.Flags().BoolVar(&f.json, "json", false, "print JSON instead of a table")
+	return f
+}
+
+// addConnFlags registers the flags that say which server to call and how,
+// for a command whose output has no JSON form.
+func addConnFlags(cmd *cobra.Command) *clientFlags {
 	f := &clientFlags{}
 	fl := cmd.Flags()
 	fl.StringVar(&f.server, "server", "", "server URL (env "+envServer+"; default from the client config, then "+defaultServer+")")
 	fl.StringVar(&f.token, "token", "", "API token (env "+envToken+"; default from the client config's token file)")
 	fl.StringVar(&f.clientConfig, "client-config", "", "client config file (env "+envClientConfig+"; default "+defaultClientConfigHint+")")
 	fl.StringVar(&f.caCert, "ca-cert", "", "PEM file of the CA certificates to trust for an https server, instead of the system's (env "+envCACert+"; default from the client config)")
-	fl.BoolVar(&f.json, "json", false, "print JSON instead of a table")
 	return f
 }
 
