@@ -681,6 +681,37 @@ func listNodes(ctx context.Context, q querier) ([]Node, error) {
 	return out, rows.Err()
 }
 
+// RenewLease renews the node's lease and changes nothing else. An agent calls
+// it on its own timer, so a reconcile pass that takes longer than the lease
+// timeout, stopping containers or pulling an image, does not make the node
+// lost. A node that was removed gets ErrNodeRemoved, and one that is not
+// registered ErrNotFound.
+func (s *Store) RenewLease(ctx context.Context, nodeID string) error {
+	return s.tx(ctx, func(tx *sql.Tx) error {
+		return s.renewLease(ctx, tx, nodeID, s.now().UnixNano())
+	})
+}
+
+// renewLease sets the node's lease to now, and restarts its readiness if the
+// lease had lapsed.
+func (s *Store) renewLease(ctx context.Context, tx *sql.Tx, nodeID string, now int64) error {
+	res, err := tx.ExecContext(ctx, `UPDATE nodes SET last_lease = ?,
+		ready_since = `+readySinceExpr+` WHERE id = ?`,
+		now, now-int64(scheduler.DefaultLeaseTimeout), now, nodeID)
+	if err != nil {
+		return err
+	}
+	if n, _ := res.RowsAffected(); n == 0 {
+		if removed, err := isRemoved(ctx, tx, nodeID); err != nil {
+			return err
+		} else if removed {
+			return fmt.Errorf("node %q: %w", nodeID, ErrNodeRemoved)
+		}
+		return fmt.Errorf("node %q: %w", nodeID, ErrNotFound)
+	}
+	return nil
+}
+
 // ReportStatus replaces everything the node reported before with st, and
 // renews the node's lease. Replicas marked for removal that the node no
 // longer reports a container for are then deleted, and so are deleted apps
@@ -695,19 +726,8 @@ func (s *Store) ReportStatus(ctx context.Context, nodeID string, st []Status) er
 	}
 	return s.tx(ctx, func(tx *sql.Tx) error {
 		now := s.now().UnixNano()
-		res, err := tx.ExecContext(ctx, `UPDATE nodes SET last_lease = ?,
-			ready_since = `+readySinceExpr+` WHERE id = ?`,
-			now, now-int64(scheduler.DefaultLeaseTimeout), now, nodeID)
-		if err != nil {
+		if err := s.renewLease(ctx, tx, nodeID, now); err != nil {
 			return err
-		}
-		if n, _ := res.RowsAffected(); n == 0 {
-			if removed, err := isRemoved(ctx, tx, nodeID); err != nil {
-				return err
-			} else if removed {
-				return fmt.Errorf("node %q: %w", nodeID, ErrNodeRemoved)
-			}
-			return fmt.Errorf("node %q: %w", nodeID, ErrNotFound)
 		}
 		if _, err := tx.ExecContext(ctx, `DELETE FROM container_status WHERE node_id = ?`, nodeID); err != nil {
 			return err

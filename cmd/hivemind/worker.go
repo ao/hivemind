@@ -448,6 +448,17 @@ func (w workerSource) ReportStatus(ctx context.Context, id string, st []store.St
 	return w.check(w.client.ReportStatus(ctx, id, st))
 }
 
+// RenewLease makes the worker's agent renew its lease on a timer, apart from
+// its passes (agent.LeaseRenewer). A node the server does not know yet gets
+// ErrNotRegistered, which the next report handles.
+func (w workerSource) RenewLease(ctx context.Context, id string) error {
+	lr, ok := w.client.(agent.LeaseRenewer)
+	if !ok {
+		return nil
+	}
+	return w.check(lr.RenewLease(ctx, id))
+}
+
 func (w workerSource) StatusForNode(ctx context.Context, id string) ([]store.Status, error) {
 	sts, err := w.client.StatusForNode(ctx, id)
 	return sts, w.check(err)

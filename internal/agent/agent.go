@@ -26,7 +26,20 @@ import (
 const (
 	DefaultInterval    = 2 * time.Second
 	DefaultStopTimeout = 10 * time.Second
+	// DefaultHeartbeat is how often Run renews the lease on its own, when
+	// the Source can (LeaseRenewer). Three renewals fit in the 15 s lease.
+	DefaultHeartbeat = 5 * time.Second
 )
+
+// LeaseRenewer is a Source that can renew the node's lease without a status
+// report. Run renews it every Heartbeat, beside the passes, because a pass
+// renews the lease only when it reports, at its end, and a pass that stops
+// containers (up to StopTimeout each, one after another) or pulls an image
+// can take longer than the 15 s lease. Nomad clients heartbeat the same way,
+// apart from the work they run.
+type LeaseRenewer interface {
+	RenewLease(ctx context.Context, nodeID string) error
+}
 
 // Source gives the agent its assignments and takes its status reports. The
 // store implements it in-process; the node API client will implement it
@@ -55,6 +68,9 @@ type Config struct {
 	// wall time the pass took and its error. Metrics use it. A pass cut
 	// short by the end of Run is not reported.
 	OnPass func(d time.Duration, err error)
+	// Heartbeat is how often Run renews the lease when Source is a
+	// LeaseRenewer. Zero means DefaultHeartbeat.
+	Heartbeat time.Duration
 }
 
 // Agent reconciles one node.
@@ -81,6 +97,9 @@ func New(cfg Config) (*Agent, error) {
 	}
 	if cfg.StopTimeout <= 0 {
 		cfg.StopTimeout = DefaultStopTimeout
+	}
+	if cfg.Heartbeat <= 0 {
+		cfg.Heartbeat = DefaultHeartbeat
 	}
 	if cfg.Clock == nil {
 		cfg.Clock = time.Now
@@ -119,6 +138,18 @@ func (a *Agent) Trigger() {
 // nil when ctx is cancelled.
 func (a *Agent) Run(ctx context.Context) error {
 	defer a.Close()
+	if lr, ok := a.cfg.Source.(LeaseRenewer); ok {
+		hbCtx, stop := context.WithCancel(ctx)
+		done := make(chan struct{})
+		go func() {
+			defer close(done)
+			a.heartbeat(hbCtx, lr)
+		}()
+		defer func() {
+			stop()
+			<-done
+		}()
+	}
 	t := time.NewTicker(a.cfg.Interval)
 	defer t.Stop()
 	for {
@@ -150,6 +181,24 @@ func (a *Agent) Run(ctx context.Context) error {
 		}
 		if timer != nil {
 			timer.Stop()
+		}
+	}
+}
+
+// heartbeat renews the lease every Heartbeat until ctx ends. It does not take
+// a.mu, so it keeps going while a pass is slow. A failure is logged at debug
+// level and tried again at the next tick: the passes report the same errors.
+func (a *Agent) heartbeat(ctx context.Context, lr LeaseRenewer) {
+	t := time.NewTicker(a.cfg.Heartbeat)
+	defer t.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-t.C:
+		}
+		if err := lr.RenewLease(ctx, a.cfg.NodeID); err != nil && ctx.Err() == nil {
+			a.log.Debug("lease renewal", "err", err)
 		}
 	}
 }

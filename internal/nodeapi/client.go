@@ -134,6 +134,13 @@ func (c *Client) ReportStatus(ctx context.Context, nodeID string, st []store.Sta
 	return c.do(ctx, http.MethodPost, StatusPath(nodeID), b, nil)
 }
 
+// RenewLease renews the node's lease without a status report. It implements
+// the agent's LeaseRenewer. A 2.0 server has no such route and answers 404,
+// which comes back as ErrNotRegistered; the reports still renew the lease.
+func (c *Client) RenewLease(ctx context.Context, nodeID string) error {
+	return c.do(ctx, http.MethodPost, LeasePath(nodeID), nil, nil)
+}
+
 // StatusForNode returns what the node last reported. It implements the
 // agent's optional status reader, which seeds restart counts at start.
 func (c *Client) StatusForNode(ctx context.Context, nodeID string) ([]store.Status, error) {

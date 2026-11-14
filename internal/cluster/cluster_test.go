@@ -435,6 +435,15 @@ func TestNodeCannotActForAnotherNode(t *testing.T) {
 	if code, _ := fx.send(a, http.MethodGet, fx.nodeURL(nodeapi.AssignmentsPath(idA)), nil); code != http.StatusOK {
 		t.Errorf("A reads its own assignments: %d, want 200", code)
 	}
+	if code, _ := fx.send(a, http.MethodPost, fx.nodeURL(nodeapi.LeasePath(idB)), nil); code != http.StatusForbidden {
+		t.Errorf("A renews B's lease: %d, want 403", code)
+	}
+	if code, _ := fx.send(a, http.MethodPost, fx.nodeURL(nodeapi.LeasePath(idA)), nil); code != http.StatusNoContent {
+		t.Errorf("A renews its own lease: %d, want 204", code)
+	}
+	if code, _ := fx.post(a, fx.nodeURL(nodeapi.LeasePath(idA)), nodeapi.Register{Name: "x"}); code != http.StatusBadRequest {
+		t.Errorf("A renews its lease with a body: %d, want 400", code)
+	}
 }
 
 func TestNodeRoutesRejectBadInput(t *testing.T) {

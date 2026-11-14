@@ -46,6 +46,34 @@ func (e *schedEnv) sweep() []string {
 	return lost
 }
 
+// RenewLease keeps a node from being lost without a status report, and leaves
+// what it reported as it was.
+func TestRenewLeaseKeepsANodeWithoutAReport(t *testing.T) {
+	e := newSchedEnv(t, 0, "node-1")
+	mustPut(t, e.s, web(1))
+	st := []Status{{Name: "c1", App: "web", Replica: 0, Generation: 1, ContainerID: "abc", State: "running", Ready: true}}
+	if err := e.s.ReportStatus(ctxT(t), "node-1", st); err != nil {
+		t.Fatal(err)
+	}
+	for range 4 {
+		e.clock.Advance(10 * time.Second)
+		if err := e.s.RenewLease(ctxT(t), "node-1"); err != nil {
+			t.Fatal(err)
+		}
+		if lost := e.sweep(); len(lost) != 0 {
+			t.Fatalf("lost %v at %s with a lease renewed every 10 s", lost, e.clock.Now())
+		}
+	}
+	got, err := e.s.StatusForNode(ctxT(t), "node-1")
+	if err != nil || len(got) != 1 || got[0].ContainerID != "abc" {
+		t.Fatalf("status after the renewals: %+v, %v; want the report as it was", got, err)
+	}
+	e.clock.Advance(16 * time.Second)
+	if lost := e.sweep(); len(lost) != 1 {
+		t.Fatalf("lost %v 16 s after the last renewal, want node-1", lost)
+	}
+}
+
 // A server that has just started, after an outage or a restore, finds every
 // lease as old as the outage. It gives each node a whole lease timeout from
 // its start to report, and only a node that stays quiet is lost.

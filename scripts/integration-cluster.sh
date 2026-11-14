@@ -41,6 +41,9 @@
 #     directory, and serve starts. Both workers, which were never restarted,
 #     reconnect with their certificates, and the apps converge with no
 #     duplicate replica
+#   - a slow pass: nine replicas of busybox sleep, which ignores SIGTERM, are
+#     deleted; each agent takes about 30 s to stop its three, and no node is
+#     lost meanwhile, because leases are renewed apart from the passes
 #   - node removal: removing w1 while it runs is refused without --force.
 #     With --force, its spread replica moves to another node, its web replica
 #     waits on the host port, hivemind nodes no longer lists it, its worker
@@ -360,6 +363,34 @@ wait_for 90 spread_three || cl_fail "spread did not converge on the restored ser
 wait_for 60 no_duplicates || cl_fail "a replica is duplicated after the restore: $( (containers_of web; containers_of spread) | sort | tr '\n' ';')"
 cl_check_server_listeners
 cl_note "after the restore: web $(app_rows web | awk '{ print $1, $2, $3 }' | sort | tr '\n' ';') spread at three, no duplicates"
+
+# A slow pass. busybox sleep as PID 1 ignores SIGTERM, so Docker stops each
+# container only when its 10 s grace ends, and a pass stops one container at
+# a time: with three per node, a pass takes about 30 s. The agents renew
+# their leases apart from their passes, so no node may be lost meanwhile.
+docker exec -i "$S" hivemind deploy -f - >/dev/null <<'EOF' || cl_fail "deploy slowstop"
+name: slowstop
+image: busybox:1.36
+replicas: 9
+command: ["sleep", "3600"]
+EOF
+slowstop_up() { [ "$(count_running slowstop)" -eq 9 ]; }
+wait_for 120 slowstop_up || cl_fail "slowstop did not reach nine running replicas: $(app_rows slowstop | tr '\n' ';')"
+per_node=$(app_rows slowstop | awk '{ print $2 }' | sort | uniq -c | tr '\n' ';')
+docker exec "$S" hivemind delete slowstop >/dev/null || cl_fail "delete slowstop"
+deleted_at=$(date +%s)
+# The API hides a deleted app at once; its containers go one by one.
+slowstop_gone() { [ -z "$(containers_of slowstop)" ]; }
+while ! slowstop_gone; do
+	if docker exec "$S" hivemind nodes | grep -q ' lost '; then
+		cl_fail "a node was lost while its agent stopped slowstop's containers, $(($(date +%s) - deleted_at)) s after the delete: $(docker exec "$S" hivemind nodes | tr '\n' ';')"
+	fi
+	[ $(($(date +%s) - deleted_at)) -lt 120 ] || cl_fail "slowstop was not removed in 120 s"
+	sleep 1
+done
+took=$(($(date +%s) - deleted_at))
+[ "$took" -gt 15 ] || cl_fail "slowstop was removed in $took s, under the 15 s lease, so the check proves nothing"
+cl_note "slowstop ($per_node) was removed in $took s, and no node was lost meanwhile"
 
 # worker_stopped NODE: no hivemind process runs in NODE.
 worker_stopped() { ! docker exec "$1" pgrep -x hivemind >/dev/null 2>&1; }
