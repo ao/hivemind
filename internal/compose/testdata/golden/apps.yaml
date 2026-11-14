@@ -6,9 +6,9 @@ command:
   - --listen
   - :9000
   - --db
-  - postgres://shop@127.0.0.1:5432/shop
+  - postgres://shop@10.0.0.5:5432/shop
 env:
-  DB_HOST: 127.0.0.1
+  DB_HOST: 10.0.0.5
   DB_PASSWORD: change-me
   LOG_LEVEL: info
   WORKERS: "4"
@@ -29,7 +29,7 @@ env:
   POSTGRES_PASSWORD: change-me
   POSTGRES_USER: shop
 ports:
-  - bind: 127.0.0.1
+  - bind: 10.0.0.5
     host: 5432
     container: 5432
     protocol: tcp

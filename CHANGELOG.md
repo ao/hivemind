@@ -2,6 +2,12 @@
 
 Notable changes to hivemind, newest first. Versions follow [Semantic Versioning](https://semver.org). A release is cut by pushing a `v*` tag; its notes are the matching section below.
 
+## [2.2.0] - Unreleased
+
+### Added
+
+- `hivemind compose convert`, `deploy` and `delete` read a Docker Compose file and make one app of each service. The CLI does the conversion; the API is unchanged. The keys read are `image`, `command`, `environment`, `ports`, named `volumes`, `deploy` (`replicas`, `resources` and `restart_policy`), `healthcheck` and `restart`, with anchors, merge keys, `x-` extensions and `.env` interpolation. Any other key is refused with its path and a reason, and every refusal is listed in one error. A port with no address is published on `127.0.0.1`, where Compose publishes on every interface, and a note on standard error says so for each such port. An unset variable with no default is an error rather than an empty string. Apps do not find each other by service name. `deploy` validates every app before it sends any, and `--prefix` names the apps `<prefix>-<service>`. See [docs/compose.md](docs/compose.md).
+
 ## [2.1.0] - Unreleased
 
 ### Added

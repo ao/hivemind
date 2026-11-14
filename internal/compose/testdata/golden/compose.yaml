@@ -1,4 +1,6 @@
-# A small shop: a web front end, an API, and the API's database.
+# A small shop: a web front end, an API, and the API's database. The
+# database is published on the node's private address, DB_ADDR, which the
+# API's container can reach; 127.0.0.1 inside a container is the container.
 name: shop
 
 x-restart: &restart
@@ -6,7 +8,7 @@ x-restart: &restart
 
 x-api-env: &api-env
   LOG_LEVEL: info
-  DB_HOST: 127.0.0.1
+  DB_HOST: ${DB_ADDR}
 
 services:
   web:
@@ -23,7 +25,7 @@ services:
   api:
     <<: *restart
     image: ghcr.io/example/shop-api:${API_TAG:-2.4.1}
-    command: serve --listen :9000 --db "postgres://shop@127.0.0.1:5432/shop"
+    command: serve --listen :9000 --db "postgres://shop@${DB_ADDR}:5432/shop"
     environment:
       <<: *api-env
       DB_PASSWORD: ${DB_PASSWORD:?set DB_PASSWORD in .env}
@@ -46,7 +48,7 @@ services:
       POSTGRES_PASSWORD: ${DB_PASSWORD}
       POSTGRES_DB: shop
     ports:
-      - "127.0.0.1:5432:5432"
+      - "${DB_ADDR}:5432:5432"
     volumes:
       - pgdata:/var/lib/postgresql/data
     healthcheck:
