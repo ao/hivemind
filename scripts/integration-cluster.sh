@@ -22,6 +22,19 @@
 #     pending with the host-port reason
 #   - Task 10: the worker starts again with its data directory. No replica of
 #     any app is duplicated, and each app is back at its replica count
+#   - certificate renewal: the binary is built with -tags hivemind_testknobs,
+#     and the server runs with HIVEMIND_TEST_CERT_LIFETIME=10m, so node
+#     certificates fall due after about 6m40s. Each worker renews over the
+#     node API and keeps working without a restart: node.crt changes, the
+#     key and certificate stay mode 0600, the server logs each renewal and
+#     renews its own certificate, and the apps stay at their counts
+#   - disaster recovery: hivemind backup on the server, from the data
+#     directory and through the API. The server container, its data
+#     directory and its Docker volume are destroyed. A new server node gets
+#     the same IP, hivemind restore puts the backup in an empty data
+#     directory, and serve starts. Both workers, which were never restarted,
+#     reconnect with their certificates, and the apps converge with no
+#     duplicate replica
 #   - node removal: removing w1 while it runs is refused without --force.
 #     With --force, its spread replica moves to another node, its web replica
 #     waits on the host port, hivemind nodes no longer lists it, its worker
@@ -41,6 +54,12 @@ REPO=$(cd "$(dirname "$0")/.." && pwd)
 . "$REPO/scripts/lib/cluster.sh"
 
 cl_init integration
+# The test-only build tag, and a short certificate lifetime, so a renewal
+# happens during the run. The network gets its own subnet, so the server can
+# be replaced by a new container at the same address.
+CL_GO_TAGS=hivemind_testknobs
+CL_SERVER_ENV=HIVEMIND_TEST_CERT_LIFETIME=10m
+CL_NET_SUBNET=auto
 cl_add_node
 cl_add_node
 cl_add_node
@@ -59,6 +78,11 @@ W1_ID=${CL_IDS[1]}
 W2_ID=${CL_IDS[2]}
 cl_check_worker_listeners
 cl_note "workers listen on no hivemind port"
+
+# cert_sum NODE: the SHA-256 of the worker's node.crt.
+cert_sum() { docker exec "$1" sha256sum /var/lib/hivemind/node.crt | awk '{ print $1 }'; }
+W1_CERT0=$(cert_sum "$W1")
+W2_CERT0=$(cert_sum "$W2")
 
 # app_rows APP prints "index node state detail" for each replica of APP, from
 # the replica table of hivemind status. The node is "-" when the replica has
@@ -179,6 +203,87 @@ cl_note "after the return: web and spread at their replica counts, no duplicate 
 cl_check_server_listeners
 cl_check_worker_listeners
 cl_note "listeners unchanged after the restart"
+
+# Certificate renewal. Certificates last 10 minutes here, so each worker
+# renews about 6m40s after it joined, and keeps running.
+renewed() { # renewed NODE CERT0: the worker logged a renewal and its node.crt changed
+	docker exec "$1" grep -q "node certificate renewed" /var/log/hivemind.log && [ "$(cert_sum "$1")" != "$2" ]
+}
+wait_for 480 renewed "$W1" "$W1_CERT0" || cl_fail "$W1 did not renew its certificate"
+wait_for 120 renewed "$W2" "$W2_CERT0" || cl_fail "$W2 did not renew its certificate"
+for c in "$W1" "$W2"; do
+	modes=$(docker exec "$c" stat -c '%a %n' /var/lib/hivemind/node.key /var/lib/hivemind/node.crt)
+	[ "$(awk '$1 != "600"' <<<"$modes")" = "" ] || cl_fail "$c: renewed files are not mode 0600: $modes"
+	if docker exec "$c" sh -c 'ls /var/lib/hivemind/*.next' >/dev/null 2>&1; then
+		cl_fail "$c left staging files after a renewal"
+	fi
+done
+for id in "$W1_ID" "$W2_ID"; do
+	docker exec "$S" grep "node certificate renewed" /var/log/hivemind.log | grep -q "node=$id" ||
+		cl_fail "the server did not log a renewal for $id"
+done
+docker exec "$S" grep -q "server certificate renewed" /var/log/hivemind.log || cl_fail "the server did not renew its own certificate"
+# Both workers still run the process they started with, and still report.
+for c in "$W1" "$W2"; do
+	docker exec "$c" pgrep -x hivemind >/dev/null || cl_fail "the worker on $c stopped"
+done
+wait_for 60 web_ok || cl_fail "web is not at its counts after the renewals: $(app_rows web | tr '\n' ';')"
+spread_three() { [ "$(count_running spread)" -eq 3 ]; }
+wait_for 60 spread_three || cl_fail "spread is not at three running replicas after the renewals: $(app_rows spread | tr '\n' ';')"
+nodes_out=$(docker exec "$S" hivemind nodes)
+[ "$(grep -c ' ready .* (in ' <<<"$nodes_out")" -eq 3 ] || cl_fail "hivemind nodes does not show three ready nodes with a certificate expiry: $nodes_out"
+cl_note "both workers renewed their certificates and kept working; $(docker exec "$W1" grep 'node certificate renewed' /var/log/hivemind.log | tail -n 1)"
+
+# Disaster recovery. Back up the server while it runs, from the data
+# directory and through the API, and check both archives.
+docker exec "$S" hivemind backup /root/hm.tar >/dev/null || cl_fail "hivemind backup"
+docker exec "$S" hivemind backup /root/hm-api.tar --api >/dev/null || cl_fail "hivemind backup --api"
+[ "$(docker exec "$S" stat -c %a /root/hm.tar)" = 600 ] || cl_fail "the backup file is not mode 0600"
+docker cp "$S:/root/hm.tar" "$CL_WORK/hm.tar"
+web_before=$(app_rows web | awk '{ print $1, $2, $3 }' | sort | tr '\n' ';')
+cl_note "backed up the server; web was: $web_before"
+
+# The server machine is lost: its container, its data directory and its
+# Docker volume. Its containers go with it.
+docker rm -fv "$S" >/dev/null
+docker volume rm "$S-docker" >/dev/null
+lost_at=$(date +%s)
+cl_note "destroyed $S, its data directory and its Docker volume"
+
+# A new machine at the same address, with the backup restored into an empty
+# data directory.
+cl_run_node "$S" --ip "$CL_S_IP"
+cl_ready_node "$S"
+[ "$(cl_ip_of "$S")" = "$CL_S_IP" ] || cl_fail "the new server node has address $(cl_ip_of "$S"), not $CL_S_IP"
+docker cp "$CL_WORK/hm.tar" "$S:/root/hm.tar"
+out=$(docker exec "$S" hivemind restore /root/hm.tar --data-dir /var/lib/hivemind 2>&1) || cl_fail "hivemind restore: $out"
+[ "$(docker exec "$S" stat -c %a /var/lib/hivemind)" = 700 ] || cl_fail "the restored data directory is not mode 0700"
+modes=$(docker exec "$S" sh -c 'stat -c "%a %n" /var/lib/hivemind/*')
+[ "$(awk '$1 != "600"' <<<"$modes")" = "" ] || cl_fail "restored files are not mode 0600: $modes"
+if out=$(docker exec "$S" hivemind restore /root/hm.tar --data-dir /var/lib/hivemind 2>&1); then
+	cl_fail "a restore into a non-empty data directory succeeded"
+fi
+cl_serve_server
+wait_for 30 docker exec "$S" hivemind status || cl_fail "the restored server's API did not answer"
+cl_note "restored the backup on a new $S at $CL_S_IP, $(($(date +%s) - lost_at)) s after the loss"
+
+# The workers never restarted. They reconnect with their own certificates,
+# the server node starts its replicas again, and nothing is duplicated.
+workers_ready() {
+	local n
+	n=$(docker exec "$S" hivemind nodes | awk -v a="$W1_ID" -v b="$W2_ID" '($1 == a || $1 == b) && / ready /' | wc -l)
+	[ "$n" -eq 2 ]
+}
+wait_for 60 workers_ready || cl_fail "the workers did not reconnect to the restored server: $(docker exec "$S" hivemind nodes | tr '\n' ';')"
+for c in "$W1" "$W2"; do
+	docker exec "$c" pgrep -x hivemind >/dev/null || cl_fail "the worker on $c stopped while the server was down"
+done
+cl_note "both workers reconnected to the restored server without joining again"
+wait_for 150 web_ok || cl_fail "web did not converge on the restored server: $(app_rows web | tr '\n' ';')"
+wait_for 90 spread_three || cl_fail "spread did not converge on the restored server: $(app_rows spread | tr '\n' ';')"
+wait_for 60 no_duplicates || cl_fail "a replica is duplicated after the restore: $( (containers_of web; containers_of spread) | sort | tr '\n' ';')"
+cl_check_server_listeners
+cl_note "after the restore: web $(app_rows web | awk '{ print $1, $2, $3 }' | sort | tr '\n' ';') spread at three, no duplicates"
 
 # worker_stopped NODE: no hivemind process runs in NODE.
 worker_stopped() { ! docker exec "$1" pgrep -x hivemind >/dev/null 2>&1; }

@@ -104,26 +104,64 @@ cl_node_id_of() {
 	docker exec "$1" sh -c "sed -n 's/.*\"node_id\": *\"\(node-[0-9a-f]*\)\".*/\1/p' /var/lib/hivemind/node.json | head -n 1"
 }
 
+# cl_create_network creates $CL_NET. With CL_NET_SUBNET=auto it gives the
+# network a /24 of its own in 10.231.0.0-10.254.255.0, so a node can be
+# started again with the same address (--ip needs a configured subnet). A
+# subnet that clashes with an existing network is skipped.
+cl_create_network() {
+	local try subnet
+	if [ "${CL_NET_SUBNET:-}" != auto ]; then
+		docker network create "$CL_NET" >/dev/null
+		return
+	fi
+	for try in 1 2 3 4 5 6 7 8; do
+		subnet="10.$((231 + $(od -An -N1 -tu1 /dev/urandom | tr -d ' ') % 24)).$(od -An -N1 -tu1 /dev/urandom | tr -d ' ').0/24"
+		if docker network create --subnet "$subnet" "$CL_NET" >/dev/null 2>&1; then
+			cl_note "network $CL_NET on $subnet"
+			return
+		fi
+	done
+	cl_fail "could not create $CL_NET on a free subnet"
+}
+
+# cl_build builds the hivemind binary into $CL_WORK/hivemind, with the build
+# tags in CL_GO_TAGS (none by default).
+cl_build() {
+	mkdir -p "$CL_WORK"
+	cl_note "building the hivemind binary for linux in $GO_IMAGE${CL_GO_TAGS:+ with tags $CL_GO_TAGS}"
+	docker run --rm -v "$REPO:/src" -v "$CACHE_VOLUME:/cache" -w /src \
+		-e GOMODCACHE=/cache/mod -e GOCACHE=/cache/build -e GOFLAGS=-buildvcs=false \
+		-e GOPROXY=direct -e GOSUMDB=off -e GOTOOLCHAIN=local -e CGO_ENABLED=0 \
+		"$GO_IMAGE" go build -trimpath -tags "${CL_GO_TAGS:-}" -o "/src/${CL_WORK#"$REPO"/}/hivemind" ./cmd/hivemind
+}
+
+# cl_run_node NAME [DOCKER-RUN-OPTIONS...]: start one node as dind on the
+# network. The first argument to the image is dockerd, so the image's
+# entrypoint adds no TCP listeners. Only the unix socket is served.
+cl_run_node() {
+	local c=$1
+	shift
+	docker run -d --name "$c" --privileged --network "$CL_NET" "$@" -v "$c-docker:/var/lib/docker" \
+		"$DIND_IMAGE" dockerd -H "unix://$CL_SOCK" >/dev/null
+}
+
+# cl_ready_node NAME: wait for the node's Docker daemon, and copy in the binary.
+cl_ready_node() {
+	wait_for 90 docker exec "$1" docker info || cl_fail "the Docker daemon in $1 did not start"
+	docker cp "$CL_WORK/hivemind" "$1:/usr/local/bin/hivemind"
+}
+
 # cl_start_nodes: create the network, start every node as dind, copy in the
 # binary built into $CL_WORK/hivemind, and wait for each Docker daemon.
 cl_start_nodes() {
 	local c
-	mkdir -p "$CL_WORK"
-	cl_note "building the hivemind binary for linux in $GO_IMAGE"
-	docker run --rm -v "$REPO:/src" -v "$CACHE_VOLUME:/cache" -w /src \
-		-e GOMODCACHE=/cache/mod -e GOCACHE=/cache/build -e GOFLAGS=-buildvcs=false \
-		-e GOPROXY=direct -e GOSUMDB=off -e GOTOOLCHAIN=local -e CGO_ENABLED=0 \
-		"$GO_IMAGE" go build -trimpath -o "/src/${CL_WORK#"$REPO"/}/hivemind" ./cmd/hivemind
-	docker network create "$CL_NET" >/dev/null
+	cl_build
+	cl_create_network
 	for c in "${CL_NAMES[@]}"; do
-		# The first argument is dockerd, so the image's entrypoint adds no TCP
-		# listeners. Only the unix socket is served.
-		docker run -d --name "$c" --privileged --network "$CL_NET" -v "$c-docker:/var/lib/docker" \
-			"$DIND_IMAGE" dockerd -H "unix://$CL_SOCK" >/dev/null
+		cl_run_node "$c"
 	done
 	for c in "${CL_NAMES[@]}"; do
-		wait_for 90 docker exec "$c" docker info || cl_fail "the Docker daemon in $c did not start"
-		docker cp "$CL_WORK/hivemind" "$c:/usr/local/bin/hivemind"
+		cl_ready_node "$c"
 	done
 }
 
@@ -139,8 +177,11 @@ cl_start_server() {
 }
 
 # cl_serve_server starts (or restarts) the server process in the background.
+# CL_SERVER_ENV, if set, is one NAME=value passed to it.
 cl_serve_server() {
-	docker exec -d "${CL_NAMES[0]}" sh -c "exec hivemind serve --advertise $CL_S_IP >>/var/log/hivemind.log 2>&1"
+	local envs=()
+	[ -n "${CL_SERVER_ENV:-}" ] && envs=(-e "$CL_SERVER_ENV")
+	docker exec -d ${envs[@]+"${envs[@]}"} "${CL_NAMES[0]}" sh -c "exec hivemind serve --advertise $CL_S_IP >>/var/log/hivemind.log 2>&1"
 }
 
 # cl_join: each worker (index 1..) gets a join token from the server and joins.
