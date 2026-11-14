@@ -20,6 +20,7 @@ import (
 
 	"github.com/ao/hivemind/internal/agent"
 	"github.com/ao/hivemind/internal/auth"
+	"github.com/ao/hivemind/internal/backup"
 	"github.com/ao/hivemind/internal/cluster"
 	"github.com/ao/hivemind/internal/config"
 	"github.com/ao/hivemind/internal/logging"
@@ -400,8 +401,13 @@ func runServe(ctx context.Context, cfg *config.Config, log *slog.Logger, rt runt
 	if ca != nil {
 		issue = joinIssuer(ca, st)
 	}
+	writeBackup := func(ctx context.Context, w io.Writer) error {
+		_, err := backup.Write(ctx, w, backup.Options{DataDir: cfg.DataDir, Snapshot: st.SnapshotTo, HivemindVersion: version})
+		return err
+	}
 	api, err := server.New(server.Config{Store: st, Runtime: rt, NodeID: cl.NodeID, Auth: authn,
-		Trigger: ag.Trigger, Logger: log.With("component", "api"), Metrics: m, IssueJoinToken: issue})
+		Trigger: ag.Trigger, Logger: log.With("component", "api"), Metrics: m, IssueJoinToken: issue,
+		Backup: writeBackup})
 	if err != nil {
 		return err
 	}

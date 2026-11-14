@@ -24,6 +24,7 @@ hivemind
 
 | Command | Description |
 |---|---|
+| `backup` | Write a backup of the server's state to a file |
 | `delete` | Delete an app and stop its containers |
 | `deploy` | Create or update an app |
 | `init` | Create a cluster on this machine |
@@ -32,10 +33,49 @@ hivemind
 | `logs` | Print a replica's container log |
 | `node` | Manage one node |
 | `nodes` | List the nodes in the cluster |
+| `restore` | Restore a server's state from a backup into an empty data directory |
 | `scale` | Set an app's replica count |
 | `serve` | Run the server and the agent on this node |
 | `status` | Show apps, their replicas and container state |
 | `version` | Print the version |
+
+### hivemind backup
+
+Write a backup of the server's state to <file>, with mode 0600. The file must
+not exist.
+
+The backup holds the cluster CA's private key, which can sign a certificate for
+any node, and the admin token. Anyone who has the file can join machines to the
+cluster and call the API. Keep it as private as the data directory: mode 0600,
+on a disk only you can read, and encrypted if it leaves the machine.
+
+By default backup reads the data directory (--data-dir) on this machine. It
+works whether serve is running or not: the store is copied with SQLite's
+VACUUM INTO, which reads one consistent snapshot and does not block the
+server. It needs read access to the data directory, so run it as the user
+that runs serve.
+
+--api asks the server for the backup instead (POST /v1/backup), with the
+admin token. The server sends it only over TLS, or to a client on loopback.
+
+The file is a tar archive: manifest.json, with a format version and the
+SHA-256 of each file, then hivemind.db, ca.key, ca.crt and admin.token. backup
+reads the file back and checks every digest before it keeps it. Restore it
+with hivemind restore.
+
+```
+hivemind backup <file> [flags]
+```
+
+| Flag | Type | Default | Environment | Description |
+|---|---|---|---|---|
+| `--api` | bool | - | - | get the backup from the server's API instead of reading the data directory |
+| `--ca-cert` | string | - | - | PEM file of the CA certificates to trust for an https server, instead of the system's (env HIVEMIND_CA_CERT; default from the client config) |
+| `--client-config` | string | - | `HIVEMIND_CLIENT_CONFIG` | client config file (env HIVEMIND_CLIENT_CONFIG; default $XDG_CONFIG_HOME/hivemind/config.yaml or ~/.config/hivemind/config.yaml) |
+| `--data-dir` | string | see description | `HIVEMIND_DATA_DIR` | the server's data directory (env HIVEMIND_DATA_DIR; default /var/lib/hivemind for root, else ~/.local/state/hivemind). The default is /var/lib/hivemind for root, and $XDG_STATE_HOME/hivemind or ~/.local/state/hivemind for other users. |
+| `--json` | bool | - | - | print JSON instead of a table |
+| `--server` | string | - | `HIVEMIND_SERVER` | server URL (env HIVEMIND_SERVER; default from the client config, then http://127.0.0.1:4483) |
+| `--token` | string | - | `HIVEMIND_TOKEN` | API token (env HIVEMIND_TOKEN; default from the client config's token file) |
 
 ### hivemind delete
 
@@ -262,6 +302,37 @@ hivemind nodes [flags]
 | `--json` | bool | - | - | print JSON instead of a table |
 | `--server` | string | - | `HIVEMIND_SERVER` | server URL (env HIVEMIND_SERVER; default from the client config, then http://127.0.0.1:4483) |
 | `--token` | string | - | `HIVEMIND_TOKEN` | API token (env HIVEMIND_TOKEN; default from the client config's token file) |
+
+### hivemind restore
+
+Restore a backup made with hivemind backup into --data-dir, which must be
+missing or empty. The directory gets mode 0700 and each file mode 0600.
+
+restore checks the archive before it keeps anything: the format version, the
+size and SHA-256 of every file, SQLite's integrity check on the store, and
+that the CA key matches the CA certificate. A store at an older schema version
+is migrated forward when serve opens it; a store from a newer hivemind is
+refused. On any failure, the files it wrote are removed.
+
+The backup holds the cluster CA's private key and the admin token. Delete
+copies you no longer need.
+
+Like init, restore writes a client config that points the CLI at this server
+and at the restored token file, unless one exists.
+
+To replace a lost server, restore on a machine with the same address and run
+"hivemind serve --advertise <that address>". The workers reconnect without
+joining again, because the CA and their certificates are unchanged. See
+docs/backup.md.
+
+```
+hivemind restore <file> [flags]
+```
+
+| Flag | Type | Default | Environment | Description |
+|---|---|---|---|---|
+| `--client-config` | string | - | `HIVEMIND_CLIENT_CONFIG` | client config file to write (default $XDG_CONFIG_HOME/hivemind/config.yaml or ~/.config/hivemind/config.yaml; env HIVEMIND_CLIENT_CONFIG) |
+| `--data-dir` | string | see description | `HIVEMIND_DATA_DIR` | the new data directory, missing or empty (env HIVEMIND_DATA_DIR; default /var/lib/hivemind for root, else ~/.local/state/hivemind). The default is /var/lib/hivemind for root, and $XDG_STATE_HOME/hivemind or ~/.local/state/hivemind for other users. |
 
 ### hivemind scale
 

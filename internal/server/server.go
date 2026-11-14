@@ -7,6 +7,7 @@ package server
 import (
 	"context"
 	"errors"
+	"io"
 	"log/slog"
 	"net/http"
 	"strconv"
@@ -58,6 +59,9 @@ type Config struct {
 	// LoginLimiter counts failed logins (POST /v1/session) per source
 	// address. Nil means LoginFailLimit failures per LoginFailWindow.
 	LoginLimiter *ratelimit.FailLimiter
+	// Backup writes a backup archive of the data directory to w. Nil means
+	// POST /v1/backup answers 503.
+	Backup func(ctx context.Context, w io.Writer) error
 }
 
 // Defaults for Config.LoginLimiter: an address may fail LoginFailLimit
@@ -164,6 +168,7 @@ func (s *Server) routes() {
 	r.HandleFunc("POST /v1/join-tokens", s.postJoinToken)
 	r.HandleFunc("GET /v1/nodes", s.listNodes)
 	r.HandleFunc("DELETE /v1/nodes/{id}", s.removeNode)
+	r.HandleFunc("POST /v1/backup", s.postBackup)
 	r.HandleFunc("GET /metrics", s.metricsHandler)
 }
 
