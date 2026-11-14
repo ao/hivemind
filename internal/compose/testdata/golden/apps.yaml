@@ -1,0 +1,68 @@
+name: api
+image: ghcr.io/example/shop-api:2.5.0
+replicas: 1
+command:
+  - serve
+  - --listen
+  - :9000
+  - --db
+  - postgres://shop@127.0.0.1:5432/shop
+env:
+  DB_HOST: 127.0.0.1
+  DB_PASSWORD: change-me
+  LOG_LEVEL: info
+  WORKERS: "4"
+ports:
+  - bind: 0.0.0.0
+    host: 9000
+    container: 9000
+    protocol: tcp
+resources:
+  cpu: 0.5
+  memory: 256Mi
+---
+name: db
+image: postgres:16
+replicas: 1
+env:
+  POSTGRES_DB: shop
+  POSTGRES_PASSWORD: change-me
+  POSTGRES_USER: shop
+ports:
+  - bind: 127.0.0.1
+    host: 5432
+    container: 5432
+    protocol: tcp
+volumes:
+  - name: pgdata
+    path: /var/lib/postgresql/data
+resources:
+  memory: 1Gi
+health:
+  exec:
+    - /bin/sh
+    - -c
+    - pg_isready -U shop
+  interval: 10s
+  timeout: 2s
+  retries: 3
+  start_period: 30s
+---
+name: web
+image: nginx:1.27-alpine
+replicas: 1
+ports:
+  - bind: 127.0.0.1
+    host: 8080
+    container: 80
+    protocol: tcp
+health:
+  exec:
+    - wget
+    - -q
+    - -O
+    - /dev/null
+    - http://127.0.0.1/
+  interval: 15s
+  timeout: 3s
+  retries: 3
