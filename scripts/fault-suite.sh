@@ -26,9 +26,10 @@
 #                 containers that moved, and the cluster converges.
 #   slow          tc netem adds 2000 ms of delay to a worker. For 60 s no node
 #                 is lost and no replica moves.
-#   flap          10 partition/heal cycles in 120 s on a worker. Then the new
-#                 replicas placed in the 30 s after the last heal must avoid the
-#                 flapping node (MinReady).
+#   flap          6 partition/heal cycles in 146 s on a worker, each partition
+#                 longer than the lease. Then the new replicas placed in the
+#                 30 s after the last heal must avoid the flapping node
+#                 (MinReady).
 #
 # Convergence (see converged): every replica is either running on the node the
 # server assigns it, with that container running, or pending with a placement
@@ -383,13 +384,18 @@ scenario_slow() {
 scenario_flap() {
 	local c=${CL_NAMES[2]} id=${CL_IDS[2]} lost0 lost1 k node a rep t_heal
 	lost0=$(lost_count "$id")
-	cl_note "flap: $c, 10 partition/heal cycles, 8 s down and 4 s up"
-	for ((k = 1; k <= 10; k++)); do
+	# Each partition lasts longer than the 15 s lease and one 5 s sweep, so
+	# each one lapses the lease, the last one included. A node whose lease
+	# lapsed is ready again only from its next renewal, so the placements
+	# below fall within its 30 s wait whatever the timing. With partitions
+	# shorter than the lease, whether the last one lapsed was down to chance.
+	cl_note "flap: $c, 6 partition/heal cycles, 21 s down and 4 s up"
+	for ((k = 1; k <= 6; k++)); do
 		docker exec "$c" iptables -I OUTPUT -p tcp -d "$CL_S_IP" --dport 4484 -j DROP || cl_fail "flap: iptables in $c"
-		sleep 8
+		sleep 21
 		docker exec "$c" iptables -D OUTPUT -p tcp -d "$CL_S_IP" --dport 4484 -j DROP || cl_fail "flap: heal in $c"
 		t_heal=$(now)
-		if [ "$k" -lt 10 ]; then sleep 4; fi
+		if [ "$k" -lt 6 ]; then sleep 4; fi
 	done
 	lost1=$(lost_count "$id")
 	cl_note "flap: last heal at $(date -u +%T); the server logged $((lost1 - lost0)) losses of $id during the flaps"
