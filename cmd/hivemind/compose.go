@@ -1,0 +1,267 @@
+package main
+
+import (
+	"errors"
+	"fmt"
+	"io"
+	"io/fs"
+	"net/http"
+	"os"
+	"path/filepath"
+	"strings"
+
+	"github.com/spf13/cobra"
+
+	"github.com/ao/hivemind/internal/compose"
+	"github.com/ao/hivemind/internal/server"
+)
+
+func composeCmd() *cobra.Command {
+	cmd := &cobra.Command{
+		Use:   "compose",
+		Short: "Convert a Docker Compose file to apps, and deploy or delete them",
+		Long: `Turn each service in a Docker Compose file into an app:
+
+  hivemind compose convert compose.yaml   print the app specs
+  hivemind compose deploy compose.yaml    create or update the apps
+  hivemind compose delete compose.yaml    delete the apps
+
+Only part of Compose is read. Any other key is refused, with its path and a
+reason, and every refusal is listed in one error. Variables come from the
+environment, then from a .env file beside the compose file, and a variable
+that is not set and has no default is an error. A port with no address is
+published on 127.0.0.1, where Compose would publish it on every interface.
+Apps do not find each other by service name. See docs/compose.md.`,
+	}
+	cmd.AddCommand(composeConvertCmd(), composeDeployCmd(), composeDeleteCmd())
+	return cmd
+}
+
+func addPrefixFlag(cmd *cobra.Command) *string {
+	return cmd.Flags().String("prefix", "", "name each app PREFIX-<service> instead of <service>")
+}
+
+func composeConvertCmd() *cobra.Command {
+	cmd := &cobra.Command{
+		Use:   "convert <file>",
+		Short: "Print the app specs for a compose file",
+		Long: `Print the app spec for each service in a compose file, as YAML, one
+document per service, sorted by name. Each document is a file that
+hivemind deploy -f reads. - reads the compose file from standard input, and
+the .env file from the working directory.
+
+Nothing is sent to the server. A note on standard error names each port that
+is published on 127.0.0.1 because the file gives it no address.`,
+		Args: cobra.ExactArgs(1),
+	}
+	prefix := addPrefixFlag(cmd)
+	cmd.RunE = func(cmd *cobra.Command, args []string) error {
+		res, err := convertComposeFile(cmd, args[0], *prefix)
+		if err != nil {
+			return err
+		}
+		out, err := compose.Marshal(res.Apps)
+		if err != nil {
+			return err
+		}
+		_, err = cmd.OutOrStdout().Write(out)
+		return err
+	}
+	return cmd
+}
+
+func composeDeployCmd() *cobra.Command {
+	cmd := &cobra.Command{
+		Use:   "deploy <file>",
+		Short: "Create or update the apps in a compose file",
+		Long: `Convert a compose file, check every app, and then create or update each one
+as hivemind deploy -f does, in name order, printing a line for each.
+
+Nothing is sent until every service converts and its spec is valid. If the
+server refuses an app, the command stops there: the apps before it stay
+deployed, and the error names them.`,
+		Args: cobra.ExactArgs(1),
+	}
+	cf := addClientFlags(cmd)
+	prefix := addPrefixFlag(cmd)
+	cmd.RunE = func(cmd *cobra.Command, args []string) error {
+		res, err := convertComposeFile(cmd, args[0], *prefix)
+		if err != nil {
+			return err
+		}
+		c, err := cf.client()
+		if err != nil {
+			return err
+		}
+		results := []server.PutResult{}
+		var done []string
+		for _, a := range res.Apps {
+			var r server.PutResult
+			if err := c.call(cmd.Context(), "PUT", appPath(a.Spec.Name), a.Spec, &r); err != nil {
+				return partialError("deploying", "deployed", a.Spec.Name, a.Service, done, err)
+			}
+			done = append(done, a.Spec.Name)
+			results = append(results, r)
+			if !cf.json {
+				verb := "updated"
+				if r.Created {
+					verb = "created"
+				}
+				fmt.Fprintf(cmd.OutOrStdout(), "%s: %s, generation %d, %d %s\n", r.App.Name, verb, r.App.Generation,
+					r.App.Replicas, plural(r.App.Replicas, "replica", "replicas"))
+			}
+		}
+		if cf.json {
+			return printJSON(cmd.OutOrStdout(), results)
+		}
+		return nil
+	}
+	return cmd
+}
+
+// composeDeleted is one line of compose delete --json.
+type composeDeleted struct {
+	Name   string `json:"name"`
+	Status string `json:"status"`
+}
+
+func composeDeleteCmd() *cobra.Command {
+	cmd := &cobra.Command{
+		Use:   "delete <file>",
+		Short: "Delete the apps in a compose file",
+		Long: `Delete the app for each service in a compose file, in name order, printing a
+line for each. Only the service names are read, so the file's variables need
+not be set, and keys that convert would refuse are ignored. An app that does
+not exist is reported as not found and skipped. Volumes are kept, as
+hivemind delete keeps them.`,
+		Args: cobra.ExactArgs(1),
+	}
+	cf := addClientFlags(cmd)
+	prefix := addPrefixFlag(cmd)
+	cmd.RunE = func(cmd *cobra.Command, args []string) error {
+		data, err := readComposeData(cmd.InOrStdin(), args[0])
+		if err != nil {
+			return err
+		}
+		names, err := compose.AppNames(data, *prefix)
+		if err != nil {
+			return fmt.Errorf("%s: %w", fileName(args[0]), err)
+		}
+		c, err := cf.client()
+		if err != nil {
+			return err
+		}
+		results := []composeDeleted{}
+		var done []string
+		for _, name := range names {
+			var res map[string]string
+			err := c.call(cmd.Context(), "DELETE", appPath(name), nil, &res)
+			var ae *apiError
+			switch {
+			case err == nil:
+				done = append(done, name)
+				results = append(results, composeDeleted{name, "deleting"})
+				if !cf.json {
+					fmt.Fprintf(cmd.OutOrStdout(), "%s: deleting; its containers stop on the next reconcile pass\n", name)
+				}
+			case errors.As(err, &ae) && ae.status == http.StatusNotFound:
+				results = append(results, composeDeleted{name, "not found"})
+				if !cf.json {
+					fmt.Fprintf(cmd.OutOrStdout(), "%s: not found\n", name)
+				}
+			default:
+				return partialError("deleting", "deleted", name, "", done, err)
+			}
+		}
+		if cf.json {
+			return printJSON(cmd.OutOrStdout(), results)
+		}
+		return nil
+	}
+	return cmd
+}
+
+// partialError reports a request that failed after others succeeded.
+func partialError(doing, did, app, service string, done []string, err error) error {
+	what := "app " + app
+	if service != "" && service != app {
+		what += " (service " + service + ")"
+	}
+	if len(done) == 0 {
+		return fmt.Errorf("%s %s: %w", doing, what, err)
+	}
+	return fmt.Errorf("%s %s: %w; already %s: %s", doing, what, err, did, strings.Join(done, ", "))
+}
+
+// convertComposeFile reads and converts a compose file, and prints its notes
+// on standard error.
+func convertComposeFile(cmd *cobra.Command, path, prefix string) (*compose.Result, error) {
+	data, err := readComposeData(cmd.InOrStdin(), path)
+	if err != nil {
+		return nil, err
+	}
+	dotenv, err := readDotEnv(path)
+	if err != nil {
+		return nil, err
+	}
+	res, err := compose.Convert(data, compose.Options{Prefix: prefix, Lookup: os.LookupEnv, DotEnv: dotenv})
+	if err != nil {
+		return nil, fmt.Errorf("%s: %w", fileName(path), err)
+	}
+	for _, n := range res.Notes {
+		fmt.Fprintf(cmd.ErrOrStderr(), "note: %s\n", n)
+	}
+	return res, nil
+}
+
+// readComposeData reads the compose file, or standard input for "-", up to
+// the same limit as deploy -f.
+func readComposeData(stdin io.Reader, path string) ([]byte, error) {
+	r := stdin
+	if path != "-" {
+		f, err := os.Open(path)
+		if err != nil {
+			return nil, err
+		}
+		defer f.Close()
+		r = f
+	}
+	return readLimited(r, fileName(path))
+}
+
+// readDotEnv reads the .env file beside the compose file, or in the working
+// directory when the file is standard input. A missing .env is nil.
+func readDotEnv(path string) ([]byte, error) {
+	dir := "."
+	if path != "-" {
+		dir = filepath.Dir(path)
+	}
+	p := filepath.Join(dir, ".env")
+	f, err := os.Open(p)
+	if errors.Is(err, fs.ErrNotExist) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	defer f.Close()
+	return readLimited(f, p)
+}
+
+func readLimited(r io.Reader, name string) ([]byte, error) {
+	b, err := io.ReadAll(io.LimitReader(r, maxSpecFile+1))
+	if err != nil {
+		return nil, fmt.Errorf("%s: %w", name, err)
+	}
+	if len(b) > maxSpecFile {
+		return nil, fmt.Errorf("%s is larger than %d bytes", name, maxSpecFile)
+	}
+	return b, nil
+}
+
+func fileName(path string) string {
+	if path == "-" {
+		return "standard input"
+	}
+	return path
+}

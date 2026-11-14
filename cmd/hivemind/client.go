@@ -240,10 +240,19 @@ func (c *apiClient) send(ctx context.Context, method, path string, body any) (*h
 	var e server.ErrorBody
 	b, _ := io.ReadAll(io.LimitReader(resp.Body, 64<<10))
 	if json.Unmarshal(b, &e) == nil && e.Error != "" {
-		return nil, errors.New(e.Error)
+		return nil, &apiError{status: resp.StatusCode, msg: e.Error}
 	}
-	return nil, fmt.Errorf("server returned %s", resp.Status)
+	return nil, &apiError{status: resp.StatusCode, msg: "server returned " + resp.Status}
 }
+
+// apiError is an error reply from the server. Its text is the server's
+// message; status lets a command tell a 404 from other failures.
+type apiError struct {
+	status int
+	msg    string
+}
+
+func (e *apiError) Error() string { return e.msg }
 
 // call makes a request and decodes the JSON reply into out.
 func (c *apiClient) call(ctx context.Context, method, path string, body, out any) error {
