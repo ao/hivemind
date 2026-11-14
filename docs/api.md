@@ -63,7 +63,7 @@ Every error is a JSON object with one field:
 | 403 | A cookie request to an unsafe method without the session's CSRF token: `{"error":"csrf_token_invalid"}` |
 | 404 | No such app or node, no drain of the node, or no container for the replica on its node. Unknown routes give `{"error":"not found"}` |
 | 405 | Wrong method for a known path: `{"error":"method not allowed"}` |
-| 409 | Removing the server's own node, or a node that still renews its lease without `force=true`. An ineligible node that runs nothing needs no `force` |
+| 409 | Removing the server's own node, or a node that still renews its lease without `force=true`. An ineligible node that runs nothing needs no `force`. A put whose `routes` name a host that another app routes: `{"error":"conflict: host www.example.com is routed by app web; remove it there first"}` |
 | 413 | Request body over 1 MiB |
 | 429 | Too many failed logins from this address, or too many log streams open to one node |
 | 500 | Unexpected failure. The message is `internal error`, and the details go to the server log |
@@ -97,10 +97,11 @@ The token is shown once. The server keeps a SHA-256 hash of its secret, and a to
 ```json
 [{"id": "node-<12 hex digits>", "name": "host-a", "cpu": 4, "memory": 8254390272,
   "last_lease": "2026-11-13T10:00:00Z", "lease_age_seconds": 1.2, "state": "ready",
-  "server": true, "replicas": 2, "cert_not_after": "2027-11-14T10:00:00Z", "eligible": true}]
+  "server": true, "replicas": 2, "cert_not_after": "2027-11-14T10:00:00Z", "eligible": true,
+  "address": "10.0.0.5"}]
 ```
 
-`cpu` and `memory` (bytes) are what the node's Docker daemon reports. `state` is `ready` while the lease is at most 15 s old, and `lost` after that. `server` marks the node that runs the server. `replicas` counts the replicas placed on the node that should run. `cert_not_after` is when the node's certificate expires, as the server recorded it when it issued the certificate or saw the node present it. It is absent when there is no record, as for a server without `--advertise`. `eligible` is false for a node that takes no new replicas. A node with a drain, in progress or finished, also has a `drain` object, described below.
+`address` is the node's private address, where its routed replicas publish their ports. It is absent for a node that reported none, such as a worker older than 2.2, which takes no routed replicas. `cpu` and `memory` (bytes) are what the node's Docker daemon reports. `state` is `ready` while the lease is at most 15 s old, and `lost` after that. `server` marks the node that runs the server. `replicas` counts the replicas placed on the node that should run. `cert_not_after` is when the node's certificate expires, as the server recorded it when it issued the certificate or saw the node present it. It is absent when there is no record, as for a server without `--advertise`. `eligible` is false for a node that takes no new replicas. A node with a drain, in progress or finished, also has a `drain` object, described below.
 
 `POST /v1/nodes/{id}/eligibility` with `{"eligible": false}` makes the node ineligible: it takes no new replicas, and keeps the ones it runs. `{"eligible": true}` makes it eligible again, and on a node with a drain in progress it cancels the drain: copies still starting on other nodes are removed, and the replicas stay on the node. The reply:
 
@@ -141,9 +142,20 @@ The server's own node can be made ineligible and drained. Its replicas move to w
 
 The archive holds the CA private key, so the server sends it only over TLS, or to a client on loopback. A plain-HTTP request from another address gets `403`. The API listens on loopback unless it has TLS, so that refusal matters only behind a proxy. The store is copied before the reply starts, and a failure there is a `500`. A failure after the archive has started aborts the connection, so a client sees a broken transfer, not a short file that looks complete. Check the archive before you keep it; `hivemind backup` does.
 
+## Routing table
+
+`GET /v1/routes` returns the routing table that every router serves, sorted by host:
+
+```json
+{"routes": [{"host": "www.example.com", "app": "web", "port": 80,
+  "endpoints": ["10.0.0.5:32768", "10.0.0.6:32771"]}]}
+```
+
+`port` is the container port the route names. `endpoints` are the `address:port` of each replica that takes the host's traffic now: its container is Ready, it is the copy the replica (or its rollout surge) is assigned, and its node's lease is current. A host whose app has no such replica has `"endpoints": []`, and a router answers it with `503`. See [routing](routing.md).
+
 ## Node API (internal)
 
-Workers talk to the server over a second API, on the cluster port that `serve --advertise` opens. It has routes for a worker to join, register, read its assignments, report its containers, renew its certificate, and take and answer log requests. It is internal. Its routes, bodies and errors may change in any release, so this document does not describe them, except that a removed node gets `403` on every one of them, and a certificate that has expired by the server's clock gets `401`. The listeners and the trust model are in [security](security.md).
+Workers talk to the server over a second API, on the cluster port that `serve --advertise` opens. It has routes for a worker to join, register, read its assignments, report its containers, renew its certificate, take and answer log requests, read the routing table, and use the routers' shared TLS storage. It is internal. Its routes, bodies and errors may change in any release, so this document does not describe them, except that a removed node gets `403` on every one of them, and a certificate that has expired by the server's clock gets `401`. The listeners and the trust model are in [security](security.md).
 
 ## Routes
 
@@ -167,6 +179,7 @@ Workers talk to the server over a second API, on the cluster port that `serve --
 | `POST /v1/nodes/{id}/eligibility` | `{"eligible": false}` or `true` | 200, `{"id", "name", "eligible", "drain_cancelled"}` | Stop or let a node take new replicas. See [nodes](#nodes) |
 | `POST /v1/nodes/{id}/drain` | `{"deadline": "10m"}`, or `{}` | 200, the drain | Drain a node, or set a new deadline on its drain |
 | `GET /v1/nodes/{id}/drain` | none | 200, the drain | Read a node's drain |
+| `GET /v1/routes` | none | 200, `{"routes": [...]}` | The routing table. See [routing table](#routing-table) |
 | `POST /v1/backup` | none | 200, `application/x-tar` | A backup of the data directory, CA private key included. TLS or loopback only. See [backup](#backup) |
 | `GET /metrics` | none | 200, Prometheus text | Metrics |
 
@@ -241,6 +254,7 @@ The spec is the JSON form of the YAML file that `deploy -f` reads. Unknown field
 | `volumes` | list | Up to 16. Each has `name` and an absolute `path` other than `/`. An app with volumes has one replica. The Docker volume is named `hivemind-<app>_<name>` |
 | `resources` | object | `cpu` (0, or 0.01 to 1024) and `memory` (0, or 6Mi to 1Ti). Counted by placement and applied as container limits. 0 means no limit |
 | `health` | object | Exactly one of `http` (`path`, default `/`; `port`), `tcp` (`port`) or `exec` (a list of arguments). Also `interval` (default `10s`), `timeout` (default `2s`), `retries` (1 to 10, default 3) and `start_period` (default 0). Durations are strings such as `5s` |
+| `routes` | list | Up to 16. Each has `host`, an exact DNS name of at least two labels (lowercased, a trailing dot dropped; no wildcard, IP address or underscore), and `port`, the container port (1 to 65535). A host appears once, and belongs to one app: a put that claims another app's host gets `409`. A change to `routes` is a rolling update. See [routing](routing.md) |
 
 `memory` takes a whole number of bytes, or a string such as `512Mi` or `2G`. The suffixes `k`, `M`, `G` and `T` are powers of 1000, and `Ki`, `Mi`, `Gi` and `Ti` are powers of 1024.
 
@@ -280,8 +294,11 @@ With `follow`, closing the request ends the worker's stream and the log read on 
 | `hivemind_reconcile_duration_seconds` | histogram | none | Wall time of the local agent's passes |
 | `hivemind_reconcile_errors_total` | counter | none | Passes that returned an error |
 | `hivemind_http_requests_total` | counter | `method`, `route`, `code` | Requests by method, route pattern and status |
+| `hivemind_router_requests_total` | counter | `host`, `code` | Requests to the server's router, with `--route-addr`. A host not in the routing table is `unknown` |
+| `hivemind_router_upstream_errors_total` | counter | `host`, `kind` | Requests from the server's router to a replica that failed: `dial` (it tried the next replica) or `proxy` (after it reached one) |
+| `hivemind_router_cert_expiry_timestamp_seconds` | gauge | `host` | Unix time at which the certificate the server's router serves for the host expires. A host without a certificate yet has no sample |
 
-`route` is the route pattern, such as `/v1/apps/{name}`, or `unmatched`. A client cannot make the label set grow.
+`route` is the route pattern, such as `/v1/apps/{name}`, or `unmatched`. A client cannot make the label set grow. The router's `host` label is a host in the routing table or `unknown`, so a client cannot grow it either. A worker's router is not in these metrics.
 
 There are no metrics for rollouts yet. `GET /v1/apps/{name}/status` reports them.
 

@@ -1,6 +1,6 @@
 # Security
 
-This lists every listener the code opens, what each one exposes, and the files hivemind writes. The claims come from the code in `cmd/hivemind`, `internal/auth`, `internal/cluster`, `internal/pki` and `internal/store`. The concepts are in [concepts](concepts.md).
+This lists every listener the code opens, what each one exposes, and the files hivemind writes. The claims come from the code in `cmd/hivemind`, `internal/auth`, `internal/cluster`, `internal/pki`, `internal/router`, `internal/tlsstore` and `internal/store`. The concepts are in [concepts](concepts.md).
 
 ## Listeners
 
@@ -8,10 +8,12 @@ This lists every listener the code opens, what each one exposes, and the files h
 |---|---|---|---|
 | API | `127.0.0.1:4483` (`--api-addr`) | Bearer admin token, compared in constant time, or a session cookie that the token bought at `POST /v1/session`. A cookie request to `POST`, `PUT`, `PATCH` or `DELETE` also needs the session's CSRF token. `GET /healthz` needs no token and returns only `{"status":"ok"}` | Apps and their specs, including environment values. Status. Logs of every node's containers. Join token issuance. Nodes, and their removal. Metrics. A backup of the data directory, with the CA private key and the admin token, sent only over TLS or to a loopback client |
 | Metrics | Off. `--metrics-addr` starts it, and it must be loopback | The admin token | Prometheus metrics only |
-| Node listener | Off. Starts with `--advertise` on that address, port 4484 (`--cluster-port`) | TLS 1.3, and a client certificate that chains to the cluster CA, names a node that was not removed, and is valid by the server's clock at each request. The node ID must match the one in the path | To a node: its own assignments, which include each replica's full spec and environment values. It can also report its own containers, register its own name and capacity, get a new certificate for its own ID, take the log requests queued for it, and send the logs it was asked for |
+| Node listener | Off. Starts with `--advertise` on that address, port 4484 (`--cluster-port`) | TLS 1.3, and a client certificate that chains to the cluster CA, names a node that was not removed, and is valid by the server's clock at each request. The node ID must match the one in the path | To a node: its own assignments, which include each replica's full spec and environment values. It can also report its own containers, register its own name, capacity and private address, get a new certificate for its own ID, take the log requests queued for it, and send the logs it was asked for. For its router: the whole routing table, and read and write access to the shared TLS storage, which holds every routed host's certificate and private key and the ACME account key |
 | Join listener | Off. Starts with `--advertise` on that address, port 4485 | TLS 1.3 with the server certificate. No client certificate. The join token is the credential. Only `POST /join` is routed | The cluster CA certificate, and a node certificate for each valid token |
+| Router, http | Off. Starts with `--route-addr`, on any node, port 80 (`--route-http-port`). It may be `0.0.0.0` | None. It serves the apps' public traffic | ACME HTTP-01 answers for the routed hosts, a `308` to https for every other request to one, and `404` for any other host |
+| Router, https | Off. Starts with `--route-addr`, port 443 (`--route-https-port`). It may be `0.0.0.0` | None of its own: whatever each app does. TLS 1.2 or later, with a certificate from the ACME CA for each routed host | Every routed app, to anyone who can reach the port. A host not in the routing table gets no certificate, and a TLS handshake for it fails |
 
-Listeners bind to the advertise address only. A wildcard address is refused at startup, both by config validation and when the socket is bound. The worker opens no listener.
+The API, metrics, node and join listeners bind to the address they are given, and refuse a wildcard address at startup, both in config validation and when the socket is bound. The router is the one listener that may bind `0.0.0.0` or `::`: it is meant to be public, and `--route-addr` has no default. A worker opens no listener but the router, when it has `--route-addr`. See [routing](#routing).
 
 ### Logs from workers
 
@@ -25,7 +27,7 @@ The API TLS flags apply to the API only. The CLI checks a TLS API's certificate 
 
 The session cookie is `HttpOnly` and `SameSite=Strict`, and `Secure` when the API is served over TLS. Sessions are held in the server's memory, keyed by the SHA-256 of the session ID, and last 12 hours. Failed logins are limited per source address (5 in 10 minutes), and the limited address gets `429` at `POST /v1/session`.
 
-Two more things reach the network from containers, not from hivemind. A container's published ports are bound to the address in its spec, `127.0.0.1` by default, so an app that publishes `0.0.0.0` is reachable from the network by its own choice. And the Docker Engine socket (`--docker-host`, `unix:///var/run/docker.sock` by default) is local. Anything that can write to that socket controls the host, and hivemind needs that access.
+Three more things reach the network from containers, not from hivemind's listeners. A container's published ports are bound to the address in its spec, `127.0.0.1` by default, so an app that publishes `0.0.0.0` is reachable from the network by its own choice. A routed app's route ports are published on ephemeral ports of its node's private address, so every machine that can reach that address can reach the app without going through a router; see [routing](#routing) for the firewall rule. And the Docker Engine socket (`--docker-host`, `unix:///var/run/docker.sock` by default) is local. Anything that can write to that socket controls the host, and hivemind needs that access.
 
 The join listener is open to the network whenever the server runs with `--advertise`. Its only protection is the token. Tokens expire, and failed joins from one address are limited (5 in 10 minutes).
 
@@ -35,7 +37,7 @@ The server's data directory is created with mode 0700.
 
 | File | Mode | Holds |
 |---|---|---|
-| `hivemind.db`, with the WAL files beside it | 0600 | Apps and their specs, which include environment values. Replicas, nodes and their leases. The IDs of removed nodes. Node certificate expiry times. Join tokens as SHA-256 hashes. The admin token as a SHA-256 hash |
+| `hivemind.db`, with the WAL files beside it | 0600 | Apps and their specs, which include environment values. Replicas, nodes and their leases. The IDs of removed nodes. Node certificate expiry times. Join tokens as SHA-256 hashes. The admin token as a SHA-256 hash. The routers' TLS storage: each routed host's certificate and private key, the ACME account and its private key, and pending challenge tokens |
 | `admin.token` | 0600 | The admin token, in plain text. This is the only copy |
 | `ca.key` | 0600 | The cluster CA's private key. It can sign any node certificate |
 | `ca.crt` | 0644 | The cluster CA certificate. Public |
@@ -69,14 +71,30 @@ Assume an attacker has the worker's data directory, or root on the worker. The c
 - Renew its own certificate, with a key of its choice, for as long as it is not removed. Removal stops that: the renewal route refuses a removed node like every other route.
 - Send any text as the log of a replica placed on it, or refuse to send it. Logs from a worker are what the worker says they are.
 - Hold 4 log polls and 16 log streams open on the server.
+- Read the TLS private key of every routed host and the ACME account key, through the TLS storage routes, whether or not the worker runs a router. With them it can pose as any routed host to a client that reaches it, and act as the cluster's ACME account, until the certificates are replaced and the account key is changed. This is in addition to the environment values it already sees.
+- Write and delete keys in the TLS storage, within certmagic's namespace and the limits: 128 KiB a value and 10,000 keys. It can replace a host's certificate and key, which every router then serves, delete them so the routers issue again, fill the storage, or hold the issuing locks, 30 seconds at a time for as long as it renews them, so no router issues.
+- Register any private address that is an IP address and is not loopback, a wildcard or multicast, and report any ports for its own containers. The routers then send the traffic of the routed replicas placed on that worker to that address and those ports, which can be another machine on the routers' network.
+- Read the whole routing table: every routed host, and the address and port of each of its replicas.
+
+A worker's router needs nothing more than this: the routes above are what it uses.
 
 The worker cannot do the following.
 
 - Call the node routes for another node. The node ID in the path must match the one in its certificate, or the server answers 403.
 - Obtain a certificate for another node or for the server. It has no CA key, and the server ignores names and extensions in a certificate request. A renewal is issued for the ID in the certificate the worker presents, and the route checks that the ID in its path is that one.
 - Join another machine, or pose as the server. Its certificate names no host, so a machine that checks the server's name rejects it. It cannot issue join tokens.
-- Reach the API or the admin token, the CA key, or the database.
+- Reach the API or the admin token, the CA key, or the database, apart from the TLS storage.
 - Read the status or logs of replicas on other machines, or take or answer the log requests queued for another node.
+- Read or write anything in the TLS storage outside certmagic's namespace (`acme/`, `certificates/`, `ocsp/` and two single keys), or renew or release a lock another node holds: the server keeps each lock under the ID of the node that took it.
+- Add endpoints for replicas on other nodes: an endpoint's address is the one its node registered.
+
+## Routing
+
+The router ([routing](routing.md)) changes what is exposed in three ways. The trust model of the CA and the node API does not change: the router adds node routes behind the same listener, certificate checks, denylist and node ID check as every other node route, and it adds nothing to the API or the join listener.
+
+- The router's two ports are public by design, on every node started with `--route-addr`. They have no authentication. They answer only for the hosts in the routing table: a TLS handshake for another name fails, and a plain HTTP request for one gets `404` without a list of hosts. Request headers are limited to 64 KiB and a request must be read within 5 minutes. The `X-Forwarded-*` headers an app receives are set by the router, never taken from the client. An app behind a route is reachable by anyone who can reach a router, so it must authenticate its own users.
+- The routed containers' ports are published on the node's private address, on ports in the ephemeral range, so that the routers on the other nodes can reach them. Any machine that can reach that address reaches the apps directly, without TLS and without the router. Keep the nodes' private network to the nodes, or add a rule that allows those ports from the other nodes only. With Docker's iptables rules, for a node at `10.0.0.5` whose peers are in `10.0.0.0/24`: `iptables -I DOCKER-USER -p tcp -m conntrack --ctorigdst 10.0.0.5 --ctorigdstport 32768:60999 ! -s 10.0.0.0/24 -j DROP`.
+- The certificates' private keys and the ACME account key are in the server's database, and every worker can read them through the node API (see above). `hivemind backup` includes them. A worker's router keeps them in memory only.
 
 ## Revocation by removal
 
