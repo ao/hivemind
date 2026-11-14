@@ -31,7 +31,9 @@
 #     certificates fall due after about 6m40s. Each worker renews over the
 #     node API and keeps working without a restart: node.crt changes, the
 #     key and certificate stay mode 0600, the server logs each renewal and
-#     renews its own certificate, and the apps stay at their counts
+#     renews its own certificate, and the apps stay at their counts. After
+#     the first certificates have expired, both workers are still ready, no
+#     certificate was refused, and hivemind logs still reads w1
 #   - disaster recovery: hivemind backup on the server, from the data
 #     directory and through the API. The server container, its data
 #     directory and its Docker volume are destroyed. A new server node gets
@@ -78,6 +80,8 @@ cl_note "addresses: server $CL_S_IP, $W1 $(cl_ip_of "$W1"), $W2 $(cl_ip_of "$W2"
 cl_check_server_listeners
 cl_note "server listeners: API on 127.0.0.1:4483; cluster and join ports on $CL_S_IP only"
 cl_join
+# The first node certificates were issued by now, and last 10 minutes.
+JOINED_AT=$(date +%s)
 W1_ID=${CL_IDS[1]}
 W2_ID=${CL_IDS[2]}
 cl_check_worker_listeners
@@ -273,6 +277,33 @@ wait_for 60 spread_three || cl_fail "spread is not at three running replicas aft
 nodes_out=$(docker exec "$S" hivemind nodes)
 [ "$(grep -c ' ready .* (in ' <<<"$nodes_out")" -eq 3 ] || cl_fail "hivemind nodes does not show three ready nodes with a certificate expiry: $nodes_out"
 cl_note "both workers renewed their certificates and kept working; $(docker exec "$W1" grep 'node certificate renewed' /var/log/hivemind.log | tail -n 1)"
+
+# Past the end of the first certificates. A connection a worker opened before
+# its renewal still presents the old certificate, and the server refuses that
+# from now on. w1 has had its log poll open since it started, so this is where
+# a connection kept from before the renewal would show: its lease would lapse,
+# or its logs stop answering.
+left=$((JOINED_AT + 600 + 20 - $(date +%s)))
+if [ "$left" -gt 0 ]; then
+	cl_note "waiting $left s, until the first certificates have expired"
+	sleep "$left"
+fi
+both_ready() {
+	[ "$(docker exec "$S" hivemind nodes | awk -v a="$W1_ID" -v b="$W2_ID" '($1 == a || $1 == b) && / ready /' | wc -l)" -eq 2 ]
+}
+# A lease lapses after 15 s, so a worker that lost the server is lost by then.
+sleep 20
+both_ready || cl_fail "a worker is not ready after its first certificate expired: $(docker exec "$S" hivemind nodes | tr '\n' ';')"
+for c in "$W1" "$W2"; do
+	docker exec "$c" pgrep -x hivemind >/dev/null || cl_fail "the worker on $c stopped after its first certificate expired"
+	if docker exec "$c" grep -q 'expired or not yet valid' /var/log/hivemind.log; then
+		cl_fail "the server refused a certificate of $c: $(docker exec "$c" grep 'expired or not yet valid' /var/log/hivemind.log | tail -n 1)"
+	fi
+done
+mark marker-after-expiry
+out=$(docker exec "$S" hivemind logs spread "$LOG_IDX" --tail 2 2>&1) || cl_fail "hivemind logs of $W1_ID after its first certificate expired: $out"
+grep -q "GET /marker-after-expiry " <<<"$out" || cl_fail "the log from $W1_ID after the expiry has no new marker: $out"
+cl_note "after the first certificates expired, both workers are ready and hivemind logs reads $W1_ID"
 
 # Disaster recovery. Back up the server while it runs, from the data
 # directory and through the API, and check both archives.
