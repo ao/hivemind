@@ -64,6 +64,9 @@ EXTRA=("$PEBBLE" "$CHALL" "$CLIENT")
 
 rt_cleanup() {
 	local rc=$? c
+	# errexit would end the trap at the first failing command below, before
+	# cl_cleanup removes the nodes.
+	set +e
 	if [ "$rc" -ne 0 ]; then
 		echo "routing: --- last lines of Pebble:" >&2
 		docker logs --tail 30 "$PEBBLE" >&2 2>&1 || true
