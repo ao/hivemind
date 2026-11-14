@@ -83,6 +83,9 @@ func checkInvariants(t *testing.T, nodes []Node, existing []Assignment, pending 
 		if !n.Ready || now.Sub(n.ReadySince) < minReady {
 			t.Fatalf("%s placed on node %s, which is not ready or not ready for %s", identity(a.Replica), n.ID, minReady)
 		}
+		if n.Ineligible {
+			t.Fatalf("%s placed on node %s, which is ineligible", identity(a.Replica), n.ID)
+		}
 		if a.Replica.PinnedNode != "" && a.Replica.PinnedNode != a.NodeID {
 			t.Fatalf("%s is pinned to %s but placed on %s", identity(a.Replica), a.Replica.PinnedNode, a.NodeID)
 		}
