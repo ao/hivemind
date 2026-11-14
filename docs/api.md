@@ -61,13 +61,15 @@ Every error is a JSON object with one field:
 | 400 | Invalid JSON, an unknown field, an empty body, an invalid app spec, an invalid name or query value |
 | 401 | No valid token or session |
 | 403 | A cookie request to an unsafe method without the session's CSRF token: `{"error":"csrf_token_invalid"}` |
-| 404 | No such app or node, or no container for the replica on the server's node. Unknown routes give `{"error":"not found"}` |
+| 404 | No such app or node, or no container for the replica on its node. Unknown routes give `{"error":"not found"}` |
 | 405 | Wrong method for a known path: `{"error":"method not allowed"}` |
 | 409 | Removing the server's own node, or a node that still renews its lease without `force=true` |
 | 413 | Request body over 1 MiB |
-| 429 | Too many failed logins from this address |
+| 429 | Too many failed logins from this address, or too many log streams open to one node |
 | 500 | Unexpected failure. The message is `internal error`, and the details go to the server log |
-| 503 | The container engine cannot be reached: `the container engine is unavailable` |
+| 502 | A worker could not read a log, or broke the stream before it started |
+| 503 | The container engine cannot be reached: `the container engine is unavailable`. For logs, also a lost node, the engine on the replica's node, or a server without `--advertise` |
+| 504 | A worker did not answer a log request in 10 seconds |
 
 ## Limits
 
@@ -95,10 +97,10 @@ The token is shown once. The server keeps a SHA-256 hash of its secret, and a to
 ```json
 [{"id": "node-<12 hex digits>", "name": "host-a", "cpu": 4, "memory": 8254390272,
   "last_lease": "2026-11-13T10:00:00Z", "lease_age_seconds": 1.2, "state": "ready",
-  "server": true, "replicas": 2}]
+  "server": true, "replicas": 2, "cert_not_after": "2027-11-14T10:00:00Z"}]
 ```
 
-`cpu` and `memory` (bytes) are what the node's Docker daemon reports. `state` is `ready` while the lease is at most 15 s old, and `lost` after that. `server` marks the node that runs the server. `replicas` counts the replicas placed on the node that should run.
+`cpu` and `memory` (bytes) are what the node's Docker daemon reports. `state` is `ready` while the lease is at most 15 s old, and `lost` after that. `server` marks the node that runs the server. `replicas` counts the replicas placed on the node that should run. `cert_not_after` is when the node's certificate expires, as the server recorded it when it issued the certificate or saw the node present it. It is absent when there is no record, as for a server without `--advertise`.
 
 `DELETE /v1/nodes/{id}` removes a node for good. It refuses, with `409`, the server's own node, and a node whose lease is current, unless the query has `force=true`. An unknown node, or one already removed, gets `404`. On success:
 
@@ -108,9 +110,15 @@ The token is shown once. The server keeps a SHA-256 hash of its secret, and a to
 
 `rescheduled` counts the replicas that lost the node and are placed again. `held` counts the replicas with a volume, which wait with no node because their data was on the removed node. What removal does is in [concepts](concepts.md#removing-a-node), and what it does to the node's certificate is in [security](security.md#revocation-by-removal).
 
+## Backup
+
+`POST /v1/backup` streams a backup of the server's data directory as `application/x-tar`: the store, the cluster CA certificate and private key, and the admin token file. The format is in [backup](backup.md#the-file). `hivemind backup --api` calls this route.
+
+The archive holds the CA private key, so the server sends it only over TLS, or to a client on loopback. A plain-HTTP request from another address gets `403`. The API listens on loopback unless it has TLS, so that refusal matters only behind a proxy. The store is copied before the reply starts, and a failure there is a `500`. A failure after the archive has started aborts the connection, so a client sees a broken transfer, not a short file that looks complete. Check the archive before you keep it; `hivemind backup` does.
+
 ## Node API (internal)
 
-Workers talk to the server over a second API, on the cluster port that `serve --advertise` opens. It has routes for a worker to join, register, read its assignments and report its containers. It is internal. Its routes, bodies and errors may change in any release, so this document does not describe them, except that a removed node gets `403` on every one of them. The listeners and the trust model are in [security](security.md).
+Workers talk to the server over a second API, on the cluster port that `serve --advertise` opens. It has routes for a worker to join, register, read its assignments, report its containers, renew its certificate, and take and answer log requests. It is internal. Its routes, bodies and errors may change in any release, so this document does not describe them, except that a removed node gets `403` on every one of them, and a certificate that has expired by the server's clock gets `401`. The listeners and the trust model are in [security](security.md).
 
 ## Routes
 
@@ -131,6 +139,7 @@ Workers talk to the server over a second API, on the cluster port that `serve --
 | `POST /v1/join-tokens` | `{"ttl": "1h"}`, optional | 201, `{"token", "expires_at"}` | Issue a token that lets one machine join. See [join tokens](#join-tokens) |
 | `GET /v1/nodes` | none | 200, a list of `NodeView` | List the nodes. See [nodes](#nodes) |
 | `DELETE /v1/nodes/{id}` | none. `?force=true` removes a node that still renews its lease | 200, `RemoveNodeReply` | Remove a node for good |
+| `POST /v1/backup` | none | 200, `application/x-tar` | A backup of the data directory, CA private key included. TLS or loopback only. See [backup](#backup) |
 | `GET /metrics` | none | 200, Prometheus text | Metrics |
 
 An app that has been deleted is treated as missing by every route, even before its containers are gone.
@@ -215,7 +224,17 @@ The spec is the JSON form of the YAML file that `deploy -f` reads. Unknown field
 - `tail` (default 0): the number of lines from the end. 0 returns the whole log.
 - `follow` (default false): keep the stream open until the client disconnects, or the container exits.
 
-The log is `text/plain`. Standard output and standard error are both written to the body. The server reads the replica's container on its own node. It picks the running container, or else the one with the highest generation. A replica that has no container on the server's node gets `404`, and that includes every replica placed on a worker. A worker has no API, so read those logs with `docker logs` on the worker.
+The log is `text/plain`. Standard output and standard error are both written to the body, in the order the engine wrote them. The node that runs the replica reads its container's log. It picks the running container, or else the one with the highest generation. A replica on the server's node, or with no node, is read on the server.
+
+A replica on a worker is read by that worker, which sends the log to the server as it reads it. Standard output and standard error stay separate frames on the way, and the body is the same as for a replica on the server. The worker has no listener: it takes the request over a poll it keeps open to the server. [Security](security.md#logs-from-workers) describes the routes. The errors that are particular to a worker:
+
+- `404` when the worker has no container for the replica.
+- `503` when the node is lost (its lease is more than 15 s old), when the container engine on the node is unavailable, or when the server runs without `--advertise` and so cannot reach workers.
+- `504` with `worker node-... did not answer within 10s; is it running?` when the worker did not take the request and start the stream in 10 seconds. A worker of version 2.0.0 does not take log requests, so this is the answer for its replicas too.
+- `429` when the node already has 16 log streams open.
+- `502` when the worker could not read the log for another reason.
+
+With `follow`, closing the request ends the worker's stream and the log read on the worker. The server copies a worker's stream to the response as it arrives and keeps none of it, so a user who reads slowly slows the worker down.
 
 ## Metrics
 
@@ -229,6 +248,7 @@ The log is `text/plain`. Standard output and standard error are both written to 
 | `hivemind_replicas_ready` | gauge | `app` | Running replicas that pass their health check, or have none |
 | `hivemind_container_restarts_total` | counter | `app`, `replica` | Restarts of the current container by the agent. Resets after 10 minutes of healthy running |
 | `hivemind_node_lease_age_seconds` | gauge | `node` | Seconds since the node last reported in |
+| `hivemind_node_cert_expiry_timestamp_seconds` | gauge | `node` | Unix time at which the node's certificate expires, as the server last recorded it. A node with no record has no sample. Alert on `hivemind_node_cert_expiry_timestamp_seconds - time() < 30 * 86400`: a node renews with about 122 days left, so less than 30 means its renewals fail |
 | `hivemind_reconcile_duration_seconds` | histogram | none | Wall time of the local agent's passes |
 | `hivemind_reconcile_errors_total` | counter | none | Passes that returned an error |
 | `hivemind_http_requests_total` | counter | `method`, `route`, `code` | Requests by method, route pattern and status |

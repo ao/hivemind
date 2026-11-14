@@ -100,7 +100,15 @@ func placedOn(ctx context.Context, q querier) ([]Assignment, error) {
 // as lost and releases their replicas, drops the replica reasons on nodes
 // that are back, and places every pending replica. It returns the IDs of the
 // lost nodes, sorted. It is safe to call at any time.
-func (s *Store) ReconcileNodes(ctx context.Context) ([]string, error) {
+//
+// A lease counts from the node's last renewal or from since, whichever is
+// later. serve passes the time it started: a server that was down, or was
+// restored from a backup, finds every lease as old as its outage, and without
+// this its first sweep would move the replicas of nodes that are fine and
+// simply have not reported to it yet. Each node gets a whole lease timeout to
+// do so, as a new Nomad leader resets every node's heartbeat timer. The zero
+// time means no such floor.
+func (s *Store) ReconcileNodes(ctx context.Context, since time.Time) ([]string, error) {
 	var lost []string
 	err := s.tx(ctx, func(tx *sql.Tx) error {
 		now := s.now()
@@ -110,7 +118,11 @@ func (s *Store) ReconcileNodes(ctx context.Context) ([]string, error) {
 		}
 		leases := make([]scheduler.NodeLease, 0, len(nodes))
 		for _, n := range nodes {
-			leases = append(leases, scheduler.NodeLease{NodeID: n.ID, RenewedAt: n.LastLease})
+			renewed := n.LastLease
+			if since.After(renewed) {
+				renewed = since
+			}
+			leases = append(leases, scheduler.NodeLease{NodeID: n.ID, RenewedAt: renewed})
 		}
 		lost = scheduler.LostNodes(leases, now, scheduler.DefaultLeaseTimeout)
 		for _, id := range lost {

@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"io"
 	"net/url"
+	"strings"
 	"text/tabwriter"
 	"time"
 
@@ -18,7 +19,12 @@ func nodesCmd() *cobra.Command {
 		Short: "List the nodes in the cluster",
 		Long: `List the nodes: ID, name, CPU and memory as each node's Docker daemon reports
 them, the age of its lease, whether it is ready or lost, and how many replicas
-are placed on it. A node is lost when its lease is more than 15 s old.`,
+are placed on it. A node is lost when its lease is more than 15 s old.
+
+CERT EXPIRES is when the node's certificate expires, as the server recorded it
+when it issued the certificate. A worker renews its certificate once two thirds
+of its lifetime have passed, so a date less than four months away means the
+node has not renewed. "-" means the server has no record yet.`,
 		Args: cobra.NoArgs,
 	}
 	cf := addClientFlags(cmd)
@@ -46,17 +52,39 @@ func printNodes(out io.Writer, nodes []server.NodeView) {
 		return
 	}
 	tw := tabwriter.NewWriter(out, 0, 4, 2, ' ', 0)
-	fmt.Fprintln(tw, "ID\tNAME\tROLE\tCPU\tMEMORY\tLEASE AGE\tSTATE\tREPLICAS")
+	fmt.Fprintln(tw, "ID\tNAME\tROLE\tCPU\tMEMORY\tLEASE AGE\tSTATE\tREPLICAS\tCERT EXPIRES")
+	now := time.Now()
 	for _, n := range nodes {
 		role := "worker"
 		if n.Server {
 			role = "server"
 		}
 		age := (time.Duration(n.LeaseAgeSeconds * float64(time.Second))).Round(time.Second)
-		fmt.Fprintf(tw, "%s\t%s\t%s\t%d\t%s\t%s\t%s\t%d\n", n.ID, firstNonEmpty(n.Name, "-"), role, n.CPU, bytesIEC(n.Memory),
-			age, n.State, n.Replicas)
+		fmt.Fprintf(tw, "%s\t%s\t%s\t%d\t%s\t%s\t%s\t%d\t%s\n", n.ID, firstNonEmpty(n.Name, "-"), role, n.CPU, bytesIEC(n.Memory),
+			age, n.State, n.Replicas, certExpiry(n.CertNotAfter, now))
 	}
 	tw.Flush()
+}
+
+// certExpiry prints a certificate's expiry as a UTC date and the time left,
+// such as "2027-11-14 (in 364d)", or "-" without a record.
+func certExpiry(t *time.Time, now time.Time) string {
+	if t == nil {
+		return "-"
+	}
+	left := t.Sub(now)
+	var rel string
+	switch {
+	case left <= 0:
+		rel = "expired"
+	case left >= 48*time.Hour:
+		rel = fmt.Sprintf("in %dd", int(left.Hours()/24))
+	case left >= time.Minute:
+		rel = "in " + strings.TrimSuffix(left.Round(time.Minute).String(), "0s")
+	default:
+		rel = "in " + left.Round(time.Second).String()
+	}
+	return t.UTC().Format("2006-01-02") + " (" + rel + ")"
 }
 
 // bytesIEC prints a byte count in the largest binary unit that keeps a whole

@@ -117,6 +117,7 @@ func (s *Store) RemoveNode(ctx context.Context, id string, force bool) (Removal,
 			`DELETE FROM surges WHERE node_id = ?`,
 			`DELETE FROM container_status WHERE node_id = ?`,
 			`DELETE FROM nodes WHERE id = ?`,
+			`DELETE FROM node_certs WHERE id = ?`,
 		} {
 			if _, err := tx.ExecContext(ctx, q, id); err != nil {
 				return err

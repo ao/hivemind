@@ -159,7 +159,13 @@ func (ca *CA) IssueNodeCert(csrDER []byte, o NodeCertOptions) ([]byte, error) {
 	}
 	notAfter := now.Add(lifetime)
 	if notAfter.After(ca.Cert.NotAfter) {
-		return nil, fmt.Errorf("%w: certificate would outlive the CA", ErrInvalidLifetime)
+		// A certificate cannot outlive the CA that signed it. In the CA's
+		// last year, certificates end with the CA, so renewals keep working
+		// until then. Under an hour left is refused.
+		if ca.Cert.NotAfter.Sub(now) < minClippedLifetime {
+			return nil, fmt.Errorf("%w: the cluster CA expires at %s", ErrInvalidLifetime, ca.Cert.NotAfter.UTC().Format(time.RFC3339))
+		}
+		notAfter = ca.Cert.NotAfter
 	}
 
 	serial, err := randomSerial()

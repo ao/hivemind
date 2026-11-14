@@ -67,6 +67,10 @@ func AssignmentsPath(id string) string { return Prefix + "/nodes/" + id + "/assi
 // the node's lease. A GET on the same path returns what the node last reported.
 func StatusPath(id string) string { return Prefix + "/nodes/" + id + "/status" }
 
+// LeasePath is the route a node renews its lease on, with an empty POST,
+// between status reports.
+func LeasePath(id string) string { return Prefix + "/nodes/" + id + "/lease" }
+
 // Register is the body of POST register.
 type Register struct {
 	Name   string `json:"name"`

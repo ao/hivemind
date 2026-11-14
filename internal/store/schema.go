@@ -146,6 +146,17 @@ CREATE TABLE removed_nodes (
 
 ALTER TABLE replicas ADD COLUMN held INTEGER NOT NULL DEFAULT 0 CHECK (held IN (0, 1));
 `,
+	// 7: node certificate expiry. The server records the expiry of each
+	// certificate it issues, at join, at renewal and for its own listener,
+	// and of a certificate a node presents that is newer than the record.
+	// It is not a foreign key to nodes: a node joins before it registers.
+	`
+CREATE TABLE node_certs (
+	id        TEXT PRIMARY KEY CHECK (id != ''),
+	not_after INTEGER NOT NULL,
+	issued_at INTEGER NOT NULL
+) STRICT;
+`,
 }
 
 // SchemaVersion is the schema version this build writes.

@@ -39,11 +39,90 @@ func (e *schedEnv) renew(id string) {
 // sweep runs the server's node sweep and returns the nodes it found lost.
 func (e *schedEnv) sweep() []string {
 	e.t.Helper()
-	lost, err := e.s.ReconcileNodes(ctxT(e.t))
+	lost, err := e.s.ReconcileNodes(ctxT(e.t), time.Time{})
 	if err != nil {
 		e.t.Fatal(err)
 	}
 	return lost
+}
+
+// RenewLease keeps a node from being lost without a status report, and leaves
+// what it reported as it was.
+func TestRenewLeaseKeepsANodeWithoutAReport(t *testing.T) {
+	e := newSchedEnv(t, 0, "node-1")
+	mustPut(t, e.s, web(1))
+	st := []Status{{Name: "c1", App: "web", Replica: 0, Generation: 1, ContainerID: "abc", State: "running", Ready: true}}
+	if err := e.s.ReportStatus(ctxT(t), "node-1", st); err != nil {
+		t.Fatal(err)
+	}
+	for range 4 {
+		e.clock.Advance(10 * time.Second)
+		if err := e.s.RenewLease(ctxT(t), "node-1"); err != nil {
+			t.Fatal(err)
+		}
+		if lost := e.sweep(); len(lost) != 0 {
+			t.Fatalf("lost %v at %s with a lease renewed every 10 s", lost, e.clock.Now())
+		}
+	}
+	got, err := e.s.StatusForNode(ctxT(t), "node-1")
+	if err != nil || len(got) != 1 || got[0].ContainerID != "abc" {
+		t.Fatalf("status after the renewals: %+v, %v; want the report as it was", got, err)
+	}
+	e.clock.Advance(16 * time.Second)
+	if lost := e.sweep(); len(lost) != 1 {
+		t.Fatalf("lost %v 16 s after the last renewal, want node-1", lost)
+	}
+}
+
+// A server that has just started, after an outage or a restore, finds every
+// lease as old as the outage. It gives each node a whole lease timeout from
+// its start to report, and only a node that stays quiet is lost.
+func TestReconcileNodesCountsLeasesFromTheServerStart(t *testing.T) {
+	e := newSchedEnv(t, 0, "node-1", "node-2")
+	mustPut(t, e.s, web(2))
+	on := map[string]int{}
+	for _, r := range replicasOf(t, e.s, "web") {
+		on[r.NodeID] = r.Index
+	}
+	if len(on) != 2 {
+		t.Fatalf("replicas on %v, want one on each node", on)
+	}
+
+	// The server is down for a minute, then starts. Its first sweep comes 5 s
+	// later, before either node has reported.
+	e.clock.Advance(time.Minute)
+	started := e.clock.Now()
+	e.clock.Advance(5 * time.Second)
+	if lost, err := e.s.ReconcileNodes(ctxT(t), started); err != nil || len(lost) != 0 {
+		t.Fatalf("first sweep after the start: lost %v, %v; want none", lost, err)
+	}
+	// Without the start time, the same sweep loses both.
+	if lost, err := e.s.ReconcileNodes(ctxT(t), time.Time{}); err != nil || len(lost) != 2 {
+		t.Fatalf("sweep with no start time: lost %v, %v; want both nodes", lost, err)
+	}
+
+	e2 := newSchedEnv(t, 0, "node-1", "node-2")
+	mustPut(t, e2.s, web(2))
+	on = map[string]int{}
+	for _, r := range replicasOf(t, e2.s, "web") {
+		on[r.NodeID] = r.Index
+	}
+	e2.clock.Advance(time.Minute)
+	started = e2.clock.Now()
+	e2.clock.Advance(5 * time.Second)
+	if lost, err := e2.s.ReconcileNodes(ctxT(t), started); err != nil || len(lost) != 0 {
+		t.Fatalf("first sweep after the start: lost %v, %v; want none", lost, err)
+	}
+	// node-1 reports; node-2 stays quiet. 16 s after the start, node-2 is
+	// lost, and node-1's replica has not moved.
+	e2.renew("node-1")
+	e2.clock.Advance(11 * time.Second)
+	if lost, err := e2.s.ReconcileNodes(ctxT(t), started); err != nil || len(lost) != 1 || lost[0] != "node-2" {
+		t.Fatalf("16 s after the start: lost %v, %v; want [node-2]", lost, err)
+	}
+	if got := e2.nodeOf("web", on["node-1"]); got != "node-1" {
+		t.Fatalf("node-1's replica is on %q after the sweep, want node-1", got)
+	}
 }
 
 // nodeOf returns the node of one replica, or "" when it is pending.

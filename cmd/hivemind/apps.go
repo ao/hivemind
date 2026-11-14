@@ -258,8 +258,13 @@ func logsCmd() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "logs <app> [replica]",
 		Short: "Print a replica's container log",
-		Long:  "Print the log of one replica's container, replica 0 by default. -f keeps the stream open until Ctrl-C.",
-		Args:  cobra.RangeArgs(1, 2),
+		Long: `Print the log of one replica's container, replica 0 by default. -f keeps the
+stream open until Ctrl-C or until the container exits.
+
+The replica can run on any node. The server reads a worker's replica through
+that worker, which must be running and of this version: a worker that does not
+answer in 10 seconds is reported by its node ID.`,
+		Args: cobra.RangeArgs(1, 2),
 	}
 	cf := addClientFlags(cmd)
 	cmd.Flags().BoolVarP(&follow, "follow", "f", false, "keep printing new lines")

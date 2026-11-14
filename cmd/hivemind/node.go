@@ -20,9 +20,11 @@ import (
 
 	"github.com/ao/hivemind/internal/agent"
 	"github.com/ao/hivemind/internal/auth"
+	"github.com/ao/hivemind/internal/backup"
 	"github.com/ao/hivemind/internal/cluster"
 	"github.com/ao/hivemind/internal/config"
 	"github.com/ao/hivemind/internal/logging"
+	"github.com/ao/hivemind/internal/logrelay"
 	"github.com/ao/hivemind/internal/pki"
 	"github.com/ao/hivemind/internal/runtime"
 	"github.com/ao/hivemind/internal/runtime/docker"
@@ -43,8 +45,11 @@ const sweepInterval = 5 * time.Second
 
 // sweep runs the server's periodic work until ctx ends. A node whose lease
 // has lapsed is released: its replicas are placed on other nodes, and volume
-// replicas wait for it. Each node is logged once when it is lost.
+// replicas wait for it. Each node is logged once when it is lost. Leases count
+// from the sweep's start at the earliest (see store.ReconcileNodes), so a
+// server that was down gives every node a lease timeout to report.
 func sweep(ctx context.Context, st *store.Store, log *slog.Logger, every time.Duration) {
+	started := time.Now()
 	t := time.NewTicker(every)
 	defer t.Stop()
 	lost := map[string]bool{}
@@ -54,7 +59,7 @@ func sweep(ctx context.Context, st *store.Store, log *slog.Logger, every time.Du
 			return
 		case <-t.C:
 		}
-		nodes, err := st.ReconcileNodes(ctx)
+		nodes, err := st.ReconcileNodes(ctx, started)
 		if err != nil {
 			if ctx.Err() == nil {
 				log.Warn("node sweep", "err", err)
@@ -400,8 +405,19 @@ func runServe(ctx context.Context, cfg *config.Config, log *slog.Logger, rt runt
 	if ca != nil {
 		issue = joinIssuer(ca, st)
 	}
+	writeBackup := func(ctx context.Context, w io.Writer) error {
+		_, err := backup.Write(ctx, w, backup.Options{DataDir: cfg.DataDir, Snapshot: st.SnapshotTo, HivemindVersion: version})
+		return err
+	}
+	// Workers exist only with the cluster listener, and their logs come
+	// through it.
+	var logs *logrelay.Relay
+	if cfg.Advertise != "" {
+		logs = logrelay.New(logrelay.Options{})
+	}
 	api, err := server.New(server.Config{Store: st, Runtime: rt, NodeID: cl.NodeID, Auth: authn,
-		Trigger: ag.Trigger, Logger: log.With("component", "api"), Metrics: m, IssueJoinToken: issue})
+		Trigger: ag.Trigger, Logger: log.With("component", "api"), Metrics: m, IssueJoinToken: issue,
+		Backup: writeBackup, Logs: logs})
 	if err != nil {
 		return err
 	}
@@ -428,9 +444,20 @@ func runServe(ctx context.Context, cfg *config.Config, log *slog.Logger, rt runt
 	// The cluster listeners open only with --advertise, on that address only.
 	var nodes *cluster.Cluster
 	if cfg.Advertise != "" {
+		lifetime, err := testCertLifetime()
+		if err != nil {
+			ln.Close()
+			if mln != nil {
+				mln.Close()
+			}
+			return err
+		}
+		if lifetime != 0 {
+			log.Warn("test build: node certificates are issued with a short lifetime", "lifetime", lifetime)
+		}
 		c, err := cluster.Listen(cluster.Config{Store: st, CA: ca, Tokens: pki.NewTokens(st.JoinTokens()),
 			Advertise: cfg.Advertise, Port: cfg.ClusterPort, LocalNodeID: cl.NodeID,
-			Logger: log.With("component", "cluster")})
+			Logger: log.With("component", "cluster"), NodeCertLifetime: lifetime, Logs: logs})
 		if err != nil {
 			ln.Close()
 			if mln != nil {

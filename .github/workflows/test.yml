@@ -40,6 +40,8 @@ jobs:
         with:
           go-version-file: go.mod
       - run: go run honnef.co/go/tools/cmd/staticcheck@2026.2.2 ./...
+      # gofmt -l prints the files that are not formatted, and exits 0 either way.
+      - run: test -z "$(gofmt -l .)" || { gofmt -l .; exit 1; }
 
   # Every release platform compiles with CGO disabled.
   build:
@@ -147,6 +149,9 @@ jobs:
           - { pkg: ./internal/server, target: FuzzDecodeApp }
           - { pkg: ./internal/pki, target: FuzzParseJoinToken }
           - { pkg: ./internal/pki, target: FuzzParseNodeURI }
+          - { pkg: ./internal/nodeapi, target: FuzzDecodeStatus }
+          - { pkg: ./internal/nodeapi, target: FuzzDecodeAssignments }
+          - { pkg: ./internal/nodeapi, target: FuzzDecodeRegister }
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-go@v5

@@ -2,17 +2,17 @@ package server
 
 import (
 	"bytes"
-	"cmp"
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
 	"net/http"
-	"slices"
 	"strconv"
 	"sync"
 	"time"
 
+	"github.com/ao/hivemind/internal/nodeapi"
 	"github.com/ao/hivemind/internal/runtime"
 	"github.com/ao/hivemind/internal/spec"
 	"github.com/ao/hivemind/internal/store"
@@ -319,9 +319,11 @@ func (s *Server) statusOf(r *http.Request, app string) ([]AppStatus, error) {
 	return out, nil
 }
 
-// appLogs streams one replica's container log from the local runtime. The
-// query takes replica (default 0), tail (lines from the end, 0 for all) and
-// follow (true to keep the stream open).
+// appLogs streams one replica's container log. The query takes replica
+// (default 0), tail (lines from the end, 0 for all) and follow (true to keep
+// the stream open). A replica placed on another node is read through that
+// node's worker (see remoteLogs). Any other replica, the server's own and one
+// with no node, is read from the local runtime.
 func (s *Server) appLogs(w http.ResponseWriter, r *http.Request) {
 	name, ok := pathName(w, r)
 	if !ok {
@@ -349,6 +351,15 @@ func (s *Server) appLogs(w http.ResponseWriter, r *http.Request) {
 		s.fail(w, r, err)
 		return
 	}
+	node, err := s.replicaNode(r, name, replica)
+	if err != nil {
+		s.fail(w, r, err)
+		return
+	}
+	if node != "" && node != s.cfg.NodeID {
+		s.remoteLogs(w, r, node, nodeapi.LogRequest{App: name, Replica: replica, Tail: tail, Follow: follow})
+		return
+	}
 	cs, err := s.cfg.Runtime.List(r.Context(), map[string]string{
 		runtime.LabelApp: name, runtime.LabelReplica: strconv.Itoa(replica)})
 	if err != nil {
@@ -359,24 +370,11 @@ func (s *Server) appLogs(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusNotFound, fmt.Sprintf("app %q replica %d has no container on this node", name, replica))
 		return
 	}
-	c := pickContainer(cs)
+	c := runtime.PickContainer(cs)
 
-	ctx := r.Context()
-	if follow {
-		// A followed stream outlives WriteTimeout, so clear the deadline for
-		// this response. CloseStreams ends it at shutdown.
-		var cancel func()
-		ctx, cancel = mergeCancel(ctx, s.streams)
-		defer cancel()
-		if err := http.NewResponseController(w).SetWriteDeadline(time.Time{}); err != nil {
-			s.log.Warn("clear write deadline", "err", err)
-		}
-	}
-	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
-	w.Header().Set("Cache-Control", "no-store")
-	w.Header().Set("X-Content-Type-Options", "nosniff")
-	w.WriteHeader(http.StatusOK)
-	fw := &flushWriter{w: w, rc: http.NewResponseController(w)}
+	ctx, done := s.logContext(w, r, follow)
+	defer done()
+	fw := startLog(w)
 	err = s.cfg.Runtime.Logs(ctx, c.ID, runtime.LogOptions{Follow: follow, Tail: tail}, fw, fw)
 	if err != nil && ctx.Err() == nil {
 		// The status line is sent, so the error can only be logged.
@@ -384,21 +382,31 @@ func (s *Server) appLogs(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-// pickContainer prefers a running container, then the highest generation.
-func pickContainer(cs []runtime.Container) runtime.Container {
-	gen := func(c runtime.Container) int {
-		n, _ := strconv.Atoi(c.Labels[runtime.LabelGeneration])
-		return n
+// logContext is the context of a log response. A followed stream outlives
+// WriteTimeout, so its write deadline is cleared, and CloseStreams ends it at
+// shutdown.
+func (s *Server) logContext(w http.ResponseWriter, r *http.Request, follow bool) (context.Context, func()) {
+	if !follow {
+		return r.Context(), func() {}
 	}
-	return slices.MaxFunc(cs, func(a, b runtime.Container) int {
-		if a.Running() != b.Running() {
-			if a.Running() {
-				return 1
-			}
-			return -1
-		}
-		return cmp.Or(cmp.Compare(gen(a), gen(b)), cmp.Compare(a.Name, b.Name))
-	})
+	ctx, cancel := mergeCancel(r.Context(), s.streams)
+	if err := http.NewResponseController(w).SetWriteDeadline(time.Time{}); err != nil {
+		s.log.Warn("clear write deadline", "err", err)
+	}
+	return ctx, cancel
+}
+
+// startLog sends the headers of a log response, and returns the writer for
+// its body. The headers are flushed at once, so a client of a followed log
+// that is quiet knows the stream has started.
+func startLog(w http.ResponseWriter) *flushWriter {
+	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+	w.Header().Set("Cache-Control", "no-store")
+	w.Header().Set("X-Content-Type-Options", "nosniff")
+	w.WriteHeader(http.StatusOK)
+	rc := http.NewResponseController(w)
+	_ = rc.Flush()
+	return &flushWriter{w: w, rc: rc}
 }
 
 // flushWriter flushes after every write, so a followed log reaches the client

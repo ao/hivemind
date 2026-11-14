@@ -74,7 +74,7 @@ func join(cfg Config, limiter *ratelimit.FailLimiter, log *slog.Logger, w http.R
 		log.Error("node ID", "err", err)
 		return
 	}
-	der, err := cfg.CA.IssueNodeCert(req.CSR, pki.NodeCertOptions{NodeID: id})
+	der, err := cfg.CA.IssueNodeCert(req.CSR, pki.NodeCertOptions{NodeID: id, Lifetime: cfg.NodeCertLifetime, Now: cfg.now()()})
 	if err != nil {
 		fail(http.StatusBadRequest, "the certificate request is invalid", err.Error())
 		return
@@ -84,6 +84,7 @@ func join(cfg Config, limiter *ratelimit.FailLimiter, log *slog.Logger, w http.R
 		return
 	}
 
+	recordIssued(r, cfg, log, id, der)
 	certPEM := pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: der})
 	writeJSON(w, http.StatusOK, nodeapi.JoinReply{NodeID: id, CertPEM: string(certPEM), CAPEM: string(cfg.CA.CertPEM)})
 	log.Info("node joined", "node", id, "remote", src)

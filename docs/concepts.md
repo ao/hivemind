@@ -6,7 +6,7 @@ This describes the build on this branch. It runs one server and any number of wo
 
 `hivemind init` creates a cluster on one machine. That machine is the server. It keeps the desired state in a SQLite database in the data directory, serves the HTTP API on `127.0.0.1:4483` by default, decides where each replica runs, and runs an agent for its own containers.
 
-A worker is another machine that joined with `hivemind join`. It runs an agent and nothing else: no database and no API. Each pass, the agent reads its assignments from the server over the node API, compares them with its containers, and reports back.
+A worker is another machine that joined with `hivemind join`. It runs an agent and nothing else: no database, no API and no listener. Each pass, the agent reads its assignments from the server over the node API, compares them with its containers, and reports back. The worker also keeps a request open to the server for log requests, so that `hivemind logs` on the server can read its containers (see [logs from workers](#logs-from-workers)).
 
 `hivemind serve` runs the server and its agent in one process. `hivemind serve --role worker` runs a worker that has already joined. Stopping either one leaves its containers running, but nothing changes them until the agent runs again. If the server is down, workers keep their containers and no new replica is placed.
 
@@ -33,15 +33,30 @@ The trust rests on the token:
 
 A node certificate is ECDSA P-256, signed by the cluster CA, and valid for 365 days. Its URI name is `hivemind://node/<id>`, and its common name is the same ID. The server's own certificate also carries the address it advertises, so a worker can check the name it dialed.
 
+A worker renews its certificate once two thirds of its lifetime have passed, on day 243, with a new key, over the node API. The server renews its own certificate on the same schedule. Neither restarts: new connections use the new certificate. A worker that cannot reach the server for the last four months of its certificate's life, such as a machine that was switched off, cannot renew after it expires, and must be removed and join again. `hivemind nodes` shows each node's certificate expiry. The details, and what the server checks, are in [security](security.md#certificate-renewal).
+
 The node API runs on the cluster port (`--cluster-port`, 4484 by default) on the `--advertise` address. It opens only when the server runs with `--advertise`. A request is accepted only when the client presents a certificate that chains to the cluster CA and names a node. Each route then checks that the node ID in its path is the node ID in the certificate, and answers 403 if it is not. A node can therefore read its own assignments, report its own containers, and register its own name and capacity. It cannot read or write another node's data.
 
 The node API is internal, and its routes are not a stable interface. See [the API](api.md#node-api-internal).
 
+## Logs from workers
+
+`hivemind logs <app> [replica]` works for a replica on any node. The API looks up the node the replica is placed on. The server reads its own containers' logs from its Docker daemon. For a replica on a worker:
+
+1. The server queues a log request for the replica's node, with a random ID.
+2. The worker has a poll open on the node API, which the server answers with the request. A poll with nothing to answer ends after 25 seconds, and the worker opens the next one.
+3. The worker finds the replica's container, reads its log from its own Docker daemon, and posts it to the server as one streamed request. Standard output and standard error are separate frames.
+4. The server checks that the stream comes from the node the request was queued for, by its certificate, and copies it to the user's response as it arrives.
+
+A worker that does not take the request and start its stream in 10 seconds gets the user a `504` that names the worker and asks whether it is running. A lost node, whose lease is more than 15 s old, is refused at once with `503`, without waiting. With `-f`, the stream lasts until the user stops it or the container exits. Ctrl-C ends the user's request, the server cuts the worker's stream, and the worker stops reading the log. A node can have 16 log streams open at once. The routes and the checks are in [security](security.md#logs-from-workers).
+
+A worker of version 2.0.0 does not poll for log requests, so its replicas get the `504`. Upgrade the worker to read them.
+
 ## Leases and node loss
 
-Each pass of a worker's agent reports its containers to the server. That report renews the node's lease. A pass runs every `--reconcile-interval` (2 s by default), and joining and registering also renew the lease. If a worker cannot read its assignments, it does not report, so its lease ages.
+Each pass of a worker's agent reports its containers to the server. That report renews the node's lease. A pass runs every `--reconcile-interval` (2 s by default), and joining and registering also renew the lease. The agent also renews the lease every 5 s on its own, apart from its passes, because a pass reports only at its end, and a pass can take longer than the lease: it stops containers one at a time, each with up to 10 s for a process that ignores SIGTERM, and it pulls images. Nomad clients heartbeat apart from their work in the same way. The server's own node does the same. The other side of this is that a node whose agent is stuck in a pass still counts as up; the status it last reported stays as it was until the pass ends.
 
-A node is lost when its lease is more than 15 s old. The 15 s is fixed. The server checks leases every 5 s, so a lost node is noticed 15 to 20 s after its last renewal. The server logs one line for each node it marks as lost.
+A node is lost when its lease is more than 15 s old. The 15 s is fixed. The server checks leases every 5 s, so a lost node is noticed 15 to 20 s after its last renewal. The server logs one line for each node it marks as lost. When `serve` starts, every lease it finds is as old as the time it was down, so it counts each lease from its own start instead: every node gets 15 s to report to a server that has just started, or been restored from a backup, before it can be lost.
 
 Two things follow from that:
 
@@ -216,8 +231,8 @@ The web UI is not built. The API has the login and logout routes a browser would
 
 ## Data directories
 
-The server's data directory holds the database (`hivemind.db`, with the SQLite WAL files beside it), the admin token file (`admin.token`), the cluster CA (`ca.key` and `ca.crt`), and an optional config file (`hivemind.yaml`). The default is `/var/lib/hivemind` for root, and `$XDG_STATE_HOME/hivemind` or `~/.local/state/hivemind` for other users. `--data-dir` or `HIVEMIND_DATA_DIR` changes it.
+The server's data directory holds the database (`hivemind.db`, with the SQLite WAL files beside it), the admin token file (`admin.token`), the cluster CA (`ca.key` and `ca.crt`), and an optional config file (`hivemind.yaml`). The default is `/var/lib/hivemind` for root, and `$XDG_STATE_HOME/hivemind` or `~/.local/state/hivemind` for other users. `--data-dir` or `HIVEMIND_DATA_DIR` changes it. `hivemind backup` copies everything in it but `hivemind.yaml` into one file, and `hivemind restore` puts that file into an empty directory on another machine. See [backup](backup.md).
 
-A worker's data directory holds its key (`node.key`), its certificate (`node.crt`), the cluster CA certificate (`ca.crt`), and `node.json`, which records the node ID and the server it joined. `node.json` is written last, so its presence means the join finished. [Security](security.md#files) lists the file modes.
+A worker's data directory holds its key (`node.key`), its certificate (`node.crt`), the cluster CA certificate (`ca.crt`), and `node.json`, which records the node ID and the server it joined. `node.json` is written last, so its presence means the join finished. A renewal replaces `node.key` and `node.crt`. There is nothing on a worker to back up. [Security](security.md#files) lists the file modes.
 
 The database uses SQLite in WAL mode, with `synchronous=FULL`. Every change is one transaction. The schema has a version number, and a newer schema is refused. A v1 data directory is refused with a message, so use a new directory for v2. See [upgrading](upgrading.md).

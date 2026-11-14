@@ -3,9 +3,12 @@ package cluster
 import (
 	"encoding/json"
 	"errors"
+	"io"
 	"log/slog"
 	"net/http"
+	"time"
 
+	"github.com/ao/hivemind/internal/logrelay"
 	"github.com/ao/hivemind/internal/nodeapi"
 	"github.com/ao/hivemind/internal/pki"
 	"github.com/ao/hivemind/internal/store"
@@ -16,20 +19,32 @@ import (
 // handler checks that the node in the certificate is the node in the path, so
 // a node can read and report for itself only.
 type nodeAPI struct {
-	st  *store.Store
-	log *slog.Logger
+	st   *store.Store
+	log  *slog.Logger
+	logs *logrelay.Relay
+	// ca, lifetime and now issue renewed certificates (renew.go).
+	ca       *pki.CA
+	lifetime time.Duration
+	now      func() time.Time
+	certs    *certNotes
 }
 
 // nodeRoutes returns the handler of the mTLS listener. It has no join route.
-// Every request passes the denylist check first.
+// Every request passes the denylist check first, then the check that the
+// client certificate is valid now.
 func nodeRoutes(cfg Config, log *slog.Logger) http.Handler {
-	a := &nodeAPI{st: cfg.Store, log: log}
+	a := &nodeAPI{st: cfg.Store, log: log, logs: cfg.Logs,
+		ca: cfg.CA, lifetime: cfg.NodeCertLifetime, now: cfg.now(), certs: &certNotes{}}
 	mux := http.NewServeMux()
 	mux.HandleFunc("POST "+nodeapi.Prefix+"/nodes/{id}/register", a.register)
 	mux.HandleFunc("GET "+nodeapi.Prefix+"/nodes/{id}/assignments", a.assignments)
 	mux.HandleFunc("POST "+nodeapi.Prefix+"/nodes/{id}/status", a.postStatus)
 	mux.HandleFunc("GET "+nodeapi.Prefix+"/nodes/{id}/status", a.getStatus)
-	return a.denyRemoved(mux)
+	mux.HandleFunc("POST "+nodeapi.Prefix+"/nodes/{id}/lease", a.lease)
+	mux.HandleFunc("POST "+nodeapi.Prefix+"/nodes/{id}/renew", a.renew)
+	mux.HandleFunc("GET "+nodeapi.Prefix+"/nodes/{id}/logs/requests", a.logRequests)
+	mux.HandleFunc("POST "+nodeapi.Prefix+"/nodes/{id}/logs/streams/{req}", a.logStream)
+	return a.denyRemoved(a.requireCurrentCert(mux))
 }
 
 // denyRemoved refuses, with 403, every request whose client certificate names
@@ -94,6 +109,24 @@ func (a *nodeAPI) register(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if err := a.st.UpsertNode(r.Context(), store.Node{ID: id, Name: g.Name, CPU: g.CPU, Memory: g.Memory}); err != nil {
+		a.fail(w, r, err)
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
+}
+
+// lease renews the node's lease. It takes no body: an agent calls it on a
+// timer, apart from its passes.
+func (a *nodeAPI) lease(w http.ResponseWriter, r *http.Request) {
+	id, ok := a.node(w, r)
+	if !ok {
+		return
+	}
+	if n, _ := io.Copy(io.Discard, io.LimitReader(r.Body, 1)); n != 0 {
+		writeError(w, http.StatusBadRequest, "the lease route takes no body")
+		return
+	}
+	if err := a.st.RenewLease(r.Context(), id); err != nil {
 		a.fail(w, r, err)
 		return
 	}

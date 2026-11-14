@@ -221,6 +221,12 @@ func TestRemovedNodeIsDenied(t *testing.T) {
 	if err := s.ReportStatus(ctx, "node-2", nil); !errors.Is(err, ErrNodeRemoved) {
 		t.Fatalf("report from a removed node: %v", err)
 	}
+	if err := s.RenewLease(ctx, "node-2"); !errors.Is(err, ErrNodeRemoved) {
+		t.Fatalf("lease renewal by a removed node: %v", err)
+	}
+	if err := s.RenewLease(ctx, "node-3"); !errors.Is(err, ErrNotFound) || errors.Is(err, ErrNodeRemoved) {
+		t.Fatalf("lease renewal by an unknown node: %v", err)
+	}
 	if _, err := s.GetNode(ctx, "node-2"); !errors.Is(err, ErrNotFound) {
 		t.Fatalf("GetNode of a removed node: %v", err)
 	}

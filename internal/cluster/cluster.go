@@ -28,6 +28,7 @@ import (
 	"strconv"
 	"time"
 
+	"github.com/ao/hivemind/internal/logrelay"
 	"github.com/ao/hivemind/internal/pki"
 	"github.com/ao/hivemind/internal/ratelimit"
 	"github.com/ao/hivemind/internal/store"
@@ -72,15 +73,37 @@ type Config struct {
 	// Logger receives one line per join and per rejected node request. Nil
 	// means slog.Default().
 	Logger *slog.Logger
+	// Logs relays log requests to workers and their streams back. The API
+	// server must share it. Nil means a private relay, which no API uses.
+	Logs *logrelay.Relay
+	// NodeCertLifetime is the lifetime of the certificates the server
+	// issues: at join, at renewal, and its own. Zero means
+	// pki.NodeCertLifetime. Only tests set it.
+	NodeCertLifetime time.Duration
+	// Now is the clock for issuing certificates and checking client
+	// certificates on each request. Nil means time.Now. Tests set it; the
+	// TLS handshake itself always uses the real time.
+	Now func() time.Time
+}
+
+func (cfg Config) now() func() time.Time {
+	if cfg.Now != nil {
+		return cfg.Now
+	}
+	return time.Now
 }
 
 // Cluster is a pair of bound listeners, ready to serve.
 type Cluster struct {
-	log  *slog.Logger
-	mtls *http.Server
-	join *http.Server
-	mln  net.Listener
-	jln  net.Listener
+	log   *slog.Logger
+	logs  *logrelay.Relay
+	mtls  *http.Server
+	join  *http.Server
+	mln   net.Listener
+	jln   net.Listener
+	certs *serverCertSource
+	stop  context.CancelFunc
+	ctx   context.Context
 }
 
 // NewNodeID returns a new node ID: "node-" and 12 random hex digits. It is a
@@ -118,10 +141,12 @@ func Listen(cfg Config) (*Cluster, error) {
 		limiter = ratelimit.New(DefaultFailLimit, DefaultFailWindow)
 	}
 
-	tlsCert, err := serverCert(cfg)
+	certs := &serverCertSource{cfg: cfg, log: log, now: cfg.now()}
+	tlsCert, err := certs.issue()
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("cluster: server certificate: %w", err)
 	}
+	certs.holder = pki.NewCertHolder(tlsCert)
 
 	mln, err := listenAdvertise(cfg.Advertise, cfg.Port)
 	if err != nil {
@@ -137,31 +162,23 @@ func Listen(cfg Config) (*Cluster, error) {
 		return nil, fmt.Errorf("join listener on %s: %w", cfg.Advertise, err)
 	}
 
-	c := &Cluster{log: log, mln: mln, jln: jln}
+	if cfg.Logs == nil {
+		cfg.Logs = logrelay.New(logrelay.Options{})
+	}
+	c := &Cluster{log: log, logs: cfg.Logs, mln: mln, jln: jln, certs: certs}
+	c.ctx, c.stop = context.WithCancel(context.Background())
 	c.mtls = newHTTPServer(nodeRoutes(cfg, log))
 	c.join = newHTTPServer(joinRoutes(cfg, limiter, log))
-	c.mtls.TLSConfig = pki.ServerTLSConfig(cfg.CA, tlsCert)
-	c.join.TLSConfig = pki.JoinServerTLSConfig(tlsCert)
+	// Both listeners read the server certificate from the holder at each
+	// handshake, so a renewal takes effect without a restart.
+	c.mtls.TLSConfig = pki.ServerTLSConfigFrom(cfg.CA, certs.holder)
+	c.join.TLSConfig = pki.JoinServerTLSConfigFrom(certs.holder)
+	certs.check() // logs the CA warning at start, if it applies
 	return c, nil
 }
 
-// serverCert issues the server's own certificate for the advertise address.
-// It is signed by the cluster CA and carries the server's node ID.
-func serverCert(cfg Config) (tls.Certificate, error) {
-	key, err := pki.NewNodeKey()
-	if err != nil {
-		return tls.Certificate{}, err
-	}
-	csr, err := pki.NewCSR(key)
-	if err != nil {
-		return tls.Certificate{}, err
-	}
-	der, err := cfg.CA.IssueNodeCert(csr, pki.NodeCertOptions{NodeID: cfg.LocalNodeID, Advertise: cfg.Advertise})
-	if err != nil {
-		return tls.Certificate{}, fmt.Errorf("cluster: server certificate: %w", err)
-	}
-	return pki.NewTLSCertificate(der, key, cfg.CA)
-}
+// ServerCert returns the server certificate new handshakes use.
+func (c *Cluster) ServerCert() *tls.Certificate { return c.certs.holder.Load() }
 
 // listenAdvertise binds host:port on the advertise address. Port 0 picks a
 // free port. A listener that ends up on a wildcard address is refused.
@@ -198,6 +215,9 @@ func (c *Cluster) JoinAddr() string { return c.jln.Addr().String() }
 // Serve serves both listeners until Shutdown is called or one of them fails.
 // It returns the first error that is not the result of Shutdown.
 func (c *Cluster) Serve() error {
+	go func() {
+		c.certs.run(c.ctx)
+	}()
 	errc := make(chan error, 2)
 	go func() { errc <- c.mtls.ServeTLS(c.mln, "", "") }()
 	go func() { errc <- c.join.ServeTLS(c.jln, "", "") }()
@@ -212,8 +232,11 @@ func (c *Cluster) Serve() error {
 }
 
 // Shutdown closes both listeners and waits for requests in flight, up to
-// shutdownTimeout.
+// shutdownTimeout. It closes the log relay first, so log polls and streams end
+// at once instead of holding the shutdown.
 func (c *Cluster) Shutdown() error {
+	c.stop()
+	c.logs.Close()
 	ctx, cancel := context.WithTimeout(context.Background(), shutdownTimeout)
 	defer cancel()
 	return errors.Join(c.mtls.Shutdown(ctx), c.join.Shutdown(ctx))

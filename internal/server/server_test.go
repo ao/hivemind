@@ -128,7 +128,7 @@ func (s *syncBuffer) String() string {
 
 const testNode = "node-1"
 
-func newHarness(t *testing.T) *harness {
+func newHarness(t *testing.T, opts ...func(*Config)) *harness {
 	t.Helper()
 	ctx := context.Background()
 	// The test node is not the cluster's own node, so it would wait MinReady
@@ -155,8 +155,12 @@ func newHarness(t *testing.T) *harness {
 	}
 	h := &harness{store: st, rt: &fakeRuntime{}, token: tok, logs: &syncBuffer{}}
 	log := slog.New(slog.NewTextHandler(h.logs, &slog.HandlerOptions{Level: slog.LevelDebug}))
-	h.srv, err = New(Config{Store: st, Runtime: h.rt, NodeID: testNode, Auth: a, Logger: log,
-		Trigger: func() { h.mu.Lock(); h.trigger++; h.mu.Unlock() }})
+	cfg := Config{Store: st, Runtime: h.rt, NodeID: testNode, Auth: a, Logger: log,
+		Trigger: func() { h.mu.Lock(); h.trigger++; h.mu.Unlock() }}
+	for _, o := range opts {
+		o(&cfg)
+	}
+	h.srv, err = New(cfg)
 	if err != nil {
 		t.Fatal(err)
 	}

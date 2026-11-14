@@ -64,7 +64,7 @@ func TestNodesCommands(t *testing.T) {
 		found := false
 		for _, l := range lines[1:] {
 			f := strings.Fields(l)
-			if len(f) == 8 && f[0] == want[0] && f[1] == want[1] && f[2] == want[2] && f[3] == want[3] && f[4] == want[4] && f[6] == want[5] && f[7] == want[6] {
+			if len(f) == 9 && f[8] == "-" && f[0] == want[0] && f[1] == want[1] && f[2] == want[2] && f[3] == want[3] && f[4] == want[4] && f[6] == want[5] && f[7] == want[6] {
 				found = true
 			}
 		}
@@ -104,6 +104,26 @@ func TestNodesCommands(t *testing.T) {
 	for _, r := range reps {
 		if r.NodeID != "node-s" {
 			t.Fatalf("replica %d on %q after the removal", r.Index, r.NodeID)
+		}
+	}
+}
+
+func TestCertExpiry(t *testing.T) {
+	now := time.Date(2026, 11, 14, 12, 0, 0, 0, time.UTC)
+	at := func(d time.Duration) *time.Time { x := now.Add(d); return &x }
+	for _, c := range []struct {
+		t    *time.Time
+		want string
+	}{
+		{nil, "-"},
+		{at(365 * 24 * time.Hour), "2027-11-14 (in 365d)"},
+		{at(90 * time.Minute), "2026-11-14 (in 1h30m)"},
+		{at(9*time.Minute + 50*time.Second), "2026-11-14 (in 10m)"},
+		{at(30 * time.Second), "2026-11-14 (in 30s)"},
+		{at(-time.Hour), "2026-11-14 (expired)"},
+	} {
+		if got := certExpiry(c.t, now); got != c.want {
+			t.Errorf("certExpiry = %q, want %q", got, c.want)
 		}
 	}
 }

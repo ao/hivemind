@@ -28,6 +28,11 @@ type NodeView struct {
 	Server bool `json:"server"`
 	// Replicas counts the replicas placed on the node that should run.
 	Replicas int `json:"replicas"`
+	// CertNotAfter is when the node's certificate expires, as the server
+	// recorded it when it issued the certificate or saw the node present
+	// it. It is absent when there is no record, such as for a server
+	// without --advertise.
+	CertNotAfter *time.Time `json:"cert_not_after,omitempty"`
 }
 
 // RemoveNodeReply is the reply to DELETE /v1/nodes/{id}.
@@ -66,8 +71,13 @@ func (s *Server) listNodes(w http.ResponseWriter, r *http.Request) {
 		if age > scheduler.DefaultLeaseTimeout {
 			state = "lost"
 		}
-		out = append(out, NodeView{ID: n.ID, Name: n.Name, CPU: n.CPU, Memory: n.Memory, LastLease: n.LastLease.UTC(),
-			LeaseAgeSeconds: age.Seconds(), State: state, Server: n.ID == s.cfg.NodeID, Replicas: count[n.ID]})
+		v := NodeView{ID: n.ID, Name: n.Name, CPU: n.CPU, Memory: n.Memory, LastLease: n.LastLease.UTC(),
+			LeaseAgeSeconds: age.Seconds(), State: state, Server: n.ID == s.cfg.NodeID, Replicas: count[n.ID]}
+		if !n.CertNotAfter.IsZero() {
+			t := n.CertNotAfter.UTC()
+			v.CertNotAfter = &t
+		}
+		out = append(out, v)
 	}
 	writeJSON(w, http.StatusOK, out)
 }
