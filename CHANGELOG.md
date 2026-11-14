@@ -7,6 +7,14 @@ Notable changes to hivemind, newest first. Versions follow [Semantic Versioning]
 ### Added
 
 - `hivemind compose convert`, `deploy` and `delete` read a Docker Compose file and make one app of each service. The CLI does the conversion; the API is unchanged. The keys read are `image`, `command`, `environment`, `ports`, named `volumes`, `deploy` (`replicas`, `resources` and `restart_policy`), `healthcheck` and `restart`, with anchors, merge keys, `x-` extensions and `.env` interpolation. Any other key is refused with its path and a reason, and every refusal is listed in one error. A port with no address is published on `127.0.0.1`, where Compose publishes on every interface, and a note on standard error says so for each such port. An unset variable with no default is an error rather than an empty string. Apps do not find each other by service name. `deploy` validates every app before it sends any, and `--prefix` names the apps `<prefix>-<service>`. See [docs/compose.md](docs/compose.md).
+- `hivemind node eligibility <id> --disable|--enable`: an ineligible node takes no new replicas, from placement or from a rollout's surge, and keeps the ones it runs. The server stores the flag, so it holds across restarts. `POST /v1/nodes/{id}/eligibility` is the route.
+- `hivemind node drain <id> [--deadline 10m] [--no-wait]`: makes the node ineligible, then moves each replica off it with a rollout surge at the replica's own generation, one replica per app at a time, so an app keeps its replica count running while another node has room. A replica with a volume, or one whose host port is taken on every other eligible node, stays, and the drain says why. At the deadline, what is left is stopped and placed again, as on node loss; replicas with a volume keep running. The command waits and prints each move. A drain carries on across a restart of the server. `POST` and `GET /v1/nodes/{id}/drain` are the routes. See [docs/concepts.md](docs/concepts.md#draining-a-node).
+- `hivemind nodes` has an ELIGIBILITY column (`eligible`, `ineligible`, `draining` or `drained`), and `GET /v1/nodes` the fields `eligible` and `drain`. Schema version 8 adds the eligibility column and the drain tables; a 2.1 store is migrated when 2.2 opens it.
+
+### Changed
+
+- `hivemind node remove` of a node that is ineligible and runs nothing, as after a drain, needs no `--force`, though the node still renews its lease.
+- `serve`, `init` and `join` no longer accept `--server`, and `serve` and `init` no longer accept `--token`. They never used them. `logs` no longer accepts `--json`, which it ignored. Passing one of these flags is now an error. `join --token` is unchanged.
 
 ## [2.1.0] - Unreleased
 
