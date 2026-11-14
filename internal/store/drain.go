@@ -476,7 +476,7 @@ func (s *Store) startDrainMoves(ctx context.Context, tx *sql.Tx, node string) er
 		case surged:
 			reason = "it has a copy starting on another node"
 		default:
-			to, why, err := s.surgeNode(ctx, tx, rep.Spec, rep, placed)
+			to, why, err := s.surgeNode(ctx, tx, rep.Spec, rep, placed, false)
 			if err != nil {
 				return err
 			}

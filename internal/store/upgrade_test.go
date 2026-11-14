@@ -141,6 +141,17 @@ func TestOpenMigratesStoresFromEarlierSchemas(t *testing.T) {
 				t.Fatalf("drains after migration: %+v, %v", ds, err)
 			}
 
+			// Migration 9 gives nodes no address, and routes no host.
+			if n, _ := s.GetNode(ctx, "node-1"); n.Address != "" {
+				t.Fatalf("node address after migration: %q", n.Address)
+			}
+			if rt, err := s.RouteTable(ctx); err != nil || len(rt) != 0 {
+				t.Fatalf("route table after migration: %+v, %v", rt, err)
+			}
+			if sts, err := s.ListStatus(ctx, ""); err != nil || len(sts) == 0 || sts[0].RoutePorts != nil {
+				t.Fatalf("status after migration: %+v, %v", sts, err)
+			}
+
 			// The migrated store takes writes that use the new schema.
 			mustPut(t, s, web(3))
 			if app, _ := s.GetApp(ctx, "web"); app.Spec.Replicas != 3 {

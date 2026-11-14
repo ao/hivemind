@@ -99,6 +99,17 @@ type Node struct {
 	// SetNodeEligibility or DrainNode. UpsertNode ignores it: a node is
 	// eligible when it first registers, and keeps its eligibility after.
 	Eligible bool
+	// Address is the node's private IP address, where routed containers
+	// publish their ports and where routers reach them. Empty for a node
+	// that reported none, which takes no routed replicas.
+	Address string
+}
+
+// RoutePort is one container port of a routed container and the host port
+// the engine published it on, on its node's Address.
+type RoutePort struct {
+	Port     int `json:"port"`
+	HostPort int `json:"host_port"`
 }
 
 // Status is one container as a node last reported it. A replica that has no
@@ -127,7 +138,10 @@ type Status struct {
 	CrashLooping bool
 	// NextRestart is when the scheduled restart is due. Zero when none is.
 	NextRestart time.Time
-	UpdatedAt   time.Time // set by the store
+	// RoutePorts are the published ports of a routed container, sorted by
+	// container port. Empty for a container of an app without routes.
+	RoutePorts []RoutePort
+	UpdatedAt  time.Time // set by the store
 }
 
 // PlaceFunc picks the node for one replica. nodes is every registered node,
@@ -358,10 +372,36 @@ func (s *Store) PutApp(ctx context.Context, a spec.App) (App, error) {
 		if err := s.placePending(ctx, tx); err != nil {
 			return err
 		}
+		if err := syncHosts(ctx, tx, c); err != nil {
+			return err
+		}
 		out = App{Spec: c, Generation: gen, CreatedAt: time.Unix(0, created), UpdatedAt: now}
 		return nil
 	})
 	return out, err
+}
+
+// syncHosts gives the app's route hosts to it, and frees the hosts it no
+// longer routes. A host that another app routes is ErrConflict, naming that
+// app, and the whole put is rolled back.
+func syncHosts(ctx context.Context, tx *sql.Tx, a spec.App) error {
+	if _, err := tx.ExecContext(ctx, `DELETE FROM app_hosts WHERE app = ?`, a.Name); err != nil {
+		return err
+	}
+	for _, r := range a.Routes {
+		var owner string
+		err := tx.QueryRowContext(ctx, `SELECT app FROM app_hosts WHERE host = ?`, r.Host).Scan(&owner)
+		switch {
+		case err == nil:
+			return fmt.Errorf("%w: host %s is routed by app %s; remove it there first", ErrConflict, r.Host, owner)
+		case !errors.Is(err, sql.ErrNoRows):
+			return err
+		}
+		if _, err := tx.ExecContext(ctx, `INSERT INTO app_hosts (host, app, port) VALUES (?, ?, ?)`, r.Host, a.Name, r.Port); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 // syncReplicas makes replicas 0..n-1 of app desired running, and marks the
@@ -427,7 +467,13 @@ func (s *Store) placePending(ctx context.Context, tx *sql.Tx) error {
 	}
 	now := s.now().UnixNano()
 	for _, p := range pending {
-		id, perr := s.place(slices.Clone(nodes), slices.Clone(placed), p.Spec, p.Index, s.now())
+		var id string
+		var perr error
+		if candidates := routable(nodes, p.Spec); len(p.Spec.Routes) > 0 && len(candidates) == 0 {
+			perr = errNoRoutableNode
+		} else {
+			id, perr = s.place(candidates, slices.Clone(placed), p.Spec, p.Index, s.now())
+		}
 		if perr == nil {
 			switch i := slices.IndexFunc(nodes, func(n Node) bool { return n.ID == id }); {
 			case i < 0:
@@ -535,6 +581,11 @@ func (s *Store) DeleteApp(ctx context.Context, name string) error {
 		if _, err := tx.ExecContext(ctx, `DELETE FROM rollouts WHERE app = ?`, name); err != nil {
 			return err
 		}
+		// A deleted app stops routing at once, and its hosts are free for
+		// another app.
+		if _, err := tx.ExecContext(ctx, `DELETE FROM app_hosts WHERE app = ?`, name); err != nil {
+			return err
+		}
 		if err := s.syncReplicas(ctx, tx, name, 0, 1, false); err != nil {
 			return err
 		}
@@ -637,6 +688,9 @@ func (s *Store) UpsertNode(ctx context.Context, n Node) error {
 	if n.ID == "" || n.CPU < 0 || n.Memory < 0 {
 		return fmt.Errorf("%w: node needs an ID and non-negative capacity", ErrInvalid)
 	}
+	if err := checkNodeAddress(n.Address); err != nil {
+		return err
+	}
 	return s.tx(ctx, func(tx *sql.Tx) error {
 		if removed, err := isRemoved(ctx, tx, n.ID); err != nil {
 			return err
@@ -644,11 +698,11 @@ func (s *Store) UpsertNode(ctx context.Context, n Node) error {
 			return fmt.Errorf("node %q: %w", n.ID, ErrNodeRemoved)
 		}
 		now := s.now().UnixNano()
-		if _, err := tx.ExecContext(ctx, `INSERT INTO nodes (id, name, cpu, memory, last_lease, ready_since)
-			VALUES (?, ?, ?, ?, ?, CASE WHEN ? = (SELECT node_id FROM cluster WHERE id = 1) THEN 0 ELSE ? END)
+		if _, err := tx.ExecContext(ctx, `INSERT INTO nodes (id, name, cpu, memory, last_lease, ready_since, address)
+			VALUES (?, ?, ?, ?, ?, CASE WHEN ? = (SELECT node_id FROM cluster WHERE id = 1) THEN 0 ELSE ? END, ?)
 			ON CONFLICT (id) DO UPDATE SET name = excluded.name, cpu = excluded.cpu, memory = excluded.memory,
-				ready_since = `+readySinceExpr+`, last_lease = excluded.last_lease`,
-			n.ID, n.Name, n.CPU, n.Memory, now, n.ID, now, now-int64(scheduler.DefaultLeaseTimeout), now); err != nil {
+				address = excluded.address, ready_since = `+readySinceExpr+`, last_lease = excluded.last_lease`,
+			n.ID, n.Name, n.CPU, n.Memory, now, n.ID, now, n.Address, now-int64(scheduler.DefaultLeaseTimeout), now); err != nil {
 			return err
 		}
 		return s.placePending(ctx, tx)
@@ -673,7 +727,7 @@ func (s *Store) GetNode(ctx context.Context, id string) (Node, error) {
 func (s *Store) ListNodes(ctx context.Context) ([]Node, error) { return listNodes(ctx, s.db) }
 
 func listNodes(ctx context.Context, q querier) ([]Node, error) {
-	rows, err := q.QueryContext(ctx, `SELECT n.id, n.name, n.cpu, n.memory, n.last_lease, n.ready_since, coalesce(c.not_after, 0), n.eligible
+	rows, err := q.QueryContext(ctx, `SELECT n.id, n.name, n.cpu, n.memory, n.last_lease, n.ready_since, coalesce(c.not_after, 0), n.eligible, n.address
 		FROM nodes n LEFT JOIN node_certs c ON c.id = n.id ORDER BY n.id`)
 	if err != nil {
 		return nil, err
@@ -684,7 +738,7 @@ func listNodes(ctx context.Context, q querier) ([]Node, error) {
 		var n Node
 		var lease, ready, certNA int64
 		var eligible int
-		if err := rows.Scan(&n.ID, &n.Name, &n.CPU, &n.Memory, &lease, &ready, &certNA, &eligible); err != nil {
+		if err := rows.Scan(&n.ID, &n.Name, &n.CPU, &n.Memory, &lease, &ready, &certNA, &eligible, &n.Address); err != nil {
 			return nil, err
 		}
 		n.Eligible = eligible == 1
@@ -752,11 +806,15 @@ func (s *Store) ReportStatus(ctx context.Context, nodeID string, st []Status) er
 			if x.RestartCount < 0 {
 				return fmt.Errorf("%w: restart count must not be negative, got %d for %s", ErrInvalid, x.RestartCount, x.Name)
 			}
+			rp, err := encodeRoutePorts(x.RoutePorts)
+			if err != nil {
+				return fmt.Errorf("%w: container %s: %v", ErrInvalid, x.Name, err)
+			}
 			if _, err := tx.ExecContext(ctx, `INSERT INTO container_status (node_id, name, app, idx, generation, container_id, state, error, updated_at,
-				restart_count, health, ready, crash_looping, next_restart)
-				VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+				restart_count, health, ready, crash_looping, next_restart, route_ports)
+				VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 				nodeID, x.Name, x.App, x.Replica, x.Generation, x.ContainerID, x.State, x.Error, now,
-				x.RestartCount, x.Health, x.Ready, x.CrashLooping, nanos(x.NextRestart)); err != nil {
+				x.RestartCount, x.Health, x.Ready, x.CrashLooping, nanos(x.NextRestart), rp); err != nil {
 				return err
 			}
 		}
@@ -806,7 +864,7 @@ func (s *Store) StatusForNode(ctx context.Context, nodeID string) ([]Status, err
 
 func queryStatus(ctx context.Context, q querier, where string, args ...any) ([]Status, error) {
 	rows, err := q.QueryContext(ctx, `SELECT node_id, name, container_id, app, idx, generation, state, error, updated_at,
-		restart_count, health, ready, crash_looping, next_restart
+		restart_count, health, ready, crash_looping, next_restart, route_ports
 		FROM container_status WHERE `+where, args...)
 	if err != nil {
 		return nil, err
@@ -817,9 +875,13 @@ func queryStatus(ctx context.Context, q querier, where string, args ...any) ([]S
 		var x Status
 		var updated, next int64
 		var ready, crash int
+		var rp string
 		if err := rows.Scan(&x.NodeID, &x.Name, &x.ContainerID, &x.App, &x.Replica, &x.Generation, &x.State, &x.Error, &updated,
-			&x.RestartCount, &x.Health, &ready, &crash, &next); err != nil {
+			&x.RestartCount, &x.Health, &ready, &crash, &next, &rp); err != nil {
 			return nil, err
+		}
+		if x.RoutePorts, err = decodeRoutePorts(rp); err != nil {
+			return nil, fmt.Errorf("container %s: stored route ports: %w", x.Name, err)
 		}
 		x.UpdatedAt = time.Unix(0, updated)
 		x.Ready, x.CrashLooping = ready == 1, crash == 1
