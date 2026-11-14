@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"slices"
+	"strings"
 	"time"
 
 	"github.com/ao/hivemind/internal/scheduler"
@@ -21,10 +22,11 @@ import (
 // the next one only when the one in flight reports Ready at the new generation.
 // Two things make a move:
 //
-//   - Surge. When another registered node can take the replica, the new copy
+//   - Surge. When another eligible node can take the replica, the new copy
 //     is placed there as a surge row, beside the old copy. The replica only
 //     moves to the surge's node once the new copy is Ready, and then the old
 //     copy's node removes it. No replica is unavailable during a surge.
+//     Drains (drain.go) move replicas with the same surges.
 //   - In place. When no other node can take the replica, the replica's
 //     generation changes and its node replaces the old container: stop the
 //     old one, start the new one. One replica is unavailable for that time.
@@ -229,13 +231,7 @@ func (s *Store) checkMove(ctx context.Context, tx *sql.Tx, r rolloutRow, a spec.
 	switch {
 	case ready:
 		if hasSurge {
-			// The copy on the surge node is Ready, so the replica moves there.
-			// The old node's agent removes the old copy once it sees that.
-			if _, err := tx.ExecContext(ctx, `UPDATE replicas SET node_id = ?, generation = ?, updated_at = ? WHERE app = ? AND idx = ?`,
-				surge.NodeID, r.target, now.UnixNano(), r.app, r.stepIdx); err != nil {
-				return false, err
-			}
-			if _, err := tx.ExecContext(ctx, `DELETE FROM surges WHERE app = ? AND idx = ?`, r.app, r.stepIdx); err != nil {
+			if err := s.promoteSurge(ctx, tx, r.app, r.stepIdx, surge.NodeID, r.target); err != nil {
 				return false, err
 			}
 		}
@@ -263,8 +259,7 @@ func (s *Store) endMove(ctx context.Context, tx *sql.Tx, r rolloutRow) error {
 func (s *Store) pause(ctx context.Context, tx *sql.Tx, r rolloutRow, surged bool, reason string) error {
 	now := s.now().UnixNano()
 	if surged {
-		if _, err := tx.ExecContext(ctx, `UPDATE surges SET desired = 'removed', updated_at = ? WHERE app = ? AND idx = ?`,
-			now, r.app, r.stepIdx); err != nil {
+		if err := s.dropSurge(ctx, tx, r.app, r.stepIdx); err != nil {
 			return err
 		}
 	} else if _, err := tx.ExecContext(ctx, `UPDATE replicas SET generation = ?, updated_at = ? WHERE app = ? AND idx = ?`,
@@ -281,53 +276,16 @@ func (s *Store) pause(ctx context.Context, tx *sql.Tx, r rolloutRow, surged bool
 // the replica's generation in place.
 func (s *Store) startMove(ctx context.Context, tx *sql.Tx, r rolloutRow, a spec.App, rep Assignment) error {
 	now := s.now().UnixNano()
-	nodes, err := listNodes(ctx, tx)
-	if err != nil {
-		return err
-	}
 	placed, err := queryAssignments(ctx, tx, `r.desired = 'running' AND r.node_id IS NOT NULL`)
 	if err != nil {
 		return err
 	}
-	all, err := queryAssignments(ctx, tx, `r.node_id IS NOT NULL`)
+	surgeNode, _, err := s.surgeNode(ctx, tx, a, rep, placed)
 	if err != nil {
 		return err
 	}
-	surges, err := querySurges(ctx, tx, `1`)
-	if err != nil {
-		return err
-	}
-	all = append(all, surges...)
-
-	// A replica with a volume is pinned to the node its volume is on, so it is
-	// never surged: a copy elsewhere would start with an empty volume.
-	var candidates []Node
-	for _, n := range nodes {
-		if len(a.Volumes) > 0 {
-			break
-		}
-		if n.ID == rep.NodeID || now-n.LastLease.UnixNano() > int64(scheduler.DefaultLeaseTimeout) {
-			continue
-		}
-		if hostPortsTaken(a, n.ID, all) {
-			continue
-		}
-		candidates = append(candidates, n)
-	}
-	surgeNode := ""
-	if len(candidates) > 0 {
-		id, err := s.place(slices.Clone(candidates), slices.Clone(placed), a, rep.Index, s.now())
-		if err == nil && slices.ContainsFunc(candidates, func(n Node) bool { return n.ID == id }) {
-			surgeNode = id
-		}
-	}
-
 	if surgeNode != "" {
-		if _, err := tx.ExecContext(ctx, `INSERT INTO surges (app, idx, node_id, generation, desired, updated_at)
-			VALUES (?, ?, ?, ?, 'running', ?)
-			ON CONFLICT (app, idx) DO UPDATE SET node_id = excluded.node_id, generation = excluded.generation,
-				desired = 'running', updated_at = excluded.updated_at`,
-			rep.App, rep.Index, surgeNode, r.target, now); err != nil {
+		if err := s.placeSurge(ctx, tx, rep.App, rep.Index, surgeNode, r.target); err != nil {
 			return err
 		}
 	} else if _, err := tx.ExecContext(ctx, `UPDATE replicas SET generation = ?, updated_at = ? WHERE app = ? AND idx = ?`,
@@ -336,6 +294,104 @@ func (s *Store) startMove(ctx context.Context, tx *sql.Tx, r rolloutRow, a spec.
 	}
 	_, err = tx.ExecContext(ctx, `UPDATE rollouts SET step_idx = ?, step_from = ?, step_since = ?, updated_at = ? WHERE app = ?`,
 		rep.Index, rep.Generation, now, now, rep.App)
+	return err
+}
+
+// Surges are shared by rollouts and drains. A surge is a second copy of one
+// replica, on another node, that runs beside the copy on the replica's node.
+// Once the surge's container reports Ready, promoteSurge moves the replica to
+// the surge's node, and the old node's agent removes the old copy because the
+// replica is no longer assigned to it. A rollout surges at the new
+// generation; a drain surges at the replica's own generation, so only the
+// node changes.
+
+// surgeNode picks the node for a surge of rep, whose spec is a. A node can
+// take it when it is not rep's node, its lease is current, it is eligible,
+// and nothing on it publishes a host port that a publishes. Placement then
+// chooses among those nodes, with placed counted against them. A replica with
+// a volume is never surged: a copy elsewhere would start with an empty
+// volume. When no node can take the surge, it returns "" and the reason.
+func (s *Store) surgeNode(ctx context.Context, tx *sql.Tx, a spec.App, rep Assignment, placed []Assignment) (string, string, error) {
+	if len(a.Volumes) > 0 {
+		return "", "it has a volume, and its data is on this node", nil
+	}
+	nodes, err := listNodes(ctx, tx)
+	if err != nil {
+		return "", "", err
+	}
+	all, err := placedOn(ctx, tx)
+	if err != nil {
+		return "", "", err
+	}
+	now := s.now()
+	var candidates []Node
+	portsInUse := false
+	for _, n := range nodes {
+		if n.ID == rep.NodeID || !n.Eligible || now.Sub(n.LastLease) > scheduler.DefaultLeaseTimeout {
+			continue
+		}
+		if hostPortsTaken(a, n.ID, all) {
+			portsInUse = true
+			continue
+		}
+		candidates = append(candidates, n)
+	}
+	if len(candidates) == 0 {
+		if portsInUse {
+			return "", hostPortsReason(a), nil
+		}
+		return "", "no other node is ready and eligible", nil
+	}
+	id, err := s.place(slices.Clone(candidates), slices.Clone(placed), a, rep.Index, now)
+	if err != nil {
+		return "", err.Error(), nil
+	}
+	if !slices.ContainsFunc(candidates, func(n Node) bool { return n.ID == id }) {
+		return "", fmt.Sprintf("placement chose node %q, which cannot take a copy", id), nil
+	}
+	return id, "", nil
+}
+
+// hostPortsReason says that a's host ports are taken on every other node that
+// could take a copy of a replica.
+func hostPortsReason(a spec.App) string {
+	ports := scheduler.HostPortsOf(a)
+	if len(ports) == 1 {
+		return fmt.Sprintf("host port %s is in use on every other eligible node", ports[0])
+	}
+	return fmt.Sprintf("host ports %s are in use on the other eligible nodes", strings.Join(ports, ", "))
+}
+
+// placeSurge puts a surge of replica idx of app on node, at generation gen.
+// It replaces a surge row the replica already has, which can only be one
+// marked for removal: its container, if any, matches no assignment then, and
+// its node's agent removes it.
+func (s *Store) placeSurge(ctx context.Context, tx *sql.Tx, app string, idx int, node string, gen int) error {
+	_, err := tx.ExecContext(ctx, `INSERT INTO surges (app, idx, node_id, generation, desired, updated_at)
+		VALUES (?, ?, ?, ?, 'running', ?)
+		ON CONFLICT (app, idx) DO UPDATE SET node_id = excluded.node_id, generation = excluded.generation,
+			desired = 'running', updated_at = excluded.updated_at`,
+		app, idx, node, gen, s.now().UnixNano())
+	return err
+}
+
+// promoteSurge moves replica idx of app to node, its surge's node, at
+// generation gen, and deletes the surge row. The old node's agent removes
+// the old copy once it no longer has the assignment.
+func (s *Store) promoteSurge(ctx context.Context, tx *sql.Tx, app string, idx int, node string, gen int) error {
+	if _, err := tx.ExecContext(ctx, `UPDATE replicas SET node_id = ?, generation = ?, updated_at = ? WHERE app = ? AND idx = ?`,
+		node, gen, s.now().UnixNano(), app, idx); err != nil {
+		return err
+	}
+	_, err := tx.ExecContext(ctx, `DELETE FROM surges WHERE app = ? AND idx = ?`, app, idx)
+	return err
+}
+
+// dropSurge marks the surge of replica idx of app for removal. The row is
+// deleted once its node reports no container for it.
+func (s *Store) dropSurge(ctx context.Context, tx *sql.Tx, app string, idx int) error {
+	_, err := tx.ExecContext(ctx, `UPDATE surges SET desired = 'removed', updated_at = ? WHERE app = ? AND idx = ?`,
+		s.now().UnixNano(), app, idx)
 	return err
 }
 
@@ -370,9 +426,11 @@ func loadRollout(ctx context.Context, tx *sql.Tx, app string) (rolloutRow, error
 	return r, err
 }
 
-// surgeOf returns the surge of one replica, if there is one.
+// surgeOf returns the surge of one replica that should run, if there is one.
+// A surge marked for removal is not a surge in flight: its row only waits for
+// its node to report the container gone.
 func surgeOf(ctx context.Context, tx *sql.Tx, app string, idx int) (Assignment, bool, error) {
-	as, err := querySurges(ctx, tx, `s.app = ? AND s.idx = ?`, app, idx)
+	as, err := querySurges(ctx, tx, `s.app = ? AND s.idx = ? AND s.desired = 'running'`, app, idx)
 	if err != nil || len(as) == 0 {
 		return Assignment{}, false, err
 	}

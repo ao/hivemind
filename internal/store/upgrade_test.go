@@ -133,6 +133,14 @@ func TestOpenMigratesStoresFromEarlierSchemas(t *testing.T) {
 				t.Fatalf("held replicas after migration: %d, %v", held, err)
 			}
 
+			// Migration 8 leaves every node eligible, with no drain.
+			if n, err := s.GetNode(ctx, "node-1"); err != nil || !n.Eligible {
+				t.Fatalf("node after migration: %+v, %v", n, err)
+			}
+			if ds, err := s.ListDrains(ctx); err != nil || len(ds) != 0 {
+				t.Fatalf("drains after migration: %+v, %v", ds, err)
+			}
+
 			// The migrated store takes writes that use the new schema.
 			mustPut(t, s, web(3))
 			if app, _ := s.GetApp(ctx, "web"); app.Spec.Replicas != 3 {

@@ -46,6 +46,7 @@ func (s *Store) schedulerPlace(nodes []Node, placed []Assignment, app spec.App, 
 			Memory:     n.Memory,
 			Ready:      now.Sub(n.LastLease) <= scheduler.DefaultLeaseTimeout,
 			ReadySince: n.ReadySince,
+			Ineligible: !n.Eligible,
 		})
 	}
 	existing := make([]scheduler.Assignment, 0, len(placed))

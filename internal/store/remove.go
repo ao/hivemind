@@ -44,7 +44,10 @@ type RemovedNode struct {
 //   - the server's own node is refused (ErrConflict);
 //   - a node whose lease is current is refused (ErrConflict) unless force is
 //     set, because it is still running and its containers would keep running
-//     beside the copies placed elsewhere;
+//     beside the copies placed elsewhere. An ineligible node that runs
+//     nothing, as after a drain, is removed without force;
+//   - a drain's move in flight from the node ends with the replica on the
+//     node where its copy is starting;
 //   - each running replica on the node loses it. A replica without a volume is
 //     placed again like a new replica. A replica with a volume is held: it has
 //     no node, placement leaves it alone, and its reason says why, because its
@@ -52,7 +55,8 @@ type RemovedNode struct {
 //     releases it;
 //   - replicas marked for removal on the node, its surges and its reported
 //     container status are deleted;
-//   - the node row is deleted, and its ID is added to removed_nodes.
+//   - the node row is deleted, with its drain, and its ID is added to
+//     removed_nodes.
 //
 // An unknown node is ErrNotFound. A node already removed is ErrNotFound too,
 // and its message says so.
@@ -83,11 +87,24 @@ func (s *Store) RemoveNode(ctx context.Context, id string, force bool) (Removal,
 			return err
 		}
 		if age := now.Sub(time.Unix(0, lease)); age <= scheduler.DefaultLeaseTimeout && !force {
-			return fmt.Errorf("%w: node %s renewed its lease %s ago, so it is still running; stop hivemind on it first, or force the removal (--force, or force=true in the API)",
-				ErrConflict, id, max(age, 0).Round(time.Second))
+			empty, err := drainedEmpty(ctx, tx, id)
+			if err != nil {
+				return err
+			}
+			if !empty {
+				return fmt.Errorf("%w: node %s renewed its lease %s ago, so it is still running; drain it first (hivemind node drain), stop hivemind on it, or force the removal (--force, or force=true in the API)",
+					ErrConflict, id, max(age, 0).Round(time.Second))
+			}
 		}
 		out = Removal{ID: id, Name: name}
 
+		// A drain's move in flight ends with the replica on the node where
+		// its copy is starting.
+		promoted, err := s.promoteDrainMoves(ctx, tx, id)
+		if err != nil {
+			return err
+		}
+		out.Rescheduled += promoted
 		reps, err := queryAssignments(ctx, tx, `r.node_id = ? AND r.desired = 'running'`, id)
 		if err != nil {
 			return err
