@@ -2,6 +2,7 @@ package spec
 
 import (
 	"encoding/json"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -200,5 +201,103 @@ func TestDecodeJSONAndYAML(t *testing.T) {
 	}
 	if err := json.Unmarshal([]byte(`{"health":{"interval":5}}`), &b); err == nil {
 		t.Fatal("numeric duration accepted")
+	}
+}
+
+func TestRoutes(t *testing.T) {
+	a := valid()
+	a.Routes = []Route{{Host: " WWW.Example.COM. ", Port: 80}, {Host: "api.example.com", Port: 8080}, {Host: "xn--bcher-kva.example", Port: 80}}
+	a.Normalize()
+	if err := a.Validate(); err != nil {
+		t.Fatalf("valid routes rejected: %v", err)
+	}
+	if a.Routes[0].Host != "www.example.com" {
+		t.Errorf("host normalised to %q", a.Routes[0].Host)
+	}
+	if got := a.RoutePorts(); len(got) != 2 || got[0] != 80 || got[1] != 8080 {
+		t.Errorf("RoutePorts = %v, want [80 8080]", got)
+	}
+	if got := a.RouteHosts(); len(got) != 3 || got[1] != "api.example.com" {
+		t.Errorf("RouteHosts = %v", got)
+	}
+	b := a
+	b.Routes = nil
+	if a.Template() == b.Template() {
+		t.Error("routes are not part of the template")
+	}
+	c := valid()
+	c.Routes = []Route{}
+	c.Normalize()
+	if c.Routes != nil || c.Template() != valid().Template() {
+		t.Error("an empty route list changed the spec")
+	}
+}
+
+func TestRoutesRejected(t *testing.T) {
+	cases := []struct {
+		host string
+		port int
+		want string
+	}{
+		{"", 80, "required"},
+		{"*.example.com", 80, "wildcard"},
+		{"www.*.com", 80, "wildcard"},
+		{"10.0.0.1", 80, "IP address"},
+		{"::1", 80, "IP address"},
+		{"[::1]", 80, "IP address"},
+		{"localhost", 80, "two labels"},
+		{"www..example.com", 80, "label"},
+		{"-www.example.com", 80, "dash"},
+		{"www-.example.com", 80, "dash"},
+		{"www_x.example.com", 80, "lowercase letters"},
+		{"www.example.com:443", 80, "lowercase letters"},
+		{"www.example.com/path", 80, "lowercase letters"},
+		{"bücher.example", 80, "lowercase letters"},
+		{"www.example.123", 80, "all digits"},
+		{strings.Repeat("a", 64) + ".example.com", 80, "63"},
+		{strings.Repeat("a.", 127) + "com", 80, "longer than"},
+		{"www.example.com", 0, "port"},
+		{"www.example.com", 65536, "port"},
+	}
+	for _, c := range cases {
+		t.Run(c.host, func(t *testing.T) {
+			a := valid()
+			a.Routes = []Route{{Host: c.host, Port: c.port}}
+			a.Normalize()
+			err := a.Validate()
+			if err == nil {
+				t.Fatalf("accepted %q", c.host)
+			}
+			if !strings.Contains(err.Error(), c.want) {
+				t.Fatalf("error %q does not mention %q", err, c.want)
+			}
+		})
+	}
+	a := valid()
+	a.Routes = []Route{{Host: "www.example.com", Port: 80}, {Host: "WWW.example.com", Port: 81}}
+	a.Normalize()
+	if err := a.Validate(); err == nil || !strings.Contains(err.Error(), "twice") {
+		t.Errorf("duplicate host: %v", err)
+	}
+	a = valid()
+	for i := range MaxRoutes + 1 {
+		a.Routes = append(a.Routes, Route{Host: "h" + strconv.Itoa(i) + ".example.com", Port: 80})
+	}
+	if err := a.Validate(); err == nil || !strings.Contains(err.Error(), "at most") {
+		t.Errorf("too many routes: %v", err)
+	}
+}
+
+func TestRoutesFromYAML(t *testing.T) {
+	var a App
+	if err := yaml.Unmarshal([]byte("name: web\nimage: nginx\nreplicas: 2\nroutes:\n  - host: www.example.com\n    port: 80\n"), &a); err != nil {
+		t.Fatal(err)
+	}
+	a.Normalize()
+	if err := a.Validate(); err != nil {
+		t.Fatal(err)
+	}
+	if len(a.Routes) != 1 || a.Routes[0] != (Route{Host: "www.example.com", Port: 80}) {
+		t.Fatalf("routes = %+v", a.Routes)
 	}
 }
