@@ -109,9 +109,16 @@ func (c *Client) Create(ctx context.Context, cfg runtime.ContainerConfig) (strin
 	for _, p := range cfg.Ports {
 		key := strconv.Itoa(p.ContainerPort) + "/" + p.Protocol
 		exposed[key] = struct{}{}
+		// An empty HostPort asks the engine for a free port ("If HostPort
+		// is an empty string, the system assigns a port", the PortBinding
+		// definition in the Engine API).
+		hostPort := strconv.Itoa(p.HostPort)
+		if p.Ephemeral {
+			hostPort = ""
+		}
 		bindings[key] = append(bindings[key], portBinding{
 			HostIP:   p.HostIP,
-			HostPort: strconv.Itoa(p.HostPort),
+			HostPort: hostPort,
 		})
 	}
 	// A mount of type "volume" makes the engine create a missing volume with
@@ -249,6 +256,7 @@ func (c *Client) Inspect(ctx context.Context, id string) (runtime.Container, err
 			Networks  map[string]struct {
 				IPAddress string `json:"IPAddress"`
 			} `json:"Networks"`
+			Ports map[string][]portBinding `json:"Ports"`
 		} `json:"NetworkSettings"`
 	}
 	if err := json.NewDecoder(resp.Body).Decode(&b); err != nil {
@@ -266,7 +274,46 @@ func (c *Client) Inspect(ctx context.Context, id string) (runtime.Container, err
 		IPAddress:     ipAddress(b.NetworkSettings.IPAddress, b.NetworkSettings.Networks),
 		StartedAt:     b.State.StartedAt,
 		FinishedAt:    b.State.FinishedAt,
+		Ports:         inspectPorts(b.NetworkSettings.Ports),
 	}, nil
+}
+
+// inspectPorts reads NetworkSettings.Ports, a map from "80/tcp" to the
+// bindings the engine made, into a sorted list. Entries it cannot read are
+// left out.
+func inspectPorts(m map[string][]portBinding) []runtime.PortBinding {
+	var out []runtime.PortBinding
+	for key, bs := range m {
+		port, proto, ok := strings.Cut(key, "/")
+		cp, err := strconv.Atoi(port)
+		if !ok || err != nil {
+			continue
+		}
+		for _, b := range bs {
+			hp, err := strconv.Atoi(b.HostPort)
+			if err != nil || hp < 1 || hp > 65535 {
+				continue
+			}
+			out = append(out, runtime.PortBinding{HostIP: b.HostIP, HostPort: hp, ContainerPort: cp, Protocol: proto})
+		}
+	}
+	sortPorts(out)
+	return out
+}
+
+func sortPorts(ps []runtime.PortBinding) {
+	slices.SortFunc(ps, func(x, y runtime.PortBinding) int {
+		if x.ContainerPort != y.ContainerPort {
+			return x.ContainerPort - y.ContainerPort
+		}
+		if x.Protocol != y.Protocol {
+			return strings.Compare(x.Protocol, y.Protocol)
+		}
+		if x.HostIP != y.HostIP {
+			return strings.Compare(x.HostIP, y.HostIP)
+		}
+		return x.HostPort - y.HostPort
+	})
 }
 
 // List returns every container, stopped ones included, whose labels match.
@@ -299,6 +346,14 @@ func (c *Client) List(ctx context.Context, labels map[string]string) ([]runtime.
 		Image  string            `json:"Image"`
 		Labels map[string]string `json:"Labels"`
 		State  string            `json:"State"`
+		// Ports is the list output's Port: "IP", "PrivatePort",
+		// "PublicPort" (absent when not published) and "Type".
+		Ports []struct {
+			IP          string `json:"IP"`
+			PrivatePort int    `json:"PrivatePort"`
+			PublicPort  int    `json:"PublicPort"`
+			Type        string `json:"Type"`
+		} `json:"Ports"`
 	}
 	if err := json.NewDecoder(resp.Body).Decode(&list); err != nil {
 		return nil, c.readError(ctx, op, err)
@@ -309,12 +364,21 @@ func (c *Client) List(ctx context.Context, labels map[string]string) ([]runtime.
 		if len(item.Names) > 0 {
 			name = strings.TrimPrefix(item.Names[0], "/")
 		}
+		var ports []runtime.PortBinding
+		for _, p := range item.Ports {
+			if p.PublicPort < 1 || p.PublicPort > 65535 {
+				continue
+			}
+			ports = append(ports, runtime.PortBinding{HostIP: p.IP, HostPort: p.PublicPort, ContainerPort: p.PrivatePort, Protocol: p.Type})
+		}
+		sortPorts(ports)
 		out = append(out, runtime.Container{
 			ID:     item.ID,
 			Name:   name,
 			Image:  item.Image,
 			Labels: item.Labels,
 			State:  item.State,
+			Ports:  ports,
 		})
 	}
 	return out, nil
