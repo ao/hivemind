@@ -40,6 +40,8 @@ jobs:
         with:
           go-version-file: go.mod
       - run: go run honnef.co/go/tools/cmd/staticcheck@2026.2.2 ./...
+      # gofmt -l prints the files that are not formatted, and exits 0 either way.
+      - run: test -z "$(gofmt -l .)" || { gofmt -l .; exit 1; }
 
   # Every release platform compiles with CGO disabled.
   build:
