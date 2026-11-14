@@ -79,5 +79,9 @@ func (a *nodeAPI) logStream(w http.ResponseWriter, r *http.Request) {
 	// once even when the worker sends nothing. The connection is then closed,
 	// because the body is unread, and the worker's POST ends.
 	claim.Wait(r.Context(), func() { _ = rc.SetReadDeadline(time.Now()) })
+	// The connection is never used again: the read deadline in the past has
+	// left its TLS state unusable, and a reused connection would fail the
+	// worker's next call.
+	w.Header().Set("Connection", "close")
 	w.WriteHeader(http.StatusNoContent)
 }

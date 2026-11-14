@@ -278,6 +278,9 @@ func (c *Client) SendLogs(ctx context.Context, nodeID, id string, body io.Reader
 		return err
 	}
 	req.Header.Set("Content-Type", LogStreamContentType)
+	// The server cuts a stream by making its reads fail, which leaves the
+	// connection unusable, so a stream's connection is not reused.
+	req.Close = true
 	resp, err := c.stream.Do(req)
 	if err != nil {
 		return fmt.Errorf("sending the log stream: %w", err)

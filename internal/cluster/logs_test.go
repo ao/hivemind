@@ -209,18 +209,33 @@ func TestLogRelayReadsAWorkersLogOverMTLS(t *testing.T) {
 	fx, relay := newLogFixture(t)
 	id, cert := fx.enroll(fx.issue(time.Hour))
 	rt := newLogRuntime("out one", "err one", "out two")
-	startLogServer(t, fx.workerClient(cert), id, rt)
+	c := fx.workerClient(cert)
+	startLogServer(t, c, id, rt)
 
-	st, err := relay.Open(context.Background(), id, nodeapi.LogRequest{App: "web", Replica: 1, Tail: 3})
-	if err != nil {
-		t.Fatal(err)
-	}
-	got := readFrames(t, nodeapi.NewFrameReader(st), -1)
-	st.Close()
-	want := []frame{{nodeapi.FrameReady, ""}, {nodeapi.FrameStdout, "out one\n"}, {nodeapi.FrameStderr, "err one\n"},
-		{nodeapi.FrameStdout, "out two\n"}}
-	if fmt.Sprint(got) != fmt.Sprint(want) {
-		t.Fatalf("frames %v, want %v", got, want)
+	// Several streams in a row, each followed by the worker's other calls on
+	// the same client. A stream's connection must not be reused for them: the
+	// server leaves it unusable when it ends the stream.
+	for i := range 3 {
+		st, err := relay.Open(context.Background(), id, nodeapi.LogRequest{App: "web", Replica: 1, Tail: 3})
+		if err != nil {
+			t.Fatalf("stream %d: %v", i, err)
+		}
+		got := readFrames(t, nodeapi.NewFrameReader(st), -1)
+		st.Close()
+		want := []frame{{nodeapi.FrameReady, ""}, {nodeapi.FrameStdout, "out one\n"}, {nodeapi.FrameStderr, "err one\n"},
+			{nodeapi.FrameStdout, "out two\n"}}
+		if fmt.Sprint(got) != fmt.Sprint(want) {
+			t.Fatalf("stream %d: frames %v, want %v", i, got, want)
+		}
+		time.Sleep(100 * time.Millisecond) // let the stream's connection go idle
+		for j := range 3 {
+			if err := c.Register(context.Background(), id, nodeapi.Register{Name: "w", CPU: 1, Memory: 1 << 30}); err != nil {
+				t.Fatalf("register %d after stream %d: %v", j, i, err)
+			}
+			if _, err := c.AssignmentsForNode(context.Background(), id); err != nil {
+				t.Fatalf("assignments %d after stream %d: %v", j, i, err)
+			}
+		}
 	}
 	rt.mu.Lock()
 	defer rt.mu.Unlock()
