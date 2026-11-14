@@ -1,0 +1,143 @@
+#!/usr/bin/env bash
+# Install hivemind on the soak machines, as a user would, and deploy the
+# workloads.
+#
+#   SOAK_DIR=... BIN=path/to/hivemind scripts/soak/setup.sh
+#
+# The first machine in $NODES_FILE becomes the server, the others workers.
+# Each machine needs Docker Engine running, jq, curl, iptables, and an ssh
+# login with passwordless sudo. Each step is the one the docs give
+# (docs/quick-start.md, the README's "Add a machine", docs/systemd.md):
+#
+#   1. install the binary in /usr/local/bin on every machine;
+#   2. server: hivemind init, then a systemd unit that runs
+#      hivemind serve --advertise <its private address>;
+#   3. each worker: hivemind join with a join token from the server; once
+#      node.json exists, stop the foreground join and start the worker's unit,
+#      which runs hivemind serve --role worker;
+#   4. wait for every node to be ready, plus the 30 s --min-ready wait;
+#   5. deploy web (nginx, 3 replicas, 127.0.0.1:8080), spread (busybox sleep,
+#      6 replicas, no port) and kv (redis with --appendonly yes, a volume,
+#      127.0.0.1:6379), wait for convergence, and write the kv value.
+#
+# It logs the machines' versions and every TCP listener, and fails if a
+# hivemind or app port listens on a wildcard address.
+set -euo pipefail
+. "$(dirname "$0")/lib.sh"
+
+WEB_IMAGE=${WEB_IMAGE:-nginx:alpine}
+SPREAD_IMAGE=${SPREAD_IMAGE:-busybox:stable}
+KV_IMAGE=${KV_IMAGE:-redis:7-alpine}
+
+# machine_facts NAME: versions and sizes, one log line each.
+machine_facts() {
+	local n=$1
+	ev machine "$n kernel=$(on "$n" 'uname -r') os=\"$(on "$n" '. /etc/os-release; echo $PRETTY_NAME')\""
+	ev machine "$n docker=$(on "$n" "docker version --format '{{.Server.Version}}'") cpus=$(on "$n" nproc) mem_kb=$(on "$n" "awk '/MemTotal/ {print \$2}' /proc/meminfo")"
+	ev machine "$n cpu=\"$(on "$n" "lscpu | sed -n 's/^Model name: *//p' | head -n 1")\" hivemind=\"$(on "$n" "$HM version" | tr '\n' ' ')\""
+}
+
+# install_server: the server node, initialised, served by systemd, its API up.
+install_server() {
+	note "server $SERVER ($SERVER_IP): init, unit with serve --advertise $SERVER_IP"
+	# init prints the admin token once; keep it out of the log. It is in
+	# $DATA/admin.token, mode 0600, for the CLI as root.
+	hm "$SERVER" init >/dev/null
+	install_unit "$SERVER" "$(server_unit "$SERVER_IP")"
+	wait_for 60 hm "$SERVER" status || die "the API on $SERVER did not answer"
+}
+
+# join_worker NAME: join with a one-hour token, then hand over to systemd.
+join_worker() {
+	local n=$1 tok
+	tok=$(hm "$SERVER" join-token --ttl 1h 2>/dev/null) || die "join-token on $SERVER"
+	note "joining $n"
+	# The token goes on stdin, so it is in no sudo log; join takes it only as a flag.
+	on "$n" "sudo sh -c 'read -r T; nohup $HM join $SERVER_IP --token \"\$T\" >/var/log/hivemind-join.log 2>&1 </dev/null &'" <<<"$tok"
+	wait_for 60 on "$n" "sudo test -s $DATA/node.json" || die "$n did not join: $(on "$n" 'sudo tail -n 5 /var/log/hivemind-join.log' 2>&1)"
+	# join keeps running as the agent. Stop it, and let systemd run the worker.
+	on "$n" "sudo pkill -TERM -f '^$HM join' ; for i in \$(seq 1 20); do pgrep -f '^$HM join' >/dev/null || exit 0; sleep 0.5; done; exit 1" ||
+		die "$n: the foreground join did not stop"
+	install_unit "$n" "$(worker_unit)"
+}
+
+# write_ids: the "id name" map, from each worker's node.json and the server's node list.
+write_ids() {
+	local i n id
+	: >"$IDS_FILE.tmp"
+	id=$(hm "$SERVER" nodes --json | jq -r '.[] | select(.server) | .id')
+	[ -n "$id" ] || die "no server node in hivemind nodes"
+	echo "$id $SERVER" >>"$IDS_FILE.tmp"
+	for ((i = 1; i < ${#NAMES[@]}; i++)); do
+		n=${NAMES[$i]}
+		id=$(on "$n" "sudo jq -r .node_id $DATA/node.json")
+		[ -n "$id" ] || die "$n has no node ID"
+		echo "$id $n" >>"$IDS_FILE.tmp"
+	done
+	mv "$IDS_FILE.tmp" "$IDS_FILE"
+	ev ids "$(tr '\n' ' ' <"$IDS_FILE")"
+}
+
+all_ready() {
+	local want=${#NAMES[@]}
+	[ "$(hm "$SERVER" nodes --json | jq '[.[] | select(.state == "ready")] | length')" = "$want" ]
+}
+
+deploy() { # deploy JSON
+	hm "$SERVER" "deploy -f -" <<<"$1" >/dev/null
+}
+
+kv_node() { # the soak name of the node that runs kv replica 0
+	local st id
+	st=$(hm "$SERVER" status --json)
+	id=$(jq -r '.[] | select(.name == "kv") | .replicas[0].node_id // ""' <<<"$st")
+	[ -n "$id" ] && name_of_id "$id"
+}
+
+# The kv value is written over the published port with the redis inline protocol.
+KV_SET='exec 3<>/dev/tcp/127.0.0.1/6379 || exit 1; printf "SET soak:canary %s\r\n" "$1" >&3; IFS= read -r -t 3 r <&3; printf "%s\n" "${r%$(printf "\r")}"'
+
+check_listeners() {
+	local n l bad
+	for n in "${NAMES[@]}"; do
+		l=$(on "$n" "sudo ss -ltnpH" | awk '{ print $4, $6 }')
+		ev listeners "$n $(awk '{ printf "%s;", $1 }' <<<"$l")"
+		bad=$(awk '{ split($1, a, ":"); port = a[length(a)]; addr = substr($1, 1, length($1) - length(port) - 1) }
+			(port == 4483 || port == 4484 || port == 4485 || port == 8080 || port == 6379) && (addr == "0.0.0.0" || addr == "*" || addr == "[::]") { print $1 }' <<<"$l")
+		[ -z "$bad" ] || die "$n: a hivemind or app port listens on a wildcard address: $bad"
+	done
+}
+
+main() {
+	local n val
+	ev setup "begin nodes=${#NAMES[@]} server=$SERVER binary_sha256=$(sha256sum "$BIN" | cut -d' ' -f1)"
+	for n in "${NAMES[@]}"; do install_bin "$n" & done
+	wait
+	for n in "${NAMES[@]}"; do machine_facts "$n"; done
+	install_server
+	for ((i = 1; i < ${#NAMES[@]}; i++)); do join_worker "${NAMES[$i]}"; done
+	write_ids
+	wait_for 60 all_ready || die "not every node is ready: $(hm "$SERVER" nodes)"
+	note "all ${#NAMES[@]} nodes ready; waiting 40 s, the --min-ready wait, before the first deploy"
+	sleep 40
+	deploy "{\"name\":\"web\",\"image\":\"$WEB_IMAGE\",\"replicas\":3,\"ports\":[{\"host\":8080,\"container\":80,\"bind\":\"127.0.0.1\"}]}"
+	deploy "{\"name\":\"spread\",\"image\":\"$SPREAD_IMAGE\",\"replicas\":6,\"command\":[\"sleep\",\"86400\"]}"
+	deploy "{\"name\":\"kv\",\"image\":\"$KV_IMAGE\",\"command\":[\"redis-server\",\"--appendonly\",\"yes\"],\"ports\":[{\"host\":6379,\"container\":6379,\"bind\":\"127.0.0.1\"}],\"volumes\":[{\"name\":\"data\",\"path\":\"/data\"}]}"
+	ev setup "deployed web spread kv"
+	wait_for 300 converged_now || die "not converged 300 s after the deploy: $(check_converged "$SOAK_DIR/setup.tsv" | tr '\n' ';')"
+	n=$(kv_node) || die "kv has no node"
+	val="written-$(date -u +%FT%TZ)"
+	[ "$(on "$n" "bash -c '$KV_SET' sh '$val'")" = "+OK" ] || die "could not write the kv value on $n"
+	echo "$val" >"$SOAK_DIR/kv-value"
+	ev kv "write node=$n key=soak:canary value=$val"
+	for n in "${NAMES[@]}"; do
+		ev images "$n $(on "$n" "docker images --digests --format '{{.Repository}}:{{.Tag}}@{{.Digest}}'" | tr '\n' ' ')"
+	done
+	check_listeners
+	ev setup "end: converged; $(awk -F'\t' '$1 == "R" { printf "%s|%s@%s ", $2, $3, $4 }' "$SOAK_DIR/setup.tsv")"
+	note "setup done"
+}
+
+converged_now() { snapshot "$SOAK_DIR/setup.tsv" && check_converged "$SOAK_DIR/setup.tsv" >/dev/null; }
+
+main "$@"
