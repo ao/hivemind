@@ -22,9 +22,6 @@ YAML config file (` + "`serve`" + ` and ` + "`init`" + ` read ` + "`<data-dir>/h
 then the default. The client commands read the server address and token from their flags, then from
 ` + "`HIVEMIND_SERVER`" + ` and ` + "`HIVEMIND_TOKEN`" + `, then from the client config that ` + "`init`" + ` writes.
 
-` + "`init`" + ` and ` + "`serve`" + ` accept the client settings ` + "`--server`" + ` and ` + "`--token`" + `. They do not use them.
-` + "`logs`" + ` accepts ` + "`--json`" + ` and ignores it.
-
 Exit status is 0 on success and 1 on any error, including a bad flag or argument. Errors are written to
 standard error with an ` + "`error:`" + ` prefix.
 `
@@ -36,6 +33,11 @@ var envFlags = map[string]bool{
 	"api-tls-cert": true, "api-tls-key": true, "docker-host": true, "log-level": true, "log-format": true,
 	"metrics-addr": true, "reconcile-interval": true, "server": true, "token": true, "client-config": true,
 }
+
+// noEnvAnnotation marks a flag that is read from the command line only,
+// though envFlags names a flag of that name elsewhere, such as join's
+// --token, which is a join token and not HIVEMIND_TOKEN.
+const noEnvAnnotation = "hivemind-no-env"
 
 // hostDefaults are flags whose default depends on the user and the machine.
 // The reference states the rule in place of a value.
@@ -124,7 +126,7 @@ func writeCommandDoc(b *strings.Builder, c *cobra.Command, level int) {
 			name = "`-" + f.Shorthand + "`, " + name
 		}
 		env := "-"
-		if envFlags[f.Name] {
+		if envFlags[f.Name] && f.Annotations[noEnvAnnotation] == nil {
 			env = "`HIVEMIND_" + strings.ToUpper(strings.ReplaceAll(f.Name, "-", "_")) + "`"
 		}
 		desc := f.Usage

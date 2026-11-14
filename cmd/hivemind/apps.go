@@ -266,7 +266,8 @@ that worker, which must be running and of this version: a worker that does not
 answer in 10 seconds is reported by its node ID.`,
 		Args: cobra.RangeArgs(1, 2),
 	}
-	cf := addClientFlags(cmd)
+	// The log is the container's own text, so it has no JSON form.
+	cf := addConnFlags(cmd)
 	cmd.Flags().BoolVarP(&follow, "follow", "f", false, "keep printing new lines")
 	cmd.Flags().IntVar(&tail, "tail", 0, "print only the last N lines (0 for all)")
 	cmd.RunE = func(cmd *cobra.Command, args []string) error {

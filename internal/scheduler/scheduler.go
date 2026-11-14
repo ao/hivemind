@@ -42,6 +42,10 @@ type Node struct {
 	Ready bool
 	// ReadySince is when the node last became ready.
 	ReadySince time.Time
+	// Ineligible is set on a node that an operator made ineligible, or that
+	// is being drained. It gets no new replicas. Its existing assignments
+	// stay, and count against its capacity and ports as on any node.
+	Ineligible bool
 	// Labels are not used by Place yet.
 	Labels map[string]string
 }
@@ -143,8 +147,8 @@ func HostPortsOf(app spec.App) []string {
 // node's capacity and ports.
 //
 // Rules:
-//   - A node gets a new replica only if it is Ready and has been ready for
-//     at least opts.MinReady.
+//   - A node gets a new replica only if it is Ready, is not Ineligible, and
+//     has been ready for at least opts.MinReady.
 //   - The CPU and memory of existing and new replicas on a node never exceed
 //     the node's totals.
 //   - No two replicas on a node publish conflicting host ports.
@@ -163,19 +167,26 @@ func Place(nodes []Node, existing []Assignment, pending []Replica, now time.Time
 
 	byID := make(map[string]*nodeState, len(nodes))
 	states := make([]*nodeState, 0, len(nodes))
-	anyReady := false
+	// why only chooses the reason given for a replica that no node takes.
+	var why reasons
 	for _, n := range nodes {
 		if _, dup := byID[n.ID]; dup {
 			continue
 		}
 		s := &nodeState{
-			id:       n.ID,
-			cpuCap:   capMillis(n.CPU),
-			memCap:   max(n.Memory, 0),
-			eligible: n.Ready && now.Sub(n.ReadySince) >= minReady,
-			perApp:   map[string]int{},
+			id:         n.ID,
+			cpuCap:     capMillis(n.CPU),
+			memCap:     max(n.Memory, 0),
+			eligible:   n.Ready && !n.Ineligible && now.Sub(n.ReadySince) >= minReady,
+			ineligible: n.Ineligible,
+			perApp:     map[string]int{},
 		}
-		anyReady = anyReady || n.Ready
+		switch {
+		case n.Ready && n.Ineligible:
+			why.closed = true
+		case n.Ready:
+			why.open = true
+		}
 		byID[n.ID] = s
 		states = append(states, s)
 	}
@@ -211,7 +222,7 @@ func Place(nodes []Node, existing []Assignment, pending []Replica, now time.Time
 	})
 
 	for _, r := range order {
-		s, reason := choose(r, states, byID, anyReady, minReady)
+		s, reason := choose(r, states, byID, why, minReady)
 		if s == nil {
 			unplaced = append(unplaced, Unplaced{Replica: r, Reason: reason})
 			continue
@@ -224,15 +235,23 @@ func Place(nodes []Node, existing []Assignment, pending []Replica, now time.Time
 }
 
 type nodeState struct {
-	id       string
-	cpuCap   int64 // millicores
-	memCap   int64
-	cpuUsed  int64
-	memUsed  int64
-	eligible bool
-	total    int
-	perApp   map[string]int
-	ports    []hostPort
+	id         string
+	cpuCap     int64 // millicores
+	memCap     int64
+	cpuUsed    int64
+	memUsed    int64
+	eligible   bool
+	ineligible bool // Node.Ineligible
+	total      int
+	perApp     map[string]int
+	ports      []hostPort
+}
+
+// reasons records which kinds of ready node exist, for the reason given when
+// no node takes a replica.
+type reasons struct {
+	open   bool // a ready node that is not Ineligible
+	closed bool // a ready node that is Ineligible
 }
 
 func (s *nodeState) add(app string, cpu, mem int64, ports []hostPort) {
@@ -287,7 +306,7 @@ func (s *nodeState) check(cpu, mem int64, ports []hostPort) (failure, string) {
 	return fits, ""
 }
 
-func choose(r Replica, states []*nodeState, byID map[string]*nodeState, anyReady bool, minReady time.Duration) (*nodeState, string) {
+func choose(r Replica, states []*nodeState, byID map[string]*nodeState, why reasons, minReady time.Duration) (*nodeState, string) {
 	cpu, mem, ok := request(r.Resources)
 	if !ok {
 		return nil, fmt.Sprintf("invalid resources: cpu %v, memory %d", r.Resources.CPU, int64(r.Resources.Memory))
@@ -296,6 +315,9 @@ func choose(r Replica, states []*nodeState, byID map[string]*nodeState, anyReady
 
 	if r.PinnedNode != "" {
 		s := byID[r.PinnedNode]
+		if s != nil && s.ineligible {
+			return nil, fmt.Sprintf("volume pinned to node %s, which is ineligible", r.PinnedNode)
+		}
 		if s == nil || !s.eligible {
 			return nil, fmt.Sprintf("volume pinned to node %s, which is unavailable", r.PinnedNode)
 		}
@@ -337,8 +359,10 @@ func choose(r Replica, states []*nodeState, byID map[string]*nodeState, anyReady
 	}
 
 	switch {
-	case eligible == 0 && anyReady && minReady > 0:
+	case eligible == 0 && why.open && minReady > 0:
 		return nil, fmt.Sprintf("no node has been ready for %s", minReady)
+	case eligible == 0 && why.closed:
+		return nil, "every ready node is ineligible for new replicas"
 	case eligible == 0:
 		return nil, "no node is ready"
 	case counts[noCPU] == eligible:

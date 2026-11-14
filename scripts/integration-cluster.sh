@@ -26,6 +26,13 @@
 #     pending with the host-port reason
 #   - Task 10: the worker starts again with its data directory. No replica of
 #     any app is duplicated, and each app is back at its replica count
+#   - drain: hivemind node drain of w2, which runs a replica of an app without
+#     ports and one of web. Checked every second, the portless app never runs
+#     fewer than its three replicas. web's replica cannot move, because port
+#     8080 is taken on the other nodes, and the drain says so; at the deadline
+#     it is stopped and waits as pending. w2 ends with no hivemind container,
+#     hivemind nodes shows it drained, and after node eligibility --enable it
+#     takes a web replica again
 #   - certificate renewal: the binary is built with -tags hivemind_testknobs,
 #     and the server runs with HIVEMIND_TEST_CERT_LIFETIME=10m, so node
 #     certificates fall due after about 6m40s. Each worker renews over the
@@ -250,6 +257,66 @@ cl_note "after the return: web and spread at their replica counts, no duplicate 
 cl_check_server_listeners
 cl_check_worker_listeners
 cl_note "listeners unchanged after the restart"
+
+# Drain. calm has three replicas without ports, one on each node. w2 also
+# runs a web replica, whose host port 8080 is taken on the other two nodes.
+# The drain moves calm's replica off w2 with a copy that starts first, so
+# calm never runs fewer than three replicas; this checks that every second.
+# web's replica cannot move, and at the deadline it is stopped and waits as
+# pending. w2 ends with no hivemind container, and eligibility --enable lets
+# it take a web replica again.
+calm_on_three() {
+	local rows
+	rows=$(app_rows calm)
+	[ "$(awk '$3 == "running"' <<<"$rows" | wc -l)" -eq 3 ] &&
+		[ "$(awk '$3 == "running" { print $2 }' <<<"$rows" | sort -u | wc -l)" -eq 3 ]
+}
+calm_containers() { containers_of calm | awk '$3 == "running"' | wc -l; }
+docker exec "$S" hivemind deploy --name calm --image nginx:alpine --replicas 3 >/dev/null || cl_fail "deploy calm"
+wait_for 90 calm_on_three || cl_fail "calm did not run on three nodes: $(app_rows calm | tr '\n' ';')"
+[ "$(running_on web "$W2_ID")" -eq 1 ] || cl_fail "no web replica runs on $W2_ID before the drain: $(app_rows web | tr '\n' ';')"
+
+docker exec -d "$S" sh -c "hivemind node drain $W2_ID --deadline 60s >/tmp/drain.out 2>&1; echo \"exit \$?\" >>/tmp/drain.out"
+drain_started=$(date +%s)
+checks=0
+while ! docker exec "$S" grep -q '^exit ' /tmp/drain.out 2>/dev/null; do
+	n=$(count_running calm)
+	[ "$n" -ge 3 ] || cl_fail "calm ran $n replicas $(($(date +%s) - drain_started)) s into the drain: $(app_rows calm | tr '\n' ';')"
+	c=$(calm_containers)
+	[ "$c" -ge 3 ] || cl_fail "calm had $c running containers $(($(date +%s) - drain_started)) s into the drain: $(containers_of calm | tr '\n' ';')"
+	checks=$((checks + 1))
+	[ $(($(date +%s) - drain_started)) -lt 150 ] || cl_fail "the drain did not end within 150 s: $(docker exec "$S" cat /tmp/drain.out)"
+	# The checks themselves take about half a second.
+	sleep 0.5
+done
+out=$(docker exec "$S" cat /tmp/drain.out)
+grep -qx "exit 0" <<<"$out" || cl_fail "hivemind node drain failed: $out"
+grep -q "moving calm/[0-9]* to node-" <<<"$out" || cl_fail "the drain did not report calm's move: $out"
+grep -q "web/[0-9]* stays: host port 127.0.0.1:8080/tcp is in use on every other eligible node" <<<"$out" ||
+	cl_fail "the drain did not say why web stays: $out"
+grep -q "drained; 1 moved, 1 stopped at the deadline and placed again, 0 left on the node" <<<"$out" ||
+	cl_fail "the drain's result: $out"
+cl_note "drained $W2_ID in $(($(date +%s) - drain_started)) s; calm ran three replicas, and three containers, at each of $checks checks"
+cl_note "drain output: $(tr '\n' ';' <<<"$out")"
+
+w2_empty() { [ -z "$(docker exec "$W2" docker ps -aq --filter label=hivemind.app)" ]; }
+wait_for 30 w2_empty || cl_fail "$W2 still has hivemind containers after the drain: $(docker exec "$W2" docker ps -a --filter label=hivemind.app --format '{{.Names}} {{.State}}' | tr '\n' ';')"
+docker exec "$S" hivemind nodes | awk -v n="$W2_ID" '$1 == n' | grep -q " drained " ||
+	cl_fail "hivemind nodes does not show $W2_ID as drained: $(docker exec "$S" hivemind nodes | tr '\n' ';')"
+[ "$(count_running calm)" -eq 3 ] || cl_fail "calm is not at three running replicas after the drain: $(app_rows calm | tr '\n' ';')"
+rows=$(app_rows web)
+[ "$(awk '$3 == "pending" && /in use/' <<<"$rows" | wc -l)" -eq 2 ] ||
+	cl_fail "web does not have two replicas pending on the host port after the drain: $(tr '\n' ';' <<<"$rows")"
+docker exec "$S" grep -q "node drained" /var/log/hivemind.log || cl_fail "the server did not log the end of the drain"
+cl_note "$W2 runs no hivemind container; web has two replicas pending on host port 8080"
+
+out=$(docker exec "$S" hivemind node eligibility "$W2_ID" --enable 2>&1) || cl_fail "node eligibility --enable: $out"
+wait_for 60 web_ok || cl_fail "web did not go back to $W2_ID after eligibility --enable: $(app_rows web | tr '\n' ';')"
+[ "$(running_on web "$W2_ID")" -eq 1 ] || cl_fail "no web replica runs on $W2_ID after eligibility --enable: $(app_rows web | tr '\n' ';')"
+cl_note "after eligibility --enable, $W2_ID runs a web replica again: $out"
+docker exec "$S" hivemind delete calm >/dev/null || cl_fail "delete calm"
+calm_gone() { [ -z "$(containers_of calm)" ]; }
+wait_for 60 calm_gone || cl_fail "calm's containers were not removed: $(containers_of calm | tr '\n' ';')"
 
 # Certificate renewal. Certificates last 10 minutes here, so each worker
 # renews about 6m40s after it joined, and keeps running.

@@ -40,16 +40,16 @@ const storeFileName = "hivemind.db"
 const shutdownTimeout = 10 * time.Second
 
 // sweepInterval is how often the server checks leases, places pending
-// replicas, advances rollouts and prunes expired join tokens.
+// replicas, advances rollouts and drains, and prunes expired join tokens.
 const sweepInterval = 5 * time.Second
 
 // sweep runs the server's periodic work until ctx ends. A node whose lease
 // has lapsed is released: its replicas are placed on other nodes, and volume
 // replicas wait for it. Each node is logged once when it is lost. Leases count
-// from the sweep's start at the earliest (see store.ReconcileNodes), so a
-// server that was down gives every node a lease timeout to report.
-func sweep(ctx context.Context, st *store.Store, log *slog.Logger, every time.Duration) {
-	started := time.Now()
+// from started at the earliest (see store.ReconcileNodes), so a server that
+// was down gives every node a lease timeout to report. Drains count the start
+// of their moves the same way (see store.AdvanceDrains).
+func sweep(ctx context.Context, st *store.Store, log *slog.Logger, every time.Duration, started time.Time) {
 	t := time.NewTicker(every)
 	defer t.Stop()
 	lost := map[string]bool{}
@@ -83,6 +83,22 @@ func sweep(ctx context.Context, st *store.Store, log *slog.Logger, every time.Du
 		if err := st.AdvanceRollouts(ctx); err != nil && ctx.Err() == nil {
 			log.Warn("advance rollouts", "err", err)
 		}
+		advanceDrains(ctx, st, log, started)
+	}
+}
+
+// advanceDrains takes a step of every drain, and logs each drain that
+// finished.
+func advanceDrains(ctx context.Context, st *store.Store, log *slog.Logger, started time.Time) {
+	done, err := st.AdvanceDrains(ctx, started)
+	if err != nil {
+		if ctx.Err() == nil {
+			log.Warn("advance drains", "err", err)
+		}
+		return
+	}
+	for _, d := range done {
+		log.Info("node drained", "node", d.NodeID, "moved", d.Moved, "stopped", d.Stopped, "left", d.Remaining)
 	}
 }
 
@@ -379,15 +395,18 @@ func runServe(ctx context.Context, cfg *config.Config, log *slog.Logger, rt runt
 		return err
 	}
 	m := server.NewMetrics()
-	// After each agent pass, which has just reported status, the rollout
-	// controller moves the next replica or checks a deadline. The agent passes
-	// on every interval, so deadlines are checked even when nothing reports.
+	// After each agent pass, which has just reported status, the rollout and
+	// drain controllers move the next replica or check a deadline. The agent
+	// passes on every interval, so deadlines are checked even when nothing
+	// reports.
 	agentLog := log.With("component", "agent")
+	started := time.Now()
 	onPass := func(d time.Duration, err error) {
 		m.ObserveReconcile(d, err)
 		if aerr := st.AdvanceRollouts(context.Background()); aerr != nil {
 			agentLog.Warn("advance rollouts", "err", aerr)
 		}
+		advanceDrains(context.Background(), st, agentLog, started)
 	}
 	ag, err := agent.New(agent.Config{NodeID: cl.NodeID, Runtime: rt, Source: st,
 		Interval: cfg.ReconcileInterval, Logger: agentLog, OnPass: onPass})
@@ -477,7 +496,7 @@ func runServe(ctx context.Context, cfg *config.Config, log *slog.Logger, rt runt
 	}()
 	go func() {
 		defer wg.Done()
-		sweep(agentCtx, st, log.With("component", "sweep"), sweepInterval)
+		sweep(agentCtx, st, log.With("component", "sweep"), sweepInterval, started)
 	}()
 
 	serveErr := make(chan error, 3)

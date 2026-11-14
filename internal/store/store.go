@@ -95,6 +95,10 @@ type Node struct {
 	// CertNotAfter is when the node's certificate expires, as the server
 	// last recorded it. Zero means there is no record.
 	CertNotAfter time.Time
+	// Eligible is false for a node that takes no new replicas, after
+	// SetNodeEligibility or DrainNode. UpsertNode ignores it: a node is
+	// eligible when it first registers, and keeps its eligibility after.
+	Eligible bool
 }
 
 // Status is one container as a node last reported it. A replica that has no
@@ -127,21 +131,26 @@ type Status struct {
 }
 
 // PlaceFunc picks the node for one replica. nodes is every registered node,
-// sorted by ID, with LastLease and ReadySince set. placed is every
+// sorted by ID, with LastLease, ReadySince and Eligible set. placed is every
 // assignment that holds a node or a surge, the app's other replicas
 // included, since their host ports and capacity are in use. now is the
 // store's clock. An error leaves the replica pending, with the error text
-// as its reason.
+// as its reason, and so does the choice of a node that is not eligible.
 type PlaceFunc func(nodes []Node, placed []Assignment, app spec.App, replica int, now time.Time) (string, error)
 
-// FirstNode places every replica on the first node by ID. It ignores
-// capacity, ports and readiness. Tests use it to choose a node; the server
-// uses the scheduler.
+// FirstNode places every replica on the first eligible node by ID. It
+// ignores capacity, ports and readiness. Tests use it to choose a node; the
+// server uses the scheduler.
 func FirstNode(nodes []Node, _ []Assignment, _ spec.App, _ int, _ time.Time) (string, error) {
 	if len(nodes) == 0 {
 		return "", errors.New("no nodes are registered")
 	}
-	return nodes[0].ID, nil
+	for _, n := range nodes {
+		if n.Eligible {
+			return n.ID, nil
+		}
+	}
+	return "", errors.New("every node is ineligible for new replicas")
 }
 
 // Option configures Open.
@@ -419,8 +428,13 @@ func (s *Store) placePending(ctx context.Context, tx *sql.Tx) error {
 	now := s.now().UnixNano()
 	for _, p := range pending {
 		id, perr := s.place(slices.Clone(nodes), slices.Clone(placed), p.Spec, p.Index, s.now())
-		if perr == nil && !slices.ContainsFunc(nodes, func(n Node) bool { return n.ID == id }) {
-			perr = fmt.Errorf("placement chose unknown node %q", id)
+		if perr == nil {
+			switch i := slices.IndexFunc(nodes, func(n Node) bool { return n.ID == id }); {
+			case i < 0:
+				perr = fmt.Errorf("placement chose unknown node %q", id)
+			case !nodes[i].Eligible:
+				perr = fmt.Errorf("placement chose node %s, which is ineligible for new replicas", id)
+			}
 		}
 		if perr != nil {
 			if _, err := tx.ExecContext(ctx, `UPDATE replicas SET pending_reason = ?, updated_at = ? WHERE app = ? AND idx = ?`,
@@ -659,7 +673,7 @@ func (s *Store) GetNode(ctx context.Context, id string) (Node, error) {
 func (s *Store) ListNodes(ctx context.Context) ([]Node, error) { return listNodes(ctx, s.db) }
 
 func listNodes(ctx context.Context, q querier) ([]Node, error) {
-	rows, err := q.QueryContext(ctx, `SELECT n.id, n.name, n.cpu, n.memory, n.last_lease, n.ready_since, coalesce(c.not_after, 0)
+	rows, err := q.QueryContext(ctx, `SELECT n.id, n.name, n.cpu, n.memory, n.last_lease, n.ready_since, coalesce(c.not_after, 0), n.eligible
 		FROM nodes n LEFT JOIN node_certs c ON c.id = n.id ORDER BY n.id`)
 	if err != nil {
 		return nil, err
@@ -669,9 +683,11 @@ func listNodes(ctx context.Context, q querier) ([]Node, error) {
 	for rows.Next() {
 		var n Node
 		var lease, ready, certNA int64
-		if err := rows.Scan(&n.ID, &n.Name, &n.CPU, &n.Memory, &lease, &ready, &certNA); err != nil {
+		var eligible int
+		if err := rows.Scan(&n.ID, &n.Name, &n.CPU, &n.Memory, &lease, &ready, &certNA, &eligible); err != nil {
 			return nil, err
 		}
+		n.Eligible = eligible == 1
 		n.LastLease, n.ReadySince = time.Unix(0, lease), time.Unix(0, ready)
 		if certNA != 0 {
 			n.CertNotAfter = time.Unix(0, certNA)

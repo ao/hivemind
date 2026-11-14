@@ -107,13 +107,22 @@ type setting struct {
 	def   string
 	file  func(*fileConfig) *string
 	set   func(*Config, string) error
+	// client marks a setting of the client commands, which take it from
+	// their own flags. Bind leaves it out.
+	client bool
 }
 
-// Bind registers one string flag per setting on fs. The flag defaults are the
-// built-in defaults. Values are parsed when Load reads them.
+// Bind registers one string flag per node setting on fs: every setting but
+// server and token, which only the client commands take, from flags of
+// their own. The flag defaults are the built-in defaults. Values are parsed
+// when Load reads them. Load still reads a server or token flag that a
+// command registers itself, and the HIVEMIND_SERVER and HIVEMIND_TOKEN
+// environment variables.
 func Bind(fs *pflag.FlagSet, opts Options) {
 	for _, s := range settings(opts.withDefaults()) {
-		fs.String(s.name, s.def, s.usage)
+		if !s.client {
+			fs.String(s.name, s.def, s.usage)
+		}
 	}
 }
 
@@ -269,15 +278,21 @@ func settings(opts Options) []setting {
 		dur("min-ready", "how long a node must be ready before it gets new replicas; 0s means no wait", "30s",
 			func(c *Config) *time.Duration { return &c.MinReady },
 			func(f *fileConfig) *string { return f.MinReady }),
-		str("server", "server URL for the client commands", "http://127.0.0.1:4483",
+		clientSetting(str("server", "server URL for the client commands", "http://127.0.0.1:4483",
 			func(c *Config) *string { return &c.Server },
-			func(f *fileConfig) *string { return f.Server }),
+			func(f *fileConfig) *string { return f.Server })),
 		{
-			name:  "token",
-			usage: "API token for the client commands (not logged; never read from the config file)",
-			set:   func(c *Config, v string) error { c.Token = Secret(v); return nil },
+			name:   "token",
+			usage:  "API token for the client commands (not logged; never read from the config file)",
+			set:    func(c *Config, v string) error { c.Token = Secret(v); return nil },
+			client: true,
 		},
 	}
+}
+
+func clientSetting(s setting) setting {
+	s.client = true
+	return s
 }
 
 func str(name, usage, def string, field func(*Config) *string, file func(*fileConfig) *string) setting {

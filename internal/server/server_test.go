@@ -252,6 +252,13 @@ func TestEveryRouteNeedsToken(t *testing.T) {
 	if removed, _ := h.store.IsNodeRemoved(context.Background(), testNode); removed {
 		t.Fatal("an unauthenticated request removed a node")
 	}
+	// Nor made it ineligible, or drained it.
+	if n, err := h.store.GetNode(context.Background(), testNode); err != nil || !n.Eligible {
+		t.Fatalf("an unauthenticated request changed the node's eligibility: %+v, %v", n, err)
+	}
+	if ds, _ := h.store.ListDrains(context.Background()); len(ds) != 0 {
+		t.Fatalf("an unauthenticated request started a drain: %+v", ds)
+	}
 	// Unknown paths and methods also need the token.
 	for _, mp := range [][2]string{{"GET", "/v1/nope"}, {"PATCH", "/v1/apps/web"}, {"HEAD", "/healthz"}, {"POST", "/healthz"}} {
 		req := httptest.NewRequest(mp[0], mp[1], nil)

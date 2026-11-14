@@ -61,9 +61,9 @@ Every error is a JSON object with one field:
 | 400 | Invalid JSON, an unknown field, an empty body, an invalid app spec, an invalid name or query value |
 | 401 | No valid token or session |
 | 403 | A cookie request to an unsafe method without the session's CSRF token: `{"error":"csrf_token_invalid"}` |
-| 404 | No such app or node, or no container for the replica on its node. Unknown routes give `{"error":"not found"}` |
+| 404 | No such app or node, no drain of the node, or no container for the replica on its node. Unknown routes give `{"error":"not found"}` |
 | 405 | Wrong method for a known path: `{"error":"method not allowed"}` |
-| 409 | Removing the server's own node, or a node that still renews its lease without `force=true` |
+| 409 | Removing the server's own node, or a node that still renews its lease without `force=true`. An ineligible node that runs nothing needs no `force` |
 | 413 | Request body over 1 MiB |
 | 429 | Too many failed logins from this address, or too many log streams open to one node |
 | 500 | Unexpected failure. The message is `internal error`, and the details go to the server log |
@@ -97,12 +97,37 @@ The token is shown once. The server keeps a SHA-256 hash of its secret, and a to
 ```json
 [{"id": "node-<12 hex digits>", "name": "host-a", "cpu": 4, "memory": 8254390272,
   "last_lease": "2026-11-13T10:00:00Z", "lease_age_seconds": 1.2, "state": "ready",
-  "server": true, "replicas": 2, "cert_not_after": "2027-11-14T10:00:00Z"}]
+  "server": true, "replicas": 2, "cert_not_after": "2027-11-14T10:00:00Z", "eligible": true}]
 ```
 
-`cpu` and `memory` (bytes) are what the node's Docker daemon reports. `state` is `ready` while the lease is at most 15 s old, and `lost` after that. `server` marks the node that runs the server. `replicas` counts the replicas placed on the node that should run. `cert_not_after` is when the node's certificate expires, as the server recorded it when it issued the certificate or saw the node present it. It is absent when there is no record, as for a server without `--advertise`.
+`cpu` and `memory` (bytes) are what the node's Docker daemon reports. `state` is `ready` while the lease is at most 15 s old, and `lost` after that. `server` marks the node that runs the server. `replicas` counts the replicas placed on the node that should run. `cert_not_after` is when the node's certificate expires, as the server recorded it when it issued the certificate or saw the node present it. It is absent when there is no record, as for a server without `--advertise`. `eligible` is false for a node that takes no new replicas. A node with a drain, in progress or finished, also has a `drain` object, described below.
 
-`DELETE /v1/nodes/{id}` removes a node for good. It refuses, with `409`, the server's own node, and a node whose lease is current, unless the query has `force=true`. An unknown node, or one already removed, gets `404`. On success:
+`POST /v1/nodes/{id}/eligibility` with `{"eligible": false}` makes the node ineligible: it takes no new replicas, and keeps the ones it runs. `{"eligible": true}` makes it eligible again, and on a node with a drain in progress it cancels the drain: copies still starting on other nodes are removed, and the replicas stay on the node. The reply:
+
+```json
+{"id": "node-<12 hex digits>", "name": "host-b", "eligible": true, "drain_cancelled": true}
+```
+
+`POST /v1/nodes/{id}/drain` makes the node ineligible and starts a drain of it, and takes its first step before it replies. The body is a JSON object with an optional `deadline`, a Go duration such as `"10m"`, above 0 and at most `168h`. Without one, a new drain gets 10 minutes. On a node that is already draining, a `deadline` sets a new deadline from now, and `{}` changes nothing. A finished drain is replaced by a new one. `GET /v1/nodes/{id}/drain` reads the drain, and answers `404` for a node without one. Both answer with the drain:
+
+```json
+{"node_id": "node-<12 hex digits>", "state": "draining",
+ "started_at": "2026-11-14T10:00:00Z", "deadline": "2026-11-14T10:10:00Z",
+ "moved": 2, "stopped": 0, "remaining": 2, "old_containers": 1,
+ "moving": [{"app": "spread", "index": 1, "to": "node-<12 hex digits>", "since": "2026-11-14T10:00:04Z"}],
+ "blocked": [{"app": "web", "index": 3, "reason": "host port 127.0.0.1:8080/tcp is in use on every other eligible node"}]}
+```
+
+- `state` is `draining` or `done`. A finished drain has `finished_at`.
+- `moved` counts the replicas that moved to another node, and `stopped` those that lost the node at the deadline and were placed again.
+- `remaining` counts the replicas still on the node that should run.
+- `old_containers` counts the containers the node still reports for replicas that have left it. Its agent removes them on its next pass.
+- `moving` lists the moves in flight: a copy of the replica is starting on `to`.
+- `blocked` lists the replicas that did not move at the drain's last step, and why.
+
+The server's own node can be made ineligible and drained. Its replicas move to workers, and the server keeps running. What a drain does is in [concepts](concepts.md#draining-a-node).
+
+`DELETE /v1/nodes/{id}` removes a node for good. It refuses, with `409`, the server's own node, and a node whose lease is current, unless the query has `force=true` or the node is ineligible and runs nothing, as after a drain. An unknown node, or one already removed, gets `404`. On success:
 
 ```json
 {"id": "node-<12 hex digits>", "name": "host-b", "rescheduled": 3, "held": 1}
@@ -139,6 +164,9 @@ Workers talk to the server over a second API, on the cluster port that `serve --
 | `POST /v1/join-tokens` | `{"ttl": "1h"}`, optional | 201, `{"token", "expires_at"}` | Issue a token that lets one machine join. See [join tokens](#join-tokens) |
 | `GET /v1/nodes` | none | 200, a list of `NodeView` | List the nodes. See [nodes](#nodes) |
 | `DELETE /v1/nodes/{id}` | none. `?force=true` removes a node that still renews its lease | 200, `RemoveNodeReply` | Remove a node for good |
+| `POST /v1/nodes/{id}/eligibility` | `{"eligible": false}` or `true` | 200, `{"id", "name", "eligible", "drain_cancelled"}` | Stop or let a node take new replicas. See [nodes](#nodes) |
+| `POST /v1/nodes/{id}/drain` | `{"deadline": "10m"}`, or `{}` | 200, the drain | Drain a node, or set a new deadline on its drain |
+| `GET /v1/nodes/{id}/drain` | none | 200, the drain | Read a node's drain |
 | `POST /v1/backup` | none | 200, `application/x-tar` | A backup of the data directory, CA private key included. TLS or loopback only. See [backup](#backup) |
 | `GET /metrics` | none | 200, Prometheus text | Metrics |
 

@@ -92,7 +92,7 @@ hivemind join 10.0.0.5 --token hivemind-join-v1.<fingerprint>.<secret>
 
 A token works once, and it expires after 24 hours. `hivemind join-token --ttl 1h` sets a shorter lifetime, up to 168 hours. Deploy as before. The NODE column of `hivemind status` shows where each replica runs.
 
-`hivemind nodes` lists the nodes. To take a machine out of the cluster, stop hivemind on it, then run `hivemind node remove <id>` on the server. Its replicas are placed on other nodes, and the server refuses its certificate from then on. See [concepts](docs/concepts.md#removing-a-node).
+`hivemind nodes` lists the nodes. To take a machine out of the cluster, run `hivemind node drain <id>` on the server, which moves its replicas to other nodes, each new copy starting before the old one stops, then `hivemind node remove <id>`. The server refuses the node's certificate from then on. See [concepts](docs/concepts.md#draining-a-node).
 
 ## Compose files
 

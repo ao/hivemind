@@ -246,6 +246,31 @@ func TestPlace(t *testing.T) {
 			want:    map[string]string{"web/0@1": "-no node is ready"},
 		},
 		{
+			name:     "ineligible node gets nothing and keeps what it has",
+			nodes:    []Node{node("a", 8, 8*gi), {ID: "b", CPU: 8, Memory: 8 * gi, Ready: true, ReadySince: now.Add(-time.Hour), Ineligible: true}},
+			existing: []Assignment{on(rep("web", 0, 0, 0, "0.0.0.0:80/tcp"), "b")},
+			pending:  []Replica{rep("web", 1, 0, 0, "0.0.0.0:80/tcp"), rep("api", 0, 0, 0)},
+			want:     map[string]string{"web/1@1": "a", "api/0@1": "a"},
+		},
+		{
+			name:    "every ready node ineligible",
+			nodes:   []Node{{ID: "a", CPU: 4, Memory: gi, Ready: true, ReadySince: now.Add(-time.Hour), Ineligible: true}, {ID: "b", CPU: 4, Memory: gi}},
+			pending: []Replica{rep("web", 0, 0, 0)},
+			want:    map[string]string{"web/0@1": "-every ready node is ineligible for new replicas"},
+		},
+		{
+			name:    "an eligible node waiting out MinReady beside an ineligible one",
+			nodes:   []Node{{ID: "a", CPU: 4, Memory: gi, Ready: true, ReadySince: now.Add(-time.Hour), Ineligible: true}, {ID: "b", CPU: 4, Memory: gi, Ready: true, ReadySince: now}},
+			pending: []Replica{rep("web", 0, 0, 0)},
+			want:    map[string]string{"web/0@1": "-no node has been ready for 30s"},
+		},
+		{
+			name:    "pinned replica on an ineligible node stays",
+			nodes:   []Node{node("a", 4, gi), {ID: "b", CPU: 4, Memory: gi, Ready: true, ReadySince: now.Add(-time.Hour), Ineligible: true}},
+			pending: []Replica{pinned(rep("db", 0, 1, 0), "b")},
+			want:    map[string]string{"db/0@1": "-volume pinned to node b, which is ineligible"},
+		},
+		{
 			name:    "no nodes",
 			pending: []Replica{rep("web", 0, 0, 0)},
 			want:    map[string]string{"web/0@1": "-no node is ready"},

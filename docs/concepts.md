@@ -67,14 +67,14 @@ Two things follow from that:
 
 The scheduler decides where each replica runs. Its input is the nodes, the replicas already placed, and the time. It runs on every deploy, scale, node registration, status report and sweep. A replica without a node is `pending` until one takes it. For each replica, the scheduler applies these rules:
 
-- Only eligible nodes take new replicas. A node is eligible when its lease is current and it has been ready for `--min-ready` (see below). The server's own node is always ready.
+- Only eligible nodes take new replicas. A node is eligible when its lease is current, it has been ready for `--min-ready` (see below), and it has not been made ineligible or drained (see [Draining a node](#draining-a-node)). The server's own node is always ready.
 - The CPU and memory the replica asks for must fit in what is left on the node, after the replicas already placed there. A node's totals are the CPU count and memory that its Docker daemon reports. A replica's `resources` are counted here, but the container gets no limit (see [Resources](#resources)).
 - Its host ports must not clash with the ports of replicas already on the node. Two ports clash when the number and protocol match and the bind addresses overlap. A wildcard address (`0.0.0.0` or `::`) overlaps every address. Two different specific addresses do not overlap. The default bind is `127.0.0.1`.
 - Among the nodes that fit, it takes the one with the fewest replicas of the same app. Then the lowest load, which is the larger of the CPU and memory fractions in use. Then the fewest replicas overall, and then the lowest node ID.
 
-Placement never moves a replica that already has a node. Moves come only from node loss and from rollouts.
+Placement never moves a replica that already has a node. Moves come only from node loss, rollouts and drains.
 
-A replica that cannot be placed gives its reason in the status `DETAIL` column, and in the `pending_reason` field of the API. Reasons include `no node is ready`, `no node has been ready for 30s`, `no node has 1 CPU free`, and `host port 127.0.0.1:8080/tcp is in use on every eligible node`.
+A replica that cannot be placed gives its reason in the status `DETAIL` column, and in the `pending_reason` field of the API. Reasons include `no node is ready`, `no node has been ready for 30s`, `every ready node is ineligible for new replicas`, `no node has 1 CPU free`, and `host port 127.0.0.1:8080/tcp is in use on every eligible node`.
 
 Two apps that publish the same host port cannot share a node. `deploy` accepts the second app anyway. Its replicas go to the eligible nodes where the port is free, and any replica that has no such node stays `pending` with the host-port reason. It is placed once the first app's containers are gone from a node.
 
@@ -98,17 +98,39 @@ Fencing does not reach a node that is cut off but still running. Hivemind cannot
 
 ## Removing a node
 
-`hivemind nodes` lists the nodes, with each one's lease age and state: `ready` while its lease is current, `lost` after 15 s without renewal. `hivemind node remove <id>` takes a node out of the cluster for good. Stop hivemind on the machine first.
+`hivemind nodes` lists the nodes, with each one's lease age and state: `ready` while its lease is current, `lost` after 15 s without renewal. `hivemind node remove <id>` takes a node out of the cluster for good. [Drain](#draining-a-node) the node, or stop hivemind on the machine, first.
 
 - The server's own node cannot be removed.
-- A node that still renews its lease is refused, unless `--force` is given. This follows `docker node rm`, which refuses a node that is not down. A running node that is removed keeps its containers running beside the copies placed elsewhere, so the refusal keeps that from happening by mistake.
+- A node that still renews its lease is refused, unless `--force` is given, or the node is ineligible and nothing runs on it, as after a drain. This follows `docker node rm`, which refuses a node that is not down. A running node that is removed with replicas on it keeps their containers running beside the copies placed elsewhere, so the refusal keeps that from happening by mistake.
+- A drain's move in flight ends with the replica on the node where its copy is starting.
 - Each replica on the node that should run loses the node and is placed again, as after a node loss. A replica with a volume is not moved: its data is a Docker volume on the removed node, and a copy elsewhere would start empty. It waits with no node, and its `DETAIL` in `status` says so. It is placed again, with an empty volume, after a deploy that changes the app's spec, such as one with a new volume name. Deleting the app also clears it.
 - The node's row, its reported container status, its rollout surges and its replicas marked for removal are deleted. A rollout whose surge was on the node pauses at its deadline.
 - The node's ID goes on the server's list of removed nodes, which is kept for good. The server refuses the node's certificate from then on (see [security](security.md#revocation-by-removal)), refuses the ID if the node registers again, and never issues the ID to a joining machine.
 
-A worker that is still running when it is removed gets `403` on its next call to the server, within one reconcile interval. It logs that it was removed and exits with an error, rather than retrying: the removal is final, so a retry could never succeed, and an exit shows up in the service manager and the log. It leaves its containers running. Their replicas already run elsewhere, and the worker does not remove a user's containers on the strength of one reply. Remove them by hand with `docker rm -f $(docker ps -aq --filter label=hivemind.app)`. Starting the worker again fails at once. To bring the machine back, run `hivemind join` with an empty data directory and a new join token. It gets a new node ID.
+A worker that is still running when it is removed gets `403` on its next call to the server, within one reconcile interval. It logs that it was removed and exits with an error, rather than retrying: the removal is final, so a retry could never succeed, and an exit shows up in the service manager and the log. It leaves its containers running. Their replicas already run elsewhere, and the worker does not remove a user's containers on the strength of one reply. Remove them by hand with `docker rm -f $(docker ps -aq --filter label=hivemind.app)`. A drained worker has none left. Starting the worker again fails at once. To bring the machine back, run `hivemind join` with an empty data directory and a new join token. It gets a new node ID.
 
-There is no drain. Nomad's `node eligibility` and `node drain` stop new placements on a running node and move its work off before it goes; here a node is either in the cluster or removed.
+## Draining a node
+
+`hivemind node eligibility <id> --disable` makes a node ineligible. It takes no new replicas, from placement or from a rollout's surge, and it keeps the replicas it runs. `--enable` makes it eligible again. The flag is stored in the server's database, so it holds across restarts of the server and of the node, and across a lapse of the node's lease. `hivemind nodes` shows it in the `ELIGIBILITY` column, and `GET /v1/nodes` as `eligible`.
+
+`hivemind node drain <id>` makes the node ineligible and moves its replicas off while the node still runs. A move is a rollout surge at the replica's own generation: a copy starts on another eligible node, the replica moves there once the copy is ready and passes its health check, and the drained node's agent then stops the old container. Each app has one replica moving at a time, and different apps move at once. So while another node has room, an app keeps its replica count running through the drain.
+
+- A replica with a volume does not move: its data is a Docker volume on this node. It keeps running there.
+- A replica whose host ports are in use on every other eligible node, or that no other node has the CPU or memory for, does not move yet. The drain tries it again at each step, every few seconds.
+- A replica of an app with a rollout in progress is left to the rollout, which does not surge onto the drained node. The drain moves what the rollout leaves on the node.
+- A move whose copy crash-loops, or is not ready within the rollout deadline (the health check's timing plus 30 s, or 2 minutes), is undone, and that replica stays on the node until the drain's deadline.
+- At the deadline, `--deadline`, 10 minutes by default, a copy that is still starting takes its replica at once. Every other replica left on the node, except one with a volume, loses the node and is placed again, as on node loss, and the drained node's agent stops its container. A replica that no node can take waits as `pending`.
+- The drain is done at the deadline, or before it once only replicas with a volume are left on the node and its agent has removed the old containers.
+
+The command waits and prints each move, each replica that stays and why, and the result. `--no-wait` returns at once. The drain is in the server's database, and the server advances it every few seconds, so it carries on across a restart of the server. A move that was in flight while the server was down gets a whole rollout deadline from the restart. A deadline that passed while the server was down ends the drain at its first step.
+
+A drained node stays in the cluster, ineligible, until `node eligibility --enable` or `node remove`. `--enable` on a draining node cancels the drain: copies still starting elsewhere are removed, and the replicas still on the node stay there. `node remove` needs no `--force` for a node that is ineligible and runs nothing.
+
+The server's own node can be made ineligible, and drained. Its replicas move to workers. The server keeps serving the API and placing replicas, and its agent keeps running whatever is left on its node, such as a replica with a volume. With no eligible node, a new replica waits as `pending` with the reason `every ready node is ineligible for new replicas`.
+
+To drain several nodes, make them all ineligible first, then drain them one at a time, so that a replica drained off one does not move to another that is next.
+
+The commands follow Nomad's [`node eligibility`](https://developer.hashicorp.com/nomad/docs/commands/node/eligibility) and [`node drain`](https://developer.hashicorp.com/nomad/docs/commands/node/drain), and the order for draining several nodes is the one Nomad's drain documentation gives. Some differences: a drain is cancelled with `node eligibility --enable`, not with `node drain -disable`; there is no `-force`, `-no-deadline` or `-ignore-system`; and the deadline defaults to 10 minutes, where Nomad's is one hour.
 
 ## Rolling updates
 
@@ -123,7 +145,7 @@ A change to an app's spec, other than its replica count, starts a rollout. The r
 - Deploying another template during a rollout abandons the move in flight, removes its surge, and starts again from the state the replicas are in.
 - A rollout ends when every replica runs the target generation. Its state then drops out of `status`.
 
-On a single node every move is in place: the replica being moved is `pending` while its new container starts, and the others keep running. With a second node that is eligible and has the app's host ports free, the move becomes a surge.
+On a single node every move is in place: the replica being moved is `pending` while its new container starts, and the others keep running. With a second node that is eligible and has the app's host ports free, the move becomes a surge. A [drain](#draining-a-node) moves replicas off a node with the same surges, at each replica's own generation.
 
 `hivemind status` prints a line for each app with a rollout in progress or paused, such as `web: rolling out generation 2`, or the pause reason. The API reports the same thing as the `rollout` field of an app's status. See [the API](api.md#objects).
 

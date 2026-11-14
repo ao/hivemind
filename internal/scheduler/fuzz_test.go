@@ -79,6 +79,7 @@ func FuzzPlace(f *testing.F) {
 				Memory:     r.mem(),
 				Ready:      r.byte()%4 != 0,
 				ReadySince: now.Add(-time.Duration(int8(r.byte())) * time.Second),
+				Ineligible: r.byte()%5 == 0,
 			})
 		}
 		mk := func(i int) Replica {

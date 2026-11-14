@@ -433,7 +433,9 @@ func TestRestoreRefusesNewerSchema(t *testing.T) {
 func TestRestoreMigratesOlderSchema(t *testing.T) {
 	s := newServer(t)
 	var b bytes.Buffer
-	snap := editSnapshot(s.st, `DROP TABLE node_certs`, `UPDATE schema_version SET version = 6`)
+	// Undo migrations 8 and 7.
+	snap := editSnapshot(s.st, `DROP TABLE drain_blocked`, `DROP TABLE drain_moves`, `DROP TABLE drains`,
+		`ALTER TABLE nodes DROP COLUMN eligible`, `DROP TABLE node_certs`, `UPDATE schema_version SET version = 6`)
 	if _, err := Write(context.Background(), &b, Options{DataDir: s.dir, Snapshot: snap}); err != nil {
 		t.Fatal(err)
 	}

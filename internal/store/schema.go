@@ -157,6 +157,48 @@ CREATE TABLE node_certs (
 	issued_at INTEGER NOT NULL
 ) STRICT;
 `,
+	// 8: node eligibility and drains. nodes.eligible is 0 for a node that
+	// takes no new replicas; the ones it runs stay. A drains row is the drain
+	// of one node: its deadline, whether it is still draining, and how many
+	// replicas it moved, and stopped at the deadline. drain_moves holds the
+	// move in flight for each app with a replica on the node: a surge of that
+	// replica, at the replica's own generation, on another node. drain_blocked
+	// holds the reason of each replica on the node that could not move at the
+	// drain's last step. failed marks one whose move was tried and failed; it
+	// is not tried again before the deadline.
+	`
+ALTER TABLE nodes ADD COLUMN eligible INTEGER NOT NULL DEFAULT 1 CHECK (eligible IN (0, 1));
+
+CREATE TABLE drains (
+	node_id     TEXT PRIMARY KEY REFERENCES nodes(id) ON DELETE CASCADE,
+	state       TEXT NOT NULL CHECK (state IN ('draining', 'done')),
+	started_at  INTEGER NOT NULL,
+	deadline    INTEGER NOT NULL,
+	finished_at INTEGER NOT NULL DEFAULT 0,
+	moved       INTEGER NOT NULL DEFAULT 0 CHECK (moved >= 0),
+	stopped     INTEGER NOT NULL DEFAULT 0 CHECK (stopped >= 0),
+	updated_at  INTEGER NOT NULL
+) STRICT;
+
+CREATE TABLE drain_moves (
+	node_id    TEXT NOT NULL REFERENCES drains(node_id) ON DELETE CASCADE,
+	app        TEXT NOT NULL REFERENCES apps(name) ON DELETE CASCADE,
+	idx        INTEGER NOT NULL CHECK (idx >= 0),
+	surge_node TEXT NOT NULL,
+	generation INTEGER NOT NULL CHECK (generation >= 1),
+	since      INTEGER NOT NULL,
+	PRIMARY KEY (node_id, app)
+) STRICT;
+
+CREATE TABLE drain_blocked (
+	node_id TEXT NOT NULL REFERENCES drains(node_id) ON DELETE CASCADE,
+	app     TEXT NOT NULL REFERENCES apps(name) ON DELETE CASCADE,
+	idx     INTEGER NOT NULL CHECK (idx >= 0),
+	reason  TEXT NOT NULL,
+	failed  INTEGER NOT NULL DEFAULT 0 CHECK (failed IN (0, 1)),
+	PRIMARY KEY (node_id, app, idx)
+) STRICT;
+`,
 }
 
 // SchemaVersion is the schema version this build writes.

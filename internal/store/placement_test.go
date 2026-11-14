@@ -398,8 +398,8 @@ func TestSchedulerPlaceSeesLeaseAges(t *testing.T) {
 	clock := &fakeClock{t: time.Unix(1_700_000_000, 0)}
 	s := openT(t, filepath.Join(t.TempDir(), "data", "hivemind.db"), WithClock(clock.Now), WithMinReady(0))
 	nodes := []Node{
-		{ID: "node-old", CPU: 4, Memory: 1 << 30, LastLease: clock.Now().Add(-time.Minute)},
-		{ID: "node-new", CPU: 4, Memory: 1 << 30, LastLease: clock.Now(), ReadySince: clock.Now()},
+		{ID: "node-old", CPU: 4, Memory: 1 << 30, LastLease: clock.Now().Add(-time.Minute), Eligible: true},
+		{ID: "node-new", CPU: 4, Memory: 1 << 30, LastLease: clock.Now(), ReadySince: clock.Now(), Eligible: true},
 	}
 	id, err := s.schedulerPlace(nodes, nil, spec.App{Name: "web", Image: "x", Replicas: 1}, 0, clock.Now())
 	if err != nil || id != "node-new" {
