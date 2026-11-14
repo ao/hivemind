@@ -33,6 +33,8 @@ The trust rests on the token:
 
 A node certificate is ECDSA P-256, signed by the cluster CA, and valid for 365 days. Its URI name is `hivemind://node/<id>`, and its common name is the same ID. The server's own certificate also carries the address it advertises, so a worker can check the name it dialed.
 
+A worker renews its certificate once two thirds of its lifetime have passed, on day 243, with a new key, over the node API. The server renews its own certificate on the same schedule. Neither restarts: new connections use the new certificate. A worker that cannot reach the server for the last four months of its certificate's life, such as a machine that was switched off, cannot renew after it expires, and must be removed and join again. `hivemind nodes` shows each node's certificate expiry. The details, and what the server checks, are in [security](security.md#certificate-renewal).
+
 The node API runs on the cluster port (`--cluster-port`, 4484 by default) on the `--advertise` address. It opens only when the server runs with `--advertise`. A request is accepted only when the client presents a certificate that chains to the cluster CA and names a node. Each route then checks that the node ID in its path is the node ID in the certificate, and answers 403 if it is not. A node can therefore read its own assignments, report its own containers, and register its own name and capacity. It cannot read or write another node's data.
 
 The node API is internal, and its routes are not a stable interface. See [the API](api.md#node-api-internal).
@@ -216,8 +218,8 @@ The web UI is not built. The API has the login and logout routes a browser would
 
 ## Data directories
 
-The server's data directory holds the database (`hivemind.db`, with the SQLite WAL files beside it), the admin token file (`admin.token`), the cluster CA (`ca.key` and `ca.crt`), and an optional config file (`hivemind.yaml`). The default is `/var/lib/hivemind` for root, and `$XDG_STATE_HOME/hivemind` or `~/.local/state/hivemind` for other users. `--data-dir` or `HIVEMIND_DATA_DIR` changes it.
+The server's data directory holds the database (`hivemind.db`, with the SQLite WAL files beside it), the admin token file (`admin.token`), the cluster CA (`ca.key` and `ca.crt`), and an optional config file (`hivemind.yaml`). The default is `/var/lib/hivemind` for root, and `$XDG_STATE_HOME/hivemind` or `~/.local/state/hivemind` for other users. `--data-dir` or `HIVEMIND_DATA_DIR` changes it. `hivemind backup` copies everything in it but `hivemind.yaml` into one file, and `hivemind restore` puts that file into an empty directory on another machine. See [backup](backup.md).
 
-A worker's data directory holds its key (`node.key`), its certificate (`node.crt`), the cluster CA certificate (`ca.crt`), and `node.json`, which records the node ID and the server it joined. `node.json` is written last, so its presence means the join finished. [Security](security.md#files) lists the file modes.
+A worker's data directory holds its key (`node.key`), its certificate (`node.crt`), the cluster CA certificate (`ca.crt`), and `node.json`, which records the node ID and the server it joined. `node.json` is written last, so its presence means the join finished. A renewal replaces `node.key` and `node.crt`. There is nothing on a worker to back up. [Security](security.md#files) lists the file modes.
 
 The database uses SQLite in WAL mode, with `synchronous=FULL`. Every change is one transaction. The schema has a version number, and a newer schema is refused. A v1 data directory is refused with a message, so use a new directory for v2. See [upgrading](upgrading.md).

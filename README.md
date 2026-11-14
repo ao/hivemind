@@ -104,8 +104,8 @@ A token works once, and it expires after 24 hours. `hivemind join-token --ttl 1h
 
 ## Limits
 
-- The server is one machine. If it goes down, running containers keep running, but nothing new is placed and lost nodes are not rescheduled.
-- A node's certificate cannot be renewed, and the only way to revoke one is to remove the node. A certificate lasts 365 days. See [security](docs/security.md#revocation-by-removal).
+- The server is one machine. If it goes down, running containers keep running, but nothing new is placed and lost nodes are not rescheduled. `hivemind backup` and `hivemind restore` bring it back on a new machine at the same address. See [backup](docs/backup.md).
+- A node certificate lasts 365 days, and nodes renew theirs on day 243. The only way to revoke one is to remove the node. The cluster CA lasts ten years and cannot be rotated. See [security](docs/security.md#certificate-renewal).
 - A replica with a volume stays on its node. If that node is lost, the app is down until the node returns.
 - `deploy` does not reject a host port that another app already publishes. The second app's replicas go where the port is free. Any that cannot go stay `pending`, with the reason. See [concepts](docs/concepts.md#placement).
 - `hivemind logs` cannot read replicas that run on a worker. Use `docker logs` on that machine.
@@ -118,6 +118,7 @@ A token works once, and it expires after 24 hours. `hivemind join-token --ttl 1h
 - [Quick start](docs/quick-start.md)
 - [Concepts](docs/concepts.md)
 - [Security](docs/security.md)
+- [Backup and restore](docs/backup.md)
 - [CLI reference](docs/cli.md)
 - [HTTP API](docs/api.md)
 - [Upgrading from v1](docs/upgrading.md)

@@ -6,9 +6,9 @@ This lists every listener the code opens, what each one exposes, and the files h
 
 | Listener | Default bind | Auth | Exposes |
 |---|---|---|---|
-| API | `127.0.0.1:4483` (`--api-addr`) | Bearer admin token, compared in constant time, or a session cookie that the token bought at `POST /v1/session`. A cookie request to `POST`, `PUT`, `PATCH` or `DELETE` also needs the session's CSRF token. `GET /healthz` needs no token and returns only `{"status":"ok"}` | Apps and their specs, including environment values. Status. Logs of this server's containers. Join token issuance. Nodes, and their removal. Metrics |
+| API | `127.0.0.1:4483` (`--api-addr`) | Bearer admin token, compared in constant time, or a session cookie that the token bought at `POST /v1/session`. A cookie request to `POST`, `PUT`, `PATCH` or `DELETE` also needs the session's CSRF token. `GET /healthz` needs no token and returns only `{"status":"ok"}` | Apps and their specs, including environment values. Status. Logs of this server's containers. Join token issuance. Nodes, and their removal. Metrics. A backup of the data directory, with the CA private key and the admin token, sent only over TLS or to a loopback client |
 | Metrics | Off. `--metrics-addr` starts it, and it must be loopback | The admin token | Prometheus metrics only |
-| Node listener | Off. Starts with `--advertise` on that address, port 4484 (`--cluster-port`) | TLS 1.3, and a client certificate that chains to the cluster CA and names a node that was not removed. The node ID must match the one in the path | To a node: its own assignments, which include each replica's full spec and environment values. It can also report its own containers and register its own name and capacity |
+| Node listener | Off. Starts with `--advertise` on that address, port 4484 (`--cluster-port`) | TLS 1.3, and a client certificate that chains to the cluster CA, names a node that was not removed, and is valid by the server's clock at each request. The node ID must match the one in the path | To a node: its own assignments, which include each replica's full spec and environment values. It can also report its own containers, register its own name and capacity, and get a new certificate for its own ID |
 | Join listener | Off. Starts with `--advertise` on that address, port 4485 | TLS 1.3 with the server certificate. No client certificate. The join token is the credential. Only `POST /join` is routed | The cluster CA certificate, and a node certificate for each valid token |
 
 Listeners bind to the advertise address only. A wildcard address is refused at startup, both by config validation and when the socket is bound. The worker opens no listener.
@@ -27,7 +27,7 @@ The server's data directory is created with mode 0700.
 
 | File | Mode | Holds |
 |---|---|---|
-| `hivemind.db`, with the WAL files beside it | 0600 | Apps and their specs, which include environment values. Replicas, nodes and their leases. The IDs of removed nodes. Join tokens as SHA-256 hashes. The admin token as a SHA-256 hash |
+| `hivemind.db`, with the WAL files beside it | 0600 | Apps and their specs, which include environment values. Replicas, nodes and their leases. The IDs of removed nodes. Node certificate expiry times. Join tokens as SHA-256 hashes. The admin token as a SHA-256 hash |
 | `admin.token` | 0600 | The admin token, in plain text. This is the only copy |
 | `ca.key` | 0600 | The cluster CA's private key. It can sign any node certificate |
 | `ca.crt` | 0644 | The cluster CA certificate. Public |
@@ -40,11 +40,14 @@ A worker's data directory is created with mode 0700.
 | File | Mode | Holds |
 |---|---|---|
 | `node.key` | 0600 | The worker's private key |
-| `node.crt` | 0644 | The worker's certificate. Public |
+| `node.crt` | 0644 at join, 0600 after a renewal | The worker's certificate. Public |
 | `ca.crt` | 0644 | The cluster CA certificate. Public |
 | `node.json` | 0600 | The node ID, the server's address and the join time |
+| `node.key.next`, `node.crt.next` | 0600 | Only during a renewal: the new pair, before it is renamed into place |
 
 A worker has no CA key, no database and no admin token.
+
+A backup file (`hivemind backup`) is written with mode 0600. It holds `hivemind.db`, `ca.key`, `ca.crt` and `admin.token`, so it grants everything the server's data directory does. A restored data directory is 0700, with every file 0600, `ca.crt` included. See [backup](backup.md).
 
 ## What a compromised worker can do
 
@@ -55,25 +58,27 @@ Assume an attacker has the worker's data directory, or root on the worker. The c
 - Renew or stop renewing its own lease. Stopping makes the server move its replicas.
 - Register any name of up to 253 printable characters, and any capacity up to the limits the server checks: 1,048,576 CPUs and 2^50 bytes of memory. Placement trusts these figures, so the worker can attract more replicas, and so more environment values, than it has room for.
 - Run whatever its Docker daemon will run, which is the worker's own host.
+- Renew its own certificate, with a key of its choice, for as long as it is not removed. Removal stops that: the renewal route refuses a removed node like every other route.
 
 The worker cannot do the following.
 
 - Call the node routes for another node. The node ID in the path must match the one in its certificate, or the server answers 403.
-- Obtain a certificate for another node or for the server. It has no CA key, and the server ignores names and extensions in a certificate request.
+- Obtain a certificate for another node or for the server. It has no CA key, and the server ignores names and extensions in a certificate request. A renewal is issued for the ID in the certificate the worker presents, and the route checks that the ID in its path is that one.
 - Join another machine, or pose as the server. Its certificate names no host, so a machine that checks the server's name rejects it. It cannot issue join tokens.
 - Reach the API or the admin token, the CA key, or the database.
 - Read the status or logs of replicas on other machines.
 
 ## Revocation by removal
 
-There is no certificate revocation list and no OCSP. A node certificate is valid for 365 days, and it keeps verifying against the cluster CA after the node is removed. Removing the node is what makes it useless.
+There is no certificate revocation list and no OCSP. A node certificate is valid for 365 days, and it keeps verifying against the cluster CA after the node is removed. Removing the node is what makes it useless. Renewal does not revoke the old certificate either: it stays valid until it expires. The worker replaces the old key on disk, so only a copy taken before the renewal can still use it, and removing the node stops both.
 
 `hivemind node remove <id>` (`DELETE /v1/nodes/{id}`) puts the node's ID on a denylist, the `removed_nodes` table in the server's database, in the same transaction that deletes the node. From then on:
 
 - The node listener checks the denylist on every request, after the TLS handshake and before routing, and answers `403` with `this node was removed from the cluster`. No node route is reachable with the certificate, whatever path the request names.
 - The store refuses the ID when a node registers or reports, so a request that was already past the check when the removal committed cannot bring the node back.
 - The join listener never issues a removed ID to a new node.
-- The denylist is never pruned, and it survives restarts. A removed ID cannot be allowed again.
+- The node API's renewal route is refused the same way, so a removed node cannot get a certificate that outlasts the one it has. The store refuses the renewal again in the transaction that records it, so a renewal that races the removal is not handed out.
+- The denylist is never pruned, and it survives restarts. A removed ID cannot be allowed again. Restoring a backup brings back the denylist as it was when the backup was taken; remove again any node removed after it. See [backup](backup.md#replacing-a-lost-server).
 
 So a stolen certificate stops working when its node is removed. The node's key and certificate files can stay where they are: they no longer grant anything. A worker that is still running when it is removed gets `403` on its next call, logs that it was removed, and exits with an error. It does not stop its containers. The server has placed their replicas elsewhere already, and stopping them on the strength of one reply is left to the operator, who can run `docker rm -f $(docker ps -aq --filter label=hivemind.app)` on that machine. Starting the worker again fails at once with the same error. The machine can join again only with an empty data directory and a new join token, and it gets a new ID.
 
@@ -81,4 +86,23 @@ Removal needs the admin token. It refuses the server's own node, and it refuses 
 
 Removal does not reach what the node already has: the assignments it read before, including their environment values, and any containers it runs. Treat those values as exposed, and change them. To cut off every node at once, create a new cluster with `init` in a new data directory and join every machine again.
 
-There is no renewal either. When a worker's certificate expires after 365 days, the worker cannot reach the server. `join` refuses a data directory that holds a joined node, so the worker needs an empty data directory and a new join token. The server's own certificate is issued again each time `serve --advertise` starts, so a restart renews it.
+## Certificate renewal
+
+A worker renews its certificate once two thirds of its lifetime have passed: day 243 of 365, with about 122 days left. It checks at start and then every hour. It generates a new key, sends a certificate request for it to the node API's renewal route, and authenticates with its current certificate, which must still be valid. The server:
+
+- issues for the node ID in the client certificate. The ID in the route's path must be the same one, or the request gets `403`. The request's names and extensions are ignored, as at join;
+- refuses a removed node with `403`, before routing and again when it records the certificate;
+- refuses a certificate that has expired, or is not yet valid, by its clock. The TLS handshake checks this once per connection. The server checks it again on every node API request, because a worker reuses its connection for as long as it keeps calling;
+- issues a certificate with the same 365-day lifetime as at join, and records its expiry.
+
+The worker checks the reply: one certificate, chaining to the cluster CA it already has, naming its own node ID, for the new key. It writes the new key and certificate with mode 0600 under staging names, syncs them, and renames them over `node.key` and `node.crt`. A crash between the two renames is finished the next time the worker starts. The worker's TLS config reads the certificate at each handshake (`GetClientCertificate`), and the worker closes its idle connections after a renewal, so the next request uses the new certificate without a restart.
+
+The server renews its own listener certificate the same way, from its CA, without the network. Both listeners read it at each handshake (`GetCertificate`).
+
+A renewal that fails is tried again at the next check, and logged. A worker whose certificate has expired, after more than about four months of failed renewals or a machine that was off for that long, cannot renew: the server refuses the certificate. It logs, and fails at start with, the fix: run `hivemind node remove <id>` on the server, then join the machine again with an empty data directory and a new join token.
+
+`hivemind nodes` shows each node's certificate expiry, and `/metrics` has `hivemind_node_cert_expiry_timestamp_seconds`. A node that joined before 2.1 has its expiry recorded on its first request to a 2.1 server.
+
+The cluster CA lasts ten years. It cannot be rotated; that is out of scope for now. In the CA's last year, certificates are issued to end when the CA does, and the server logs a warning once a day. When the CA expires, no node can reach the server. Before then, create a new cluster with `init` in a new data directory and join every machine to it.
+
+Tests use a shorter certificate lifetime. Only a binary built with `-tags hivemind_testknobs` reads it, from `HIVEMIND_TEST_CERT_LIFETIME`. A release build has no code that shortens a certificate, and refuses to start the cluster listener when that variable is set.

@@ -2,6 +2,29 @@
 
 Notable changes to hivemind, newest first. Versions follow [Semantic Versioning](https://semver.org). A release is cut by pushing a `v*` tag; its notes are the matching section below.
 
+## [2.1.0] - Unreleased
+
+### Added
+
+- Node certificate renewal. A worker renews its certificate on day 243 of 365, with a new key, over the node API, using its current certificate. The server issues for the node ID in that certificate only, and refuses a removed node or an expired certificate. The new key and certificate are written with mode 0600 and renamed into place, and the worker uses them without a restart. A worker must run 2.1 to renew; a 2.0 worker keeps working against a 2.1 server until its certificate expires.
+- The server renews its own cluster listener certificate on the same schedule, without a restart.
+- `hivemind nodes` has a CERT EXPIRES column, `GET /v1/nodes` a `cert_not_after` field, and `/metrics` the gauge `hivemind_node_cert_expiry_timestamp_seconds`. Schema version 7 adds the `node_certs` table; a 2.0 store is migrated when 2.1 opens it.
+- `hivemind backup <file>`: a backup of the server's store, CA certificate and key, and admin token file, as a tar file with a manifest, a format version and a SHA-256 for each file. It is written with mode 0600, and checked before it is kept. It reads the data directory, with `serve` running or not; `--api` gets it from the new `POST /v1/backup` route instead, which sends it only over TLS or to a loopback client.
+- `hivemind restore <file> --data-dir <dir>`: restores a backup into an empty directory, with mode 0700 and files 0600, after checking every digest, the store's integrity and schema version, and the CA. [docs/backup.md](docs/backup.md) has the procedure for replacing a lost server at the same address; the workers reconnect without joining again.
+
+### Changed
+
+- Every node API request checks that the client certificate is valid by the server's clock. Before, only the TLS handshake did, so a worker that kept its connection open could keep using a certificate that had expired.
+- In the CA's last year, node certificates are issued to end with the CA rather than refused, and the server logs a warning once a day. The CA lasts ten years and cannot be rotated.
+- A worker whose certificate has expired fails at start with what to do: remove the node, and join again.
+- `node.crt` on a worker is mode 0600 after a renewal; it was 0644.
+
+### Known limits
+
+- The cluster CA cannot be rotated. When it expires, ten years after `init`, every machine must join a new cluster.
+- A restored server has the state of the backup: nodes removed since then must be removed again, and join tokens used since then work again until they expire. Volumes on the old server are not in a backup.
+- Restoring on a new address is not supported. Workers must join again.
+
 ## [2.0.0] - 2026-11-14
 
 Version 2 is a rewrite. It is not compatible with 1.x: the command line, the API, the data directory and the feature set all differ. v1 data is not migrated, so start v2 in a new data directory. See [docs/upgrading.md](docs/upgrading.md).
