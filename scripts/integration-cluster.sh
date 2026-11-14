@@ -350,6 +350,11 @@ for c in "$W1" "$W2"; do
 	docker exec "$c" pgrep -x hivemind >/dev/null || cl_fail "the worker on $c stopped while the server was down"
 done
 cl_note "both workers reconnected to the restored server without joining again"
+# Their leases in the backup are as old as the outage. The restored server
+# counts each lease from its own start, so it releases neither worker.
+if docker exec "$S" grep "node lost" /var/log/hivemind.log; then
+	cl_fail "the restored server released a node whose worker was running"
+fi
 wait_for 150 web_ok || cl_fail "web did not converge on the restored server: $(app_rows web | tr '\n' ';')"
 wait_for 90 spread_three || cl_fail "spread did not converge on the restored server: $(app_rows spread | tr '\n' ';')"
 wait_for 60 no_duplicates || cl_fail "a replica is duplicated after the restore: $( (containers_of web; containers_of spread) | sort | tr '\n' ';')"

@@ -45,8 +45,11 @@ const sweepInterval = 5 * time.Second
 
 // sweep runs the server's periodic work until ctx ends. A node whose lease
 // has lapsed is released: its replicas are placed on other nodes, and volume
-// replicas wait for it. Each node is logged once when it is lost.
+// replicas wait for it. Each node is logged once when it is lost. Leases count
+// from the sweep's start at the earliest (see store.ReconcileNodes), so a
+// server that was down gives every node a lease timeout to report.
 func sweep(ctx context.Context, st *store.Store, log *slog.Logger, every time.Duration) {
+	started := time.Now()
 	t := time.NewTicker(every)
 	defer t.Stop()
 	lost := map[string]bool{}
@@ -56,7 +59,7 @@ func sweep(ctx context.Context, st *store.Store, log *slog.Logger, every time.Du
 			return
 		case <-t.C:
 		}
-		nodes, err := st.ReconcileNodes(ctx)
+		nodes, err := st.ReconcileNodes(ctx, started)
 		if err != nil {
 			if ctx.Err() == nil {
 				log.Warn("node sweep", "err", err)

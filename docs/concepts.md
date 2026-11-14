@@ -56,7 +56,7 @@ A worker of version 2.0.0 does not poll for log requests, so its replicas get th
 
 Each pass of a worker's agent reports its containers to the server. That report renews the node's lease. A pass runs every `--reconcile-interval` (2 s by default), and joining and registering also renew the lease. If a worker cannot read its assignments, it does not report, so its lease ages.
 
-A node is lost when its lease is more than 15 s old. The 15 s is fixed. The server checks leases every 5 s, so a lost node is noticed 15 to 20 s after its last renewal. The server logs one line for each node it marks as lost.
+A node is lost when its lease is more than 15 s old. The 15 s is fixed. The server checks leases every 5 s, so a lost node is noticed 15 to 20 s after its last renewal. The server logs one line for each node it marks as lost. When `serve` starts, every lease it finds is as old as the time it was down, so it counts each lease from its own start instead: every node gets 15 s to report to a server that has just started, or been restored from a backup, before it can be lost.
 
 Two things follow from that:
 
