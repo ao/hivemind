@@ -39,6 +39,16 @@ type ScaleRequest struct {
 	Replicas int `json:"replicas"`
 }
 
+// stateUnknown is a replica's state when its node has not reported to this
+// server process yet. The container ID is the one last reported.
+const stateUnknown = "unknown"
+
+// staleReport reports whether a container report was made before this server
+// process started.
+func (s *Server) staleReport(updated time.Time) bool {
+	return !s.cfg.Started.IsZero() && updated.Before(s.cfg.Started)
+}
+
 // ReplicaStatus is one replica and the state of its container.
 type ReplicaStatus struct {
 	Index         int    `json:"index"`
@@ -298,6 +308,14 @@ func (s *Server) statusOf(r *http.Request, app string) ([]AppStatus, error) {
 					if !st.NextRestart.IsZero() {
 						nr := st.NextRestart.UTC()
 						rs.NextRestart = &nr
+					}
+					// A report made to an earlier server process says what
+					// was true then. After a restore on a new machine the
+					// server's own containers are gone, so it is not shown
+					// as the state until the node reports to this process.
+					if s.staleReport(st.UpdatedAt) {
+						rs.State, rs.Ready, rs.Health, rs.Error = stateUnknown, false, "", ""
+						rs.CrashLooping, rs.NextRestart = false, nil
 					}
 				}
 			}
