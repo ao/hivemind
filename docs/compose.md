@@ -315,6 +315,8 @@ API_TAG=2.5.0
 DB_ADDR=10.0.0.5
 ```
 
+hivemind does not choose db's node from `DB_ADDR`. On a cluster of more than one node, db can be placed on a node that does not have that address. Its start then fails with `bind: cannot assign requested address` in `hivemind status`, and the replica stays on that node, held there by its volume. Set `DB_ADDR` to that node's address, which `hivemind nodes --json` lists as `address`, and run `hivemind compose deploy` again.
+
 `hivemind compose convert compose.yaml` prints a note on standard error for the web port, which has no address:
 
 ```
