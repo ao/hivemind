@@ -54,6 +54,16 @@ with hivemind restore.`,
 	cmd.Flags().BoolVar(&useAPI, "api", false, "get the backup from the server's API instead of reading the data directory")
 	cmd.RunE = func(cmd *cobra.Command, args []string) error {
 		out := args[0]
+		// The archive is written to a temporary file beside out, whose name
+		// the user never typed, so a missing directory is reported here.
+		dir := filepath.Dir(out)
+		if fi, err := os.Stat(dir); errors.Is(err, fs.ErrNotExist) {
+			return fmt.Errorf("the directory %s does not exist; create it first (mkdir -p %s)", dir, dir)
+		} else if err != nil {
+			return err
+		} else if !fi.IsDir() {
+			return fmt.Errorf("%s is not a directory, so backup cannot write %s", dir, out)
+		}
 		if _, err := os.Lstat(out); err == nil {
 			return fmt.Errorf("%s already exists; backup does not overwrite a file", out)
 		} else if !errors.Is(err, fs.ErrNotExist) {

@@ -156,3 +156,32 @@ func TestBackupThroughTheAPI(t *testing.T) {
 		t.Fatalf("restore of the API backup: %v", err)
 	}
 }
+
+// A backup into a directory that does not exist says so, and names the
+// directory, not the temporary file the archive would have gone to first;
+// so does one whose directory is a file. Nothing is written.
+func TestBackupIntoAMissingDirectory(t *testing.T) {
+	home := isolate(t)
+	dir := filepath.Join(home, "server")
+	if _, _, err := run(t, "", "init", "--data-dir", dir); err != nil {
+		t.Fatal(err)
+	}
+	missing := filepath.Join(home, "backups", "hivemind")
+	for _, args := range [][]string{{"--data-dir", dir}, {"--api", "--server", "http://127.0.0.1:1", "--token", "x"}} {
+		_, _, err := run(t, "", append([]string{"backup", filepath.Join(missing, "Mon.tar")}, args...)...)
+		want := "the directory " + missing + " does not exist; create it first (mkdir -p " + missing + ")"
+		if err == nil || err.Error() != want {
+			t.Fatalf("backup %v into a missing directory: %v, want %q", args, err, want)
+		}
+	}
+	if _, err := os.Stat(filepath.Join(home, "backups")); !os.IsNotExist(err) {
+		t.Fatalf("backup created something: %v", err)
+	}
+	file := filepath.Join(home, "file")
+	if err := os.WriteFile(file, nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := run(t, "", "backup", filepath.Join(file, "b.tar"), "--data-dir", dir); err == nil || !strings.Contains(err.Error(), file+" is not a directory") {
+		t.Fatalf("backup under a file: %v", err)
+	}
+}
