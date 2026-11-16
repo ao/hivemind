@@ -59,6 +59,7 @@ hivemind serve
 
 # Terminal 2.
 hivemind deploy --name web --image nginx:alpine --port 127.0.0.1:8080:80
+# deploy returns before the image is pulled. Run status again until STATE is running.
 hivemind status
 curl -fsS http://127.0.0.1:8080/ > /dev/null
 hivemind logs web
@@ -92,7 +93,7 @@ hivemind join 10.0.0.5 --token hivemind-join-v1.<fingerprint>.<secret>
 
 A token works once, and it expires after 24 hours. `hivemind join-token --ttl 1h` sets a shorter lifetime, up to 168 hours. Deploy as before. The NODE column of `hivemind status` shows where each replica runs.
 
-`hivemind nodes` lists the nodes. To take a machine out of the cluster, run `hivemind node drain <id>` on the server, which moves its replicas to other nodes, each new copy starting before the old one stops, then `hivemind node remove <id>`. The server refuses the node's certificate from then on. See [concepts](docs/concepts.md#draining-a-node).
+`hivemind nodes` lists the nodes. To take a machine out of the cluster, run `hivemind node drain <id>` on the server (unreleased 2.2.0), which moves its replicas to other nodes, each new copy starting before the old one stops, then `hivemind node remove <id>`. The server refuses the node's certificate from then on. In 2.0.0, which has no `node drain`, stop hivemind on the machine before `node remove`. See [concepts](docs/concepts.md#draining-a-node).
 
 ## Compose files
 
@@ -106,15 +107,15 @@ In the unreleased 2.2.0, an app can name `routes: [{host: www.example.com, port:
 
 - The API listens on `127.0.0.1:4483`. Every route except `GET /healthz` needs the admin token that `init` prints. A non-loopback `--api-addr` needs TLS as well. With a certificate from a private CA, give the CLI that CA with `--ca-cert` or `HIVEMIND_CA_CERT`.
 - `serve --advertise` opens two more ports, on that address only. Port 4484 is the node API. It accepts only a machine that holds a certificate from the cluster CA. Port 4485 takes join requests, and each one needs a join token.
-- `--route-addr` opens the router, on ports 80 and 443. It is the one listener that may bind `0.0.0.0`, and it has no authentication: it serves the routed apps' public traffic.
+- `--route-addr` (unreleased 2.2.0) opens the router, on ports 80 and 443. It is the one listener that may bind `0.0.0.0`, and it has no authentication: it serves the routed apps' public traffic.
 - Nothing else listens. Container ports are published on `127.0.0.1` unless the spec names another address. A routed app's ports are published on ephemeral ports of the node's private address, for the other nodes' routers; keep that network to the nodes, or firewall those ports.
 
 [docs/security.md](docs/security.md) lists every listener and file, and what a compromised worker can and cannot do.
 
 ## Limits
 
-- The server is one machine. If it goes down, running containers keep running, but nothing new is placed and lost nodes are not rescheduled. `hivemind backup` and `hivemind restore` bring it back on a new machine at the same address. See [backup](docs/backup.md).
-- A node certificate lasts 365 days, and nodes renew theirs on day 243. The only way to revoke one is to remove the node. The cluster CA lasts ten years and cannot be rotated. See [security](docs/security.md#certificate-renewal).
+- The server is one machine. If it goes down, running containers keep running, but nothing new is placed and lost nodes are not rescheduled. In the unreleased 2.1.0, `hivemind backup` and `hivemind restore` bring it back on a new machine at the same address. See [backup](docs/backup.md).
+- A node certificate lasts 365 days. In the unreleased 2.1.0, nodes renew theirs on day 243; a 2.0.0 node cannot renew, so upgrade it within a year of joining (see [upgrading](docs/upgrading.md#from-200)). The only way to revoke one is to remove the node. The cluster CA lasts ten years and cannot be rotated. See [security](docs/security.md#certificate-renewal).
 - A replica with a volume stays on its node. If that node is lost, the app is down until the node returns.
 - `deploy` does not reject a host port that another app already publishes. The second app's replicas go where the port is free. Any that cannot go stay `pending`, with the reason. See [concepts](docs/concepts.md#placement).
 - In 2.0.0, `hivemind logs` cannot read replicas that run on a worker; use `docker logs` on that machine. The unreleased 2.1.0 reads them, when the server and the worker both run it.
