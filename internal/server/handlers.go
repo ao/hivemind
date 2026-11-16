@@ -409,7 +409,7 @@ func (s *Server) appLogs(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if len(cs) == 0 {
-		writeError(w, http.StatusNotFound, fmt.Sprintf("app %q replica %d has no container on this node", name, replica))
+		writeError(w, http.StatusNotFound, s.noContainer(r, name, replica, "this node"))
 		return
 	}
 	c := runtime.PickContainer(cs)
@@ -422,6 +422,36 @@ func (s *Server) appLogs(w http.ResponseWriter, r *http.Request) {
 		// The status line is sent, so the error can only be logged.
 		s.log.Warn("log stream ended with an error", "app", name, "replica", replica, "err", err)
 	}
+}
+
+// noContainer says why a replica has no container to read a log from. One
+// that is pending, waiting for a node or for its node to start it, says so
+// and why, as status does; otherwise the container is missing from where,
+// such as "this node".
+func (s *Server) noContainer(r *http.Request, app string, index int, where string) string {
+	if sts, err := s.statusOf(r, app); err == nil && len(sts) == 1 {
+		for _, rp := range sts[0].Replicas {
+			if rp.Index != index || rp.State != "pending" {
+				continue
+			}
+			why := rp.Error
+			if why == "" {
+				why = rp.PendingReason
+			}
+			if rp.NodeID == "" {
+				if why == "" {
+					why = "it waits for a node"
+				}
+				return fmt.Sprintf("app %q replica %d is pending, with no node, so it has no log yet: %s", app, index, clean(why))
+			}
+			msg := fmt.Sprintf("app %q replica %d is pending on node %s, so it has no container to read a log from yet", app, index, rp.NodeID)
+			if why != "" {
+				msg += ": " + clean(why)
+			}
+			return msg + fmt.Sprintf("; hivemind status %s shows when it runs", app)
+		}
+	}
+	return fmt.Sprintf("app %q replica %d has no container on %s", app, index, where)
 }
 
 // logContext is the context of a log response. A followed stream outlives

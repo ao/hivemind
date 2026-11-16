@@ -107,7 +107,7 @@ func (s *Server) remoteLogs(w http.ResponseWriter, r *http.Request, node string,
 		msg, _ := fr.Message()
 		switch typ {
 		case nodeapi.FrameNotFound:
-			writeError(w, http.StatusNotFound, fmt.Sprintf("%s has no container on node %s", what, node))
+			writeError(w, http.StatusNotFound, s.noContainer(r, q.App, q.Replica, "node "+node))
 		case nodeapi.FrameUnavailable:
 			s.log.Error("container engine unavailable on a node", "node", node, "err", clean(msg))
 			writeError(w, http.StatusServiceUnavailable, fmt.Sprintf("the container engine on node %s is unavailable", node))

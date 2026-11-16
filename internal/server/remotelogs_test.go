@@ -195,7 +195,7 @@ func TestRemoteLogsErrorsFromTheWorker(t *testing.T) {
 		code  int
 		want  string
 	}{
-		{nodeapi.FrameNotFound, http.StatusNotFound, "has no container on node " + workerNode},
+		{nodeapi.FrameNotFound, http.StatusNotFound, "is pending on node " + workerNode + ", so it has no container to read a log from yet"},
 		{nodeapi.FrameUnavailable, http.StatusServiceUnavailable, "container engine on node " + workerNode + " is unavailable"},
 		{nodeapi.FrameFailed, http.StatusBadGateway, "could not read the log: boom"},
 	}

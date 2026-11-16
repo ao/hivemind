@@ -39,6 +39,7 @@ Notable changes to hivemind, newest first. Versions follow [Semantic Versioning]
 - `hivemind node remove` of a node that is ineligible and runs nothing, as after a drain, needs no `--force`, though the node still renews its lease.
 - `serve`, `init` and `join` no longer accept `--server`, and `serve` and `init` no longer accept `--token`. They never used them. `logs` no longer accepts `--json`, which it ignored. Passing one of these flags is now an error. `join --token` is unchanged.
 - A client command with `--server http://...` against an API that serves TLS says `the server at http://... speaks https: use --server https://...`, rather than `server returned 400 Bad Request`.
+- `hivemind logs` of a replica that has no container yet says it is pending, on which node, and why, as `status` does: `app "web" replica 0 is pending on node node-..., so it has no container to read a log from yet: <the pull error>; hivemind status web shows when it runs`, or `is pending, with no node` and the placement reason. Before, it said `has no container on this node`.
 
 ### Fixed
 

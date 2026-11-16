@@ -300,7 +300,7 @@ The log is `text/plain`. Standard output and standard error are both written to 
 
 A replica on a worker is read by that worker, which sends the log to the server as it reads it. Standard output and standard error stay separate frames on the way, and the body is the same as for a replica on the server. The worker has no listener: it takes the request over a poll it keeps open to the server. [Security](security.md#logs-from-workers) describes the routes. The errors that are particular to a worker:
 
-- `404` when the worker has no container for the replica.
+- `404` when the worker has no container for the replica. For a replica that is pending, the message says so and why, as for a replica on the server.
 - `503` when the node is lost (its lease is more than 15 s old), when the container engine on the node is unavailable, or when the server runs without `--advertise` and so cannot reach workers.
 - `504` with `worker node-... did not answer within 10s; is it running?` when the worker did not take the request and start the stream in 10 seconds. The message names the worker's version when it reports one. A worker of version 2.0.0 does not take log requests: once the server has run for a minute, a worker that reports no version and has not polled for log requests gets `worker node-... runs a hivemind older than 2.1, which cannot stream logs; upgrade it`.
 - `429` when the node already has 16 log streams open.
