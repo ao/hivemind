@@ -12,6 +12,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"time"
 
@@ -123,7 +124,13 @@ stores only its SHA-256 digest in the cluster database. The token is printed
 once. init also writes a client config that points the CLI at this server and
 at the token file. With --api-tls-cert, the client config also names that
 certificate as ca-cert, so the CLI on this machine trusts it. init refuses to
-run if a cluster already exists.`,
+run if a cluster already exists.
+
+init takes serve's flags, and writes the ones it is given to
+<data-dir>/hivemind.yaml, with mode 0600, so that a plain hivemind serve uses
+them; certificate paths are written as absolute paths. A config file that
+exists, such as one given with --config, is not changed: init refuses serve
+flags then, before it creates anything.`,
 		Args: cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			return runInit(cmd, cmd.Flags(), clientConfig)
@@ -161,6 +168,24 @@ func runInit(cmd *cobra.Command, flags *pflag.FlagSet, clientConfigFlag string) 
 		} else if !errors.Is(err, fs.ErrNotExist) {
 			return err
 		}
+	}
+	// The serve flags init was given go into the config file, so that a
+	// plain serve, as the quick start and the systemd unit run it, uses
+	// them. A file that exists, as one given with --config must, is the
+	// user's, and is not changed.
+	explicitConfig := flags.Changed("config")
+	_, err = os.Lstat(cfg.ConfigFile)
+	configExists := err == nil
+	if err != nil && !errors.Is(err, fs.ErrNotExist) {
+		return err
+	}
+	serveSettings, err := config.GivenFlags(flags)
+	if err != nil {
+		return err
+	}
+	if len(serveSettings) > 0 && configExists {
+		return fmt.Errorf("%s exists, and init writes the serve settings it is given (%s) to it: put them in that file and run init without them, or remove the file",
+			cfg.ConfigFile, settingFlags(serveSettings))
 	}
 	if err := os.MkdirAll(dir, 0o700); err != nil {
 		return fmt.Errorf("create data directory: %w", err)
@@ -213,6 +238,12 @@ func runInit(cmd *cobra.Command, flags *pflag.FlagSet, clientConfigFlag string) 
 	fmt.Fprintf(out, "Created a cluster in %s (node %s).\n\n", dir, nodeID)
 	fmt.Fprintf(out, "Admin token, shown only this once:\n\n    %s\n\n", token)
 	fmt.Fprintf(out, "It is also saved in %s (mode 0600). The server keeps only its SHA-256 digest.\n", tokenPath)
+	if len(serveSettings) > 0 {
+		if err := config.WriteFile(cfg.ConfigFile, "Written by hivemind init: the serve settings it was given. serve reads this file.", serveSettings); err != nil {
+			return fmt.Errorf("the cluster is created, but writing %s failed: %w; give serve the same flags", cfg.ConfigFile, err)
+		}
+		fmt.Fprintf(out, "The serve settings init was given (%s) are in %s, which serve reads.\n", settingFlags(serveSettings), cfg.ConfigFile)
+	}
 
 	ccPath, err := clientConfigPath(clientConfigFlag)
 	if err != nil {
@@ -239,12 +270,29 @@ func runInit(cmd *cobra.Command, flags *pflag.FlagSet, clientConfigFlag string) 
 			return err
 		}
 	}
-	fmt.Fprintf(out, "\nStart the node with `hivemind serve`. From another shell or machine, use\n\n")
+	serveLine := "hivemind serve"
+	switch {
+	case explicitConfig:
+		serveLine += " --config " + cfg.ConfigFile
+	case flags.Changed("data-dir"):
+		serveLine += " --data-dir " + dir
+	}
+	fmt.Fprintf(out, "\nStart the node with `%s`. From another shell or machine, use\n\n", serveLine)
 	fmt.Fprintf(out, "    export HIVEMIND_SERVER=%s\n    export HIVEMIND_TOKEN=<the token above>\n", serverURL(cfg))
 	if cfg.APITLSCert != "" {
 		fmt.Fprintf(out, "    export %s=<a copy of %s, or the CA that signed it>\n", envCACert, cfg.APITLSCert)
 	}
 	return nil
+}
+
+// settingFlags lists settings as the flags they came from, such as
+// "--api-addr, --advertise".
+func settingFlags(ss []config.Setting) string {
+	names := make([]string, 0, len(ss))
+	for _, s := range ss {
+		names = append(names, "--"+s.Key)
+	}
+	return strings.Join(names, ", ")
 }
 
 // removeCA deletes the CA files init created, after a failed init, so the

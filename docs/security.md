@@ -41,7 +41,7 @@ The server's data directory is created with mode 0700.
 | `admin.token` | 0600 | The admin token, in plain text. This is the only copy |
 | `ca.key` | 0600 | The cluster CA's private key. It can sign any node certificate |
 | `ca.crt` | 0644 | The cluster CA certificate. Public |
-| `hivemind.yaml` | As you create it | Optional settings. hivemind does not write this file. It may hold a `token` if you put one there |
+| `hivemind.yaml` | 0600 when `init` writes it; as you create it otherwise | Optional settings for `serve`. `init` writes the serve flags it was given here; nothing else writes it. A `token` key in it is refused |
 | `hivemind.lock` | 0600 | The pid of the `serve` that holds it locked |
 
 The CLI config that `init` writes is `~/.config/hivemind/config.yaml`, with mode 0600, in a directory that is 0700 when it is created. It names the server and the token file, and with `--api-tls-cert`, the API certificate as `ca-cert`. It does not hold the token.

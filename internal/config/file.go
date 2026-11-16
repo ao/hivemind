@@ -5,7 +5,10 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"os"
+	"path/filepath"
 
+	"github.com/spf13/pflag"
 	"gopkg.in/yaml.v3"
 )
 
@@ -54,6 +57,74 @@ func decodeFile(data []byte, name string, fc *fileConfig) error {
 	// a credential.
 	if fc.Token != nil {
 		return fmt.Errorf("%s: token: the API token does not belong in the config file; set HIVEMIND_TOKEN or --token, or let the client read the token file that init wrote", name)
+	}
+	return nil
+}
+
+// Setting is one setting as the YAML file names it: a key and its value as
+// text.
+type Setting struct {
+	Key   string
+	Value string
+}
+
+// pathKeys are the settings whose value is a file, written as an absolute
+// path so the file means the same from any working directory.
+var pathKeys = map[string]bool{"api-tls-cert": true, "api-tls-key": true}
+
+// GivenFlags returns the node settings set with a flag on fs, in the order
+// Bind registers them, except config and data-dir, which say where the file
+// is. File paths are made absolute. These are what init writes for serve.
+func GivenFlags(fs *pflag.FlagSet) ([]Setting, error) {
+	var out []Setting
+	for _, s := range settings(Options{}.withDefaults()) {
+		if s.client || s.name == "config" || s.name == "data-dir" {
+			continue
+		}
+		f := fs.Lookup(s.name)
+		if f == nil || !f.Changed {
+			continue
+		}
+		v := f.Value.String()
+		if pathKeys[s.name] && v != "" {
+			abs, err := filepath.Abs(v)
+			if err != nil {
+				return nil, fmt.Errorf("--%s %s: %w", s.name, v, err)
+			}
+			v = abs
+		}
+		out = append(out, Setting{Key: s.name, Value: v})
+	}
+	return out, nil
+}
+
+// WriteFile creates the YAML config file path, with mode 0600, holding
+// settings, each value a quoted string, after a comment line, header. It
+// never replaces a file: one that exists is an error that wraps
+// fs.ErrExist. Load reads the file back as it reads one written by hand.
+func WriteFile(path, header string, settings []Setting) error {
+	doc := &yaml.Node{Kind: yaml.MappingNode}
+	for _, s := range settings {
+		doc.Content = append(doc.Content,
+			&yaml.Node{Kind: yaml.ScalarNode, Value: s.Key},
+			&yaml.Node{Kind: yaml.ScalarNode, Value: s.Value, Style: yaml.DoubleQuotedStyle})
+	}
+	b, err := yaml.Marshal(doc)
+	if err != nil {
+		return err
+	}
+	f, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
+	if err != nil {
+		return err
+	}
+	if _, err := f.Write(append([]byte("# "+header+"\n"), b...)); err != nil {
+		f.Close()
+		os.Remove(path)
+		return err
+	}
+	if err := f.Close(); err != nil {
+		os.Remove(path)
+		return err
 	}
 	return nil
 }

@@ -41,7 +41,7 @@ export HIVEMIND_SERVER=http://127.0.0.1:4483
 export HIVEMIND_TOKEN=hm_...
 ```
 
-The API listens on loopback only, so the CLI on another machine cannot reach it at that address. To use the CLI from another machine, serve the API on a non-loopback `--api-addr` with `--api-tls-cert` and `--api-tls-key`, and give that CLI the certificate with `--ca-cert`; see [the API](api.md#tls).
+The API listens on loopback only, so the CLI on another machine cannot reach it at that address. To use the CLI from another machine, serve the API on a non-loopback `--api-addr` with `--api-tls-cert` and `--api-tls-key`, and give that CLI the certificate with `--ca-cert`; see [the API](api.md#tls). `init` takes the same flags as `serve`, and writes the ones it is given to `<data-dir>/hivemind.yaml`, so a plain `hivemind serve` uses them.
 
 `init` refuses to run again on the same data directory, so a second run cannot replace the token.
 

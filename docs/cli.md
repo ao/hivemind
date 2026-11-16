@@ -224,6 +224,12 @@ at the token file. With --api-tls-cert, the client config also names that
 certificate as ca-cert, so the CLI on this machine trusts it. init refuses to
 run if a cluster already exists.
 
+init takes serve's flags, and writes the ones it is given to
+<data-dir>/hivemind.yaml, with mode 0600, so that a plain hivemind serve uses
+them; certificate paths are written as absolute paths. A config file that
+exists, such as one given with --config, is not changed: init refuses serve
+flags then, before it creates anything.
+
 ```
 hivemind init [flags]
 ```
