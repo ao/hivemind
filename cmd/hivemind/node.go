@@ -277,12 +277,35 @@ func runInit(cmd *cobra.Command, flags *pflag.FlagSet, clientConfigFlag string) 
 	case flags.Changed("data-dir"):
 		serveLine += " --data-dir " + dir
 	}
-	fmt.Fprintf(out, "\nStart the node with `%s`. From another shell or machine, use\n\n", serveLine)
-	fmt.Fprintf(out, "    export HIVEMIND_SERVER=%s\n    export HIVEMIND_TOKEN=<the token above>\n", serverURL(cfg))
+	printClientHint(out, cfg, serveLine)
+	return nil
+}
+
+// printClientHint prints init's last lines: how to start the node, and the
+// variables the CLI in another shell needs. Only an API on an address other
+// machines can reach is offered to them: a loopback API is not, and for a
+// wildcard one the URL needs one of this machine's addresses.
+func printClientHint(out io.Writer, cfg *config.Config, serveLine string) {
+	host, port, err := net.SplitHostPort(cfg.APIAddr)
+	ip := net.ParseIP(host)
+	loopback := err == nil && (host == "localhost" || ip != nil && ip.IsLoopback())
+	where, apiURL := "From another shell or machine", serverURL(cfg)
+	switch {
+	case loopback:
+		where = "From another shell on this machine"
+	case err == nil && (host == "" || ip != nil && ip.IsUnspecified()):
+		apiURL = "https://" + net.JoinHostPort("<an address of this machine>", port)
+	}
+	fmt.Fprintf(out, "\nStart the node with `%s`. %s, use\n\n", serveLine, where)
+	fmt.Fprintf(out, "    export HIVEMIND_SERVER=%s\n    export HIVEMIND_TOKEN=<the token above>\n", apiURL)
 	if cfg.APITLSCert != "" {
 		fmt.Fprintf(out, "    export %s=<a copy of %s, or the CA that signed it>\n", envCACert, cfg.APITLSCert)
 	}
-	return nil
+	if loopback {
+		fmt.Fprintf(out, "\nThe API listens on %s, a loopback address, so the CLI on another machine cannot reach it. "+
+			"To use it from there, serve the API on a private address with TLS: --api-addr, --api-tls-cert and --api-tls-key (see docs/api.md#tls).\n",
+			cfg.APIAddr)
+	}
 }
 
 // settingFlags lists settings as the flags they came from, such as

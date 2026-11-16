@@ -1,6 +1,7 @@
 package main
 
 import (
+	"fmt"
 	"net"
 	"os"
 	"path/filepath"
@@ -112,5 +113,44 @@ func TestInitRefusesFlagsOverAnExistingConfigFile(t *testing.T) {
 	// Without flags, init uses the file as it is.
 	if _, _, err := run(t, "", "init", "--data-dir", data); err != nil {
 		t.Fatalf("init with the file and no flags: %v", err)
+	}
+}
+
+// init's last lines offer the CLI on another machine only an API it can
+// reach: not a loopback one, and for a wildcard one, with a placeholder for
+// this machine's address.
+func TestInitSaysWhereTheCLICanReachTheAPI(t *testing.T) {
+	home := isolate(t)
+	ca := newTestCA(t, "test ca")
+	certPEM, keyPEM := ca.issue(t, []net.IP{net.ParseIP("127.0.0.1"), net.ParseIP("10.0.0.5")})
+	cert := writeFile(t, filepath.Join(home, "api.crt"), certPEM)
+	key := writeFile(t, filepath.Join(home, "api.key"), keyPEM)
+	for i, c := range []struct {
+		flags []string
+		want  []string
+		not   string
+	}{
+		{nil, []string{"From another shell on this machine, use", "export HIVEMIND_SERVER=http://127.0.0.1:4483",
+			"The API listens on 127.0.0.1:4483, a loopback address, so the CLI on another machine cannot reach it"}, "From another shell or machine"},
+		{[]string{"--api-addr", "0.0.0.0:4483", "--api-tls-cert", cert, "--api-tls-key", key},
+			[]string{"From another shell or machine, use", "export HIVEMIND_SERVER=https://<an address of this machine>:4483",
+				"export HIVEMIND_CA_CERT=<a copy of " + cert}, "loopback"},
+		{[]string{"--api-addr", "10.0.0.5:4483", "--api-tls-cert", cert, "--api-tls-key", key},
+			[]string{"From another shell or machine, use", "export HIVEMIND_SERVER=https://10.0.0.5:4483"}, "loopback"},
+	} {
+		args := append([]string{"init", "--data-dir", filepath.Join(home, fmt.Sprintf("d%d", i)), "--client-config",
+			filepath.Join(home, fmt.Sprintf("c%d.yaml", i))}, c.flags...)
+		out, _, err := run(t, "", args...)
+		if err != nil {
+			t.Fatalf("%v: %v", c.flags, err)
+		}
+		for _, w := range c.want {
+			if !strings.Contains(out, w) {
+				t.Errorf("%v: no %q in:\n%s", c.flags, w, out)
+			}
+		}
+		if strings.Contains(out, c.not) {
+			t.Errorf("%v: %q in:\n%s", c.flags, c.not, out)
+		}
 	}
 }

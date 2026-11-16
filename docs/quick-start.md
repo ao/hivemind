@@ -26,10 +26,12 @@ Admin token, shown only this once:
 It is also saved in /var/lib/hivemind/admin.token (mode 0600). The server keeps only its SHA-256 digest.
 The CLI on this machine reads the server address and token file from /root/.config/hivemind/config.yaml.
 
-Start the node with `hivemind serve`. From another shell or machine, use
+Start the node with `hivemind serve`. From another shell on this machine, use
 
     export HIVEMIND_SERVER=http://127.0.0.1:4483
     export HIVEMIND_TOKEN=<the token above>
+
+The API listens on 127.0.0.1:4483, a loopback address, so the CLI on another machine cannot reach it. To use it from there, serve the API on a private address with TLS: --api-addr, --api-tls-cert and --api-tls-key (see docs/api.md#tls).
 ```
 
 The paths depend on who runs `init`. On Linux, a user other than root gets `~/.local/state/hivemind` and `~/.config/hivemind/config.yaml`. Setting `--data-dir` or `HIVEMIND_DATA_DIR` moves the data directory.
