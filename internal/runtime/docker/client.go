@@ -206,35 +206,61 @@ func pullNotFound(msg string) bool {
 // daemon's own file system.
 var pullDeniedRE = regexp.MustCompile(`(^|: )denied(:|$)`)
 
-// pullUnauthorized reports whether a pull error says that the registry
-// refused the credential, or wants one. The texts are the daemon's and the
-// registries' own: "no basic auth credentials" when none was sent to a
-// registry that wants one, "unauthorized: ..." for the UNAUTHORIZED error
-// code, "denied: ..." for DENIED, Docker Hub's "pull access denied ...
-// may require 'docker login'", and ECR's "Your authorization token has
-// expired".
-func pullUnauthorized(msg string) bool {
+// pullRefusal reads a failed pull's HTTP status (0 for an error in the
+// progress stream) and message. refused is true when the registry refused
+// the pull for want of a credential, or refused the one sent. ambiguous is
+// true when the registry said so in words it also uses for an image that
+// does not exist, as Docker Hub does for a private repository. reason is a
+// short, fixed description, with nothing the registry said in it.
+//
+// The words are the daemon's and the registries'. With the classic image
+// store: "no basic auth credentials", "unauthorized: authentication
+// required", and Docker Hub's "pull access denied for <repo>, repository
+// does not exist or may require 'docker login': denied: requested access to
+// the resource is denied". With the containerd image store (the default of
+// a new Docker 29 daemon, docker:dind included): "pull access denied,
+// repository does not exist or may require authorization: authorization
+// failed: no basic auth credentials" without a credential, and "unexpected
+// status from HEAD request to <url>: 401 Unauthorized" with a wrong one.
+// ECR says "denied: Your authorization token has expired".
+func pullRefusal(status int, msg string) (refused, ambiguous bool, reason string) {
 	m := strings.ToLower(msg)
-	for _, s := range []string{"unauthorized", "no basic auth credentials", "authentication required",
-		"pull access denied", "may require 'docker login'", "requested access to the resource is denied",
-		"authorization token has expired", "incorrect username or password"} {
-		if strings.Contains(m, s) {
-			return true
+	has := func(ss ...string) bool {
+		for _, s := range ss {
+			if strings.Contains(m, s) {
+				return true
+			}
 		}
+		return false
 	}
-	return pullDeniedRE.MatchString(m)
+	switch {
+	case has("no basic auth credentials"):
+		return true, false, "no credential"
+	case has("token has expired"):
+		return true, false, "the token has expired"
+	case has("incorrect username or password"):
+		return true, false, "incorrect username or password"
+	case status == http.StatusUnauthorized || has("unauthorized", "authentication required"):
+		return true, false, "unauthorized"
+	case status == http.StatusForbidden || has("403 forbidden"):
+		return true, false, "forbidden"
+	case has("pull access denied", "may require 'docker login'", "may require authorization",
+		"requested access to the resource is denied") || pullDeniedRE.MatchString(m):
+		return true, true, "no such image, or no access to it"
+	}
+	return false, false, ""
 }
 
 // classifyPull maps a failed pull, from its HTTP status (0 for an error in
 // the progress stream) and message, to a typed error.
 func classifyPull(status int, msg string) *runtime.Error {
 	e := classify("pull", status, msg)
-	auth := status == http.StatusUnauthorized || status == http.StatusForbidden || pullUnauthorized(msg)
-	notFound := errors.Is(e.Err, runtime.ErrNotFound) || pullNotFound(msg)
+	refused, ambiguous, _ := pullRefusal(status, msg)
+	notFound := ambiguous || (!refused && (errors.Is(e.Err, runtime.ErrNotFound) || pullNotFound(msg)))
 	switch {
-	case auth && notFound:
+	case refused && notFound:
 		e.Err = errors.Join(runtime.ErrNotFound, runtime.ErrUnauthorized)
-	case auth:
+	case refused:
 		e.Err = runtime.ErrUnauthorized
 	case notFound:
 		e.Err = runtime.ErrNotFound

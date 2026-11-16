@@ -74,7 +74,8 @@ func (c *Client) Pull(ctx context.Context, ref string, auth *runtime.RegistryAut
 	fail := func(status int, msg string) error {
 		e := classifyPull(status, msg)
 		if auth != nil && errors.Is(e.Err, runtime.ErrUnauthorized) {
-			e.Message = "the registry refused the pull (" + unauthorizedReason(status, msg) + ")"
+			_, _, reason := pullRefusal(status, msg)
+			e.Message = "the registry refused the pull (" + reason + ")"
 		} else {
 			e.Message = redact(e.Message, auth, header)
 		}
@@ -151,26 +152,6 @@ func EncodeRegistryAuth(a runtime.RegistryAuth) (string, error) {
 		return "", err
 	}
 	return base64.URLEncoding.EncodeToString(b), nil
-}
-
-// unauthorizedReason is the part of a refused pull's error that is safe to
-// show: the HTTP status, or which kind of refusal the registry gave. The
-// registry's own text is left out.
-func unauthorizedReason(status int, msg string) string {
-	m := strings.ToLower(msg)
-	switch {
-	case strings.Contains(m, "no basic auth credentials"):
-		return "no credential"
-	case strings.Contains(m, "token has expired"):
-		return "the token has expired"
-	case strings.Contains(m, "pull access denied"), strings.Contains(m, "may require 'docker login'"):
-		return "no such image, or no access to it"
-	case pullDeniedRE.MatchString(m), strings.Contains(m, "access to the resource is denied"):
-		return "access denied"
-	case status == http.StatusForbidden:
-		return "403 forbidden"
-	}
-	return "unauthorized"
 }
 
 // accountRE matches the account parameter of a registry token request,

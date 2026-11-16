@@ -94,10 +94,15 @@ func TestPullRefusedByTheRegistry(t *testing.T) {
 		{"no credential, before the stream", 500, `{"message":"Head \"https://reg.example.com/v2/acme/app/manifests/1\": no basic auth credentials"}`, true, false, "no credential"},
 		{"wrong credential", 500, `{"message":"Head \"https://reg.example.com/v2/acme/app/manifests/1\": unauthorized: authentication required"}`, true, false, "unauthorized"},
 		{"401", 401, `{"message":"something"}`, true, false, "unauthorized"},
-		{"403", 403, `{"message":"something"}`, true, false, "403"},
-		{"token request names the account", 500, `{"message":"` + strings.ReplaceAll(tokenURL, `"`, `\"`) + `unauthorized: incorrect username or password"}`, true, false, "unauthorized"},
+		{"403", 403, `{"message":"something"}`, true, false, "forbidden"},
+		{"token request names the account", 500, `{"message":"` + strings.ReplaceAll(tokenURL, `"`, `\"`) + `unauthorized: incorrect username or password"}`, true, false, "incorrect username or password"},
 		{"Docker Hub, private or missing, in the stream", 200, `{"error":"pull access denied for acme/app, repository does not exist or may require 'docker login': denied: requested access to the resource is denied"}` + "\n", true, true, "no such image, or no access"},
-		{"denied", 500, `{"message":"Head \"https://ghcr.io/v2/acme/app/manifests/1\": denied"}`, true, false, "access denied"},
+		{"denied", 500, `{"message":"Head \"https://ghcr.io/v2/acme/app/manifests/1\": denied"}`, true, true, "no such image, or no access"},
+		// The containerd image store's words, from a Docker 29 daemon
+		// (docker:dind) against registry:2 with htpasswd.
+		{"containerd store, no credential", 500, `{"message":"failed to resolve reference \"reg.example.com/acme/app:1\": pull access denied, repository does not exist or may require authorization: authorization failed: no basic auth credentials"}`, true, false, "no credential"},
+		{"containerd store, wrong credential", 500, `{"message":"unknown: failed to resolve reference \"reg.example.com/acme/app:1\": unexpected status from HEAD request to https://reg.example.com/v2/acme/app/manifests/1: 401 Unauthorized"}`, true, false, "unauthorized"},
+		{"containerd store, Docker Hub", 500, `{"message":"failed to resolve reference \"docker.io/acme/app:1\": pull access denied, repository does not exist or may require authorization: server message: insufficient_scope: authorization failed"}`, true, true, "no such image, or no access"},
 		{"ECR token expired", 200, `{"status":"Pulling"}` + "\n" + `{"error":"denied: Your authorization token has expired. Reauthenticate and try again."}` + "\n", true, false, "expired"},
 		{"local permission denied", 500, `{"message":"open /var/lib/docker/tmp/x: permission denied"}`, false, false, "permission denied"},
 		{"manifest unknown", 404, `{"message":"manifest for reg.example.com/acme/app:1 not found: manifest unknown"}`, false, true, "manifest unknown"},
