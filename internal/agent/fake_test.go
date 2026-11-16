@@ -33,6 +33,9 @@ type fakeRuntime struct {
 	// private maps an image to the credential a pull of it needs.
 	private   map[string]runtime.RegistryAuth
 	pullAuths []*runtime.RegistryAuth
+	// pullFn, when set, runs before each pull, without the lock, so it may
+	// block until ctx ends; a non-nil error is the pull's.
+	pullFn func(ctx context.Context, image string) error
 }
 
 type fakeContainer struct {
@@ -59,7 +62,15 @@ func (f *fakeRuntime) Info(context.Context) (runtime.Info, error) {
 	return runtime.Info{NCPU: 2, MemTotal: 1 << 30}, nil
 }
 
-func (f *fakeRuntime) Pull(_ context.Context, image string, auth *runtime.RegistryAuth) error {
+func (f *fakeRuntime) Pull(ctx context.Context, image string, auth *runtime.RegistryAuth) error {
+	f.mu.Lock()
+	fn := f.pullFn
+	f.mu.Unlock()
+	if fn != nil {
+		if err := fn(ctx, image); err != nil {
+			return err
+		}
+	}
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.pullAuths = append(f.pullAuths, auth)

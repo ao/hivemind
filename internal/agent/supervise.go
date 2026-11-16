@@ -293,12 +293,14 @@ func (a *Agent) wake() time.Time {
 	return a.wakeAt
 }
 
-// Close stops the health probes. Run calls it when it returns. A closed agent
-// can still reconcile, and starts new probes as it needs them.
+// Close stops the health probes and the pulls in flight. Run calls it when
+// it returns. A closed agent can still reconcile, and starts new probes and
+// pulls as it needs them.
 func (a *Agent) Close() {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	for name := range a.probes {
 		a.stopProbe(name)
 	}
+	a.cancelPulls()
 }
