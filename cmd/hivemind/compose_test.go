@@ -18,6 +18,7 @@ import (
 	"github.com/ao/hivemind/internal/auth"
 	"github.com/ao/hivemind/internal/compose"
 	"github.com/ao/hivemind/internal/server"
+	"github.com/ao/hivemind/internal/spec"
 	"github.com/ao/hivemind/internal/store"
 )
 
@@ -160,6 +161,13 @@ func TestComposeMaxFileIsDeploys(t *testing.T) {
 // the client at it.
 func composeAPI(t *testing.T) *store.Store {
 	t.Helper()
+	return composeAPIWith(t, nil)
+}
+
+// composeAPIWith is composeAPI with the handler passed through wrap, when
+// it is set.
+func composeAPIWith(t *testing.T, wrap func(*store.Store, http.Handler) http.Handler) *store.Store {
+	t.Helper()
 	home := isolate(t)
 	ctx := context.Background()
 	st, err := store.Open(ctx, filepath.Join(home, "d", storeFileName), store.WithMinReady(0))
@@ -178,7 +186,11 @@ func composeAPI(t *testing.T) *store.Store {
 	if err != nil {
 		t.Fatal(err)
 	}
-	ts := httptest.NewServer(api.Handler())
+	h := api.Handler()
+	if wrap != nil {
+		h = wrap(st, h)
+	}
+	ts := httptest.NewServer(h)
 	t.Cleanup(ts.Close)
 	t.Setenv(envServer, ts.URL)
 	t.Setenv(envToken, tok)
@@ -240,7 +252,7 @@ func TestComposeDeployAndDelete(t *testing.T) {
 
 	// A wrong token is refused.
 	other, _ := auth.NewToken()
-	if _, _, err = run(t, "", "compose", "deploy", path, "--token", other); err == nil || !strings.Contains(err.Error(), "deploying app db: unauthorized") {
+	if _, _, err = run(t, "", "compose", "deploy", path, "--token", other); err == nil || !strings.Contains(err.Error(), "reading app db before deploying: unauthorized") {
 		t.Fatalf("wrong token: %v", err)
 	}
 
@@ -276,6 +288,12 @@ func TestComposeStopsAtAServerError(t *testing.T) {
 	var n atomic.Int32
 	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
+		if r.Method == http.MethodGet {
+			// compose deploy's check before the first write: no such app.
+			w.WriteHeader(http.StatusNotFound)
+			w.Write([]byte(`{"error":"app not found"}`))
+			return
+		}
 		if n.Add(1) > 1 {
 			w.WriteHeader(http.StatusInternalServerError)
 			w.Write([]byte(`{"error":"the store is read-only"}`))
@@ -338,17 +356,21 @@ func TestComposeDeployRefusesAnAppItDidNotDeploy(t *testing.T) {
 	}
 	shop := writeComposeIn(t, "Shop.App", "services:\n  web: {image: nginx:alpine}\n  api: {image: nginx:alpine}\n")
 	out, _, err := run(t, "", "compose", "deploy", shop)
-	want := "deploying app web: conflict: app web was deployed with hivemind deploy or the API, not from compose project shopapp; " +
-		"hivemind compose deploy --replace (replace=true in the API) updates it anyway; already deployed: api"
-	if err == nil || err.Error() != want || out != "api: created, generation 1, 1 replica\n" {
+	want := "conflict: app web was deployed with hivemind deploy or the API, not from compose project shopapp; " +
+		"hivemind compose deploy --replace (replace=true in the API) updates it anyway; nothing was deployed"
+	if err == nil || err.Error() != want || out != "" {
 		t.Fatalf("compose deploy over an app it did not deploy: %q, %v\nwant the error %q", out, err, want)
 	}
 	if web, err := st.GetApp(ctx, "web"); err != nil || web.Spec.Image != "httpd:2" || web.Generation != 1 || web.Origin != "" {
 		t.Fatalf("web after the refused deploy: %+v, %v; want it unchanged", web, err)
 	}
+	// api comes before web, and is new, but the file was refused whole.
+	if _, err := st.GetApp(ctx, "api"); !errors.Is(err, store.ErrNotFound) {
+		t.Fatalf("api after the refused deploy: %v; want it not deployed", err)
+	}
 
 	out, _, err = run(t, "", "compose", "deploy", shop, "--replace")
-	if err != nil || out != "api: updated, generation 1, 1 replica\nweb: updated, generation 2, 1 replica\n" {
+	if err != nil || out != "api: created, generation 1, 1 replica\nweb: updated, generation 2, 1 replica\n" {
 		t.Fatalf("compose deploy --replace: %q, %v", out, err)
 	}
 	if web, err := st.GetApp(ctx, "web"); err != nil || web.Spec.Image != "nginx:alpine" || web.Origin != "compose:shopapp" {
@@ -376,5 +398,49 @@ func TestComposeDeployRefusesAnAppItDidNotDeploy(t *testing.T) {
 	if v, _, err := run(t, "", "compose", "deploy", writeComposeIn(t, "x", "name: Blog\nservices:\n  web: {image: caddy:2}\n")); err == nil ||
 		!strings.Contains(err.Error(), "name: a project name is 1 to 64 lowercase letters") {
 		t.Fatalf("compose deploy with a bad project name: %q, %v", v, err)
+	}
+
+	// Every app that belongs to something else is named, and none of the
+	// file is deployed.
+	if _, _, err := run(t, "", "deploy", "--name", "cache", "--image", "redis:7"); err != nil {
+		t.Fatal(err)
+	}
+	both := writeComposeIn(t, "blog", "services:\n  a-new: {image: caddy:2}\n  cache: {image: redis:7}\n  web: {image: caddy:2}\n")
+	out, _, err = run(t, "", "compose", "deploy", both)
+	want = "conflict: app cache was deployed with hivemind deploy or the API, not from compose project blog; " +
+		"app web was deployed from compose project shopapp, not from compose project blog; " +
+		"hivemind compose deploy --replace (replace=true in the API) updates them anyway; nothing was deployed"
+	if err == nil || err.Error() != want || out != "" {
+		t.Fatalf("compose deploy over two apps it did not deploy: %q, %v\nwant the error %q", out, err, want)
+	}
+	if _, err := st.GetApp(ctx, "a-new"); !errors.Is(err, store.ErrNotFound) {
+		t.Fatalf("a-new after the refused deploy: %v", err)
+	}
+}
+
+// The check before the first write does not replace the store's own: an app
+// that hivemind deploy takes between the check and the write is still
+// refused, and the error names the apps deployed before it.
+func TestComposeDeployRefusesAnAppTakenAfterTheCheck(t *testing.T) {
+	var took atomic.Bool
+	st := composeAPIWith(t, func(st *store.Store, h http.Handler) http.Handler {
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if r.Method == http.MethodPut && r.URL.Path == "/v1/apps/web" && took.CompareAndSwap(false, true) {
+				if _, err := st.PutApp(r.Context(), spec.App{Name: "web", Image: "httpd:2", Replicas: 1}); err != nil {
+					t.Error(err)
+				}
+			}
+			h.ServeHTTP(w, r)
+		})
+	})
+	shop := writeComposeIn(t, "shop", "services:\n  web: {image: nginx:alpine}\n  api: {image: nginx:alpine}\n")
+	out, _, err := run(t, "", "compose", "deploy", shop)
+	want := "deploying app web: conflict: app web was deployed with hivemind deploy or the API, not from compose project shop; " +
+		"hivemind compose deploy --replace (replace=true in the API) updates it anyway; already deployed: api"
+	if err == nil || err.Error() != want || out != "api: created, generation 1, 1 replica\n" {
+		t.Fatalf("compose deploy racing hivemind deploy: %q, %v\nwant the error %q", out, err, want)
+	}
+	if web, err := st.GetApp(context.Background(), "web"); err != nil || web.Spec.Image != "httpd:2" || web.Origin != "" {
+		t.Fatalf("web after the race: %+v, %v", web, err)
 	}
 }

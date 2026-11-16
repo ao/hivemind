@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"io"
@@ -15,6 +16,7 @@ import (
 
 	"github.com/ao/hivemind/internal/compose"
 	"github.com/ao/hivemind/internal/server"
+	"github.com/ao/hivemind/internal/store"
 )
 
 func composeCmd() *cobra.Command {
@@ -85,9 +87,13 @@ deployed it, so running it again is safe, and it refuses an app of the same
 name that hivemind deploy, the API or another project deployed. --replace
 updates such an app anyway, and the project takes it over.
 
-Nothing is sent until every service converts and its spec is valid. If the
-server refuses an app, the command stops there: the apps before it stay
-deployed, and the error names them.`,
+Nothing is sent until every service converts and its spec is valid. Then,
+without --replace, deploy reads each app from the server before the first
+write, and if any of them belongs to something else, it refuses the whole
+file, naming every such app, and deploys nothing. If the server refuses an
+app after that, the command stops there: the apps before it stay deployed,
+and the error names them. The server checks the origin again at each write,
+so an app that another deploy took in the meantime is still refused.`,
 		Args: cobra.ExactArgs(1),
 	}
 	cf := addClientFlags(cmd)
@@ -102,13 +108,19 @@ deployed, and the error names them.`,
 		if err != nil {
 			return err
 		}
-		q := url.Values{"origin": {"compose:" + project}}
+		origin := "compose:" + project
+		q := url.Values{"origin": {origin}}
 		if *replace {
 			q.Set("replace", "true")
 		}
 		c, err := cf.client()
 		if err != nil {
 			return err
+		}
+		if !*replace {
+			if err := composeOwnerCheck(cmd.Context(), c, res.Apps, origin); err != nil {
+				return err
+			}
 		}
 		results := []server.PutResult{}
 		var done []string
@@ -134,6 +146,35 @@ deployed, and the error names them.`,
 		return nil
 	}
 	return cmd
+}
+
+// composeOwnerCheck reads each app before the first write, and refuses the
+// whole file, so that nothing is deployed, when any of them exists with
+// another origin than origin: another project's, or none, from hivemind
+// deploy or the API. The store checks again at each write, which refuses an
+// app that changed hands after this check.
+func composeOwnerCheck(ctx context.Context, c *apiClient, apps []compose.App, origin string) error {
+	var conflicts []string
+	project := strings.TrimPrefix(store.OriginText(origin), "from ")
+	for _, a := range apps {
+		var v server.AppView
+		err := c.call(ctx, "GET", appPath(a.Spec.Name), nil, &v)
+		var ae *apiError
+		switch {
+		case err == nil:
+			if v.Origin != origin {
+				conflicts = append(conflicts, fmt.Sprintf("app %s was deployed %s, not from %s", a.Spec.Name, store.OriginText(v.Origin), project))
+			}
+		case errors.As(err, &ae) && ae.status == http.StatusNotFound:
+		default:
+			return fmt.Errorf("reading app %s before deploying: %w; nothing was deployed", a.Spec.Name, err)
+		}
+	}
+	if len(conflicts) == 0 {
+		return nil
+	}
+	return fmt.Errorf("conflict: %s; hivemind compose deploy --replace (replace=true in the API) updates %s anyway; nothing was deployed",
+		strings.Join(conflicts, "; "), plural(len(conflicts), "it", "them"))
 }
 
 // composeProject is the compose project of the file at path: the file's

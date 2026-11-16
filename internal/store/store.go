@@ -445,7 +445,7 @@ func (s *Store) PutAppWith(ctx context.Context, a spec.App, o PutOptions) (App, 
 				origin = o.Origin
 			case o.Origin != "" && origin != o.Origin && !o.Replace:
 				return fmt.Errorf("%w: app %s was deployed %s, not from %s; hivemind compose deploy --replace "+
-					"(replace=true in the API) updates it anyway", ErrConflict, c.Name, originText(origin), strings.TrimPrefix(originText(o.Origin), "from "))
+					"(replace=true in the API) updates it anyway", ErrConflict, c.Name, OriginText(origin), strings.TrimPrefix(OriginText(o.Origin), "from "))
 			case o.Origin != "":
 				origin = o.Origin
 			}
@@ -495,9 +495,9 @@ func (s *Store) PutAppWith(ctx context.Context, a spec.App, o PutOptions) (App, 
 	return out, err
 }
 
-// originText says where an app with origin o came from, for messages: "from
+// OriginText says where an app with origin o came from, for messages: "from
 // compose project shop", or "with hivemind deploy or the API" for none.
-func originText(o string) string {
+func OriginText(o string) string {
 	switch {
 	case o == "":
 		return "with hivemind deploy or the API"

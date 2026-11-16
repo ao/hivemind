@@ -152,9 +152,13 @@ deployed it, so running it again is safe, and it refuses an app of the same
 name that hivemind deploy, the API or another project deployed. --replace
 updates such an app anyway, and the project takes it over.
 
-Nothing is sent until every service converts and its spec is valid. If the
-server refuses an app, the command stops there: the apps before it stay
-deployed, and the error names them.
+Nothing is sent until every service converts and its spec is valid. Then,
+without --replace, deploy reads each app from the server before the first
+write, and if any of them belongs to something else, it refuses the whole
+file, naming every such app, and deploys nothing. If the server refuses an
+app after that, the command stops there: the apps before it stay deployed,
+and the error names them. The server checks the origin again at each write,
+so an app that another deploy took in the meantime is still refused.
 
 ```
 hivemind compose deploy <file> [flags]

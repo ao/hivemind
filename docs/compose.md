@@ -14,13 +14,15 @@ Only part of the [Compose specification](https://github.com/compose-spec/compose
 
 `convert` prints one YAML document per service, sorted by service name. Each document is an app spec that `hivemind deploy -f` accepts. It sends nothing to the server.
 
-`deploy` converts the file and validates every app before it sends anything. Then it creates or updates each app in name order, as `hivemind deploy -f` does, and prints a line for each. If the server refuses an app, `deploy` stops there; the apps before it stay deployed, and the error names them.
+`deploy` converts the file and validates every app before it sends anything, and checks who deployed each app (below). Then it creates or updates each app in name order, as `hivemind deploy -f` does, and prints a line for each. If the server refuses an app, `deploy` stops there; the apps before it stay deployed, and the error names them.
 
-Each app records the project that deployed it: the file's top-level `name`, or else the name of the file's directory, lowercased and without the characters a project name cannot have, as Docker Compose takes it (the working directory for `-`). `deploy` updates only an app that the same project deployed, so running it again is safe. An app of the same name that `hivemind deploy`, the API or another project deployed is refused, and left as it is:
+Each app records the project that deployed it: the file's top-level `name`, or else the name of the file's directory, lowercased and without the characters a project name cannot have, as Docker Compose takes it (the working directory for `-`). `deploy` updates only an app that the same project deployed, so running it again is safe. Before the first write it reads every app of the file from the server. If an app of the same name exists that `hivemind deploy`, the API or another project deployed, the whole file is refused, every such app is named, and nothing is deployed:
 
 ```
-error: deploying app web: conflict: app web was deployed with hivemind deploy or the API, not from compose project shop; hivemind compose deploy --replace (replace=true in the API) updates it anyway; already deployed: db
+error: conflict: app web was deployed with hivemind deploy or the API, not from compose project shop; hivemind compose deploy --replace (replace=true in the API) updates it anyway; nothing was deployed
 ```
+
+The server checks the project again at each write, so an app that another deploy takes after that first read is still refused; then `deploy` stops at it, and the error names the apps already deployed, as for any other refusal.
 
 `--replace` updates such an app, and the project then owns it. `hivemind deploy` can still update an app a project deployed, and the app stays the project's. Apps deployed with `compose deploy` before this check have no project, so the first `deploy` after an upgrade needs `--replace`.
 
