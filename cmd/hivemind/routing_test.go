@@ -10,6 +10,8 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -55,27 +57,117 @@ func (f *fakeRegistrar) Register(_ context.Context, _ string, g nodeapi.Register
 
 func TestRegisterFallsBackForAnOlderServer(t *testing.T) {
 	ctx := context.Background()
-	logs := &syncLog{}
-	log := slog.New(slog.NewTextHandler(logs, nil))
 	reg := nodeapi.Register{Name: "w", CPU: 2, Memory: 1 << 30, Address: "10.0.0.6"}
 
 	newer := &fakeRegistrar{}
-	if err := registerWith(ctx, newer, "node-w", reg, log); err != nil || len(newer.calls) != 1 || newer.calls[0].Address != "10.0.0.6" {
-		t.Fatalf("a 2.2 server: %v, %+v", err, newer.calls)
+	if refused, err := registerWith(ctx, newer, "node-w", reg); err != nil || refused || len(newer.calls) != 1 || newer.calls[0].Address != "10.0.0.6" {
+		t.Fatalf("a 2.2 server: %v %v, %+v", refused, err, newer.calls)
 	}
 	older := &fakeRegistrar{old: true}
-	if err := registerWith(ctx, older, "node-w", reg, log); err != nil || len(older.calls) != 2 || older.calls[1].Address != "" {
-		t.Fatalf("an older server: %v, %+v", err, older.calls)
-	}
-	if !strings.Contains(logs.String(), "takes no routed replicas") {
-		t.Errorf("the fallback was not logged: %s", logs.String())
+	if refused, err := registerWith(ctx, older, "node-w", reg); err != nil || !refused || len(older.calls) != 2 || older.calls[1].Address != "" {
+		t.Fatalf("an older server: %v %v, %+v", refused, err, older.calls)
 	}
 	// Without an address there is nothing to retry.
 	noAddr := &fakeRegistrar{old: true}
 	reg.Address = ""
-	if err := registerWith(ctx, noAddr, "node-w", reg, log); err != nil || len(noAddr.calls) != 1 {
-		t.Fatalf("no address: %v, %+v", err, noAddr.calls)
+	if refused, err := registerWith(ctx, noAddr, "node-w", reg); err != nil || refused || len(noAddr.calls) != 1 {
+		t.Fatalf("no address: %v %v, %+v", refused, err, noAddr.calls)
 	}
+}
+
+// upgradable is a server that refuses node addresses until it is upgraded,
+// and then sends its version, which changes ServerChanged.
+type upgradable struct {
+	mu       sync.Mutex
+	upgraded bool
+	version  string
+	changed  chan struct{}
+	fakeRegistrar
+}
+
+func (u *upgradable) ServerVersion() string {
+	u.mu.Lock()
+	defer u.mu.Unlock()
+	return u.version
+}
+
+func (u *upgradable) ServerChanged() <-chan struct{} {
+	u.mu.Lock()
+	defer u.mu.Unlock()
+	return u.changed
+}
+
+func (u *upgradable) Register(ctx context.Context, id string, g nodeapi.Register) error {
+	u.mu.Lock()
+	defer u.mu.Unlock()
+	u.old = !u.upgraded
+	return u.fakeRegistrar.Register(ctx, id, g)
+}
+
+func (u *upgradable) upgrade() {
+	u.mu.Lock()
+	defer u.mu.Unlock()
+	u.upgraded, u.version = true, "v2.2.0"
+	close(u.changed)
+	u.changed = make(chan struct{})
+}
+
+func (u *upgradable) addresses() []string {
+	u.mu.Lock()
+	defer u.mu.Unlock()
+	var out []string
+	for _, c := range u.calls {
+		out = append(out, c.Address)
+	}
+	return out
+}
+
+// A worker whose address an older server refused registers it once the
+// server is upgraded, without a restart: at once when the server's version
+// changes, and on the retry timer when it does not.
+func TestWorkerRegistersItsAddressAfterTheServerUpgrade(t *testing.T) {
+	srv := &upgradable{changed: make(chan struct{})}
+	var refused atomic.Bool
+	reg := nodeapi.Register{Name: "w", Address: "10.0.0.6"}
+	register := func(ctx context.Context) error {
+		r, err := registerWith(ctx, srv, "node-w", reg)
+		refused.Store(r)
+		return err
+	}
+	if err := register(context.Background()); err != nil || !refused.Load() {
+		t.Fatalf("first registration with an old server: %v, refused %v", err, refused.Load())
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		retryAddress(ctx, srv, refused.Load, register, time.Hour, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	}()
+	defer func() {
+		cancel()
+		<-done
+	}()
+	time.Sleep(50 * time.Millisecond)
+	if n := len(srv.addresses()); n != 2 {
+		t.Fatalf("%d registrations before the server changed, want 2: %v", n, srv.addresses())
+	}
+	srv.upgrade()
+	waitUntil(t, "the address registered", func() bool { return !refused.Load() })
+	if got := srv.addresses(); got[len(got)-1] != "10.0.0.6" {
+		t.Fatalf("registrations %q: the last has no address", got)
+	}
+
+	// With no change of version, the timer retries.
+	srv2 := &upgradable{changed: make(chan struct{})}
+	refused.Store(true)
+	ctx2, cancel2 := context.WithCancel(context.Background())
+	defer cancel2()
+	go retryAddress(ctx2, srv2, refused.Load, func(ctx context.Context) error {
+		r, err := registerWith(ctx, srv2, "node-w", reg)
+		refused.Store(r)
+		return err
+	}, 20*time.Millisecond, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	waitUntil(t, "a retry on the timer", func() bool { return len(srv2.addresses()) >= 4 })
 }
 
 // serve with --route-addr runs the router on that address beside the API:

@@ -24,6 +24,11 @@ func nodesCmd() *cobra.Command {
 them, the age of its lease, whether it is ready or lost, and how many replicas
 are placed on it. A node is lost when its lease is more than 15 s old.
 
+ADDRESS is the node's private address, where its routed replicas publish
+their ports. "-" means it reported none: such a node takes no routed replicas.
+A worker whose server refused its address, as a server older than 2.2 does,
+registers it again once the server is upgraded.
+
 VERSION is the hivemind version the node reports with each request; the
 server's own node shows the server's. "-" means the node reports none, which
 a version older than 2.2 does.
@@ -66,7 +71,7 @@ func printNodes(out io.Writer, nodes []server.NodeView) {
 		return
 	}
 	tw := tabwriter.NewWriter(out, 0, 4, 2, ' ', 0)
-	fmt.Fprintln(tw, "ID\tNAME\tROLE\tVERSION\tCPU\tMEMORY\tLEASE AGE\tSTATE\tELIGIBILITY\tREPLICAS\tCERT EXPIRES")
+	fmt.Fprintln(tw, "ID\tNAME\tROLE\tADDRESS\tVERSION\tCPU\tMEMORY\tLEASE AGE\tSTATE\tELIGIBILITY\tREPLICAS\tCERT EXPIRES")
 	now := time.Now()
 	for _, n := range nodes {
 		role := "worker"
@@ -74,9 +79,9 @@ func printNodes(out io.Writer, nodes []server.NodeView) {
 			role = "server"
 		}
 		age := (time.Duration(n.LeaseAgeSeconds * float64(time.Second))).Round(time.Second)
-		fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%d\t%s\t%s\t%s\t%s\t%d\t%s\n", n.ID, firstNonEmpty(n.Name, "-"), role,
-			firstNonEmpty(n.Version, "-"), n.CPU, bytesIEC(n.Memory), age, n.State, eligibility(n), n.Replicas,
-			certExpiry(n.CertNotAfter, n.CertNotRenewing, now))
+		fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%s\t%d\t%s\t%s\t%s\t%s\t%d\t%s\n", n.ID, firstNonEmpty(n.Name, "-"), role,
+			firstNonEmpty(n.Address, "-"), firstNonEmpty(n.Version, "-"), n.CPU, bytesIEC(n.Memory), age, n.State,
+			eligibility(n), n.Replicas, certExpiry(n.CertNotAfter, n.CertNotRenewing, now))
 	}
 	tw.Flush()
 }

@@ -85,7 +85,7 @@ func TestNodesCommands(t *testing.T) {
 	if err := st.InitCluster(ctx, store.Cluster{AdminTokenHash: [32]byte{1}, NodeID: "node-s"}); err != nil {
 		t.Fatal(err)
 	}
-	for _, n := range []store.Node{{ID: "node-s", Name: "srv", CPU: 4, Memory: 8 << 30, Version: "v2.2.0"}, {ID: "node-w", Name: "wrk", CPU: 2, Memory: 1 << 30}} {
+	for _, n := range []store.Node{{ID: "node-s", Name: "srv", CPU: 4, Memory: 8 << 30, Version: "v2.2.0", Address: "10.0.0.5"}, {ID: "node-w", Name: "wrk", CPU: 2, Memory: 1 << 30}} {
 		if err := st.UpsertNode(ctx, n); err != nil {
 			t.Fatal(err)
 		}
@@ -116,9 +116,9 @@ func TestNodesCommands(t *testing.T) {
 		t.Fatalf("nodes table:\n%s", out)
 	}
 	for _, want := range []map[string]string{
-		{"ID": "node-s", "NAME": "srv", "ROLE": "server", "VERSION": "v2.2.0", "CPU": "4", "MEMORY": "8.0Gi", "STATE": "ready",
+		{"ID": "node-s", "NAME": "srv", "ROLE": "server", "ADDRESS": "10.0.0.5", "VERSION": "v2.2.0", "CPU": "4", "MEMORY": "8.0Gi", "STATE": "ready",
 			"ELIGIBILITY": "eligible", "REPLICAS": "1", "CERT EXPIRES": "-"},
-		{"ID": "node-w", "NAME": "wrk", "ROLE": "worker", "VERSION": "-", "CPU": "2", "MEMORY": "1.0Gi", "STATE": "ready",
+		{"ID": "node-w", "NAME": "wrk", "ROLE": "worker", "ADDRESS": "-", "VERSION": "-", "CPU": "2", "MEMORY": "1.0Gi", "STATE": "ready",
 			"ELIGIBILITY": "eligible", "REPLICAS": "1", "CERT EXPIRES": "-"},
 	} {
 		if !hasRow(rows, want) {

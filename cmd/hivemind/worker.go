@@ -17,6 +17,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"github.com/spf13/cobra"
@@ -351,15 +352,29 @@ func runWorker(ctx context.Context, cfg *config.Config, log *slog.Logger, rt run
 		log: renewLog, now: time.Now, missing: nodeapi.NewMissingRoute(client, "certificate renewal", renewLog)}).run(renewCtx)
 	hostname, _ := os.Hostname()
 	// addr is the node's private address, where its routed replicas publish
-	// their ports. It is found before the first registration, and kept.
+	// their ports. It is found before the first registration, and kept. A
+	// server older than 2.2 refuses it; addrRefused records that, and the
+	// worker registers it again once the server takes it (retryAddress).
 	var addr string
+	var addrRefused atomic.Bool
 	register := func(ctx context.Context) error {
 		info, err := rt.Info(ctx)
 		if err != nil {
 			return fmt.Errorf("reading the Docker host: %w", err)
 		}
 		reg := nodeapi.Register{Name: hostname, CPU: info.NCPU, Memory: info.MemTotal, Address: addr}
-		return registerWith(ctx, client, w.state.NodeID, reg, log)
+		refused, err := registerWith(ctx, client, w.state.NodeID, reg)
+		if err != nil {
+			return err
+		}
+		switch was := addrRefused.Swap(refused); {
+		case refused && !was:
+			log.Warn("the server refused this node's address, as a server older than 2.2 does; this node takes no routed replicas until the server takes it",
+				"address", addr)
+		case !refused && was:
+			log.Info("the server took this node's address; it takes routed replicas now", "address", addr)
+		}
+		return nil
 	}
 	for {
 		var err error
@@ -416,6 +431,9 @@ func runWorker(ctx context.Context, cfg *config.Config, log *slog.Logger, rt run
 			}
 		}()
 	}
+	// After a workers-first upgrade, the server that refused the address is
+	// upgraded under the running worker, which then registers it.
+	go retryAddress(runCtx, client, addrRefused.Load, register, addressRetry, log)
 	// Log requests come over a poll the worker makes, so it needs no listener.
 	logsDone := make(chan struct{})
 	go func() {
@@ -447,19 +465,49 @@ type registrar interface {
 // registerWith registers the node. A server older than 2.2 refuses the
 // address field with 400, as it refuses any field it does not know, so a
 // refusal of a registration with an address is tried once more without it:
-// that server places no routed replicas anyway.
-func registerWith(ctx context.Context, c registrar, nodeID string, reg nodeapi.Register, log *slog.Logger) error {
-	err := c.Register(ctx, nodeID, reg)
+// that server places no routed replicas anyway. addressRefused reports that
+// the node is registered without its address.
+func registerWith(ctx context.Context, c registrar, nodeID string, reg nodeapi.Register) (addressRefused bool, err error) {
+	err = c.Register(ctx, nodeID, reg)
 	var refused *nodeapi.RefusedError
 	if !errors.As(err, &refused) || refused.Code != http.StatusBadRequest || reg.Address == "" {
-		return err
+		return false, err
 	}
 	reg.Address = ""
 	if err := c.Register(ctx, nodeID, reg); err != nil {
-		return err
+		return false, err
 	}
-	log.Warn("the server refused this node's address, as a server older than 2.2 does; this node takes no routed replicas")
-	return nil
+	return true, nil
+}
+
+// addressRetry is how often a worker whose address the server refused
+// registers again, when no reply shows the server's version changed first.
+const addressRetry = 5 * time.Minute
+
+// retryAddress registers the node again while refused says the server
+// refused its address: at once when a reply shows the server's version
+// changed, as after the server was upgraded, and every `every` otherwise.
+// It runs until ctx ends.
+func retryAddress(ctx context.Context, w nodeapi.ServerWatcher, refused func() bool, register func(context.Context) error,
+	every time.Duration, log *slog.Logger) {
+	for {
+		changed := w.ServerChanged()
+		t := time.NewTimer(every)
+		select {
+		case <-ctx.Done():
+			t.Stop()
+			return
+		case <-changed:
+		case <-t.C:
+		}
+		t.Stop()
+		if !refused() {
+			continue
+		}
+		if err := register(ctx); err != nil && ctx.Err() == nil {
+			log.Info("registering this node's address again; trying later", "err", err)
+		}
+	}
 }
 
 // removedError is what a worker exits with once the server says it was
