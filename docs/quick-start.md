@@ -5,7 +5,7 @@ This deploys nginx on one Linux machine, using only loopback addresses. The comm
 ## Before you start
 
 - Linux, amd64 or arm64.
-- Docker Engine 25 or newer, running. Your user needs access to `/var/run/docker.sock`, or you run hivemind as root.
+- Docker Engine 25 or newer, running. Your user needs access to `/var/run/docker.sock`, or you run hivemind as root. Without it, `serve` and `join` stop with `cannot reach Docker at unix:///var/run/docker.sock: ... permission denied; this user may not open the socket: add it to the docker group (sudo usermod -aG docker $USER, then log in again), or run hivemind as root`.
 - The `hivemind` binary on your PATH. See the install section of the [README](../README.md).
 
 ## 1. Create the cluster

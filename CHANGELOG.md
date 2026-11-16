@@ -44,6 +44,7 @@ Notable changes to hivemind, newest first. Versions follow [Semantic Versioning]
 - `hivemind join` on a machine whose data directory holds a node that was removed asks that server, with the node's certificate, and says the files cannot be used again: move the directory aside, or use another `--data-dir`, and join again; the token was not used. Before, it said to run `serve --role worker`, which fails for a removed node.
 - `serve` logs one line for each schema step it applies to an existing store, as `store schema migrated from=6 to=7 adds="node certificate expiry"`. Before, the migration was silent.
 - `hivemind nodes` prints a LEASE AGE of 48 hours or more in days (`123d`), as CERT EXPIRES does, rather than as `2952h0m46s`.
+- `serve` and `join` whose user may not open the Docker socket say to add the user to the docker group (`sudo usermod -aG docker $USER`, then log in again) or to run as root. A worker stops at once then, rather than retrying every 5 s, since the group takes effect only for a new login.
 
 ### Fixed
 

@@ -404,6 +404,17 @@ private keys and env values are not logged.`,
 	return cmd
 }
 
+// dockerReachError is the error for a Docker daemon that serve or a worker
+// cannot reach at host. A socket this user may not open says what to do:
+// join the docker group, or run as root.
+func dockerReachError(host string, err error) error {
+	if errors.Is(err, fs.ErrPermission) {
+		return fmt.Errorf("cannot reach Docker at %s: %w; this user may not open the socket: add it to the docker group "+
+			"(sudo usermod -aG docker $USER, then log in again), or run hivemind as root", host, err)
+	}
+	return fmt.Errorf("cannot reach Docker at %s: %w", host, err)
+}
+
 // newLogger is the server's logger: the level and format from the config,
 // with secrets redacted.
 func newLogger(cfg *config.Config, w io.Writer) (*slog.Logger, error) {
@@ -466,7 +477,7 @@ func runServe(ctx context.Context, cfg *config.Config, log *slog.Logger, rt runt
 
 	info, err := rt.Info(ctx)
 	if err != nil {
-		return fmt.Errorf("cannot reach Docker at %s: %w", cfg.DockerHost, err)
+		return dockerReachError(cfg.DockerHost, err)
 	}
 	// The node's private address, where its routed replicas publish their
 	// ports: the cluster listener's address, or loopback without one.

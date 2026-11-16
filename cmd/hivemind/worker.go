@@ -434,7 +434,7 @@ func runWorker(ctx context.Context, cfg *config.Config, log *slog.Logger, rt run
 	register := func(ctx context.Context) error {
 		info, err := rt.Info(ctx)
 		if err != nil {
-			return fmt.Errorf("reading the Docker host: %w", err)
+			return dockerReachError(cfg.DockerHost, err)
 		}
 		reg := nodeapi.Register{Name: hostname, CPU: info.NCPU, Memory: info.MemTotal, Address: addr}
 		refused, err := registerWith(ctx, client, w.state.NodeID, reg)
@@ -461,6 +461,11 @@ func runWorker(ctx context.Context, cfg *config.Config, log *slog.Logger, rt run
 		if errors.Is(err, nodeapi.ErrNodeRemoved) {
 			log.Error("the server says this node was removed from the cluster; stopping", "node", w.state.NodeID)
 			return removedError(w.state.NodeID)
+		}
+		if errors.Is(err, fs.ErrPermission) {
+			// A group the user joins takes effect at its next login, so
+			// retrying in this process cannot help.
+			return err
 		}
 		if ctx.Err() != nil {
 			return nil
