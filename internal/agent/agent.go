@@ -101,6 +101,7 @@ type Agent struct {
 	seeded   bool                     // restart counts have been read from the store
 	wakeAt   time.Time                // when the next scheduled restart or route drain is due, or zero
 	unrouted map[string]time.Time     // by container name: when a routed container was first seen unassigned
+	pulls    map[pullKey]*pullState   // failed pulls, for their backoff
 }
 
 // New returns an agent. It does nothing until Run or Reconcile is called.
@@ -137,6 +138,7 @@ func New(cfg Config) (*Agent, error) {
 		restarts: map[string]*restartState{},
 		probes:   map[string]*probe{},
 		unrouted: map[string]time.Time{},
+		pulls:    map[pullKey]*pullState{},
 	}, nil
 }
 
@@ -349,7 +351,12 @@ func (a *Agent) Reconcile(ctx context.Context) error {
 				afterStart(as, &st)
 			}
 			if err != nil {
-				errs = append(errs, err)
+				// A pull waiting out its backoff failed in an earlier
+				// pass; the status keeps saying so, and the pass is fine.
+				var pe *pullError
+				if !errors.As(err, &pe) || !pe.waiting {
+					errs = append(errs, err)
+				}
 				st.Error = err.Error()
 			}
 		}
@@ -386,9 +393,10 @@ func (a *Agent) report(ctx context.Context, st []store.Status) error {
 }
 
 // create makes and starts the container for one replica. The image is pulled
-// only when it is missing, so a replacement does not wait for the registry.
-// It returns the container ID, the state the container is left in, and any
-// error.
+// only when it is missing, so a replacement does not wait for the registry,
+// with the assignment's registry credential if it has one, and a failed pull
+// backs off (pull.go). It returns the container ID, the state the container
+// is left in, and any error.
 func (a *Agent) create(ctx context.Context, as store.Assignment) (string, string, error) {
 	cfg := containerConfig(as, a.cfg.RouteBind)
 	log := a.log.With("app", as.App, "replica", as.Index, "generation", as.Generation)
@@ -398,8 +406,7 @@ func (a *Agent) create(ctx context.Context, as store.Assignment) (string, string
 
 	id, err := a.cfg.Runtime.Create(ctx, cfg)
 	if errors.Is(err, runtime.ErrNotFound) {
-		log.Info("pulling image", "image", cfg.Image)
-		if perr := a.cfg.Runtime.Pull(ctx, cfg.Image); perr != nil {
+		if perr := a.pull(ctx, as, cfg.Image, log); perr != nil {
 			return "", "pending", fmt.Errorf("%s: %w", cfg.Name, perr)
 		}
 		id, err = a.cfg.Runtime.Create(ctx, cfg)

@@ -63,7 +63,7 @@ func itPull(t *testing.T, c *Client, image string) {
 	if _, loaded := pulled.LoadOrStore(image, struct{}{}); loaded {
 		return
 	}
-	if err := c.Pull(itCtx(t), image); err != nil {
+	if err := c.Pull(itCtx(t), image, nil); err != nil {
 		pulled.Delete(image)
 		t.Fatalf("pull %s: %v", image, err)
 	}
@@ -130,7 +130,7 @@ func TestIntegrationInfo(t *testing.T) {
 func TestIntegrationPullMissingImage(t *testing.T) {
 	c := itClient(t)
 	ref := itName("hivemind-no-such-image") + ":1"
-	err := c.Pull(itCtx(t), ref)
+	err := c.Pull(itCtx(t), ref, nil)
 	if !errors.Is(err, runtime.ErrNotFound) {
 		t.Fatalf("pull %s: err = %v, want ErrNotFound", ref, err)
 	}

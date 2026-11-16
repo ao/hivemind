@@ -13,6 +13,7 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"regexp"
 	"strings"
 	"time"
 
@@ -97,6 +98,11 @@ func isLoopback(h string) bool {
 // body is closed. Transport failures map to runtime.ErrUnavailable, unless the
 // context was cancelled, in which case the context error is returned.
 func (c *Client) call(ctx context.Context, op, method, path string, query url.Values, body any, allow ...int) (*http.Response, error) {
+	return c.callWith(ctx, op, method, path, query, nil, body, allow...)
+}
+
+// callWith is call with extra request headers.
+func (c *Client) callWith(ctx context.Context, op, method, path string, query url.Values, header http.Header, body any, allow ...int) (*http.Response, error) {
 	var rd io.Reader
 	if body != nil {
 		b, err := json.Marshal(body)
@@ -112,6 +118,11 @@ func (c *Client) call(ctx context.Context, op, method, path string, query url.Va
 	req, err := http.NewRequestWithContext(ctx, method, u, rd)
 	if err != nil {
 		return nil, &runtime.Error{Op: op, Message: "building request", Cause: err}
+	}
+	for k, vs := range header {
+		for _, v := range vs {
+			req.Header.Add(k, v)
+		}
 	}
 	if body != nil {
 		req.Header.Set("Content-Type", "application/json")
@@ -188,6 +199,47 @@ func pullNotFound(msg string) bool {
 		}
 	}
 	return false
+}
+
+// pullDeniedRE matches a registry's DENIED error code as the daemon words
+// it: "...: denied" or "denied: ...", but not "permission denied" from the
+// daemon's own file system.
+var pullDeniedRE = regexp.MustCompile(`(^|: )denied(:|$)`)
+
+// pullUnauthorized reports whether a pull error says that the registry
+// refused the credential, or wants one. The texts are the daemon's and the
+// registries' own: "no basic auth credentials" when none was sent to a
+// registry that wants one, "unauthorized: ..." for the UNAUTHORIZED error
+// code, "denied: ..." for DENIED, Docker Hub's "pull access denied ...
+// may require 'docker login'", and ECR's "Your authorization token has
+// expired".
+func pullUnauthorized(msg string) bool {
+	m := strings.ToLower(msg)
+	for _, s := range []string{"unauthorized", "no basic auth credentials", "authentication required",
+		"pull access denied", "may require 'docker login'", "requested access to the resource is denied",
+		"authorization token has expired", "incorrect username or password"} {
+		if strings.Contains(m, s) {
+			return true
+		}
+	}
+	return pullDeniedRE.MatchString(m)
+}
+
+// classifyPull maps a failed pull, from its HTTP status (0 for an error in
+// the progress stream) and message, to a typed error.
+func classifyPull(status int, msg string) *runtime.Error {
+	e := classify("pull", status, msg)
+	auth := status == http.StatusUnauthorized || status == http.StatusForbidden || pullUnauthorized(msg)
+	notFound := errors.Is(e.Err, runtime.ErrNotFound) || pullNotFound(msg)
+	switch {
+	case auth && notFound:
+		e.Err = errors.Join(runtime.ErrNotFound, runtime.ErrUnauthorized)
+	case auth:
+		e.Err = runtime.ErrUnauthorized
+	case notFound:
+		e.Err = runtime.ErrNotFound
+	}
+	return e
 }
 
 func containsInt(xs []int, x int) bool {

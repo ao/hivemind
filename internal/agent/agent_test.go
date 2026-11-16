@@ -399,7 +399,17 @@ func TestRuntimeErrorReportedAndRetried(t *testing.T) {
 		t.Fatalf("status after the failure: %+v", st)
 	}
 
+	// The pull backs off: the next pass does not pull, and is not an error.
 	e.rt.setFail(nil)
+	e.rt.counts(true)
+	e.reconcile()
+	if n := e.rt.counts(false)["pull"]; n != 0 {
+		t.Fatalf("%d pulls during the backoff", n)
+	}
+	if st := e.status("web"); len(st) != 1 || st[0].State != "pending" || !strings.Contains(st[0].Error, "registry timeout") {
+		t.Fatalf("status during the backoff: %+v", st)
+	}
+	e.clock.Advance(pullBase)
 	e.reconcile()
 	st = e.status("web")
 	if len(st) != 1 || st[0].State != "running" || st[0].Error != "" {

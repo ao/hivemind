@@ -2,6 +2,7 @@ package docker
 
 import (
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -9,6 +10,7 @@ import (
 	"math"
 	"net/http"
 	"net/url"
+	"regexp"
 	"slices"
 	"strconv"
 	"strings"
@@ -38,9 +40,17 @@ func (c *Client) Info(ctx context.Context) (runtime.Info, error) {
 }
 
 // Pull fetches an image and reads the progress stream to the end. The engine
-// reports pull failures inside the stream, with HTTP 200, so the stream is
-// checked for an error object.
-func (c *Client) Pull(ctx context.Context, ref string) error {
+// reports a failure before the pull starts with an HTTP status, and one
+// after it starts inside the stream, with HTTP 200, so both are checked.
+//
+// A credential goes in the X-Registry-Auth header (EncodeRegistryAuth). The
+// daemon uses it for the registry the reference names. When one was sent,
+// the error of a refused pull says only that, with a reason in
+// parentheses, so that it holds nothing the registry echoed, such as a
+// token URL with the username in it; any other error has the password, the
+// header and such account parameters taken out. Without a credential, the
+// daemon's message is kept: it can hold no secret.
+func (c *Client) Pull(ctx context.Context, ref string, auth *runtime.RegistryAuth) error {
 	const op = "pull"
 	img, err := spec.ParseImage(ref)
 	if err != nil {
@@ -53,11 +63,49 @@ func (c *Client) Pull(ctx context.Context, ref string) error {
 		q.Set("fromImage", img.Repository())
 		q.Set("tag", img.Tag)
 	}
-	resp, err := c.call(ctx, op, http.MethodPost, "/images/create", q, nil)
+	var hdr http.Header
+	var header string
+	if auth != nil {
+		if header, err = EncodeRegistryAuth(*auth); err != nil {
+			return &runtime.Error{Op: op, Err: runtime.ErrInvalid, Message: "encoding the registry credential"}
+		}
+		hdr = http.Header{"X-Registry-Auth": {header}}
+	}
+	fail := func(status int, msg string) error {
+		e := classifyPull(status, msg)
+		if auth != nil && errors.Is(e.Err, runtime.ErrUnauthorized) {
+			e.Message = "the registry refused the pull (" + unauthorizedReason(status, msg) + ")"
+		} else {
+			e.Message = redact(e.Message, auth, header)
+		}
+		return e
+	}
+	// Every status comes back as a response, so that its message is
+	// classified, and redacted, here.
+	resp, err := c.callWith(ctx, op, http.MethodPost, "/images/create", q, hdr, nil,
+		http.StatusUnauthorized, http.StatusForbidden, http.StatusNotFound, http.StatusInternalServerError)
 	if err != nil {
+		var re *runtime.Error
+		if errors.As(err, &re) {
+			re.Message = redact(re.Message, auth, header)
+		}
 		return err
 	}
 	defer resp.Body.Close()
+	if resp.StatusCode/100 != 2 {
+		raw, _ := io.ReadAll(io.LimitReader(resp.Body, maxErrorBody))
+		msg := strings.TrimSpace(string(raw))
+		var body struct {
+			Message string `json:"message"`
+		}
+		if json.Unmarshal(raw, &body) == nil && body.Message != "" {
+			msg = body.Message
+		}
+		if msg == "" {
+			msg = resp.Status
+		}
+		return fail(resp.StatusCode, msg)
+	}
 
 	dec := json.NewDecoder(resp.Body)
 	for {
@@ -79,13 +127,73 @@ func (c *Client) Pull(ctx context.Context, ref string) error {
 			msg = m.ErrorDetail.Message
 		}
 		if msg != "" {
-			e := classify(op, 0, msg)
-			if pullNotFound(msg) {
-				e.Err = runtime.ErrNotFound
-			}
-			return e
+			return fail(0, msg)
 		}
 	}
+}
+
+// EncodeRegistryAuth returns the X-Registry-Auth header for a credential.
+// The Engine API (v1.44) asks for "a base64url encoded (JSON) string" of
+// {"username", "password", "serveraddress"}, where serveraddress "is a
+// domain/IP without a protocol": the Authentication section of
+// https://docs.docker.com/reference/api/engine/version/v1.44/#section/Authentication,
+// which the X-Registry-Auth parameter of ImageCreate (POST /images/create)
+// refers to. base64url is RFC 4648 section 5; the padding is kept, as the
+// Docker CLI writes it (registry.EncodeAuthConfig uses
+// base64.URLEncoding).
+func EncodeRegistryAuth(a runtime.RegistryAuth) (string, error) {
+	b, err := json.Marshal(struct {
+		Username      string `json:"username"`
+		Password      string `json:"password"`
+		ServerAddress string `json:"serveraddress"`
+	}{a.Username, a.Password, a.ServerAddress})
+	if err != nil {
+		return "", err
+	}
+	return base64.URLEncoding.EncodeToString(b), nil
+}
+
+// unauthorizedReason is the part of a refused pull's error that is safe to
+// show: the HTTP status, or which kind of refusal the registry gave. The
+// registry's own text is left out.
+func unauthorizedReason(status int, msg string) string {
+	m := strings.ToLower(msg)
+	switch {
+	case strings.Contains(m, "no basic auth credentials"):
+		return "no credential"
+	case strings.Contains(m, "token has expired"):
+		return "the token has expired"
+	case strings.Contains(m, "pull access denied"), strings.Contains(m, "may require 'docker login'"):
+		return "no such image, or no access to it"
+	case pullDeniedRE.MatchString(m), strings.Contains(m, "access to the resource is denied"):
+		return "access denied"
+	case status == http.StatusForbidden:
+		return "403 forbidden"
+	}
+	return "unauthorized"
+}
+
+// accountRE matches the account parameter of a registry token request,
+// which names the user: ?account=<username>&scope=...
+var accountRE = regexp.MustCompile(`account=[^&\s"']*`)
+
+// redact takes the password, the header and the username of a token URL
+// out of an error message.
+func redact(msg string, auth *runtime.RegistryAuth, header string) string {
+	if auth == nil {
+		return msg
+	}
+	const r = "[redacted]"
+	if header != "" {
+		msg = strings.ReplaceAll(msg, header, r)
+	}
+	if auth.Password != "" {
+		msg = strings.ReplaceAll(msg, auth.Password, r)
+		msg = strings.ReplaceAll(msg, url.QueryEscape(auth.Password), r)
+		basic := base64.StdEncoding.EncodeToString([]byte(auth.Username + ":" + auth.Password))
+		msg = strings.ReplaceAll(msg, basic, r)
+	}
+	return accountRE.ReplaceAllString(msg, "account="+r)
 }
 
 // Create makes a container with the hivemind labels, a restart policy of

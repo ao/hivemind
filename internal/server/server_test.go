@@ -38,7 +38,7 @@ type fakeRuntime struct {
 func (f *fakeRuntime) Info(context.Context) (runtime.Info, error) {
 	return runtime.Info{NCPU: 2, MemTotal: 1 << 30}, nil
 }
-func (f *fakeRuntime) Pull(context.Context, string) error { return nil }
+func (f *fakeRuntime) Pull(context.Context, string, *runtime.RegistryAuth) error { return nil }
 func (f *fakeRuntime) Create(context.Context, runtime.ContainerConfig) (string, error) {
 	return "", nil
 }

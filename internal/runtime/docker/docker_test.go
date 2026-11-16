@@ -25,6 +25,7 @@ type exchange struct {
 	Path   string
 	Query  url.Values
 	Body   []byte
+	Header http.Header
 }
 
 type handler func(w http.ResponseWriter, ex exchange)
@@ -55,7 +56,7 @@ func newFake(t *testing.T, h handler) (*Client, *fakeDaemon) {
 			http.NotFound(w, r)
 			return
 		}
-		ex := exchange{Method: r.Method, Path: strings.TrimPrefix(p, prefix), Query: r.URL.Query(), Body: body}
+		ex := exchange{Method: r.Method, Path: strings.TrimPrefix(p, prefix), Query: r.URL.Query(), Body: body, Header: r.Header.Clone()}
 		fd.mu.Lock()
 		fd.reqs = append(fd.reqs, ex)
 		fd.mu.Unlock()
@@ -177,7 +178,7 @@ func TestPullNormalisesAndDrainsStream(t *testing.T) {
 					`{"status":"Downloading","progressDetail":{"current":1,"total":2}}`+"\n"+
 					`{"status":"Status: Downloaded newer image"}`+"\n")
 			})
-			requireNoErr(t, c.Pull(context.Background(), tc.ref))
+			requireNoErr(t, c.Pull(context.Background(), tc.ref, nil))
 			reqs := fd.requests()
 			if len(reqs) != 1 || reqs[0].Method != http.MethodPost || reqs[0].Path != "/images/create" {
 				t.Fatalf("requests = %+v, want one POST /images/create", reqs)
@@ -239,7 +240,7 @@ func TestPullErrorsInStream(t *testing.T) {
 				w.WriteHeader(tc.status)
 				_, _ = io.WriteString(w, tc.body)
 			})
-			err := c.Pull(context.Background(), "nginx:nope")
+			err := c.Pull(context.Background(), "nginx:nope", nil)
 			if err == nil {
 				t.Fatal("Pull succeeded, want an error")
 			}
@@ -257,7 +258,7 @@ func TestPullErrorsInStream(t *testing.T) {
 
 func TestPullRejectsBadReferenceWithoutRequest(t *testing.T) {
 	c, fd := newFake(t, func(w http.ResponseWriter, ex exchange) {})
-	err := c.Pull(context.Background(), "Bad Name:!!")
+	err := c.Pull(context.Background(), "Bad Name:!!", nil)
 	requireIs(t, err, runtime.ErrInvalid)
 	if n := len(fd.requests()); n != 0 {
 		t.Fatalf("%d requests sent for an invalid reference", n)

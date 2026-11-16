@@ -280,6 +280,10 @@ func (a *Agent) forget(kept map[string]bool) {
 			a.wakeAt = due
 		}
 	}
+	// A pull waiting out its backoff is tried when the wait ends.
+	if due := a.forgetPulls(); !due.IsZero() && (a.wakeAt.IsZero() || due.Before(a.wakeAt)) {
+		a.wakeAt = due
+	}
 }
 
 // wake returns when a scheduled restart is next due, or zero if none is.

@@ -35,7 +35,7 @@ func newMemRuntime() *memRuntime {
 func (m *memRuntime) Info(context.Context) (runtime.Info, error) {
 	return runtime.Info{NCPU: 2, MemTotal: 1 << 30, ServerVersion: "mem"}, nil
 }
-func (m *memRuntime) Pull(context.Context, string) error { return nil }
+func (m *memRuntime) Pull(context.Context, string, *runtime.RegistryAuth) error { return nil }
 
 func (m *memRuntime) Create(_ context.Context, cfg runtime.ContainerConfig) (string, error) {
 	m.mu.Lock()

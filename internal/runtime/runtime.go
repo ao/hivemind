@@ -39,7 +39,21 @@ var (
 	// ErrInvalid means the configuration was rejected before anything was sent
 	// to the engine.
 	ErrInvalid = errors.New("invalid configuration")
+	// ErrUnauthorized means the registry refused a pull: it wants a
+	// credential and got none, or refused the one sent. Docker Hub answers
+	// a private repository and a missing one alike ("pull access denied"),
+	// so such an error matches ErrNotFound as well.
+	ErrUnauthorized = errors.New("the registry refused the pull")
 )
+
+// RegistryAuth is the credential a pull sends to the image's registry.
+type RegistryAuth struct {
+	Username string
+	Password string
+	// ServerAddress is the registry's host, and port if it has one,
+	// without a scheme.
+	ServerAddress string
+}
 
 // Error is returned by Runtime methods when an operation fails.
 type Error struct {
@@ -217,8 +231,11 @@ type Runtime interface {
 	// Info returns the host's CPU count and memory.
 	Info(ctx context.Context) (Info, error)
 	// Pull fetches an image. The reference is normalised with spec.ParseImage,
-	// so "nginx" is pulled as docker.io/library/nginx:latest.
-	Pull(ctx context.Context, image string) error
+	// so "nginx" is pulled as docker.io/library/nginx:latest. A non-nil auth
+	// is sent to the image's registry; nil pulls without a credential. A
+	// refusal by the registry matches ErrUnauthorized. No error contains
+	// the password.
+	Pull(ctx context.Context, image string, auth *RegistryAuth) error
 	// Create makes a container without starting it, and returns its ID. The
 	// restart policy is always "no": the agent is the supervisor. Each volume
 	// is mounted as VolumeName(cfg.App, v.Name), created with VolumeLabels

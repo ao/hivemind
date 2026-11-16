@@ -30,6 +30,9 @@ type fakeRuntime struct {
 	now func() time.Time
 	// execFn, when set, decides the result of Exec on a running container.
 	execFn func(ctx context.Context, id string, cmd []string) (int, error)
+	// private maps an image to the credential a pull of it needs.
+	private   map[string]runtime.RegistryAuth
+	pullAuths []*runtime.RegistryAuth
 }
 
 type fakeContainer struct {
@@ -56,9 +59,10 @@ func (f *fakeRuntime) Info(context.Context) (runtime.Info, error) {
 	return runtime.Info{NCPU: 2, MemTotal: 1 << 30}, nil
 }
 
-func (f *fakeRuntime) Pull(_ context.Context, image string) error {
+func (f *fakeRuntime) Pull(_ context.Context, image string, auth *runtime.RegistryAuth) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	f.pullAuths = append(f.pullAuths, auth)
 	if err := f.begin("pull", image); err != nil {
 		return err
 	}
@@ -66,8 +70,51 @@ func (f *fakeRuntime) Pull(_ context.Context, image string) error {
 	if err != nil {
 		return rtErr("pull", runtime.ErrInvalid)
 	}
+	// A private image needs its credential, as a registry with htpasswd
+	// does; the messages are the Docker client's.
+	if want, ok := f.private[ref.String()]; ok {
+		switch {
+		case auth == nil:
+			return &runtime.Error{Op: "pull", Err: runtime.ErrUnauthorized, Message: "the registry refused the pull (no credential)"}
+		case *auth != want:
+			return &runtime.Error{Op: "pull", Err: runtime.ErrUnauthorized, Message: "the registry refused the pull (unauthorized)"}
+		}
+	}
 	f.images[ref.String()] = true
 	return nil
+}
+
+// makePrivate makes a pull of image need the credential want.
+func (f *fakeRuntime) makePrivate(image string, want runtime.RegistryAuth) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	ref, err := spec.ParseImage(image)
+	if err != nil {
+		panic(err)
+	}
+	if f.private == nil {
+		f.private = map[string]runtime.RegistryAuth{}
+	}
+	f.private[ref.String()] = want
+}
+
+// removeImage deletes an image, as docker rmi -f does; containers made
+// from it keep running.
+func (f *fakeRuntime) removeImage(image string) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	ref, _ := spec.ParseImage(image)
+	delete(f.images, ref.String())
+}
+
+// sentAuths returns the credential of each pull so far, nil for none, and
+// forgets them.
+func (f *fakeRuntime) sentAuths() []*runtime.RegistryAuth {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	out := f.pullAuths
+	f.pullAuths = nil
+	return out
 }
 
 // add puts a container in place directly, as if made out of band.
