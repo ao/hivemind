@@ -433,8 +433,10 @@ func TestRestoreRefusesNewerSchema(t *testing.T) {
 func TestRestoreMigratesOlderSchema(t *testing.T) {
 	s := newServer(t)
 	var b bytes.Buffer
-	// Undo migrations 10, 9, 8 and 7.
-	snap := editSnapshot(s.st, `DROP TABLE registries`, `DROP TABLE tls_locks`, `DROP TABLE tls_storage`, `DROP TABLE app_hosts`,
+	// Undo migrations 12 to 7. Migration 11 changed only drains, which
+	// migration 8 made.
+	snap := editSnapshot(s.st, `ALTER TABLE apps DROP COLUMN origin`,
+		`DROP TABLE registries`, `DROP TABLE tls_locks`, `DROP TABLE tls_storage`, `DROP TABLE app_hosts`,
 		`ALTER TABLE container_status DROP COLUMN route_ports`, `ALTER TABLE nodes DROP COLUMN address`,
 		`DROP TABLE drain_blocked`, `DROP TABLE drain_moves`, `DROP TABLE drains`,
 		`ALTER TABLE nodes DROP COLUMN eligible`, `DROP TABLE node_certs`, `UPDATE schema_version SET version = 6`)
@@ -459,6 +461,10 @@ func TestRestoreMigratesOlderSchema(t *testing.T) {
 	}
 	if _, err := r.PutRegistry(context.Background(), "ghcr.io", "u", "p"); err != nil {
 		t.Fatalf("the migrated store has no version 10 table: %v", err)
+	}
+	if a, err := r.PutAppWith(context.Background(), spec.App{Name: "fresh", Image: "nginx:alpine"}, store.PutOptions{Origin: "compose:shop"}); err != nil ||
+		a.Origin != "compose:shop" {
+		t.Fatalf("the migrated store has no version 12 column: %+v, %v", a, err)
 	}
 }
 

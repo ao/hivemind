@@ -252,6 +252,12 @@ CREATE TABLE registries (
 ALTER TABLE drains ADD COLUMN lost INTEGER NOT NULL DEFAULT 0 CHECK (lost >= 0);
 ALTER TABLE drains ADD COLUMN lost_at INTEGER NOT NULL DEFAULT 0;
 `,
+	// 12: app origins. apps.origin names what deployed the app, such as
+	// "compose:shop" for a compose project, or '' for hivemind deploy and the
+	// API. A put that names an origin refuses an app with another one.
+	`
+ALTER TABLE apps ADD COLUMN origin TEXT NOT NULL DEFAULT '';
+`,
 }
 
 // SchemaVersion is the schema version this build writes.

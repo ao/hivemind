@@ -186,7 +186,7 @@ Workers talk to the server over a second API, on the cluster port that `serve --
 | `GET /v1/apps` | none | 200, a list of apps | List apps |
 | `POST /v1/apps` | app spec | 201 when created, 200 when updated, with `PutResult` | Create or update the app named in the body |
 | `GET /v1/apps/{name}` | none | 200, `AppView` | Read one app |
-| `PUT /v1/apps/{name}` | app spec | 201 or 200, with `PutResult` | Create or update the app at `{name}`. A `name` in the body must match |
+| `PUT /v1/apps/{name}` | app spec | 201 or 200, with `PutResult` | Create or update the app at `{name}`. A `name` in the body must match. The query may name an origin, as `origin=compose:shop` (at most 128 printable characters): an app that exists with another origin, or with none, is refused with `409` unless the query also has `replace=true`, and the app then takes the origin. Without `origin`, the app keeps the one it has |
 | `DELETE /v1/apps/{name}` | none | 202 `{"name":"...","status":"deleting"}` | Delete the app |
 | `POST /v1/apps/{name}/scale` | `{"replicas": N}` | 200, `AppView` | Set the replica count, 1 to 100 |
 | `GET /v1/apps/{name}/status` | none | 200, `AppStatus` | Replicas of one app |
@@ -224,9 +224,12 @@ A write that changes the spec other than the replica count starts a rollout, whi
   "replicas": 2,
   "spec": { "...": "the app spec, as stored" },
   "created_at": "2026-11-13T10:00:00Z",
-  "updated_at": "2026-11-13T10:00:00Z"
+  "updated_at": "2026-11-13T10:00:00Z",
+  "origin": "compose:shop"
 }
 ```
+
+`origin` is what deployed the app, as the `origin` of its put named it; `hivemind compose deploy` sends `compose:<project>`. It is absent for an app deployed without one.
 
 `PutResult` wraps it: `{"app": AppView, "created": true}`.
 

@@ -309,3 +309,72 @@ func TestComposeStopsAtAServerError(t *testing.T) {
 		t.Fatalf("first deploy fails: %v", err)
 	}
 }
+
+// writeComposeIn writes a compose file into a new directory called dir, and
+// returns its path.
+func writeComposeIn(t *testing.T, dir, file string) string {
+	t.Helper()
+	d := filepath.Join(t.TempDir(), dir)
+	if err := os.Mkdir(d, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(d, "compose.yaml")
+	if err := os.WriteFile(path, []byte(file), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	return path
+}
+
+// compose deploy updates only the apps its project deployed. It refuses an
+// app of the same name that hivemind deploy or another project made, and
+// changes nothing of it, unless --replace; after that the project owns it,
+// and deploying again needs no flag. The project is the file's top-level
+// name, or its directory's name.
+func TestComposeDeployRefusesAnAppItDidNotDeploy(t *testing.T) {
+	st := composeAPI(t)
+	ctx := context.Background()
+	if out, _, err := run(t, "", "deploy", "--name", "web", "--image", "httpd:2"); err != nil || !strings.HasPrefix(out, "web: created") {
+		t.Fatalf("deploy web: %q, %v", out, err)
+	}
+	shop := writeComposeIn(t, "Shop.App", "services:\n  web: {image: nginx:alpine}\n  api: {image: nginx:alpine}\n")
+	out, _, err := run(t, "", "compose", "deploy", shop)
+	want := "deploying app web: conflict: app web was deployed with hivemind deploy or the API, not from compose project shopapp; " +
+		"hivemind compose deploy --replace (replace=true in the API) updates it anyway; already deployed: api"
+	if err == nil || err.Error() != want || out != "api: created, generation 1, 1 replica\n" {
+		t.Fatalf("compose deploy over an app it did not deploy: %q, %v\nwant the error %q", out, err, want)
+	}
+	if web, err := st.GetApp(ctx, "web"); err != nil || web.Spec.Image != "httpd:2" || web.Generation != 1 || web.Origin != "" {
+		t.Fatalf("web after the refused deploy: %+v, %v; want it unchanged", web, err)
+	}
+
+	out, _, err = run(t, "", "compose", "deploy", shop, "--replace")
+	if err != nil || out != "api: updated, generation 1, 1 replica\nweb: updated, generation 2, 1 replica\n" {
+		t.Fatalf("compose deploy --replace: %q, %v", out, err)
+	}
+	if web, err := st.GetApp(ctx, "web"); err != nil || web.Spec.Image != "nginx:alpine" || web.Origin != "compose:shopapp" {
+		t.Fatalf("web after --replace: %+v, %v", web, err)
+	}
+	if out, _, err = run(t, "", "compose", "deploy", shop); err != nil || out != "api: updated, generation 1, 1 replica\nweb: updated, generation 2, 1 replica\n" {
+		t.Fatalf("compose deploy again: %q, %v", out, err)
+	}
+
+	// hivemind deploy may update it, and the project keeps it.
+	if _, _, err := run(t, "", "deploy", "--name", "web", "--image", "nginx:1.27"); err != nil {
+		t.Fatal(err)
+	}
+	if out, _, err = run(t, "", "compose", "deploy", shop); err != nil || !strings.Contains(out, "web: updated") {
+		t.Fatalf("compose deploy after hivemind deploy: %q, %v", out, err)
+	}
+
+	// Another project with a service web is refused; its top-level name is
+	// its project.
+	other := writeComposeIn(t, "shop.app", "name: blog\nservices:\n  web: {image: caddy:2}\n")
+	if _, _, err := run(t, "", "compose", "deploy", other); err == nil ||
+		!strings.Contains(err.Error(), "app web was deployed from compose project shopapp, not from compose project blog") {
+		t.Fatalf("compose deploy of another project: %v", err)
+	}
+	if v, _, err := run(t, "", "compose", "deploy", writeComposeIn(t, "x", "name: Blog\nservices:\n  web: {image: caddy:2}\n")); err == nil ||
+		!strings.Contains(err.Error(), "name: a project name is 1 to 64 lowercase letters") {
+		t.Fatalf("compose deploy with a bad project name: %q, %v", v, err)
+	}
+}

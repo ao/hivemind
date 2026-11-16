@@ -26,6 +26,9 @@ type AppView struct {
 	Spec       spec.App  `json:"spec"`
 	CreatedAt  time.Time `json:"created_at"`
 	UpdatedAt  time.Time `json:"updated_at"`
+	// Origin names what deployed the app, such as "compose:shop". It is
+	// absent for an app deployed without one.
+	Origin string `json:"origin,omitempty"`
 }
 
 // PutResult is the reply to a create or update.
@@ -104,7 +107,7 @@ type ErrorBody struct {
 
 func view(a store.App) AppView {
 	return AppView{Name: a.Spec.Name, Generation: a.Generation, Replicas: a.Spec.Replicas, Spec: a.Spec,
-		CreatedAt: a.CreatedAt, UpdatedAt: a.UpdatedAt}
+		CreatedAt: a.CreatedAt, UpdatedAt: a.UpdatedAt, Origin: a.Origin}
 }
 
 func (s *Server) healthz(w http.ResponseWriter, _ *http.Request) {
@@ -173,14 +176,27 @@ func (s *Server) putApp(w http.ResponseWriter, r *http.Request) {
 	s.put(w, r, a)
 }
 
+// put stores the app. The query may name an origin, origin=compose:shop,
+// which refuses with 409 an app that exists with another origin or with none,
+// unless it also has replace=true. See store.PutAppWith.
 func (s *Server) put(w http.ResponseWriter, r *http.Request, a spec.App) {
+	q := r.URL.Query()
+	opts := store.PutOptions{Origin: q.Get("origin")}
+	switch q.Get("replace") {
+	case "", "false":
+	case "true":
+		opts.Replace = true
+	default:
+		writeError(w, http.StatusBadRequest, "the replace parameter must be true or false")
+		return
+	}
 	_, err := s.cfg.Store.GetApp(r.Context(), a.Name)
 	created := errors.Is(err, store.ErrNotFound)
 	if err != nil && !created {
 		s.fail(w, r, err)
 		return
 	}
-	got, err := s.cfg.Store.PutApp(r.Context(), a)
+	got, err := s.cfg.Store.PutAppWith(r.Context(), a, opts)
 	if err != nil {
 		s.fail(w, r, err)
 		return

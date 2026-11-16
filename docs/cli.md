@@ -145,6 +145,13 @@ hivemind compose delete <file> [flags]
 Convert a compose file, check every app, and then create or update each one
 as hivemind deploy -f does, in name order, printing a line for each.
 
+Each app records the compose project that deployed it: the file's top-level
+name, or else the name of the file's directory, as Docker Compose takes it
+(the working directory for -). deploy updates an app only if the same project
+deployed it, so running it again is safe, and it refuses an app of the same
+name that hivemind deploy, the API or another project deployed. --replace
+updates such an app anyway, and the project takes it over.
+
 Nothing is sent until every service converts and its spec is valid. If the
 server refuses an app, the command stops there: the apps before it stay
 deployed, and the error names them.
@@ -159,6 +166,7 @@ hivemind compose deploy <file> [flags]
 | `--client-config` | string | - | `HIVEMIND_CLIENT_CONFIG` | client config file (env HIVEMIND_CLIENT_CONFIG; default $XDG_CONFIG_HOME/hivemind/config.yaml or ~/.config/hivemind/config.yaml) |
 | `--json` | bool | - | - | print JSON instead of a table |
 | `--prefix` | string | - | - | name each app PREFIX-<service> instead of <service> |
+| `--replace` | bool | - | - | update an app of the same name that another project, hivemind deploy or the API deployed |
 | `--server` | string | - | `HIVEMIND_SERVER` | server URL (env HIVEMIND_SERVER; default from the client config, then http://127.0.0.1:4483) |
 | `--token` | string | - | `HIVEMIND_TOKEN` | API token (env HIVEMIND_TOKEN; default from the client config's token file) |
 

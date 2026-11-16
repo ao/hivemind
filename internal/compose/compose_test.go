@@ -733,3 +733,35 @@ func TestMarshalRoundTrips(t *testing.T) {
 		}
 	}
 }
+
+// The top-level name is the project name, and may come from a variable. A
+// file without one has none; a name Compose would refuse is refused.
+// ProjectName makes one from a directory as Compose does.
+func TestProjectName(t *testing.T) {
+	lookup := func(k string) (string, bool) { return map[string]string{"P": "shop-2"}[k], k == "P" }
+	for file, want := range map[string]string{
+		"name: shop\nservices:\n  web: {image: nginx}\n":   "shop",
+		"name: ${P}\nservices:\n  web: {image: nginx}\n":   "shop-2",
+		"services:\n  web: {image: nginx}\n":               "",
+		"name: null\nservices:\n  web: {image: nginx}\n":   "",
+		"name: my_app\nservices:\n  web: {image: nginx}\n": "my_app",
+	} {
+		res, err := Convert([]byte(file), Options{Lookup: lookup})
+		if err != nil {
+			t.Errorf("%q: %v", file, err)
+		} else if res.Name != want {
+			t.Errorf("%q: name %q, want %q", file, res.Name, want)
+		}
+	}
+	for _, file := range []string{"name: Shop\nservices:\n  web: {image: nginx}\n", "name: -x\nservices:\n  web: {image: nginx}\n",
+		"name: [a]\nservices:\n  web: {image: nginx}\n"} {
+		if _, err := Convert([]byte(file), Options{}); err == nil || !strings.Contains(err.Error(), "name: ") {
+			t.Errorf("%q: %v, want the name refused", file, err)
+		}
+	}
+	for dir, want := range map[string]string{"/srv/Shop.App": "shopapp", "/srv/my_app/": "my_app", "/srv/-x": "x", "/": "", "/srv/..": ""} {
+		if got := ProjectName(dir); got != want {
+			t.Errorf("ProjectName(%q) = %q, want %q", dir, got, want)
+		}
+	}
+}

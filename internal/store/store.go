@@ -59,7 +59,24 @@ type App struct {
 	Generation int
 	CreatedAt  time.Time
 	UpdatedAt  time.Time
+	// Origin names what deployed the app, such as "compose:shop" for the
+	// compose project shop. It is empty for an app that hivemind deploy or
+	// the API created, without an origin. See PutAppWith.
+	Origin string
 }
+
+// PutOptions are what PutAppWith takes besides the spec.
+type PutOptions struct {
+	// Origin, when set, names what deploys the app, and is stored with it.
+	// A put with an origin refuses an app that exists with another origin,
+	// or with none, unless Replace is set. A put without one keeps the app's
+	// origin.
+	Origin  string
+	Replace bool
+}
+
+// MaxOriginLen is the longest origin a put may name.
+const MaxOriginLen = 128
 
 // Replica is one copy of an app and where it is placed.
 type Replica struct {
@@ -317,6 +334,18 @@ func cleanSpec(a spec.App) (spec.App, error) {
 // it, and adds or removes replicas. Putting an app that was deleted creates
 // it again with a higher generation, so its old containers are replaced.
 func (s *Store) PutApp(ctx context.Context, a spec.App) (App, error) {
+	return s.PutAppWith(ctx, a, PutOptions{})
+}
+
+// PutAppWith is PutApp with an origin. With o.Origin set, an app that exists
+// with another origin, or with none, is refused with ErrConflict unless
+// o.Replace is set, and nothing is written; the app then takes o.Origin.
+// Without one, the app keeps the origin it has, and a new app has none. An
+// app that was deleted counts as new.
+func (s *Store) PutAppWith(ctx context.Context, a spec.App, o PutOptions) (App, error) {
+	if len(o.Origin) > MaxOriginLen || strings.ContainsFunc(o.Origin, func(r rune) bool { return r < 0x20 || r == 0x7f }) {
+		return App{}, fmt.Errorf("%w: an origin is at most %d printable characters", ErrInvalid, MaxOriginLen)
+	}
 	c, err := cleanSpec(a)
 	if err != nil {
 		return App{}, err
@@ -327,33 +356,41 @@ func (s *Store) PutApp(ctx context.Context, a spec.App) (App, error) {
 	err = s.tx(ctx, func(tx *sql.Tx) error {
 		now := s.now()
 		var gen int
-		var oldTmpl string
+		var oldTmpl, origin string
 		var deleted int
 		var created int64
-		err := tx.QueryRowContext(ctx, `SELECT generation, template, deleted, created_at FROM apps WHERE name = ?`, c.Name).
-			Scan(&gen, &oldTmpl, &deleted, &created)
+		err := tx.QueryRowContext(ctx, `SELECT generation, template, deleted, created_at, origin FROM apps WHERE name = ?`, c.Name).
+			Scan(&gen, &oldTmpl, &deleted, &created, &origin)
 		// rolling is a template change to a live app: its replicas move to the
 		// new generation through a rollout. recreate is an app put again after
 		// a delete: its replicas are replaced at once, as before rollouts.
 		rolling, recreate := false, false
 		switch {
 		case errors.Is(err, sql.ErrNoRows):
-			gen, created = 1, now.UnixNano()
-			_, err = tx.ExecContext(ctx, `INSERT INTO apps (name, spec, template, generation, replicas, deleted, created_at, updated_at)
-				VALUES (?, ?, ?, ?, ?, 0, ?, ?)`, c.Name, string(specJSON), tmpl, gen, c.Replicas, created, now.UnixNano())
+			gen, created, origin = 1, now.UnixNano(), o.Origin
+			_, err = tx.ExecContext(ctx, `INSERT INTO apps (name, spec, template, generation, replicas, deleted, created_at, updated_at, origin)
+				VALUES (?, ?, ?, ?, ?, 0, ?, ?, ?)`, c.Name, string(specJSON), tmpl, gen, c.Replicas, created, now.UnixNano(), origin)
 		case err != nil:
 			return err
 		default:
-			if deleted == 1 {
+			switch {
+			case deleted == 1:
 				gen++
 				created = now.UnixNano()
 				recreate = true
-			} else if oldTmpl != tmpl {
+				origin = o.Origin
+			case o.Origin != "" && origin != o.Origin && !o.Replace:
+				return fmt.Errorf("%w: app %s was deployed %s, not from %s; hivemind compose deploy --replace "+
+					"(replace=true in the API) updates it anyway", ErrConflict, c.Name, originText(origin), strings.TrimPrefix(originText(o.Origin), "from "))
+			case o.Origin != "":
+				origin = o.Origin
+			}
+			if !recreate && oldTmpl != tmpl {
 				gen++
 				rolling = true
 			}
 			_, err = tx.ExecContext(ctx, `UPDATE apps SET spec = ?, template = ?, generation = ?, replicas = ?, deleted = 0,
-				created_at = ?, updated_at = ? WHERE name = ?`, string(specJSON), tmpl, gen, c.Replicas, created, now.UnixNano(), c.Name)
+				created_at = ?, updated_at = ?, origin = ? WHERE name = ?`, string(specJSON), tmpl, gen, c.Replicas, created, now.UnixNano(), origin, c.Name)
 		}
 		if err != nil {
 			return err
@@ -388,10 +425,22 @@ func (s *Store) PutApp(ctx context.Context, a spec.App) (App, error) {
 		if err := syncHosts(ctx, tx, c); err != nil {
 			return err
 		}
-		out = App{Spec: c, Generation: gen, CreatedAt: time.Unix(0, created), UpdatedAt: now}
+		out = App{Spec: c, Generation: gen, CreatedAt: time.Unix(0, created), UpdatedAt: now, Origin: origin}
 		return nil
 	})
 	return out, err
+}
+
+// originText says where an app with origin o came from, for messages: "from
+// compose project shop", or "with hivemind deploy or the API" for none.
+func originText(o string) string {
+	switch {
+	case o == "":
+		return "with hivemind deploy or the API"
+	case strings.HasPrefix(o, "compose:"):
+		return "from compose project " + strings.TrimPrefix(o, "compose:")
+	}
+	return fmt.Sprintf("from %q", o)
 }
 
 // syncHosts gives the app's route hosts to it, and frees the hosts it no
@@ -561,7 +610,7 @@ func (s *Store) ListApps(ctx context.Context) ([]App, error) {
 }
 
 func (s *Store) listApps(ctx context.Context, where string, args ...any) ([]App, error) {
-	rows, err := s.db.QueryContext(ctx, `SELECT spec, generation, created_at, updated_at FROM apps WHERE `+where+` ORDER BY name`, args...)
+	rows, err := s.db.QueryContext(ctx, `SELECT spec, generation, created_at, updated_at, origin FROM apps WHERE `+where+` ORDER BY name`, args...)
 	if err != nil {
 		return nil, err
 	}
@@ -571,7 +620,7 @@ func (s *Store) listApps(ctx context.Context, where string, args ...any) ([]App,
 		var a App
 		var specJSON string
 		var created, updated int64
-		if err := rows.Scan(&specJSON, &a.Generation, &created, &updated); err != nil {
+		if err := rows.Scan(&specJSON, &a.Generation, &created, &updated, &a.Origin); err != nil {
 			return nil, err
 		}
 		if err := json.Unmarshal([]byte(specJSON), &a.Spec); err != nil {
@@ -648,8 +697,8 @@ func getAppTx(ctx context.Context, tx *sql.Tx, name string) (App, error) {
 	var a App
 	var specJSON string
 	var created, updated int64
-	err := tx.QueryRowContext(ctx, `SELECT spec, generation, created_at, updated_at FROM apps WHERE name = ? AND deleted = 0`, name).
-		Scan(&specJSON, &a.Generation, &created, &updated)
+	err := tx.QueryRowContext(ctx, `SELECT spec, generation, created_at, updated_at, origin FROM apps WHERE name = ? AND deleted = 0`, name).
+		Scan(&specJSON, &a.Generation, &created, &updated, &a.Origin)
 	if errors.Is(err, sql.ErrNoRows) {
 		return App{}, fmt.Errorf("app %q: %w", name, ErrNotFound)
 	}

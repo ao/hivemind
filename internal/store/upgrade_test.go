@@ -82,7 +82,7 @@ func TestOpenMigratesStoresFromEarlierSchemas(t *testing.T) {
 			if err != nil {
 				t.Fatalf("App: %v", err)
 			}
-			if app.Generation != 1 || app.Spec.Replicas != 2 || app.Spec.Image != "nginx:alpine" {
+			if app.Generation != 1 || app.Spec.Replicas != 2 || app.Spec.Image != "nginx:alpine" || app.Origin != "" {
 				t.Fatalf("app after migration: generation %d, %+v", app.Generation, app.Spec)
 			}
 			if reps := replicasOf(t, s, "web"); len(reps) != 2 {

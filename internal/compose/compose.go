@@ -12,6 +12,8 @@ package compose
 import (
 	"bytes"
 	"fmt"
+	"path/filepath"
+	"regexp"
 	"sort"
 	"strings"
 
@@ -68,6 +70,35 @@ type Result struct {
 	Apps []App
 	// Notes are sorted by path.
 	Notes []Note
+	// Name is the file's top-level name, the Compose project name, or ""
+	// when the file has none.
+	Name string
+}
+
+// projectRE is a Compose project name: lowercase letters, digits, dashes
+// and underscores, starting with a letter or a digit.
+var projectRE = regexp.MustCompile(`^[a-z0-9][a-z0-9_-]*$`)
+
+// maxProjectLen bounds a project name, so that the origin it makes fits the
+// store's limit.
+const maxProjectLen = 64
+
+// ProjectName returns the project name of a file without a top-level name:
+// the name of its directory, lowercased, without the characters a project
+// name cannot have, as Docker Compose makes it. It is "" when nothing is left.
+func ProjectName(dir string) string {
+	base := strings.ToLower(filepath.Base(filepath.Clean(dir)))
+	var b strings.Builder
+	for _, r := range base {
+		if (r >= 'a' && r <= 'z') || (r >= '0' && r <= '9') || r == '-' || r == '_' {
+			b.WriteRune(r)
+		}
+	}
+	s := strings.TrimLeft(b.String(), "-_")
+	if len(s) > maxProjectLen {
+		s = s[:maxProjectLen]
+	}
+	return s
 }
 
 // Problem is one thing wrong with the file, at a path such as
@@ -126,11 +157,12 @@ func Convert(data []byte, opts Options) (*Result, error) {
 		return v, ok
 	}, volumeUser: map[string]string{}}
 	apps := c.file(root)
+	name := c.projectName(root)
 	if len(c.problems) > 0 {
 		return nil, newError(c.problems)
 	}
 	sortByPath(c.notes, func(n Note) string { return n.Path })
-	return &Result{Apps: apps, Notes: c.notes}, nil
+	return &Result{Apps: apps, Notes: c.notes, Name: name}, nil
 }
 
 // AppNames returns the app name for each service in the file, sorted by

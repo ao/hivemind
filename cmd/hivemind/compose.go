@@ -6,6 +6,7 @@ import (
 	"io"
 	"io/fs"
 	"net/http"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
@@ -77,6 +78,13 @@ func composeDeployCmd() *cobra.Command {
 		Long: `Convert a compose file, check every app, and then create or update each one
 as hivemind deploy -f does, in name order, printing a line for each.
 
+Each app records the compose project that deployed it: the file's top-level
+name, or else the name of the file's directory, as Docker Compose takes it
+(the working directory for -). deploy updates an app only if the same project
+deployed it, so running it again is safe, and it refuses an app of the same
+name that hivemind deploy, the API or another project deployed. --replace
+updates such an app anyway, and the project takes it over.
+
 Nothing is sent until every service converts and its spec is valid. If the
 server refuses an app, the command stops there: the apps before it stay
 deployed, and the error names them.`,
@@ -84,10 +92,19 @@ deployed, and the error names them.`,
 	}
 	cf := addClientFlags(cmd)
 	prefix := addPrefixFlag(cmd)
+	replace := cmd.Flags().Bool("replace", false, "update an app of the same name that another project, hivemind deploy or the API deployed")
 	cmd.RunE = func(cmd *cobra.Command, args []string) error {
 		res, err := convertComposeFile(cmd, args[0], *prefix)
 		if err != nil {
 			return err
+		}
+		project, err := composeProject(args[0], res.Name)
+		if err != nil {
+			return err
+		}
+		q := url.Values{"origin": {"compose:" + project}}
+		if *replace {
+			q.Set("replace", "true")
 		}
 		c, err := cf.client()
 		if err != nil {
@@ -97,7 +114,7 @@ deployed, and the error names them.`,
 		var done []string
 		for _, a := range res.Apps {
 			var r server.PutResult
-			if err := c.call(cmd.Context(), "PUT", appPath(a.Spec.Name), a.Spec, &r); err != nil {
+			if err := c.call(cmd.Context(), "PUT", appPath(a.Spec.Name)+"?"+q.Encode(), a.Spec, &r); err != nil {
 				return partialError("deploying", "deployed", a.Spec.Name, a.Service, done, err)
 			}
 			done = append(done, a.Spec.Name)
@@ -117,6 +134,27 @@ deployed, and the error names them.`,
 		return nil
 	}
 	return cmd
+}
+
+// composeProject is the compose project of the file at path: the file's
+// top-level name, or else the name of its directory, or of the working
+// directory for standard input.
+func composeProject(path, name string) (string, error) {
+	if name != "" {
+		return name, nil
+	}
+	dir := "."
+	if path != "-" {
+		dir = filepath.Dir(path)
+	}
+	abs, err := filepath.Abs(dir)
+	if err != nil {
+		return "", err
+	}
+	if p := compose.ProjectName(abs); p != "" {
+		return p, nil
+	}
+	return "", fmt.Errorf("the directory %s gives no compose project name; set the top-level name in %s", abs, fileName(path))
 }
 
 // composeDeleted is one line of compose delete --json.

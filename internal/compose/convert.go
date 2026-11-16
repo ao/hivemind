@@ -60,6 +60,24 @@ func (c *converter) file(root *node) []App {
 	return apps
 }
 
+// projectName reads the top-level name, the project name, which may come
+// from a variable. It is "" when the file has none.
+func (c *converter) projectName(root *node) string {
+	n, ok := root.vals["name"]
+	if !ok || n.kind == nullKind {
+		return ""
+	}
+	s, ok := c.str("name", n)
+	if !ok {
+		return ""
+	}
+	if !projectRE.MatchString(s) || len(s) > maxProjectLen {
+		c.add("name", "a project name is 1 to %d lowercase letters, digits, dashes and underscores, starting with a letter or digit", maxProjectLen)
+		return ""
+	}
+	return s
+}
+
 // services returns the services, sorted by name.
 func (c *converter) services(root *node) []service {
 	n, ok := root.vals["services"]

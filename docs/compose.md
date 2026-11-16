@@ -16,6 +16,14 @@ Only part of the [Compose specification](https://github.com/compose-spec/compose
 
 `deploy` converts the file and validates every app before it sends anything. Then it creates or updates each app in name order, as `hivemind deploy -f` does, and prints a line for each. If the server refuses an app, `deploy` stops there; the apps before it stay deployed, and the error names them.
 
+Each app records the project that deployed it: the file's top-level `name`, or else the name of the file's directory, lowercased and without the characters a project name cannot have, as Docker Compose takes it (the working directory for `-`). `deploy` updates only an app that the same project deployed, so running it again is safe. An app of the same name that `hivemind deploy`, the API or another project deployed is refused, and left as it is:
+
+```
+error: deploying app web: conflict: app web was deployed with hivemind deploy or the API, not from compose project shop; hivemind compose deploy --replace (replace=true in the API) updates it anyway; already deployed: db
+```
+
+`--replace` updates such an app, and the project then owns it. `hivemind deploy` can still update an app a project deployed, and the app stays the project's. Apps deployed with `compose deploy` before this check have no project, so the first `deploy` after an upgrade needs `--replace`.
+
 `delete` deletes the app for each service, in name order. It reads only the service names, so the file's variables need not be set, and keys that `convert` would refuse do not matter. An app that does not exist is reported as `not found` and skipped. Volumes are kept, as with `hivemind delete`.
 
 All three take `--prefix NAME`, which names each app `NAME-<service>` instead of `<service>`. Every app name must follow the app spec's rules, 1 to 32 lowercase letters, digits and dashes, starting and ending with a letter or digit, or the command fails and names the service. Compose allows service names that hivemind does not, such as `my_db`.
@@ -59,7 +67,7 @@ One app reaches another through a published port on an address its containers ca
 | `services` | Required, with 1 to 100 services. |
 | `volumes` | Named volumes. Each is `{}` or empty; any setting is refused (see [refusals](#refusals)). |
 | `version` | Ignored. The Compose specification calls it obsolete. |
-| `name` | Ignored. It is the Compose project name, which hivemind has no use for; use `--prefix` to group apps by name. |
+| `name` | The Compose project name, which `deploy` records with each app (see [commands](#commands)). It is 1 to 64 lowercase letters, digits, dashes and underscores, starting with a letter or digit, and may come from a variable. It does not change the app names; use `--prefix` for that. |
 | `x-*` | Ignored. |
 
 ### Service keys
