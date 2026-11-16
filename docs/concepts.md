@@ -156,7 +156,7 @@ An app with routes and no host ports is the exception: its surge may go on the r
 
 An app is a desired state: a container image, the command, environment, ports, volumes, resources, a health check, and a replica count. Replicas are numbered from 0 to the count minus one. The count is 1 by default and may be at most 100.
 
-The agent pulls images without registry credentials, so an image that needs a login fails to pull, and the replica stays `pending` with the registry's answer, such as `denied`, in `status`. `docker login` on the node does not change this: the Docker Engine API takes credentials with each pull request, and hivemind sends none.
+An image from a private registry needs a credential stored with `hivemind registry login <host>` (see [registries](registries.md)). The agent sends it with each pull of an image from that host. `docker login` on the node does not help: the Docker Engine API takes credentials with each pull request. Without one, the replica stays `pending`, and `status` says which registry wants a login. A failed pull is tried again after 10 s, doubling to 5 minutes.
 
 `hivemind compose` makes one app of each service in a Docker Compose file. The CLI does the conversion, so the server stores and runs those apps like any other. See [Compose files](compose.md).
 
