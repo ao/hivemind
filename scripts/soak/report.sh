@@ -113,7 +113,7 @@ $3 == "mark" && $4 == "steady" && $5 == "end" { stop("steady", $2) }
 		if ($3 == "probe") { np[w]++; if (f("api") == "ok") ok[w]++; if (f("converged") == "yes") cv[w]++; split(f("running"), rr, "/"); if (rr[1] == rr[2] && rr[2] > 0) ar[w]++; if (f("dups") != "0") dp[w]++ }
 		if ($3 == "reach") { if ($4 == "app=web") { rw[w]++; if ($7 == "ok") rwo[w]++ } if ($4 == "app=kv") { rk[w]++; if ($7 == "ok") rko[w]++ } }
 		if ($3 == "reach-fast") { rf[w]++; if ($6 == "ok") rfo[w]++ }
-		if ($3 == "lat" && $4 == "code=200") { sub(/^s=/, "", $5); lat[w, ++nl[w]] = $5 + 0 }
+		if ($3 == "lat" && $4 == "code=200" && ($6 == "" || $6 == "route=/v1/status")) { sub(/^s=/, "", $5); lat[w, ++nl[w]] = $5 + 0 }
 		if ($3 == "lat" && $4 != "code=200") latf[w]++
 	}
 }
@@ -161,6 +161,29 @@ END {
 			(wal0[n] != "" ? sprintf("%.0f / %.0f", wal0[n] / 1024, wal1[n] / 1024) : "-"), restarts[n]
 	}
 }' "$LOG"
+
+echo
+echo "## API latency by route in the steady window"
+echo
+echo "| Route | Requests | p50 / p99 / max (ms) | Reply bytes min / max |"
+echo "|---|---|---|---|"
+awk '
+function kv(k,   i) { for (i = 4; i <= NF; i++) if (index($i, k "=") == 1) return substr($i, length(k) + 2); return "" }
+$3 == "mark" && $4 == "steady" && $5 == "begin" { on = 1; next }
+$3 == "mark" && $4 == "steady" && $5 == "end" { on = 0; next }
+on && $3 == "lat" && $4 == "code=200" {
+	r = kv("route"); if (r == "") r = "/v1/status"
+	if (!(r in n)) order[++nr] = r
+	v[r, ++n[r]] = kv("s") + 0; b = kv("bytes") + 0
+	if (!(r in bmin) || b < bmin[r]) bmin[r] = b; if (b > bmax[r]) bmax[r] = b
+}
+function q(r, p,   i, j, k, x, m) {
+	m = n[r]; for (i = 1; i <= m; i++) x[i] = v[r, i]
+	for (i = 2; i <= m; i++) { k = x[i]; for (j = i - 1; j >= 1 && x[j] > k; j--) x[j + 1] = x[j]; x[j + 1] = k }
+	i = int(p * m + 0.999999); if (i < 1) i = 1; if (i > m) i = m
+	return sprintf("%.1f", x[i] * 1000)
+}
+END { for (i = 1; i <= nr; i++) { r = order[i]; printf "| %s | %d | %s / %s / %s | %d / %d |\n", r, n[r], q(r, 0.5), q(r, 0.99), q(r, 1), bmin[r], bmax[r] } }' "$LOG"
 
 echo
 echo "## Duplicates, failures and unexpected events"

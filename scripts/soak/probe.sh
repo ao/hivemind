@@ -12,9 +12,10 @@
 #     value on 127.0.0.1:6379, both run on that node over ssh. While the API
 #     is down, the last assignment it gave is used.
 # Every 60 s, one "res" line per node (the hivemind process's RSS, threads,
-# CPU time, open fds, start time; on the server the store's files), five
-# "lat" lines (GET /v1/status on the server, curl time_total), and one
-# "metrics" line (whether /metrics has go_goroutines).
+# CPU time, open fds, start time; on the server the store's files), fifteen
+# "lat" lines (five each of GET /v1/status, /v1/nodes and /v1/apps on the
+# server: curl's time_total and the reply's size), and one "metrics" line
+# (whether /metrics has go_goroutines, and its value).
 set -uo pipefail
 . "$(dirname "$0")/lib.sh"
 
@@ -50,8 +51,10 @@ EOF
 read -r -d '' REMOTE_LAT <<'EOF' || true
 tok=$(cat /var/lib/hivemind/admin.token) || exit 1
 cfg() { printf 'header = "Authorization: Bearer %s"\n' "$tok"; }
-for i in 1 2 3 4 5; do
-	cfg | curl -sS -o /dev/null -K - -m 5 -w '%{http_code} %{time_total}\n' http://127.0.0.1:4483/v1/status 2>/dev/null || echo "fail 0"
+for r in status nodes apps; do
+	for i in 1 2 3 4 5; do
+		cfg | curl -sS -o /dev/null -K - -m 5 -w "%{http_code} %{time_total} $r %{size_download}\n" http://127.0.0.1:4483/v1/$r 2>/dev/null || echo "fail 0 $r 0"
+	done
 done
 if m=$(cfg | curl -sS -K - -m 5 http://127.0.0.1:4483/metrics 2>/dev/null); then
 	g=$(printf '%s\n' "$m" | awk '$1 == "go_goroutines" { print $2 }')
@@ -130,11 +133,11 @@ resources_once() {
 		) &
 	done
 	if out=$(on "$SERVER" "sudo bash -s" <<<"$REMOTE_LAT" 2>/dev/null); then
-		while read -r a b c; do
+		while read -r a b c d; do
 			case "$a" in
 			metrics) ev metrics "$b $c" ;;
-			fail) ev lat "fail" ;;
-			*) ev lat "code=$a s=$b" ;;
+			fail) ev lat "fail route=/v1/$c" ;;
+			*) ev lat "code=$a s=$b route=/v1/$c bytes=$d" ;;
 			esac
 		done <<<"$out"
 	else

@@ -160,15 +160,17 @@ status_rows() {
 # the nodes come from one ssh call; the nodes are asked in parallel.
 collect() {
 	local f=$1 want_nodes=${2:-} tmp=$1.tmp out i n pids=()
+	# The reply is split with sed, not ${out%%#nodes*}: bash's pattern
+	# removal is quadratic in the length, 24 s for a 115 KB status.
 	out=$(on "$SERVER" "sudo $HM status --json && echo '#nodes' && { [ -z '$want_nodes' ] || sudo $HM nodes --json; }" 2>/dev/null) &&
-		[[ "$out" == *'#nodes'* ]] || out=
-	if [ -n "$out" ] && printf '%s\n' "${out%%#nodes*}" | status_rows >"$tmp" 2>/dev/null; then
+		grep -qx '#nodes' <<<"$out" || out=
+	if [ -n "$out" ] && sed '/^#nodes$/,$d' <<<"$out" | status_rows >"$tmp" 2>/dev/null; then
 		echo "S	ok" >>"$tmp"
 	else
 		echo "S	fail" >"$tmp"
 	fi
 	if [ -n "$want_nodes" ] && [ -n "$out" ]; then
-		printf '%s\n' "${out#*#nodes}" | jq -r '.[] | ["L", .id, .state, (.lease_age_seconds|tostring)] | @tsv' >>"$tmp" 2>/dev/null || true
+		sed '1,/^#nodes$/d' <<<"$out" | jq -r '.[] | ["L", .id, .state, (.lease_age_seconds|tostring)] | @tsv' >>"$tmp" 2>/dev/null || true
 	fi
 	awk '{ printf "N\t%s\t%s\n", $1, $2 }' "$IDS_FILE" >>"$tmp"
 	for i in "${!NAMES[@]}"; do
@@ -285,6 +287,11 @@ read -r -d '' REMOTE_KV_GET <<'EOK' || true
 timeout 3 bash -c 'exec 3<>/dev/tcp/127.0.0.1/6379 || exit 1; printf "GET soak:canary\r\n" >&3; IFS= read -r -t 2 a <&3; IFS= read -r -t 2 b <&3; printf "%s\n" "${b%$(printf "\r")}"'
 EOK
 kv_get() { on "$1" "$REMOTE_KV_GET"; }
+
+# kv_set NAME VALUE: write the kv value on NAME over the published port, with
+# the redis inline protocol. Prints the reply, +OK on success.
+KV_SET='exec 3<>/dev/tcp/127.0.0.1/6379 || exit 1; printf "SET soak:canary %s\r\n" "$1" >&3; IFS= read -r -t 3 r <&3; printf "%s\n" "${r%$(printf "\r")}"'
+kv_set() { on "$1" "bash -c '$KV_SET' sh '$2'"; }
 
 VOLUME_APPS=${VOLUME_APPS:-kv}
 

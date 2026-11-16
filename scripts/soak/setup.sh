@@ -3,6 +3,7 @@
 # workloads.
 #
 #   SOAK_DIR=... BIN=path/to/hivemind scripts/soak/setup.sh
+#   SOAK_DIR=... scripts/soak/setup.sh rejoin NAME    join a removed worker again
 #
 # The first machine in $NODES_FILE becomes the server, the others workers.
 # Each machine needs Docker Engine running, jq, curl, iptables, and an ssh
@@ -19,6 +20,8 @@
 #   5. deploy web (nginx, 3 replicas, 127.0.0.1:8080), spread (busybox sleep,
 #      6 replicas, no port) and kv (redis with --appendonly yes, a volume,
 #      127.0.0.1:6379), wait for convergence, and write the kv value.
+#      With SETUP_APPS=0 it stops after step 4, for a run that deploys its
+#      own apps (scale.sh).
 #
 # It logs the machines' versions and every TCP listener, and fails if a
 # hivemind or app port listens on a wildcard address.
@@ -94,8 +97,6 @@ kv_node() { # the soak name of the node that runs kv replica 0
 	[ -n "$id" ] && name_of_id "$id"
 }
 
-# The kv value is written over the published port with the redis inline protocol.
-KV_SET='exec 3<>/dev/tcp/127.0.0.1/6379 || exit 1; printf "SET soak:canary %s\r\n" "$1" >&3; IFS= read -r -t 3 r <&3; printf "%s\n" "${r%$(printf "\r")}"'
 
 check_listeners() {
 	local n l bad
@@ -120,6 +121,11 @@ main() {
 	wait_for 60 all_ready || die "not every node is ready: $(hm "$SERVER" nodes)"
 	note "all ${#NAMES[@]} nodes ready; waiting 40 s, the --min-ready wait, before the first deploy"
 	sleep 40
+	if [ "${SETUP_APPS:-1}" = 0 ]; then
+		ev setup "end: no apps (SETUP_APPS=0)"
+		note "setup done, without apps"
+		return 0
+	fi
 	deploy "{\"name\":\"web\",\"image\":\"$WEB_IMAGE\",\"replicas\":3,\"ports\":[{\"host\":8080,\"container\":80,\"bind\":\"127.0.0.1\"}]}"
 	deploy "{\"name\":\"spread\",\"image\":\"$SPREAD_IMAGE\",\"replicas\":6,\"command\":[\"sleep\",\"86400\"]}"
 	deploy "{\"name\":\"kv\",\"image\":\"$KV_IMAGE\",\"command\":[\"redis-server\",\"--appendonly\",\"yes\"],\"ports\":[{\"host\":6379,\"container\":6379,\"bind\":\"127.0.0.1\"}],\"volumes\":[{\"name\":\"data\",\"path\":\"/data\"}]}"
@@ -127,7 +133,7 @@ main() {
 	wait_for 300 converged_now || die "not converged 300 s after the deploy: $(check_converged "$SOAK_DIR/setup.tsv" | tr '\n' ';')"
 	n=$(kv_node) || die "kv has no node"
 	val="written-$(date -u +%FT%TZ)"
-	[ "$(on "$n" "bash -c '$KV_SET' sh '$val'")" = "+OK" ] || die "could not write the kv value on $n"
+	[ "$(kv_set "$n" "$val")" = "+OK" ] || die "could not write the kv value on $n"
 	echo "$val" >"$SOAK_DIR/kv-value"
 	ev kv "write node=$n key=soak:canary value=$val"
 	for n in "${NAMES[@]}"; do
@@ -140,4 +146,20 @@ main() {
 
 converged_now() { snapshot "$SOAK_DIR/setup.tsv" && check_converged "$SOAK_DIR/setup.tsv" >/dev/null; }
 
-main "$@"
+# rejoin NAME: bring back a worker that hivemind node remove removed, as
+# docs/cli.md says: stop its service, remove its containers by hand, empty its
+# data directory, and join again with a new token.
+rejoin() {
+	local n=$1
+	note "rejoining $n with an empty data directory"
+	SSH_TIMEOUT=180 on "$n" "sudo systemctl disable --now hivemind.service; ids=\$(sudo docker ps -aq --filter label=hivemind.app); [ -z \"\$ids\" ] || sudo docker rm -f \$ids >/dev/null; sudo rm -rf $DATA" ||
+		die "$n: could not clear the old node"
+	join_worker "$n"
+	write_ids
+	ev setup "rejoined $n as $(id_of "$n")"
+}
+
+case "${1:-}" in
+rejoin) rejoin "${2:?name}" ;;
+*) main "$@" ;;
+esac
