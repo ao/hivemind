@@ -137,6 +137,7 @@ func (a *Agent) supervise(ctx context.Context, as store.Assignment, c runtime.Co
 		}
 		if now.Before(due) {
 			a.schedule(rs, due, st)
+			st.Error = exitReason(ci, as)
 			return nil
 		}
 		if ls := a.launchWaiting(c.Name); ls != nil {
@@ -175,6 +176,10 @@ func (a *Agent) supervise(ctx context.Context, as store.Assignment, c runtime.Co
 				due := res.UnhealthySince.Add(backoff(rs.restarts))
 				if now.Before(due) {
 					a.schedule(rs, due, st)
+					st.Error = fmt.Sprintf("failed its health check %d times in a row", res.Failures)
+					if res.LastError != "" {
+						st.Error += ": " + res.LastError
+					}
 					return nil
 				}
 				if err := a.restartInPlace(ctx, c); err != nil {
@@ -202,6 +207,19 @@ func (a *Agent) supervise(ctx context.Context, as store.Assignment, c runtime.Co
 		}
 	}
 	return nil
+}
+
+// exitReason says why an exited container stopped, for its status while it
+// waits for its restart: its exit code, or that the kernel killed it for
+// going over its memory limit.
+func exitReason(ci runtime.Container, as store.Assignment) string {
+	if ci.OOMKilled {
+		if m := as.Spec.Resources.Memory; m > 0 {
+			return fmt.Sprintf("killed for going over its memory limit of %s (out of memory)", m)
+		}
+		return "killed by the kernel for lack of memory (out of memory)"
+	}
+	return fmt.Sprintf("exited with code %d", ci.ExitCode)
 }
 
 // afterStart sets the readiness of a container that has just been started. A

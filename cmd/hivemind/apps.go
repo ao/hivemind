@@ -374,6 +374,9 @@ func printStatus(out io.Writer, apps []server.AppStatus) {
 			detail := firstNonEmpty(r.PendingReason, r.Error, "-")
 			if r.CrashLooping {
 				detail = "crash-looping"
+				if r.Error != "" {
+					detail += ": " + r.Error
+				}
 				if r.NextRestart != nil {
 					detail += ", next restart in " + max(time.Until(*r.NextRestart), 0).Round(time.Second).String()
 				}
