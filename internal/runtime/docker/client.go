@@ -143,6 +143,12 @@ func (c *Client) transportError(ctx context.Context, op string, err error) error
 	if ctxErr := ctx.Err(); ctxErr != nil {
 		return ctxErr
 	}
+	// The URL of the request, which url.Error puts in front of the cause,
+	// is the same for every call and says nothing to the reader.
+	var ue *url.Error
+	if errors.As(err, &ue) {
+		err = ue.Err
+	}
 	return &runtime.Error{Op: op, Err: runtime.ErrUnavailable, Message: "lost the connection to the Docker daemon", Cause: err}
 }
 

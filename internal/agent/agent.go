@@ -244,6 +244,12 @@ type replicaKey struct {
 func (a *Agent) Reconcile(ctx context.Context) error {
 	a.mu.Lock()
 	defer a.mu.Unlock()
+	// A pass that ends early, because the server or the daemon is down,
+	// schedules no wake: the one from an earlier pass may be in the past,
+	// and Run would pass again at once, over and over, against a server or
+	// a daemon that is down. The next tick tries again. A full pass sets the
+	// wake in forget.
+	a.wakeAt = time.Time{}
 
 	assigned, err := a.cfg.Source.AssignmentsForNode(ctx, a.cfg.NodeID)
 	if err != nil {
@@ -269,11 +275,15 @@ func (a *Agent) Reconcile(ctx context.Context) error {
 		// Without the list nothing can be compared. Report every replica as
 		// unknown, and leave the containers alone.
 		err = fmt.Errorf("listing containers: %w", err)
+		msg := err.Error()
+		if errors.Is(err, runtime.ErrUnavailable) {
+			msg = "the Docker daemon on this node is not answering, so the state of its containers is not known: " + err.Error()
+		}
 		st := make([]store.Status, 0, len(wantKeys))
 		for _, k := range wantKeys {
 			as := want[k]
 			st = append(st, store.Status{Name: ContainerName(as.App, as.Index, as.Generation), App: as.App,
-				Replica: as.Index, Generation: as.Generation, State: "unknown", Error: err.Error()})
+				Replica: as.Index, Generation: as.Generation, State: "unknown", Error: msg})
 		}
 		return errors.Join(err, a.report(ctx, st))
 	}
