@@ -107,6 +107,9 @@ type rolloutRow struct {
 	stepIdx   int
 	stepFrom  int
 	stepSince int64
+	// stepSeen is when the move's new copy was first seen reported with a
+	// container, or 0.
+	stepSeen int64
 }
 
 // startRollout records that the app's replicas are moving to target. A move
@@ -120,7 +123,7 @@ func (s *Store) startRollout(ctx context.Context, tx *sql.Tx, app string, target
 	_, err := tx.ExecContext(ctx, `INSERT INTO rollouts (app, target, state, reason, step_idx, step_from, step_since, updated_at)
 		VALUES (?, ?, 'in_progress', '', -1, 0, 0, ?)
 		ON CONFLICT (app) DO UPDATE SET target = excluded.target, state = 'in_progress', reason = '',
-			step_idx = -1, step_from = 0, step_since = 0, updated_at = excluded.updated_at`, app, target, now)
+			step_idx = -1, step_from = 0, step_since = 0, step_seen = 0, updated_at = excluded.updated_at`, app, target, now)
 	return err
 }
 
@@ -198,7 +201,7 @@ func (s *Store) advanceApp(ctx context.Context, tx *sql.Tx, app string) error {
 		return err
 	}
 	if len(pending) == 0 {
-		_, err := tx.ExecContext(ctx, `UPDATE rollouts SET state = 'done', reason = '', step_idx = -1, step_from = 0, step_since = 0, updated_at = ?
+		_, err := tx.ExecContext(ctx, `UPDATE rollouts SET state = 'done', reason = '', step_idx = -1, step_from = 0, step_since = 0, step_seen = 0, updated_at = ?
 			WHERE app = ?`, s.now().UnixNano(), app)
 		return err
 	}
@@ -226,7 +229,7 @@ func (s *Store) checkMove(ctx context.Context, tx *sql.Tx, r rolloutRow, a spec.
 	if hasSurge {
 		node = surge.NodeID
 	}
-	ready, crash, err := containerState(ctx, tx, node, r.app, r.stepIdx, r.target)
+	ready, crash, exists, err := containerState(ctx, tx, node, r.app, r.stepIdx, r.target)
 	if err != nil {
 		return false, err
 	}
@@ -241,8 +244,23 @@ func (s *Store) checkMove(ctx context.Context, tx *sql.Tx, r rolloutRow, a spec.
 	case crash:
 		return false, s.pause(ctx, tx, r, hasSurge, fmt.Sprintf("rollout to generation %d stopped: replica %d is crash-looping", r.target, r.stepIdx))
 	}
+	// The deadline counts from when the node first reported a container of
+	// the new copy: a node busy with other work, or pulling the image, can
+	// take a while to create it, and the deadline is the health check's
+	// time. A copy that never appears fails at the deadline from the start
+	// of the move.
 	deadline := RolloutDeadline(a)
-	if now.UnixNano()-r.stepSince >= int64(deadline) {
+	if r.stepSeen == 0 && exists {
+		r.stepSeen = now.UnixNano()
+		if _, err := tx.ExecContext(ctx, `UPDATE rollouts SET step_seen = ? WHERE app = ?`, r.stepSeen, r.app); err != nil {
+			return false, err
+		}
+	}
+	switch {
+	case r.stepSeen != 0 && now.UnixNano()-r.stepSeen >= int64(deadline):
+		return false, s.pause(ctx, tx, r, hasSurge, fmt.Sprintf("rollout to generation %d stopped: replica %d is not ready %s after its container was created",
+			r.target, r.stepIdx, deadline))
+	case r.stepSeen == 0 && now.UnixNano()-r.stepSince >= int64(deadline):
 		return false, s.pause(ctx, tx, r, hasSurge, fmt.Sprintf("rollout to generation %d stopped: replica %d is not ready after %s", r.target, r.stepIdx, deadline))
 	}
 	return false, nil
@@ -250,7 +268,7 @@ func (s *Store) checkMove(ctx context.Context, tx *sql.Tx, r rolloutRow, a spec.
 
 // endMove clears the move in flight, so the next step can start.
 func (s *Store) endMove(ctx context.Context, tx *sql.Tx, r rolloutRow) error {
-	_, err := tx.ExecContext(ctx, `UPDATE rollouts SET step_idx = -1, step_from = 0, step_since = 0, updated_at = ? WHERE app = ?`,
+	_, err := tx.ExecContext(ctx, `UPDATE rollouts SET step_idx = -1, step_from = 0, step_since = 0, step_seen = 0, updated_at = ? WHERE app = ?`,
 		s.now().UnixNano(), r.app)
 	return err
 }
@@ -268,7 +286,7 @@ func (s *Store) pause(ctx context.Context, tx *sql.Tx, r rolloutRow, surged bool
 		r.stepFrom, now, r.app, r.stepIdx); err != nil {
 		return err
 	}
-	_, err := tx.ExecContext(ctx, `UPDATE rollouts SET state = 'paused', reason = ?, step_idx = -1, step_from = 0, step_since = 0, updated_at = ?
+	_, err := tx.ExecContext(ctx, `UPDATE rollouts SET state = 'paused', reason = ?, step_idx = -1, step_from = 0, step_since = 0, step_seen = 0, updated_at = ?
 		WHERE app = ?`, reason, now, r.app)
 	return err
 }
@@ -301,7 +319,7 @@ func (s *Store) startMove(ctx context.Context, tx *sql.Tx, r rolloutRow, a spec.
 		// The new generation cannot run on the replica's node, and its
 		// volume is there. Moving it would start it with an empty volume,
 		// so the rollout stops before it touches the replica.
-		_, err := tx.ExecContext(ctx, `UPDATE rollouts SET state = 'paused', reason = ?, step_idx = -1, step_from = 0, step_since = 0,
+		_, err := tx.ExecContext(ctx, `UPDATE rollouts SET state = 'paused', reason = ?, step_idx = -1, step_from = 0, step_since = 0, step_seen = 0,
 			updated_at = ? WHERE app = ?`,
 			fmt.Sprintf("rollout to generation %d stopped: replica %d has its volume on node %s, which cannot run generation %d: %s",
 				r.target, rep.Index, rep.NodeID, r.target, misfit), now, rep.App)
@@ -324,7 +342,7 @@ func (s *Store) startMove(ctx context.Context, tx *sql.Tx, r rolloutRow, a spec.
 			return err
 		}
 	}
-	_, err = tx.ExecContext(ctx, `UPDATE rollouts SET step_idx = ?, step_from = ?, step_since = ?, updated_at = ? WHERE app = ?`,
+	_, err = tx.ExecContext(ctx, `UPDATE rollouts SET step_idx = ?, step_from = ?, step_since = ?, step_seen = 0, updated_at = ? WHERE app = ?`,
 		rep.Index, rep.Generation, now, now, rep.App)
 	return err
 }
@@ -469,8 +487,8 @@ func hostPortsTaken(a spec.App, node string, all []Assignment) bool {
 // AdvanceRollouts only selects those.
 func loadRollout(ctx context.Context, tx *sql.Tx, app string) (rolloutRow, error) {
 	var r rolloutRow
-	err := tx.QueryRowContext(ctx, `SELECT app, target, state, reason, step_idx, step_from, step_since FROM rollouts WHERE app = ?`, app).
-		Scan(&r.app, &r.target, &r.state, &r.reason, &r.stepIdx, &r.stepFrom, &r.stepSince)
+	err := tx.QueryRowContext(ctx, `SELECT app, target, state, reason, step_idx, step_from, step_since, step_seen FROM rollouts WHERE app = ?`, app).
+		Scan(&r.app, &r.target, &r.state, &r.reason, &r.stepIdx, &r.stepFrom, &r.stepSince, &r.stepSeen)
 	return r, err
 }
 
@@ -486,17 +504,18 @@ func surgeOf(ctx context.Context, tx *sql.Tx, app string, idx int) (Assignment, 
 }
 
 // containerState reports whether a replica's container at generation gen on
-// node is Ready, and whether it is crash-looping. A container that has not
-// reported yet is neither.
-func containerState(ctx context.Context, tx *sql.Tx, node, app string, idx, gen int) (ready, crash bool, err error) {
-	var r, c int
-	err = tx.QueryRowContext(ctx, `SELECT ready, crash_looping FROM container_status
-		WHERE node_id = ? AND app = ? AND idx = ? AND generation = ? ORDER BY ready DESC LIMIT 1`,
-		node, app, idx, gen).Scan(&r, &c)
+// node is Ready, whether it is crash-looping, and whether the node reported
+// a container for it at all: a replica reported pending, with no container
+// yet, has none. A container that has not reported yet is none of these.
+func containerState(ctx context.Context, tx *sql.Tx, node, app string, idx, gen int) (ready, crash, exists bool, err error) {
+	var r, c, e int
+	err = tx.QueryRowContext(ctx, `SELECT ready, crash_looping, container_id != '' FROM container_status
+		WHERE node_id = ? AND app = ? AND idx = ? AND generation = ? ORDER BY ready DESC, container_id != '' DESC LIMIT 1`,
+		node, app, idx, gen).Scan(&r, &c, &e)
 	if errors.Is(err, sql.ErrNoRows) {
-		return false, false, nil
+		return false, false, false, nil
 	}
-	return r == 1, c == 1, err
+	return r == 1, c == 1, e == 1, err
 }
 
 // querySurges returns surges matching where, joined with their app's spec.

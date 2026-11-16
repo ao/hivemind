@@ -265,7 +265,7 @@ While a rollout is in progress, or after it has paused, the app status has a `ro
 
 - `target` is the generation the rollout moves the replicas to.
 - `state` is `in_progress` or `paused`. A finished rollout is not reported.
-- `reason` is set when the rollout is paused. It is a sentence such as `rollout to generation 3 stopped: replica 0 is not ready after 1m0s`.
+- `reason` is set when the rollout is paused. It is a sentence such as `rollout to generation 3 stopped: replica 0 is not ready 1m0s after its container was created`, or `... replica 0 is not ready after 1m0s` for a copy whose container never appeared.
 - `moving` is the index of the replica being moved, or -1 between moves.
 
 A paused rollout stays paused until a spec with another template is deployed. Rolling back is deploying the old spec.

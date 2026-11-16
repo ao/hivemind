@@ -374,7 +374,7 @@ func (s *Store) checkDrainMove(ctx context.Context, tx *sql.Tx, node string, m d
 		}
 		return deleteDrainMove(ctx, tx, node, m.app)
 	}
-	ready, crash, err := containerState(ctx, tx, m.surgeNode, m.app, m.idx, m.gen)
+	ready, crash, _, err := containerState(ctx, tx, m.surgeNode, m.app, m.idx, m.gen)
 	if err != nil {
 		return err
 	}

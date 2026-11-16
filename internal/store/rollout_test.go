@@ -461,3 +461,103 @@ func TestSingleNodeFallsBackToInPlaceForHostPorts(t *testing.T) {
 		t.Fatalf("surge on a single node: %+v", surges)
 	}
 }
+
+// healthChecked is web with a health check whose move deadline is 33 s: no
+// start period, 3 retries at 1 s, and the 30 s margin.
+func healthChecked(replicas int, v string) spec.App {
+	a := withEnv(replicas, v)
+	a.Health = &spec.Health{HTTP: &spec.HTTPCheck{Port: 80}, Interval: spec.Duration(time.Second),
+		Timeout: spec.Duration(500 * time.Millisecond), Retries: 3}
+	return a
+}
+
+// pendingCopy is what an agent reports for a replica whose container it has
+// not created yet: no container ID.
+func pendingCopy(app string, idx, gen int) Status {
+	return Status{Name: fmt.Sprintf("hivemind-%s-%d-g%d", app, idx, gen), App: app, Replica: idx,
+		Generation: gen, State: "pending"}
+}
+
+// The scale run: a node busy stopping containers created a surge 42 s after
+// it was placed, and the rollout paused at its 60 s deadline before the new
+// copy's health check could pass. A surge that its node creates late gets the
+// whole deadline from when it is first reported with a container.
+func TestLateSurgeGetsItsWholeDeadline(t *testing.T) {
+	e := newRolloutEnv(t, node1, nodeB)
+	e.put(healthChecked(1, "1"))
+	e.put(healthChecked(1, "2"))
+	deadline := RolloutDeadline(healthChecked(1, "2"))
+	if deadline != 33*time.Second {
+		t.Fatalf("deadline %s, want 33s", deadline)
+	}
+	e.advance()
+	if onB, err := e.s.AssignmentsForNode(e.ctx, nodeB); err != nil || len(onB) != 1 || onB[0].Generation != 2 {
+		t.Fatalf("surge on nodeB: %+v %v", onB, err)
+	}
+
+	// nodeB reports the replica pending for 30 s, most of the deadline, and
+	// then creates its container.
+	for range 3 {
+		e.clock.Advance(10 * time.Second)
+		e.report(nodeB, pendingCopy("web", 0, 2))
+		e.advance()
+	}
+	created := container("web", 0, 2)
+	created.ContainerID, created.Ready, created.Health = "c2", false, "starting"
+	e.report(nodeB, created)
+	e.advance()
+	if ro := e.rollout("web"); ro.State != RolloutInProgress || ro.Moving != 0 {
+		t.Fatalf("30 s after the surge was placed, when its container appeared: %+v", ro)
+	}
+	// 62 s after the surge was placed, 32 s after its container appeared.
+	e.clock.Advance(deadline - time.Second)
+	e.report(nodeB, created)
+	e.advance()
+	if ro := e.rollout("web"); ro.State != RolloutInProgress {
+		t.Fatalf("one second before the deadline from the container's first report, %s after the surge was placed: %+v",
+			30*time.Second+deadline-time.Second, ro)
+	}
+	e.clock.Advance(time.Second)
+	e.advance()
+	ro := e.rollout("web")
+	want := "rollout to generation 2 stopped: replica 0 is not ready 33s after its container was created"
+	if ro.State != RolloutPaused || ro.Reason != want {
+		t.Fatalf("at the deadline from the container's first report: %+v, want %q", ro, want)
+	}
+	if onB, _ := e.s.AssignmentsForNode(e.ctx, nodeB); len(onB) != 1 || onB[0].Desired != Removed {
+		t.Fatalf("surge not marked for removal: %+v", onB)
+	}
+
+	// The next move gets its own deadline, from its own copy.
+	e.put(healthChecked(1, "3"))
+	e.advance()
+	if ro := e.rollout("web"); ro.State != RolloutInProgress || ro.Moving != 0 {
+		t.Fatalf("new rollout: %+v", ro)
+	}
+	var seen int64
+	if err := e.s.db.QueryRow(`SELECT step_seen FROM rollouts WHERE app = 'web'`).Scan(&seen); err != nil || seen != 0 {
+		t.Fatalf("step_seen of the new move: %d, %v; want 0", seen, err)
+	}
+}
+
+// A copy that never appears, reported pending all along, still fails at the
+// deadline from the start of the move.
+func TestSurgeThatNeverAppearsFailsAtTheDeadline(t *testing.T) {
+	e := newRolloutEnv(t, node1, nodeB)
+	e.put(healthChecked(1, "1"))
+	e.put(healthChecked(1, "2"))
+	e.advance()
+	e.clock.Advance(32 * time.Second)
+	e.report(nodeB, pendingCopy("web", 0, 2))
+	e.advance()
+	if ro := e.rollout("web"); ro.State != RolloutInProgress {
+		t.Fatalf("one second before the deadline: %+v", ro)
+	}
+	e.clock.Advance(time.Second)
+	e.report(nodeB, pendingCopy("web", 0, 2))
+	e.advance()
+	ro := e.rollout("web")
+	if want := "rollout to generation 2 stopped: replica 0 is not ready after 33s"; ro.State != RolloutPaused || ro.Reason != want {
+		t.Fatalf("at the deadline: %+v, want %q", ro, want)
+	}
+}

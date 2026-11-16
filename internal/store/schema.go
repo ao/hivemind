@@ -265,6 +265,12 @@ ALTER TABLE apps ADD COLUMN origin TEXT NOT NULL DEFAULT '';
 	`
 ALTER TABLE nodes ADD COLUMN version TEXT NOT NULL DEFAULT '';
 `,
+	// 14: when a rollout's copy appeared. rollouts.step_seen is when the
+	// store first saw a container of the move in flight reported by its
+	// node, or 0 before that; the move's deadline counts from it.
+	`
+ALTER TABLE rollouts ADD COLUMN step_seen INTEGER NOT NULL DEFAULT 0;
+`,
 }
 
 // migrationNotes says in a few words what each migration adds, for the log:
@@ -283,6 +289,7 @@ var migrationNotes = []string{
 	"node loss during a drain",
 	"app origins",
 	"node versions",
+	"rollout copy times",
 }
 
 // SchemaVersion is the schema version this build writes.
