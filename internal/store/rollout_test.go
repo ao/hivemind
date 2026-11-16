@@ -561,3 +561,45 @@ func TestSurgeThatNeverAppearsFailsAtTheDeadline(t *testing.T) {
 		t.Fatalf("at the deadline: %+v, want %q", ro, want)
 	}
 }
+
+// A replica that loses its node during a rollout, and finds no node to take
+// it, must not stay at its old generation when the rollout finishes: placed
+// later, it would run the old spec with no rollout to move it. The
+// concurrent writers test found this with drains whose deadline released
+// replicas while every node was ineligible.
+func TestReplicaReleasedDuringRolloutTakesTheTarget(t *testing.T) {
+	e := newRolloutEnv(t, node1, nodeB)
+	e.put(web(2))
+	e.put(withEnv(2, "2"))
+	e.advance()
+	if onB, _ := e.s.AssignmentsForNode(e.ctx, nodeB); len(onB) != 1 || onB[0].Generation != 2 {
+		t.Fatalf("surge on nodeB: %+v", onB)
+	}
+	for _, id := range []string{node1, nodeB} {
+		if _, err := e.s.SetNodeEligibility(e.ctx, id, false); err != nil {
+			t.Fatal(err)
+		}
+	}
+	// node1 is lost; its replicas lose it, and no eligible node takes them.
+	e.clock.Advance(20 * time.Second)
+	e.renew(nodeB)
+	if lost, err := e.s.ReconcileNodes(e.ctx, time.Time{}); err != nil || len(lost) != 1 || lost[0] != node1 {
+		t.Fatalf("sweep: lost %v, %v", lost, err)
+	}
+	if n := e.nodesOf("web"); !eqStrings(n, []string{"", ""}) {
+		t.Fatalf("nodes after the loss: %v", n)
+	}
+	e.report(nodeB, container("web", 0, 2))
+	e.advance()
+	e.advance()
+	if ro := e.rollout("web"); ro.State != RolloutDone {
+		t.Fatalf("rollout: %+v", ro)
+	}
+	if _, err := e.s.SetNodeEligibility(e.ctx, nodeB, true); err != nil {
+		t.Fatal(err)
+	}
+	if g, n := e.gens("web"), e.nodesOf("web"); !eqInts(g, []int{2, 2}) || !eqStrings(n, []string{nodeB, nodeB}) {
+		t.Fatalf("after the rollout: gens %v, nodes %v; want both at generation 2 on %s", g, n, nodeB)
+	}
+	checkInvariants(t, e.s)
+}

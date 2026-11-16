@@ -189,6 +189,17 @@ func (s *Store) advanceApp(ctx context.Context, tx *sql.Tx, app string) error {
 	if err != nil {
 		return err
 	}
+	// A replica that lost its node during the rollout, to node loss or a
+	// drain's deadline, has nothing running, so it takes the target at once,
+	// as syncReplicas does for one with no node. Otherwise the rollout, which
+	// moves only replicas on a node, could finish without it, and it would be
+	// placed later at its old generation. A held replica keeps its own: its
+	// volume is on a removed node, and a put decides about it.
+	if _, err := tx.ExecContext(ctx, `UPDATE replicas SET generation = ?, updated_at = ?
+		WHERE app = ? AND desired = 'running' AND node_id IS NULL AND held = 0 AND generation != ?`,
+		r.target, s.now().UnixNano(), app, r.target); err != nil {
+		return err
+	}
 	if r.stepIdx >= 0 {
 		advance, err := s.checkMove(ctx, tx, r, a.Spec)
 		if err != nil || !advance {
