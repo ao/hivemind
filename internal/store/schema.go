@@ -232,6 +232,19 @@ CREATE TABLE tls_locks (
 	expires INTEGER NOT NULL
 ) STRICT;
 `,
+	// 10: registry credentials. A row is the username and password that a
+	// pull of an image from host sends. The password is stored as it is,
+	// like environment values, because the Docker daemon needs it as it is.
+	// host is in the form spec.ParseRegistryHost gives.
+	`
+CREATE TABLE registries (
+	host       TEXT PRIMARY KEY CHECK (host != ''),
+	username   TEXT NOT NULL CHECK (username != ''),
+	password   TEXT NOT NULL CHECK (password != ''),
+	created_at INTEGER NOT NULL,
+	updated_at INTEGER NOT NULL
+) STRICT;
+`,
 }
 
 // SchemaVersion is the schema version this build writes.

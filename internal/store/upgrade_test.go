@@ -152,8 +152,23 @@ func TestOpenMigratesStoresFromEarlierSchemas(t *testing.T) {
 				t.Fatalf("status after migration: %+v, %v", sts, err)
 			}
 
+			// Migration 10 adds no registry credential, and the replicas
+			// get none.
+			if rs, err := s.ListRegistries(ctx); err != nil || len(rs) != 0 {
+				t.Fatalf("registries after migration: %+v, %v", rs, err)
+			}
+			if as, err := s.AssignmentsForNode(ctx, "node-1"); err != nil || len(as) != 2 || as[0].Auth != nil {
+				t.Fatalf("assignments after migration: %+v, %v", as, err)
+			}
+
 			// The migrated store takes writes that use the new schema.
 			mustPut(t, s, web(3))
+			if _, err := s.PutRegistry(ctx, "docker.io", "u", "p"); err != nil {
+				t.Fatalf("registry credential after migration: %v", err)
+			}
+			if as, _ := s.AssignmentsForNode(ctx, "node-1"); len(as) < 2 || as[0].Auth == nil || as[0].Auth.Username != "u" {
+				t.Fatalf("assignments after a login: %+v", as)
+			}
 			if app, _ := s.GetApp(ctx, "web"); app.Spec.Replicas != 3 {
 				t.Fatalf("replicas after a write: %d, want 3", app.Spec.Replicas)
 			}

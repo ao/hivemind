@@ -78,6 +78,10 @@ type Replica struct {
 type Assignment struct {
 	Replica
 	Spec spec.App
+	// Auth is the stored credential for the registry of Spec.Image, for a
+	// replica that is to run. It is nil when there is none. Only
+	// AssignmentsForNode sets it.
+	Auth *RegistryAuth
 }
 
 // Node is a machine that runs an agent.
@@ -675,6 +679,8 @@ func (s *Store) Replicas(ctx context.Context, app string) ([]Replica, error) {
 // AssignmentsForNode returns every replica placed on the node, running and
 // marked for removal, with its app's spec. A surge on the node is included
 // as an assignment for the same replica index, at the surge's generation.
+// Each one that is to run carries the credential stored for its image's
+// registry, if there is one, so the node can pull the image.
 func (s *Store) AssignmentsForNode(ctx context.Context, nodeID string) ([]Assignment, error) {
 	out, err := queryAssignments(ctx, s.db, `r.node_id = ?`, nodeID)
 	if err != nil {
@@ -684,7 +690,11 @@ func (s *Store) AssignmentsForNode(ctx context.Context, nodeID string) ([]Assign
 	if err != nil {
 		return nil, err
 	}
-	return append(out, surges...), nil
+	out = append(out, surges...)
+	if err := attachRegistryAuth(ctx, s.db, out); err != nil {
+		return nil, err
+	}
+	return out, nil
 }
 
 // UpsertNode registers a node or updates its name and capacity, renews its

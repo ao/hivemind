@@ -433,8 +433,8 @@ func TestRestoreRefusesNewerSchema(t *testing.T) {
 func TestRestoreMigratesOlderSchema(t *testing.T) {
 	s := newServer(t)
 	var b bytes.Buffer
-	// Undo migrations 9, 8 and 7.
-	snap := editSnapshot(s.st, `DROP TABLE tls_locks`, `DROP TABLE tls_storage`, `DROP TABLE app_hosts`,
+	// Undo migrations 10, 9, 8 and 7.
+	snap := editSnapshot(s.st, `DROP TABLE registries`, `DROP TABLE tls_locks`, `DROP TABLE tls_storage`, `DROP TABLE app_hosts`,
 		`ALTER TABLE container_status DROP COLUMN route_ports`, `ALTER TABLE nodes DROP COLUMN address`,
 		`DROP TABLE drain_blocked`, `DROP TABLE drain_moves`, `DROP TABLE drains`,
 		`ALTER TABLE nodes DROP COLUMN eligible`, `DROP TABLE node_certs`, `UPDATE schema_version SET version = 6`)
@@ -456,6 +456,57 @@ func TestRestoreMigratesOlderSchema(t *testing.T) {
 	}
 	if err := r.TLSStore(context.Background(), "acme/ca/users/a@example.com/a.json", []byte("{}")); err != nil {
 		t.Fatalf("the migrated store has no version 9 table: %v", err)
+	}
+	if _, err := r.PutRegistry(context.Background(), "ghcr.io", "u", "p"); err != nil {
+		t.Fatalf("the migrated store has no version 10 table: %v", err)
+	}
+}
+
+// Registry credentials are in the store, so a backup carries them, password
+// and all, and a restored server sends them with its assignments again.
+func TestBackupCarriesRegistryCredentials(t *testing.T) {
+	s := newServer(t)
+	ctx := context.Background()
+	const password = "registry-password-in-a-backup"
+	if _, err := s.st.PutRegistry(ctx, "docker.io", "hubuser", password); err != nil {
+		t.Fatal(err)
+	}
+	var b bytes.Buffer
+	if _, err := Write(ctx, &b, Options{DataDir: s.dir, Snapshot: s.st.SnapshotTo}); err != nil {
+		t.Fatal(err)
+	}
+	dir := filepath.Join(t.TempDir(), "r")
+	if _, err := Restore(ctx, &b, dir); err != nil {
+		t.Fatal(err)
+	}
+	r, err := store.Open(ctx, filepath.Join(dir, StoreName))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer r.Close()
+	rs, err := r.ListRegistries(ctx)
+	if err != nil || len(rs) != 1 || rs[0].Host != "docker.io" || rs[0].Username != "hubuser" {
+		t.Fatalf("restored registries: %+v, %v", rs, err)
+	}
+	// web (nginx:alpine, on Docker Hub) has replicas on the two live nodes.
+	found := false
+	for _, n := range []string{serverNode, workerNode} {
+		as, err := r.AssignmentsForNode(ctx, n)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, a := range as {
+			if a.Desired != store.Running {
+				continue
+			}
+			found = true
+			if a.Auth == nil || a.Auth.Password != password {
+				t.Fatalf("restored assignment %s/%d on %s: credential %+v", a.App, a.Index, n, a.Auth)
+			}
+		}
+	}
+	if !found {
+		t.Fatal("no running assignment after the restore")
 	}
 }
 
