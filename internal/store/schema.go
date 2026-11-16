@@ -280,7 +280,8 @@ var migrationNotes = []string{
 	"node eligibility and drains",
 	"routing",
 	"registry credentials",
-	"reserved; no change",
+	"node loss during a drain",
+	"app origins",
 	"node versions",
 }
 

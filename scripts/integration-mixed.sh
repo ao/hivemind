@@ -20,7 +20,7 @@
 #     over more than two of the old 30 s retries; it logs that the server
 #     refused its address
 # After the server is upgraded, on the same data directory:
-#   - the store migration logs one line per schema step, 6 to 12
+#   - the store migration logs one line per schema step, 6 to 13
 #   - a second serve on the data directory is refused with the pid
 #   - n1 registers its address without a restart, and nodes shows it
 #   - nodes shows this build's version for n0 and n1, and "-" for n2;
@@ -162,13 +162,13 @@ wait_for 20 old_gone || cl_fail "the 2.0.0 server did not stop"
 up=$(date +%s)
 docker exec -d "$S" sh -c "exec hivemind serve --advertise $S_IP --min-ready 0s >>/var/log/hivemind.log 2>&1"
 wait_for 30 docker exec "$S" hivemind status || cl_fail "the upgraded API did not answer"
-[ "$(count "$S" 'msg="store schema migrated"')" -eq 6 ] ||
-	cl_fail "the migration logged $(count "$S" 'msg="store schema migrated"') steps, want 6: $(docker exec "$S" grep -F 'schema' /var/log/hivemind.log | tr '\n' ';')"
+[ "$(count "$S" 'msg="store schema migrated"')" -eq 7 ] ||
+	cl_fail "the migration logged $(count "$S" 'msg="store schema migrated"') steps, want 7: $(docker exec "$S" grep -F 'schema' /var/log/hivemind.log | tr '\n' ';')"
 if out=$(docker exec "$S" hivemind serve --advertise "$S_IP" 2>&1); then
 	cl_fail "a second serve on the data directory started"
 fi
 grep -q "another hivemind (pid [0-9]*) runs on the data directory /var/lib/hivemind" <<<"$out" || cl_fail "a second serve: $out"
-cl_note "the migration logged 6 steps; a second serve is refused: $out"
+cl_note "the migration logged 7 steps; a second serve is refused: $out"
 
 has_address() { docker exec "$S" hivemind nodes --json | grep -qF "\"address\": \"$W1_IP\""; }
 wait_for 60 has_address || cl_fail "$W1 did not register its address after the upgrade: $(docker exec "$S" hivemind nodes | tr '\n' ';')"
