@@ -174,6 +174,11 @@ func splitServer(arg string) (string, int, error) {
 // directory that is already joined, before it uses the token.
 func enroll(ctx context.Context, log *slog.Logger, dir, host string, port int, token string) error {
 	if _, err := os.Lstat(filepath.Join(dir, workerStateFile)); err == nil {
+		server := net.JoinHostPort(host, strconv.Itoa(port))
+		if id, removed := joinedNodeRemoved(ctx, dir, server); removed {
+			return fmt.Errorf("%s holds node %s, which the server at %s says was removed from the cluster, so these files cannot be used again: "+
+				"move %s aside, or use another --data-dir, and run this join again; the token was not used", dir, id, server, dir)
+		}
 		return fmt.Errorf("%s already holds a joined node: run hivemind serve --role worker, or use another --data-dir", dir)
 	} else if !errors.Is(err, fs.ErrNotExist) {
 		return err
@@ -205,6 +210,29 @@ func enroll(ctx context.Context, log *slog.Logger, dir, host string, port int, t
 	}
 	log.Info("joined the cluster", "node", st.NodeID, "server", st.Server)
 	return nil
+}
+
+// removedProbeTimeout bounds join's question to the server about the node a
+// data directory already holds.
+const removedProbeTimeout = 5 * time.Second
+
+// joinedNodeRemoved asks the server whether the node joined in dir was
+// removed, as after hivemind node remove, when the join is to the server
+// that node joined. It reports the node's ID, and true only when the server
+// says so with the node's own certificate.
+func joinedNodeRemoved(ctx context.Context, dir, server string) (string, bool) {
+	w, err := loadWorkerState(dir)
+	if err != nil || w.state.Server != server {
+		return "", false
+	}
+	c, err := nodeapi.NewClient("https://"+server, w.tlsCfg, nodeapi.WithVersion(version))
+	if err != nil {
+		return "", false
+	}
+	ctx, cancel := context.WithTimeout(ctx, removedProbeTimeout)
+	defer cancel()
+	_, err = c.StatusForNode(ctx, w.state.NodeID)
+	return w.state.NodeID, errors.Is(err, nodeapi.ErrNodeRemoved)
 }
 
 // saveWorkerState writes the worker's files. Each is created with O_EXCL, so

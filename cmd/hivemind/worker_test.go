@@ -11,6 +11,7 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -393,5 +394,54 @@ func TestJoinOnTheJoinPortSaysToUseTheClusterPort(t *testing.T) {
 	err = enroll(context.Background(), log, dir, "127.0.0.1", 1, pki.JoinToken{}.String())
 	if err == nil || strings.Contains(err.Error(), "join port") {
 		t.Fatalf("join on port 1: %v", err)
+	}
+}
+
+// join on a machine whose node was removed says the files cannot be used
+// again and what to do, rather than to run serve --role worker, which fails.
+func TestJoinOnARemovedNodesMachine(t *testing.T) {
+	ctx := context.Background()
+	dir := t.TempDir()
+	ca, err := pki.CreateCA(filepath.Join(dir, "ca"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	st, err := store.Open(ctx, filepath.Join(dir, "hivemind.db"), store.WithMinReady(0))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+	quiet := slog.New(slog.NewTextHandler(io.Discard, nil))
+	cl, err := cluster.Listen(cluster.Config{Store: st, CA: ca, Tokens: pki.NewTokens(st.JoinTokens()),
+		Advertise: "127.0.0.1", Port: 0, LocalNodeID: "node-server", Logger: quiet})
+	if err != nil {
+		t.Fatal(err)
+	}
+	go func() { _ = cl.Serve() }()
+	defer cl.Shutdown()
+
+	wdir := filepath.Join(dir, "worker")
+	key, der := issueForNode(t, ca, "node-w1")
+	if err := saveWorkerState(wdir, workerState{NodeID: "node-w1", Server: cl.NodeAddr(), Joined: time.Now()}, key, pemEncodeCert(der), ca.CertPEM); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.UpsertNode(ctx, store.Node{ID: "node-w1", Name: "w1"}); err != nil {
+		t.Fatal(err)
+	}
+	host, portText, _ := strings.Cut(cl.NodeAddr(), ":")
+	port, _ := strconv.Atoi(portText)
+	tok := pki.JoinToken{}.String()
+
+	// Not removed: the usual answer.
+	if err := enroll(ctx, quiet, wdir, host, port, tok); err == nil || !strings.Contains(err.Error(), "run hivemind serve --role worker") {
+		t.Fatalf("join over a live node: %v", err)
+	}
+	if _, err := st.RemoveNode(ctx, "node-w1", true); err != nil {
+		t.Fatal(err)
+	}
+	err = enroll(ctx, quiet, wdir, host, port, tok)
+	if err == nil || !strings.Contains(err.Error(), "holds node node-w1, which the server at "+cl.NodeAddr()+" says was removed from the cluster") ||
+		!strings.Contains(err.Error(), "move "+wdir+" aside") || strings.Contains(err.Error(), "serve --role worker") {
+		t.Fatalf("join over a removed node: %v", err)
 	}
 }
