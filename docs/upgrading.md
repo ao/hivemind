@@ -26,6 +26,10 @@ error: opening /var/lib/hivemind/hivemind.db: store schema is newer than this bu
 
 To go back to 2.0.0, restore the backup from step 1 into an empty data directory with the new binary's `hivemind restore`, then run 2.0.0 on it. Everything that changed since the backup is lost.
 
+## Routed apps
+
+A node's agent, when it starts, does not yet know whether its containers pass their health checks, so its routed replicas leave the routing table until each passes its first check again, although the containers keep running. With a 2-second check interval that took 4 seconds in the [second soak](soak.md#second-soak-routing-a-private-registry-and-clients-outside-the-cluster). When every node restarted within a second, as in steps 2 and 3 done in quick succession, every routed host had no ready replica for 3 to 4 seconds, and the routers answered `503`. Restart one node at a time, and wait until `hivemind status` shows its routed replicas ready before the next.
+
 ## From v1
 
 Version 2 is a new implementation, not an update to v1. The command line, the API, the data and the feature set all differ. Plan for a fresh start on a new machine or data directory.

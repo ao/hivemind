@@ -1,6 +1,6 @@
 # Soak test on four machines
 
-One server and three workers, each a separate machine, run three small apps. Then the soak test powers off a worker, reboots one, cuts one off from the server, replaces the server with an empty machine, and leaves the cluster alone for four hours. Every number below comes from the harness's log; nothing is estimated. The harness is in [scripts/soak](../scripts/soak), and the last section says how to run it.
+One server and three workers, each a separate machine, run three small apps. Then the soak test powers off a worker, reboots one, cuts one off from the server, replaces the server with an empty machine, and leaves the cluster alone for four hours. Every number below comes from the harness's log; nothing is estimated. The harness is in [scripts/soak](../scripts/soak), and [Running it](#running-it) says how to run it. A [second soak](#second-soak-routing-a-private-registry-and-clients-outside-the-cluster), on five machines, measures the same faults and more through the HTTPS routers, from clients outside the cluster.
 
 ## Kill a machine, watch it recover
 
@@ -264,3 +264,229 @@ scripts/soak/report.sh "$SOAK_DIR/soak.log"
 ```
 
 `report.sh` prints the durations, the probe results of each window and the resource figures of the steady window. The labels of its durations name the soak's own machines; edit the list at the top of the script for other names.
+
+# Second soak: routing, a private registry and clients outside the cluster
+
+The same four kinds of fault as above, and a drain, a node replaced by a new machine, a rolling update, an upgrade and three hours of steady state, on 2026-11-16, measured through the routers. Every node of the cluster ran a router. A fifth machine played the internet: it ran the ACME CA (Pebble), its DNS, a private registry, and clients that sent a request every 100 ms to each of two routed hosts through each of the four routers, eight streams in all. Times below are UTC.
+
+## Through the routers
+
+Failed requests per stream, and the longest time between two successful requests on a stream. "Other routers" are the six streams through the routers on the machines the fault did not touch; "its router" the two streams through the router on the machine it did.
+
+| Fault | Other routers: failed per stream | Other routers: longest gap | Its router |
+|---|---|---|---|
+| Power off a worker | 1 (a request on a kept-alive connection to the dead machine, held until the client gave up at 10 s) | 10.1 s | down from the power-off to 2 s after the machine was back: 88 s |
+| Reboot a worker | 0 | 2.1 s | down 18.3 s |
+| Partition a worker from the server for 60 s | 0 | 0.11 s | 0 failed: it served its last table |
+| Lose the server machine, restore it on a new one | 10 in one second on two of the three workers' routers, 0 on the third (`502` while the restored server's first table held only stale endpoints) | 2.1 s | down 107.6 s while the machine was replaced, then the same 10 `502`s |
+| Rolling update of `www` | 0 | 0.13 s | - |
+| Drain a worker, enable it again | 0 | 0.11 s | 0 |
+| Drain and remove a worker | 0 | 0.11 s | down from the removal on |
+| Join a new machine in its place | 0 | 0.13 s | 40 refused over 4.1 s while `join` handed over to the unit, then served |
+| Upgrade every node in place, all within a second | every router: 30 to 47, of them 29 to 40 `503`s in 3 to 4 s, the rest its own restart | 4.1 s | (every router restarted) |
+| Restart the server's service only | 0 | 0.11 s | refused for 1.2 s |
+| Restart one worker's service only | 0 | 0.11 s | refused for 0.2 s |
+
+Before a fault the cluster had converged and every stream was answering. "Longest gap" includes the slow requests: a request that a router first sent to a replica on a machine that had gone took 2.0 s, the router's dial timeout, and then succeeded on another replica.
+
+## The machines and the builds
+
+| | |
+|---|---|
+| Machines | 5 EC2 c7g.large in one subnet, the same type, OS and Docker as the first soak: 2 vCPU (Graviton3), 3.7 GiB (MemTotal 3897240 kB), Amazon Linux 2023.12.20261112, kernel 6.18.62-127.179.amzn2023.aarch64, Docker 25.0.18 |
+| Roles | hivemind-soakb-1 server, 2 to 4 workers, 5 the outside machine. Machines 1 (the server loss) and 4 (the node replacement) were replaced by new machines at the same address during the run |
+| hivemind | `CGO_ENABLED=0 go build -trimpath ./cmd/hivemind`, Go 1.27.4, linux/arm64. Commit 9597d90 (sha256 7eeba927...5a5ba) for the set-up and every fault scenario. Commit b4b7102 ("status, metrics: a lost node's last report is not the replica's state"; sha256 1ab140dd...52b72) from 07:38: the upgrade, the two restarts, the steady state and the slow-pass check. The cluster went from one to the other with the harness's upgrade step, server first |
+| Service | systemd, the units of [systemd.md](systemd.md) with the router's flags added |
+| Outside machine | Pebble (ghcr.io/letsencrypt/pebble, revision 5caaab3), pebble-challtestsrv, registry:2, curl 8.21.0 |
+| Network | The soak security group allowed TCP 22 from the control machine, and between the soak machines only TCP 80, 443, 4484 to 4485, 5000, 14000 and 32768 to 60999 (the routed containers' ports; see "What did not work"). Nothing from the internet |
+
+## Set-up
+
+Every node ran its router on its own private address: `--route-addr <address> --acme-email ops@soak.test --acme-ca https://pebble:14000/dir`, on ports 80 and 443. The server's unit had them after `serve --advertise <address>`, each worker's after `serve --role worker`, and `join` had them too. Before hivemind, each node got three things an operator would set up: a line in `/etc/hosts` naming the outside machine `pebble` and `registry.soak.test`; Pebble's TLS root in the system trust store (`/etc/pki/ca-trust/source/anchors`, then `update-ca-trust`), which the routers' ACME client uses; and the registry's CA in `/etc/docker/certs.d/registry.soak.test/ca.crt`.
+
+Pebble validated HTTP-01 on port 80, with its validation sleeps off (`PEBBLE_VA_NOSLEEP=1`), no nonce rejection, and no reuse of authorizations (`PEBBLE_AUTHZREUSE=0`), so every order was validated again through a router. Its default profile issued certificates valid for one hour, so that the routers renewed them during the run. pebble-challtestsrv answered `www.soak.test` and `api.soak.test` with the private addresses of all four nodes. The registry was `registry:2` with htpasswd and a TLS certificate from a CA made for the run, on port 443 of the outside machine; it held `registry.soak.test/soak/whoami:1` and `:2` (traefik/whoami v1.10.3 and v1.11.0). `hivemind registry login registry.soak.test` stored the credential on the server, from standard input.
+
+| App | Image | Replicas | Routes or ports | Notes |
+|---|---|---|---|---|
+| www | registry.soak.test/soak/whoami:1, then :2 | 3 | `www.soak.test`, container port 80 | private image; HTTP health check on `/health` every 2 s |
+| api | nginx:alpine | 2 | `api.soak.test`, container port 80 | HTTP health check on `/` every 2 s |
+| spread | busybox:stable, `sleep 86400` | 6 | none | |
+| kv | redis:7-alpine, `--appendonly yes` | 1 | 127.0.0.1:6379 | volume `data`; a value written at the start and read back by every probe |
+| front, cache | nginx:alpine, redis:7-alpine | 1 each | 127.0.0.1:8081 for front | the compose project `shop` ([scripts/soak/compose-shop.yaml](../scripts/soak/compose-shop.yaml)), deployed with `hivemind compose deploy` |
+
+The harness checked every listener after the set-up. hivemind's ports were where they were in the first soak; the routers were on each node's private address, ports 80 and 443, and each routed container on an ephemeral port of its node's private address. On the outside machine, Pebble's ACME port and the registry were on its private address, Pebble's management port and challtestsrv's on 127.0.0.1. Nothing else listened on a wildcard address but sshd.
+
+The first certificates: the deploy was at 06:55:44. `www.soak.test` was issued 6 s later; the other three routers waited for the storage lock and loaded it from the store the same second. The first challenge for `api.soak.test` failed: Pebble's validation reached a router that had not yet read the table with the new host, and it answered `404`. certmagic tried again 60 s later, and that worked. Every router served both hosts 66 s after the deploy.
+
+## Method
+
+The clients ran on the outside machine: for each router and host, one `curl --http1.1 --rate 10/s` process with `Connection: close` and no TLS session reuse, so each request was a new TCP connection and a full TLS handshake to that router, with `--resolve` naming the router's address, 3 s to connect and 10 s in all. Each request was one line with its end time (curl's `%time{}`, the outside machine's clock), its status, curl's exit code and its timings. A request failed if it was not a `200` or curl reported an error. A certificate watcher on the same machine logged, every 30 s, the serial and expiry of the certificate each router served for each host, from a fresh handshake checked against Pebble's root.
+
+The harness on the control machine was the first soak's: the 10 s probe loop, the 1 s watcher during the faults, and each scenario's own 1 s loop, all to one log with the control machine's clock. Both machines' clocks were synchronised by chrony to the Amazon Time Sync Service; at the start chrony put each within 1 microsecond of its reference. A scenario's window for the clients runs from its first log line to 60 s after its last, or to the next scenario's start. [scripts/soak/client-report.sh](../scripts/soak/client-report.sh) computes the tables from the clients' lines and the log.
+
+## Results
+
+### Power off a worker
+
+hivemind-soakb-3, running `www` 0, `api` 1, `cache` 0 and `spread` 3, powered off with `sysrq o` at about 07:04:53 (its last lease renewal; the request went out at 07:04:48.3).
+
+| Measure | Seconds |
+|---|---|
+| Power-off request to port 22 closed | 6.2 |
+| Port 22 closed to `lost` | 13.5 |
+| `lost` to the sweep releasing its replicas (server's journal) | 3.2 |
+| Released to `www` 0, `cache` 0 and `spread` 3 running on hivemind-soakb-2 | 2.4 |
+| Released to `api` 1 running on the server, after pulling nginx there | 5.8 |
+| Port 22 closed to converged | 24.1 |
+| Start request to port 22 open | 12.6 |
+| Start request to `ready`, its four old containers gone | 14.7 |
+| Replicas on two machines at any time | none |
+
+Through the routers: each of the six streams through the other three routers lost one request. It started between 07:04:53.3 and 07:04:53.6, as the machine died, and got no reply: the router had sent it on a connection it already had open to the replica on that machine (it keeps them for reuse), and with the machine gone nothing answered or reset it. curl gave up at 10 s. The server's router counted one `502` for each host afterwards (`hivemind_router_requests_total`); a router waits up to 60 s for a replica's reply. Every later request that a router sent to the dead machine's replicas waited out the 2 s dial timeout and then went to another replica, so those requests took 2.0 s, until the replicas left the table when the node was lost. The two streams through hivemind-soakb-3's own router failed from the power-off until 2 s after the machine answered on port 22 again, 88 s, with connect timeouts and then refused connections, and one failed TLS handshake right after the router started: it opens its listeners before it has loaded the certificates from the server.
+
+### Reboot a worker
+
+hivemind-soakb-4, running `www` 1, `front` 0 and `spread` 0 and 4, with `sudo systemctl reboot`.
+
+| Measure | Seconds after the reboot command |
+|---|---|
+| Port 22 closed | 0.3 |
+| `lost` | 13.5 |
+| Port 22 open | 16.9 |
+| Its four replicas running on hivemind-soakb-3; converged | 18.3 |
+| `ready` | 19.0 |
+
+No request through the other routers failed. The `www` streams' slowest requests took 2.0 s, the dials to the rebooting machine. The streams through hivemind-soakb-4's own router failed for 18.3 s. As in the first soak, a reboot takes longer than the 15 s lease, so the node was lost and its replicas moved.
+
+### Partition a worker
+
+hivemind-soakb-2, running `kv`, `api` 0, `cache` 0, `www` 0 and `spread` 2 and 3, with `iptables -I OUTPUT -p tcp -d <server> --dport 4484 -j DROP` for 60 s.
+
+| Measure | Seconds |
+|---|---|
+| Partition to `lost` | 14.4 |
+| Partition to the first replica on two machines | 16.4 |
+| Partition to its five replicas without a volume running on hivemind-soakb-4 | 20.2 |
+| Heal to `ready` | 1.4 |
+| Heal to no replica on two machines; converged | 22.3 |
+| `kv` | stayed on hivemind-soakb-2, held with its reason; the value read back intact after the heal |
+
+No request failed on any of the eight streams, and none took longer than 13 ms. The partitioned node's router could not read the table, and served the last one it had read; the replicas in it kept running on every machine, its own included, until the heal. On this build the node is `ready` 1.4 s after the heal; on the first soak's first build that took 22.3 s, because the lease waited for the pass. Convergence still waits for the pass that removes the moved copies: two `spread` containers, 10 s each, since `sleep` ignores SIGTERM.
+
+### Lose the server machine
+
+The server's data directory was backed up with `hivemind backup` (a 200192-byte tar: manifest, store, CA key and certificate, admin token), its machine terminated, and a new, empty one launched at the same address. The harness then installed the binary, set up the hosts file and the two CAs as on every node, ran `hivemind restore` and started the unit. The workers were not touched. The server ran `www` 2, `api` 1 and `spread` 1 and 5.
+
+| Measure | Seconds |
+|---|---|
+| Replace request to API down | 7.0 |
+| API down to the new machine ready (EC2 launch, boot, Docker installed) | 103.7 |
+| Machine ready to restored (binary, hosts, CAs, restore) | 1.6 |
+| Restored to unit started | 0.5 |
+| Unit started to API up | 0.9 |
+| API down to API up | 106.6 |
+| API up to each worker `ready`, without joining again | 0.2, 1.2, 1.2 |
+| API up to converged, the server's four replicas running again on the new machine | 4.2 |
+| Containers on the workers before and after | unchanged |
+
+While the server was gone, the workers' routers served their last table. Their only slow requests were those sent to the server's replicas first: 2.0 s each, then another replica. In the second after the restored server started (07:17:01.0 to 07:17:01.9), the streams through the restored server's router and through two of the three workers' routers got ten `502`s each; the third worker's router's streams got none. The restored store's routing table holds the containers each node had reported before the backup, and counts only nodes whose lease is current. Right after the start that is the server's own node alone, whose old containers do not exist on the new machine: every endpoint in the table refused the connection. The workers' replicas came back into the table when the workers reported, within the second.
+
+### Rolling update
+
+`www` from `whoami:1` to `whoami:2`, both from the private registry.
+
+| Measure | Seconds |
+|---|---|
+| Deploy to the first replica moved | 7.1 |
+| Deploy to the rollout done (three replicas, one at a time) | 17.2 |
+| Deploy to converged (old copies stopped) | 24.2 |
+
+No request failed on any stream, and the slowest took 29 ms.
+
+### Drain and enable a worker; remove a node and join a new machine
+
+`hivemind node drain` of hivemind-soakb-3 moved its four replicas (`front` 0, `spread` 0 and 4, `www` 2) in 26.1 s, and the cluster had converged when the command returned. `hivemind node eligibility --enable` then made the node eligible again; nothing moved back to it. No request failed on any stream.
+
+hivemind-soakb-4 was drained the same way (five replicas, 26.1 s), then `hivemind node remove` removed it in 0.3 s. Its agent got its refusal and stopped 1.1 s later, with exit status 1, which systemd reports as a failure, and nothing was left running on it. `Restart=on-failure` then starts it again every 5 s, refused each time, until the unit is disabled; [systemd.md](systemd.md) says to disable it on a removed machine. (A second removal at the end of the run, of the new machine, counted eight such restarts in 45 s.) Its machine was then terminated and a new one launched at the same address. The harness installed the binary, set up the hosts file and CAs, and joined it with a new token and the router's flags: 0.8 s from the join to `ready`, as a new node with a new ID. No request through the other routers failed. Through the new machine's router, 40 requests over 4.1 s were refused while the foreground `join`'s router stopped and the unit's started, as [systemd.md](systemd.md) has it; after that it served.
+
+### Upgrade, and restarts
+
+The harness's upgrade step installed b4b7102 on every node and restarted the services, the server first. The API was back 0.7 s after the server's restart, and the three workers restarted within the next 0.2 s. Every stream then got `503`s for 3 to 4 s (29 to 40 each). Each router also refused a request or a few during its own restart, the server's for 0.6 s, and two failed one handshake.
+
+The `503`s come from the agents' restarts, not the server's. An agent that starts does not know yet whether its containers pass their health checks, so the server's routing table drops its routed replicas until each passes its first check again, although the containers never stopped. A `GET /v1/routes` every 100 ms on the server, while the service on hivemind-soakb-3 alone was restarted, showed its two endpoints leave the table for 4.0 s. With every node restarted at once, every host had no endpoint left. Restarting one node's service alone failed nothing through the other routers: the server's alone failed only requests through the server's own router, refused for 1.2 s, and one worker's alone only those through that worker's router, for 0.2 s. A full upgrade one node at a time was not run. [upgrading.md](upgrading.md#routed-apps) now says to restart one node at a time.
+
+### Certificates
+
+Pebble issued 52 certificates for the two hosts over the run, 41 of them in the three hours of steady state, each valid for one hour. certmagic renews a certificate once less than 50 minutes of it are left (five times its 10-minute check interval), so with one-hour certificates each host was renewed every 10 to 20 minutes, and every router that started, in the faults and the upgrade, renewed both hosts at once. Each renewal was done by one router under the storage lock; four times a router renewed a host again 1 to 3 minutes after another had. The others found the new certificate in the store at their next check and logged `certificate expires soon, but is already renewed in storage; reloading stored certificate`; until then they served the previous one, still valid. The watcher's fresh handshakes, every 30 s with every router for both hosts (3560 in all), always got a certificate that verified against Pebble's root, except while a router was down in a fault (32). The least validity left on any certificate a router served was 31 minutes. No request failed across any renewal.
+
+## Steady state
+
+On b4b7102, 3 h 0 min 34 s, from 07:44:20.7 to 10:44:55.0, with no fault and no change to the apps. The clients ran throughout, eight streams of 10 requests a second, and the probe loop; the watcher was off. Placement in the window: hivemind-soakb-1 (the server) ran `www` 2, `api` 1 and `spread` 1 and 5; hivemind-soakb-2 `kv`, `front`, `www` 0 and `spread` 3; hivemind-soakb-3 `api` 0, `cache`, `www` 1 and `spread` 2; hivemind-soakb-4, the machine that joined at 07:29, `spread` 0 and 4, so its router reached every replica over the network.
+
+| Through the routers | |
+|---|---|
+| Requests, all eight streams | 860918 |
+| Succeeded | 860918 (100 %) |
+| Longest gap between two successful requests on a stream | 1.13 s (one request whose TCP connection took 1.03 s, a SYN sent again after 1 s); every other stream at most 0.32 s |
+| Total time per request (TCP connect, TLS handshake, request and reply), p50 / p90 / p99 / p99.9 / max | 2.4 / 2.9 / 3.6 / 5.5 / 1027.7 ms |
+| TLS handshake, p50 / p99 / max | 1.5 / 2.5 / 224.2 ms |
+| TLS done to first byte of the reply (the router and the replica), p50 / p99 / max | 0.6 / 1.1 / 11.8 ms |
+| Requests over 100 ms | 2 of 860918, both through hivemind-soakb-3's router |
+
+| Probe | Result |
+|---|---|
+| Status answered, converged, all 14 replicas running, no replica on two machines | 1084 of 1084 |
+| `kv` value read back, and the same as written | 1084 of 1084 |
+| `GET /v1/status` on the server, 905 requests | all 200; p50 1.7 ms, p99 7.2 ms, max 15.6 ms |
+| Events: lost nodes, restarts, failed probes, duplicates | none |
+
+The hivemind process on each node, 181 samples a minute apart:
+
+| Node | RSS first / last / max (MiB) | RSS, hourly mean, hours 1 to 3 (MiB) | RSS slope, least squares (KiB/h) | Threads first / last | Open fds first / last / max | CPU, % of one CPU | Restarts |
+|---|---|---|---|---|---|---|---|
+| hivemind-soakb-1 (server) | 25.6 / 26.2 / 26.5 | 26.0, 26.1, 26.1 | +109 | 9 / 9 | 31 / 31 / 33 | 2.20 | 0 |
+| hivemind-soakb-2 | 22.0 / 22.8 / 23.0 | 22.3, 22.7, 22.8 | +218 | 8 / 9 | 19 / 19 / 21 | 1.73 | 0 |
+| hivemind-soakb-3 | 21.8 / 22.6 / 23.1 | 22.1, 22.6, 22.7 | +327 | 8 / 8 | 18 / 19 / 21 | 1.75 | 0 |
+| hivemind-soakb-4 | 21.8 / 22.4 / 22.8 | 22.3, 22.4, 22.5 | +120 | 8 / 8 | 18 / 19 / 21 | 1.52 | 0 |
+
+The workers' RSS rose 0.6 to 0.8 MiB over the three hours, most of it in the first two, and by at most 0.1 MiB in the third hour; the server's by 0.6 MiB, and 0.1 MiB after the first hour. Three hours show no leak at this resolution; a slower one would need a longer run. Each process used 1.5 to 2.2 % of one CPU, against 0.05 to 0.30 % in the first soak: each router here did about 20 TLS handshakes and proxied requests a second. The store went from 192 to 208 KiB (`hivemind.db`), with a 4032 to 4036 KiB WAL.
+
+## What did not work, and what was not measured
+
+- The soak security group first allowed only TCP 80, 443, 4484 to 4485, 5000 and 14000 between the machines. A probe from one machine to a listener on another showed the routed containers' range, 32768 to 60999, closed; with it closed a router can reach only the replicas on its own node. The range was opened (from the group itself) before the cluster was set up, and [routing.md](routing.md#ports-and-firewall) now says that the nodes must allow it from each other.
+- The clients' timestamps are the outside machine's clock and the harness's the control machine's. Both were synchronised by chrony; differences between them below a few milliseconds are not meaningful.
+- curl writes its lines in 4 KiB blocks, so a log read while curl runs ends in a partial line; the report skips such lines and counts them.
+- The 1 s watcher ran during the faults and was stopped for the steady state, as in the first soak; the probe loop ran throughout.
+- `/metrics` exists only on the server, so the routers' `502` counts are the server's router's; the workers' routers export none.
+- One-hour certificates are much shorter than any public CA's. certmagic renews a certificate once less than five times its 10-minute check interval is left, so here every router renewed at its start and each host was renewed every 10 to 20 minutes. That exercises renewal far more often than 90-day or 6-day certificates would, but it is not how a production CA behaves.
+- The scenarios ran on 9597d90, the steady state on b4b7102. b4b7102 changes what status and the metrics report for a lost node's replicas, not routing or the agents, so the routing results above should not depend on it; they were not run again on it.
+
+## Running it, with routing
+
+On a control machine with ssh to the four nodes and the outside machine (passwordless sudo, Docker, jq, curl 8.6 or later and openssl on each), gawk on the control machine, and a linux build of hivemind:
+
+```sh
+export SOAK_DIR=$PWD/.scratch/run SOAK_ROUTES=1
+printf 'node-1 10.0.0.5\nnode-2 10.0.0.6\nnode-3 10.0.0.7\nnode-4 10.0.0.8\n' >"$SOAK_DIR/nodes"   # the first is the server
+printf 'outside 10.0.0.9\n' >"$SOAK_DIR/outside"
+scripts/soak/outside.sh setup          # Pebble, challtestsrv, registry; the private images
+BIN=path/to/hivemind scripts/soak/setup.sh
+scripts/soak/outside.sh client-start
+scripts/soak/scenario.sh probe-start
+scripts/soak/scenario.sh watch-start
+
+# the faults of the first soak; mark each one the operator makes:
+scripts/soak/scenario.sh begin kill-worker node-3
+scripts/soak/scenario.sh measure kill-worker node-3 loss &
+scripts/soak/scenario.sh fault kill-worker node-3 poweroff    # ...then power it off
+scripts/soak/scenario.sh rollout 2          # www to whoami:2
+scripts/soak/scenario.sh drain node-3       # drain, then eligibility --enable
+scripts/soak/scenario.sh remove node-4      # drain, then node remove
+scripts/soak/scenario.sh join-new node-4    # after the machine is replaced at the same address
+
+scripts/soak/outside.sh fetch
+SOAK_DURATIONS=scripts/soak/durations-routing.txt scripts/soak/report.sh "$SOAK_DIR/soak.log"
+scripts/soak/client-report.sh "$SOAK_DIR/soak.log" "$SOAK_DIR/client"
+```
+
+`client-report.sh` prints, for each scenario window, each stream's requests, failures and their codes, longest gap and latency; for the steady window, the success rate and the latency over every stream; and each certificate Pebble issued, with when each router first served it.

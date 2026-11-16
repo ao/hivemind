@@ -89,5 +89,6 @@ On c7g.large machines (2 vCPU, Graviton3, Amazon Linux 2023), from the soak test
 
 - `sudo systemctl reboot` on a worker: the node was `ready` again 18.8 s later.
 - A worker powered off, then started again with the EC2 API: `ready` 15.1 s after the start request was sent, and its old containers were gone in the same second.
+- A worker removed with `hivemind node remove` (second soak): its agent stopped 1.1 s after the removal. With the unit still enabled, systemd started it again every 5.2 s, eight times in 45 s, and the server refused it each time, until `systemctl disable --now hivemind`.
 
 The method and the other numbers are in [soak.md](soak.md).

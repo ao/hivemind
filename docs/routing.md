@@ -76,6 +76,8 @@ iptables -I DOCKER-USER -p tcp -m conntrack --ctorigdst 10.0.0.5 --ctorigdstport
 
 Check the rule against the Docker documentation for your version ("Packet filtering and firewalls"). See [security](security.md#routing) for what the router exposes.
 
+The other direction matters as much: every node must accept the whole range from every other node. A firewall or cloud security group between the nodes that allows only hivemind's own ports (4484 and 4485) leaves each router able to reach only the replicas on its own node; its dials to the others time out after 2 seconds, the endpoint is skipped for 3 seconds and tried again, so requests that a router sends to another node wait 2 seconds before they go to a local replica, and a router on a node without a replica of the host answers `502` once every endpoint has failed. On EC2 that means a security group rule for TCP 32768 to 60999 from the nodes' own group; the [second soak](soak.md#second-soak-routing-a-private-registry-and-clients-outside-the-cluster) needed one, which its first set-up lacked.
+
 ## Example
 
 Three machines on one private network, `10.0.0.5` (the server), `10.0.0.6` and `10.0.0.7`, each with a public address, and DNS for `www.example.com` listing the three public addresses.
@@ -132,6 +134,9 @@ A worker has no metrics listener, so its router's counters are not exported yet.
 - Request headers are limited to 64 KiB, and so are a replica's response headers. A request, body included, must be read within 5 minutes; a replica must start its reply within 60 seconds. A reply streams for as long as the replica sends it.
 - The table a router serves is up to a second old, longer while it cannot reach the server. For up to 15 seconds after a node is lost, its replicas stay in the table and their dials fail; each such request costs up to 2 seconds before it goes to another replica.
 - A request whose body has started to go to a replica is not retried on another one.
+- A router keeps idle connections to each replica. When a replica's machine stops without closing them (power off), the next request on such a connection waits for a reply that never comes, up to the 60 seconds above, and then gets `502`. In the [second soak](soak.md#second-soak-routing-a-private-registry-and-clients-outside-the-cluster) that was one request per router and host; the requests after it dialled, waited the 2 seconds, and went to another replica.
+- After `hivemind restore`, the server's first routing table can hold only the server's own replicas as they were at the backup, whose containers no longer exist on a new machine. Until the workers report to the new server, about a second, the routers answer `502` for every routed host.
+- A new host's first certificate can fail its HTTP-01 challenge if the CA reaches a router that has not read the new table yet: that router answers `404`, and certmagic tries again a minute later.
 - A worker's router needs a 2.2 server. Workers older than 2.2 take no routed replicas.
 - The routers share one ACME account and one set of certificates. Each router on each node holds every routed host's private key in memory.
 
