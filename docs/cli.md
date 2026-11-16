@@ -201,7 +201,8 @@ Create or update an app, either from flags or from a YAML or JSON file:
 
 --port is [bind:]host:container[/udp]. A port is published on 127.0.0.1 unless
 it names another bind address. --volume is name:/path, a named volume on the
-replica's node mounted at that path; an app with a volume has one replica.
+replica's node mounted at that path; an app with a volume has one replica. A
+path on the host in place of the name, a bind mount, is not supported.
 The words after -- are the container's command, in place of the image's. A
 health check, resources and routes need a file. -f - reads the spec from
 standard input. A key the spec does not have is refused with its line, and

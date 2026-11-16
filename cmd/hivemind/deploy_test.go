@@ -44,6 +44,10 @@ func TestDeployCommandAndVolumesFromFlags(t *testing.T) {
 		{[]string{"deploy", "--name", "x", "--image", "busybox", "sleep", "60"}, `unexpected argument "sleep": put the container's command after --`},
 		{[]string{"deploy", "--name", "x", "--image", "busybox", "--volume", "data"}, `--volume "data": want name:/path`},
 		{[]string{"deploy", "--name", "x", "--image", "busybox", "--volume", ":/data"}, "want name:/path"},
+		{[]string{"deploy", "--name", "x", "--image", "busybox", "--volume", "/srv/data:/data"}, `--volume "/srv/data:/data": /srv/data is a path on the host, ` +
+			"and bind mounts are not supported: hivemind mounts named volumes only; give a name, as in --volume data:/data"},
+		{[]string{"deploy", "--name", "x", "--image", "busybox", "--volume", "./data:/data"}, "bind mounts are not supported"},
+		{[]string{"deploy", "--name", "x", "--image", "busybox", "--volume", "~/data:/data"}, "bind mounts are not supported"},
 		{[]string{"deploy", "-f", file, "--", "sleep", "60"}, "use -f or a command after --, not both"},
 		{[]string{"deploy", "-f", file, "--volume", "data:/data"}, "use -f or the --volume flag, not both"},
 	} {

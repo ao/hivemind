@@ -243,7 +243,10 @@ func (a *App) Validate() error {
 	paths := map[string]bool{}
 	names := map[string]bool{}
 	for i, v := range a.Volumes {
-		if !ValidName(v.Name) {
+		switch {
+		case IsHostPath(v.Name):
+			add("volumes[%d]: name %q is a path on the host, and bind mounts are not supported: hivemind mounts named volumes only; give the volume a name", i, v.Name)
+		case !ValidName(v.Name):
 			add("volumes[%d]: name %q: use lowercase letters, digits and dashes", i, v.Name)
 		}
 		if names[v.Name] {
@@ -438,6 +441,13 @@ func validPort(p int) bool { return p >= 1 && p <= 65535 }
 func validBind(s string) bool {
 	a, err := netip.ParseAddr(s)
 	return err == nil && a.Zone() == ""
+}
+
+// IsHostPath reports whether a volume's name is written as a path on the
+// host, as a bind mount's source is in docker run -v and Compose: it starts
+// with /, . or ~, or has a / in it.
+func IsHostPath(name string) bool {
+	return strings.HasPrefix(name, ".") || strings.HasPrefix(name, "~") || strings.Contains(name, "/")
 }
 
 func validMountPath(p string) bool {

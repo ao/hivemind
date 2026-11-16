@@ -44,7 +44,8 @@ func deployCmd() *cobra.Command {
 
 --port is [bind:]host:container[/udp]. A port is published on 127.0.0.1 unless
 it names another bind address. --volume is name:/path, a named volume on the
-replica's node mounted at that path; an app with a volume has one replica.
+replica's node mounted at that path; an app with a volume has one replica. A
+path on the host in place of the name, a bind mount, is not supported.
 The words after -- are the container's command, in place of the image's. A
 health check, resources and routes need a file. -f - reads the spec from
 standard input. A key the spec does not have is refused with its line, and
@@ -104,6 +105,9 @@ the spec stays deployed.`,
 				vn, vp, ok := strings.Cut(v, ":")
 				if !ok || vn == "" || vp == "" {
 					return fmt.Errorf("--volume %q: want name:/path", v)
+				}
+				if spec.IsHostPath(vn) {
+					return fmt.Errorf("--volume %q: %s is a path on the host, and bind mounts are not supported: hivemind mounts named volumes only; give a name, as in --volume data:%s", v, vn, vp)
 				}
 				a.Volumes = append(a.Volumes, spec.Volume{Name: vn, Path: vp})
 			}
