@@ -4,7 +4,7 @@ hivemind is meant for one to ten machines. This test ran it at ten: one server a
 
 ## What broke or was slow
 
-In order of damage. The evidence is in the sections below.
+In order of damage. The evidence is in the sections below. Each has been fixed since this run, except that a deploy still reads every placed replica (part of 4); [After the fixes](#after-the-fixes) says how, and what was measured.
 
 1. A node removes containers one at a time, and nothing else happens on it meanwhile. A container whose PID 1 ignores SIGTERM, such as `busybox sleep`, takes the full 10 s stop timeout. During the 50-app rolling update, the surge copies of the 30 apps with a health check waited behind those stops on their nodes: one was created 42 s after it was placed, another not at all within its 60 s deadline. All 30 rollouts paused with `replica 3 is not ready after 1m0s` and stayed split between two generations until they were deployed again. Alone, the same 30 rollouts finished in 112.5 s. The same serial removal made deleting the 100 apps take 185 s and scaling back from 933 to 500 replicas take 367 s, although the API calls took about a second.
 2. A replica with a volume, held on a lost node, is reported `running` and `ready`, and counted in the app's `running` and `ready`, while its `pending_reason` says the app is down. With three workers powered off, `GET /v1/status` said 500 of 500 running; two of them were on machines that were off. The metrics code counts the same way (read in `internal/server/metrics.go`, not measured).
@@ -243,6 +243,31 @@ To see how the costs grow past 500 replicas, the Go benchmarks in [scripts/soak/
 | `PutApp` of one more app of 5 replicas | 2.79 ms | 4.82 ms | 8.49 ms | 13.75 ms |
 
 Every operation grows about linearly with the replica count. The report and the put include an fsync of the store, which is why they do not start near zero. Ten nodes report every 2 s, so at 2000 replicas with one unplaceable replica the reports alone would hold the store's one connection about 8% of the time.
+
+## After the fixes
+
+The findings were fixed after this run. The ten-machine test was not run again; what was run instead is below.
+
+1. Serial removal. An agent now stops and removes extra containers in the background, 8 at a time, and starts the containers it needs without waiting for them. A container that needs a host port, the volumes or the name of one being removed waits for that one only, and its removal skips the queue. A rollout move's deadline counts from when the node first reports a container of the new copy. `scripts/integration-cluster.sh` now rolls 8 apps with an HTTP health check (a 33 s move deadline) at the moment 24 `sleep` containers, 8 per node, are deleted, on three Docker-in-Docker nodes on one c8g.4xlarge: the `sleep` containers were gone in 16 s and the 8 rollouts finished 26 s after the delete, none paused. The same script against the code before the fixes failed there as this run did: each node removed a `sleep` container every 10 s, and 37 s after the delete all 8 rollouts had paused with `replica 0 is not ready after 33s`.
+2. A held volume replica on a lost node is `unknown` and not counted, in status and metrics.
+3. A report that is the same as the node's last one renews the lease and stamps the rows, without rewriting them; a changed one prepares its `INSERT` once. Reads outside a transaction use a pool of four read-only connections beside the write connection.
+4. Placement is skipped when nothing it reads changed since it last placed nothing, and a transaction decodes each app generation's spec once and reads the placed replicas once.
+5. A removed worker exits with status 3, and the systemd units have `RestartPreventExitStatus=3`.
+
+The same benchmarks, with two more, on the build host (c8g.4xlarge, 16 vCPU Graviton4, Amazon Linux 2023, `golang:1.27` in Docker, `-benchtime 50x`), before (the code this run used, with fix 2) and after, each the mean of two runs, run in turn on an idle machine:
+
+| Operation | 100 replicas | 500 | 1000 | 2000 |
+|---|---|---|---|---|
+| Sweep, with one replica no node can take | 2.99 → 0.61 ms | 5.04 → 1.80 ms | 8.65 → 3.31 ms | 15.58 → 6.34 ms |
+| Sweep, nothing pending | 0.41 → 0.40 ms | 1.36 → 1.35 ms | 2.56 → 2.54 ms | 5.01 → 4.97 ms |
+| One node's assignments and report, report unchanged | 2.46 → 2.23 ms | 3.02 → 1.95 ms | 4.84 → 2.44 ms | 7.92 → 3.41 ms |
+| The same, with one replica no node can take | 3.24 → 2.42 ms | 5.57 → 2.52 ms | 9.40 → 3.33 ms | 16.47 → 4.86 ms |
+| One node's report, changed each time | 2.34 → 2.24 ms | 2.67 → 2.11 ms | 4.16 → 3.08 ms | 6.75 → 4.48 ms |
+| `GET /v1/status` while the ten nodes report back to back, each report changed | 44.8 → 1.52 ms | 318.3 → 7.38 ms | 921.2 → 15.37 ms | 2926.0 → 31.67 ms |
+| `GET /v1/status` alone | 1.40 → 1.41 ms | 6.80 → 6.85 ms | 14.17 → 14.32 ms | 29.50 → 29.57 ms |
+| `PutApp` of one more app of 5 replicas | 2.72 → 2.77 ms | 4.74 → 4.77 ms | 7.96 → 7.92 ms | 13.29 → 12.89 ms |
+
+`GET /v1/apps` and `/v1/nodes` did not change. A deploy is not faster: a profile of `PutApp` at 2000 replicas put most of its placement time in reading every placed replica's row from SQLite, about 2.5 µs a row, and not in decoding specs, so a deploy of N apps still costs O(N²) in total. Reading the specs apart from the rows, once per app generation, made no difference and was not kept. Keeping the placed replicas in memory across transactions would remove it; that is not done. The floor of about 2.2 ms for a report is the fsync of its commit (`synchronous=FULL`).
 
 ## What did not work, and what was not measured
 
