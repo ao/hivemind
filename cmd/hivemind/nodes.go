@@ -22,7 +22,8 @@ func nodesCmd() *cobra.Command {
 		Short: "List the nodes in the cluster",
 		Long: `List the nodes: ID, name, CPU and memory as each node's Docker daemon reports
 them, the age of its lease, whether it is ready or lost, and how many replicas
-are placed on it. A node is lost when its lease is more than 15 s old.
+are placed on it. A node is lost when its lease is more than 15 s old. A lease
+age of 48 hours or more is printed in days.
 
 ADDRESS is the node's private address, where its routed replicas publish
 their ports. "-" means it reported none: such a node takes no routed replicas.
@@ -88,7 +89,7 @@ func printNodes(out io.Writer, nodes []nodeRow) {
 		if n.Server {
 			role = "server"
 		}
-		age := (time.Duration(n.LeaseAgeSeconds * float64(time.Second))).Round(time.Second)
+		age := leaseAge(time.Duration(n.LeaseAgeSeconds * float64(time.Second)))
 		fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%s\t%d\t%s\t%s\t%s\t%s\t%d\t%s\n", n.ID, firstNonEmpty(n.Name, "-"), role,
 			firstNonEmpty(n.Address, "-"), firstNonEmpty(n.Version, "-"), n.CPU, bytesIEC(n.Memory), age, n.State,
 			eligibility(n), n.Replicas, certExpiry(n.CertNotAfter, n.CertNotRenewing, now))
@@ -110,6 +111,15 @@ func eligibility(n nodeRow) string {
 		return "ineligible"
 	}
 	return "eligible"
+}
+
+// leaseAge prints the age of a node's lease to the second, and from 48 hours
+// on in whole days, as CERT EXPIRES does: "3m8s", "2d".
+func leaseAge(d time.Duration) string {
+	if d >= 48*time.Hour {
+		return fmt.Sprintf("%dd", int(d.Hours()/24))
+	}
+	return d.Round(time.Second).String()
 }
 
 // certExpiry prints a certificate's expiry as a UTC date and the time left,

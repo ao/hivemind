@@ -441,3 +441,14 @@ func TestDrainSummarySaysTheNodeWasLost(t *testing.T) {
 		t.Fatalf("drain output without a loss: %q, want %q", b.String(), want)
 	}
 }
+
+func TestLeaseAge(t *testing.T) {
+	for d, want := range map[time.Duration]string{
+		0: "0s", 1400 * time.Millisecond: "1s", 3*time.Minute + 8*time.Second: "3m8s",
+		47*time.Hour + 59*time.Minute: "47h59m0s", 48 * time.Hour: "2d", 2952*time.Hour + 46*time.Second: "123d",
+	} {
+		if got := leaseAge(d); got != want {
+			t.Errorf("leaseAge(%s) = %q, want %q", d, got, want)
+		}
+	}
+}

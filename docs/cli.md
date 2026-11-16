@@ -502,7 +502,8 @@ hivemind node remove <id> [flags]
 
 List the nodes: ID, name, CPU and memory as each node's Docker daemon reports
 them, the age of its lease, whether it is ready or lost, and how many replicas
-are placed on it. A node is lost when its lease is more than 15 s old.
+are placed on it. A node is lost when its lease is more than 15 s old. A lease
+age of 48 hours or more is printed in days.
 
 ADDRESS is the node's private address, where its routed replicas publish
 their ports. "-" means it reported none: such a node takes no routed replicas.
