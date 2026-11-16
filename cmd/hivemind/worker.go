@@ -299,10 +299,10 @@ func readWorkerState(dir string) (workerState, error) {
 	dec := json.NewDecoder(strings.NewReader(string(raw)))
 	dec.DisallowUnknownFields()
 	if err := dec.Decode(&st); err != nil {
-		return st, fmt.Errorf("%s: %w", workerStateFile, err)
+		return st, fmt.Errorf("%s is not valid: %w", workerStateFile, err)
 	}
 	if err := pki.ValidateNodeID(st.NodeID); err != nil {
-		return st, err
+		return st, fmt.Errorf("%s: %w", workerStateFile, err)
 	}
 	if _, _, err := net.SplitHostPort(st.Server); err != nil {
 		return st, fmt.Errorf("%s: server %q: %w", workerStateFile, st.Server, err)
@@ -329,8 +329,17 @@ func workerHereError(dir, doing string) error {
 // node.json. A missing node.json is errNotJoined.
 func loadWorkerState(dir string) (*joinedWorker, error) {
 	st, err := readWorkerState(dir)
-	if err != nil {
+	switch {
+	case errors.Is(err, errNotJoined):
 		return nil, err
+	case err != nil:
+		// node.json names the node only when it is readable and valid;
+		// otherwise the certificate may still say which node this was.
+		id := st.NodeID
+		if pki.ValidateNodeID(id) != nil {
+			id = certNodeID(dir)
+		}
+		return nil, damaged(dir, id, err)
 	}
 	host, _, _ := net.SplitHostPort(st.Server)
 	if err := recoverRenewal(dir); err != nil {
@@ -339,50 +348,53 @@ func loadWorkerState(dir string) (*joinedWorker, error) {
 
 	keyPath := filepath.Join(dir, workerKeyFile)
 	info, err := os.Lstat(keyPath)
+	if errors.Is(err, fs.ErrNotExist) {
+		return nil, damaged(dir, st.NodeID, fmt.Errorf("%s is missing: without the node's private key, the node cannot prove to the server who it is", workerKeyFile))
+	}
 	if err != nil {
-		return nil, err
+		return nil, damaged(dir, st.NodeID, err)
 	}
 	if !info.Mode().IsRegular() || info.Mode().Perm()&0o077 != 0 {
-		return nil, fmt.Errorf("%s must be a regular file readable by its owner only", keyPath)
+		return nil, fmt.Errorf("%s must be a regular file readable by its owner only: run chmod 600 %s", keyPath, keyPath)
 	}
 	keyPEM, err := os.ReadFile(keyPath)
 	if err != nil {
-		return nil, err
+		return nil, damaged(dir, st.NodeID, err)
 	}
 	kb, _ := pem.Decode(keyPEM)
 	if kb == nil || kb.Type != "EC PRIVATE KEY" {
-		return nil, fmt.Errorf("%s is not a PEM EC private key", keyPath)
+		return nil, damaged(dir, st.NodeID, fmt.Errorf("%s is not a PEM EC private key", workerKeyFile))
 	}
 	key, err := x509.ParseECPrivateKey(kb.Bytes)
 	if err != nil {
-		return nil, fmt.Errorf("%s: %w", keyPath, err)
+		return nil, damaged(dir, st.NodeID, fmt.Errorf("%s: %w", workerKeyFile, err))
 	}
 
 	caPEM, err := os.ReadFile(filepath.Join(dir, pki.CACertFile))
 	if err != nil {
-		return nil, err
+		return nil, damaged(dir, st.NodeID, fmt.Errorf("reading the cluster CA: %w", err))
 	}
 	cb, _ := pem.Decode(caPEM)
 	if cb == nil || cb.Type != "CERTIFICATE" {
-		return nil, fmt.Errorf("%s is not a PEM certificate", pki.CACertFile)
+		return nil, damaged(dir, st.NodeID, fmt.Errorf("%s is not a PEM certificate", pki.CACertFile))
 	}
 	caCert, err := x509.ParseCertificate(cb.Bytes)
 	if err != nil {
-		return nil, err
+		return nil, damaged(dir, st.NodeID, fmt.Errorf("%s: %w", pki.CACertFile, err))
 	}
 	ca := &pki.CA{Cert: caCert, CertPEM: caPEM}
 
 	certPEM, err := os.ReadFile(filepath.Join(dir, workerCertFile))
 	if err != nil {
-		return nil, err
+		return nil, damaged(dir, st.NodeID, fmt.Errorf("reading the node's certificate: %w", err))
 	}
 	nb, _ := pem.Decode(certPEM)
 	if nb == nil || nb.Type != "CERTIFICATE" {
-		return nil, fmt.Errorf("%s is not a PEM certificate", workerCertFile)
+		return nil, damaged(dir, st.NodeID, fmt.Errorf("%s is not a PEM certificate", workerCertFile))
 	}
 	leaf, err := x509.ParseCertificate(nb.Bytes)
 	if err != nil {
-		return nil, err
+		return nil, damaged(dir, st.NodeID, fmt.Errorf("%s: %w", workerCertFile, err))
 	}
 	if id, err := pki.NodeIDFromCert(leaf); err == nil && id == st.NodeID && time.Now().After(leaf.NotAfter) {
 		return nil, certExpiredError(id, leaf.NotAfter)
@@ -390,14 +402,29 @@ func loadWorkerState(dir string) (*joinedWorker, error) {
 	pool := x509.NewCertPool()
 	pool.AddCert(caCert)
 	if _, err := leaf.Verify(x509.VerifyOptions{Roots: pool, KeyUsages: []x509.ExtKeyUsage{x509.ExtKeyUsageClientAuth}}); err != nil {
-		return nil, fmt.Errorf("%s does not chain to the cluster CA: %w", workerCertFile, err)
+		var ie x509.CertificateInvalidError
+		if errors.As(err, &ie) && ie.Reason == x509.Expired {
+			// The certificate has not expired, as checked above, so the
+			// clock is before the start of its validity, or the CA's.
+			return nil, fmt.Errorf("%s is valid from %s, the cluster CA from %s, and this machine's clock reads %s: "+
+				"set the clock right (NTP), then start the worker again",
+				workerCertFile, leaf.NotBefore.UTC().Format(time.RFC3339), caCert.NotBefore.UTC().Format(time.RFC3339),
+				time.Now().UTC().Format(time.RFC3339))
+		}
+		return nil, damaged(dir, st.NodeID, fmt.Errorf("%s does not chain to the cluster CA in %s, so one of them was replaced: %w",
+			workerCertFile, pki.CACertFile, err))
 	}
 	if id, err := pki.NodeIDFromCert(leaf); err != nil || id != st.NodeID {
-		return nil, fmt.Errorf("%s names node %q, but %s names %q", workerCertFile, id, workerStateFile, st.NodeID)
+		return nil, damaged(dir, st.NodeID, fmt.Errorf("%s names node %q, but %s names %q", workerCertFile, id, workerStateFile, st.NodeID))
+	}
+	// A key that is not the certificate's would load, and then fail every
+	// handshake with the server.
+	if pub, ok := leaf.PublicKey.(*ecdsa.PublicKey); !ok || !pub.Equal(&key.PublicKey) {
+		return nil, damaged(dir, st.NodeID, fmt.Errorf("%s and %s do not belong together: the key is not the certificate's", workerKeyFile, workerCertFile))
 	}
 	tlsCert, err := pki.NewTLSCertificate(nb.Bytes, key, ca)
 	if err != nil {
-		return nil, err
+		return nil, damaged(dir, st.NodeID, err)
 	}
 	holder := pki.NewCertHolder(tlsCert)
 	tlsCfg, err := pki.ClientTLSConfigFrom(ca, holder, host)
@@ -405,6 +432,43 @@ func loadWorkerState(dir string) (*joinedWorker, error) {
 		return nil, err
 	}
 	return &joinedWorker{state: st, tlsCfg: tlsCfg, ca: ca, holder: holder}, nil
+}
+
+// damaged is the error of a worker data directory that cannot be used, with
+// what to do about it. The node's files are written once, at the join, and
+// renewal replaces only the certificate; a file that is missing or does not
+// fit was changed by something else, and the worker cannot repair it. id is
+// the node's ID, or "" when it is not known.
+func damaged(dir, id string, err error) error {
+	node := "the node (hivemind nodes lists it)"
+	if id != "" {
+		node = id
+	}
+	return fmt.Errorf("the data directory %s is damaged: %w. The worker cannot start with it. "+
+		"Restore the directory from a backup of this machine, "+
+		"or join again: run `hivemind node remove %s --force` on the server, then hivemind join here with an empty --data-dir and a new join token",
+		dir, err, node)
+}
+
+// certNodeID is the node ID in the certificate in dir, or "".
+func certNodeID(dir string) string {
+	b, err := os.ReadFile(filepath.Join(dir, workerCertFile))
+	if err != nil {
+		return ""
+	}
+	blk, _ := pem.Decode(b)
+	if blk == nil {
+		return ""
+	}
+	c, err := x509.ParseCertificate(blk.Bytes)
+	if err != nil {
+		return ""
+	}
+	id, err := pki.NodeIDFromCert(c)
+	if err != nil {
+		return ""
+	}
+	return id
 }
 
 // runWorker runs the agent for the joined node in dir until ctx ends. It
