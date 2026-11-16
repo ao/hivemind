@@ -21,7 +21,7 @@ Upgrading the workers first also works. A new worker with a 2.0.0 server logs on
 A 2.0.0 binary refuses a migrated store, and leaves its files unchanged:
 
 ```
-error: opening /var/lib/hivemind/hivemind.db: store schema is newer than this build: the store has schema version 9 and this build knows up to 6; use a newer hivemind
+error: opening /var/lib/hivemind/hivemind.db: store schema is newer than this build: the store has schema version 14 and this build knows up to 6; use a newer hivemind
 ```
 
 To go back to 2.0.0, restore the backup from step 1 into an empty data directory with the new binary's `hivemind restore`, then run 2.0.0 on it. Everything that changed since the backup is lost.
