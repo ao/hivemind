@@ -38,6 +38,7 @@ Notable changes to hivemind, newest first. Versions follow [Semantic Versioning]
 - An image reference on `index.docker.io` is normalised to `docker.io`, as Docker reads it, so `index.docker.io/nginx` is `docker.io/library/nginx:latest`.
 - `hivemind node remove` of a node that is ineligible and runs nothing, as after a drain, needs no `--force`, though the node still renews its lease.
 - `serve`, `init` and `join` no longer accept `--server`, and `serve` and `init` no longer accept `--token`. They never used them. `logs` no longer accepts `--json`, which it ignored. Passing one of these flags is now an error. `join --token` is unchanged.
+- A client command with `--server http://...` against an API that serves TLS says `the server at http://... speaks https: use --server https://...`, rather than `server returned 400 Bad Request`.
 
 ### Fixed
 

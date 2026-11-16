@@ -252,6 +252,10 @@ func (c *apiClient) send(ctx context.Context, method, path string, body any) (*h
 	}
 	var e server.ErrorBody
 	b, _ := io.ReadAll(io.LimitReader(resp.Body, 64<<10))
+	if resp.StatusCode == http.StatusBadRequest && bytes.Contains(b, []byte("Client sent an HTTP request to an HTTPS server")) {
+		// Go's reply on a TLS port to a request in plain HTTP.
+		return nil, fmt.Errorf("the server at %s speaks https: use --server %s", c.base, "https://"+strings.TrimPrefix(c.base, "http://"))
+	}
 	v := nodeapi.CleanVersion(resp.Header.Get(nodeapi.VersionHeader))
 	if json.Unmarshal(b, &e) == nil && e.Error != "" {
 		return nil, &apiError{status: resp.StatusCode, msg: e.Error, version: v}

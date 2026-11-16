@@ -257,3 +257,16 @@ func mustURL(t *testing.T, s string) *url.URL {
 	}
 	return u
 }
+
+// http:// against an API that serves TLS says to use https, rather than
+// "server returned 400 Bad Request".
+func TestPlainHTTPToATLSServer(t *testing.T) {
+	isolate(t)
+	ts := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {}))
+	defer ts.Close()
+	plain := "http://" + strings.TrimPrefix(ts.URL, "https://")
+	_, _, err := run(t, "", "status", "--server", plain, "--token", "hm_x")
+	if err == nil || err.Error() != "the server at "+plain+" speaks https: use --server "+ts.URL {
+		t.Fatalf("status over http to a TLS server: %v", err)
+	}
+}
