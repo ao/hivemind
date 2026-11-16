@@ -23,10 +23,24 @@
 #      With SETUP_APPS=0 it stops after step 4, for a run that deploys its
 #      own apps (scale.sh).
 #
+# With SOAK_ROUTES=1 (the routing soak; run outside.sh setup first):
+#   - each node is prepared first (prepare_node in lib.sh: /etc/hosts, Pebble's
+#     root in the system trust, the registry's CA in /etc/docker/certs.d);
+#   - every node runs a router on its own private address (route_flags), the
+#     server through its unit, each worker through join and its unit;
+#   - the registry credential is stored with hivemind registry login;
+#   - the apps are www (the private image, 3 replicas, routed as
+#     www.soak.test, HTTP health check), api (nginx, 2 replicas, routed as
+#     api.soak.test, health check), spread, kv, and the compose project
+#     "shop" (compose-shop.yaml: front, nginx on 127.0.0.1:8081, and cache,
+#     redis without a port);
+#   - it waits until every router serves both hosts.
+#
 # It logs the machines' versions and every TCP listener, and fails if a
 # hivemind or app port listens on a wildcard address.
 set -euo pipefail
 . "$(dirname "$0")/lib.sh"
+HERE=$(cd "$(dirname "$0")" && pwd)
 
 WEB_IMAGE=${WEB_IMAGE:-nginx:alpine}
 SPREAD_IMAGE=${SPREAD_IMAGE:-busybox:stable}
@@ -50,19 +64,6 @@ install_server() {
 	wait_for 60 hm "$SERVER" status || die "the API on $SERVER did not answer"
 }
 
-# join_worker NAME: join with a one-hour token, then hand over to systemd.
-join_worker() {
-	local n=$1 tok
-	tok=$(hm "$SERVER" join-token --ttl 1h 2>/dev/null) || die "join-token on $SERVER"
-	note "joining $n"
-	# The token goes on stdin, so it is in no sudo log; join takes it only as a flag.
-	on "$n" "sudo sh -c 'read -r T; nohup $HM join $SERVER_IP --token \"\$T\" >/var/log/hivemind-join.log 2>&1 </dev/null &'" <<<"$tok"
-	wait_for 60 on "$n" "sudo test -s $DATA/node.json" || die "$n did not join: $(on "$n" 'sudo tail -n 5 /var/log/hivemind-join.log' 2>&1)"
-	# join keeps running as the agent. Stop it, and let systemd run the worker.
-	on "$n" "sudo pkill -TERM -f '^$HM join' ; for i in \$(seq 1 20); do pgrep -f '^$HM join' >/dev/null || exit 0; sleep 0.5; done; exit 1" ||
-		die "$n: the foreground join did not stop"
-	install_unit "$n" "$(worker_unit)"
-}
 
 # write_ids: the "id name" map, from each worker's node.json and the server's node list.
 write_ids() {
@@ -90,6 +91,15 @@ deploy() { # deploy JSON
 	hm "$SERVER" "deploy -f -" <<<"$1" >/dev/null
 }
 
+deploy_routed() {
+	deploy "$(www_spec 1)"
+	deploy "{\"name\":\"api\",\"image\":\"$WEB_IMAGE\",\"replicas\":2,\"routes\":[{\"host\":\"api.soak.test\",\"port\":80}],\"health\":{\"http\":{\"port\":80,\"path\":\"/\"},\"interval\":\"2s\",\"timeout\":\"1s\"}}"
+	deploy "{\"name\":\"spread\",\"image\":\"$SPREAD_IMAGE\",\"replicas\":6,\"command\":[\"sleep\",\"86400\"]}"
+	deploy "{\"name\":\"kv\",\"image\":\"$KV_IMAGE\",\"command\":[\"redis-server\",\"--appendonly\",\"yes\"],\"ports\":[{\"host\":6379,\"container\":6379,\"bind\":\"127.0.0.1\"}],\"volumes\":[{\"name\":\"data\",\"path\":\"/data\"}]}"
+	hm "$SERVER" "compose deploy -" <"$HERE/compose-shop.yaml" >/dev/null || die "compose deploy shop"
+	ev setup "deployed www api spread kv; compose project shop: front cache"
+}
+
 kv_node() { # the soak name of the node that runs kv replica 0
 	local st id
 	st=$(hm "$SERVER" status --json)
@@ -104,7 +114,7 @@ check_listeners() {
 		l=$(on "$n" "sudo ss -ltnpH" | awk '{ print $4, $6 }')
 		ev listeners "$n $(awk '{ printf "%s;", $1 }' <<<"$l")"
 		bad=$(awk '{ split($1, a, ":"); port = a[length(a)]; addr = substr($1, 1, length($1) - length(port) - 1) }
-			(port == 4483 || port == 4484 || port == 4485 || port == 8080 || port == 6379) && (addr == "0.0.0.0" || addr == "*" || addr == "[::]") { print $1 }' <<<"$l")
+			(port == 4483 || port == 4484 || port == 4485 || port == 8080 || port == 8081 || port == 6379 || port == 80 || port == 443) && (addr == "0.0.0.0" || addr == "*" || addr == "[::]") { print $1 }' <<<"$l")
 		[ -z "$bad" ] || die "$n: a hivemind or app port listens on a wildcard address: $bad"
 	done
 }
@@ -115,6 +125,9 @@ main() {
 	for n in "${NAMES[@]}"; do install_bin "$n" & done
 	wait
 	for n in "${NAMES[@]}"; do machine_facts "$n"; done
+	if [ "$SOAK_ROUTES" = 1 ]; then
+		for n in "${NAMES[@]}"; do prepare_node "$n"; done
+	fi
 	install_server
 	for ((i = 1; i < ${#NAMES[@]}; i++)); do join_worker "${NAMES[$i]}"; done
 	write_ids
@@ -126,11 +139,17 @@ main() {
 		note "setup done, without apps"
 		return 0
 	fi
-	deploy "{\"name\":\"web\",\"image\":\"$WEB_IMAGE\",\"replicas\":3,\"ports\":[{\"host\":8080,\"container\":80,\"bind\":\"127.0.0.1\"}]}"
-	deploy "{\"name\":\"spread\",\"image\":\"$SPREAD_IMAGE\",\"replicas\":6,\"command\":[\"sleep\",\"86400\"]}"
-	deploy "{\"name\":\"kv\",\"image\":\"$KV_IMAGE\",\"command\":[\"redis-server\",\"--appendonly\",\"yes\"],\"ports\":[{\"host\":6379,\"container\":6379,\"bind\":\"127.0.0.1\"}],\"volumes\":[{\"name\":\"data\",\"path\":\"/data\"}]}"
-	ev setup "deployed web spread kv"
+	if [ "$SOAK_ROUTES" = 1 ]; then
+		"$HERE/outside.sh" login
+		deploy_routed
+	else
+		deploy "{\"name\":\"web\",\"image\":\"$WEB_IMAGE\",\"replicas\":3,\"ports\":[{\"host\":8080,\"container\":80,\"bind\":\"127.0.0.1\"}]}"
+		deploy "{\"name\":\"spread\",\"image\":\"$SPREAD_IMAGE\",\"replicas\":6,\"command\":[\"sleep\",\"86400\"]}"
+		deploy "{\"name\":\"kv\",\"image\":\"$KV_IMAGE\",\"command\":[\"redis-server\",\"--appendonly\",\"yes\"],\"ports\":[{\"host\":6379,\"container\":6379,\"bind\":\"127.0.0.1\"}],\"volumes\":[{\"name\":\"data\",\"path\":\"/data\"}]}"
+		ev setup "deployed web spread kv"
+	fi
 	wait_for 300 converged_now || die "not converged 300 s after the deploy: $(check_converged "$SOAK_DIR/setup.tsv" | tr '\n' ';')"
+	[ "$SOAK_ROUTES" = 1 ] && "$HERE/outside.sh" wait-served 300
 	n=$(kv_node) || die "kv has no node"
 	val="written-$(date -u +%FT%TZ)"
 	[ "$(kv_set "$n" "$val")" = "+OK" ] || die "could not write the kv value on $n"

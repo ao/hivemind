@@ -1,0 +1,15 @@
+# The compose project of the routing soak: two services, deployed with
+# hivemind compose deploy. front publishes 127.0.0.1:8081, which the probe
+# loop checks on its node; cache has no port.
+name: shop
+services:
+  front:
+    image: nginx:alpine
+    ports:
+      - "127.0.0.1:8081:80"
+    healthcheck:
+      test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://127.0.0.1/"]
+      interval: 5s
+  cache:
+    image: redis:7-alpine
+    command: ["redis-server", "--save", ""]

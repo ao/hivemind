@@ -206,6 +206,8 @@ server_backup() {
 # restore_server: on the new, empty server machine, as docs/backup.md says.
 restore_server() {
 	install_bin "$SERVER" || return 1
+	# The machine set-up that is not hivemind's state: hosts, trust, certs.d.
+	if [ "$SOAK_ROUTES" = 1 ]; then prepare_node "$SERVER" || return 1; fi
 	(SSH_TIMEOUT=60 on "$SERVER" "umask 077; cat > /var/tmp/hivemind-soak.tar" <"$SOAK_DIR/backup.tar") || return 1
 	on "$SERVER" "sudo $HM restore /var/tmp/hivemind-soak.tar --data-dir $DATA && rm -f /var/tmp/hivemind-soak.tar" >/dev/null || return 1
 	ev event "lose-server restored"
@@ -359,9 +361,160 @@ kv_check() {
 	if [ "$v" = "$(cat "$SOAK_DIR/kv-value")" ]; then ev event "${1:-kv} kv-value-match node=$n"; else ev event "${1:-kv} kv-value-mismatch node=$n got=${v:-none}"; fi
 }
 
+# watch_moves NAME T PRE SECS DONE: once a second, until DONE (a shell
+# condition on $moved, $oldrm, $conv) holds or SECS pass, log the first time
+# T's movable replicas in PRE run elsewhere, the first time T has none of its
+# old containers for them, and each change of convergence and duplicates.
+watch_moves() {
+	local name=$1 T=$2 pre=$3 secs=$4 done=$5 cur=$SOAK_DIR/measure-$1.tsv
+	local id keys end t d v c moved=0 oldrm=0 conv="" dupl="" where
+	id=$(id_of "$T")
+	keys=$(movable "$pre" "$id" | tr '\n' ' ')
+	end=$(($(date +%s) + secs))
+	while [ "$(date +%s)" -lt "$end" ]; do
+		t=$(now_ms)
+		collect "$cur" nodes
+		if api_ok "$cur"; then
+			if [ "$moved" = 0 ]; then
+				where=$(awk -F'\t' -v id="$id" -v keys=" $keys " 'FILENAME == ARGV[1] { split($0, x, " "); nm[x[1]] = x[2]; next }
+					$1 == "R" && index(keys, " " $2 "|" $3 " ") > 0 { n++; if ($4 != id && $4 != "" && $5 == "running") { ok++; w = w $2 "|" $3 "@" nm[$4] " " } }
+					END { if (ok == n) print w }' "$IDS_FILE" "$cur")
+				[ -z "$where" ] || {
+					ev event "$name $T replicas-elsewhere $where"
+					moved=1
+				}
+			fi
+			if [ "$oldrm" = 0 ] && ! grep -q "^U	$T$" "$cur" && [ -z "$(old_on "$cur" "$pre" "$T" "$keys")" ]; then
+				ev event "$name $T old-containers-removed"
+				oldrm=1
+			fi
+			if check_converged "$cur" 0 >/dev/null; then c=yes; else c=no; fi
+			[ "$c" = "$conv" ] || {
+				ev event "$name converged-$c"
+				conv=$c
+			}
+		fi
+		d=$(dups "$cur" | tr '\n' ';')
+		[ "$d" = "$dupl" ] || {
+			ev event "$name dups ${d:-none}"
+			dupl=$d
+		}
+		eval "$done" && return 0
+		d=$((1000 - ($(now_ms) - t)))
+		[ "$d" -le 0 ] || sleep "$((d / 1000)).$(printf '%03d' $((d % 1000)))"
+	done
+	ev event "$name measure-timeout moved=$moved old_removed=$oldrm converged=$conv"
+	return 1
+}
+
+# rollout [VERSION]: a rolling update of www to the private image's tag
+# VERSION (2), measured until no rollout is in progress and the cluster has
+# converged with every www replica at the new generation.
+rollout() {
+	local name=rollout v=${1:-2} cur=$SOAK_DIR/measure-rollout.tsv end t d st r
+	begin "$name" "$SERVER"
+	ev event "$name www fault deploy $REGISTRY/soak/whoami:$v"
+	hm "$SERVER" "deploy -f -" <<<"$(www_spec "$v")" >/dev/null || die "$name: deploy"
+	end=$(($(date +%s) + 600))
+	r=""
+	while [ "$(date +%s)" -lt "$end" ]; do
+		t=$(now_ms)
+		st=$(hm "$SERVER" status --json 2>/dev/null) || st=""
+		v=$(jq -r '.[] | select(.name == "www") | (.rollout // {} | "\(.state // "none") target=\(.target // "-") moving=\(.moving // "-")") + " gens=" + ([.replicas[] | "\(.index):\(.generation):\(.state)"] | join(","))' <<<"$st" 2>/dev/null)
+		[ "$v" = "$r" ] || {
+			ev event "$name www $v"
+			r=$v
+		}
+		if [[ "$v" == none* ]]; then
+			wait_for 120 converged_now && ev event "$name converged-yes"
+			break
+		fi
+		d=$((1000 - ($(now_ms) - t)))
+		[ "$d" -le 0 ] || sleep "$((d / 1000)).$(printf '%03d' $((d % 1000)))"
+	done
+	end_scenario "$name"
+}
+
+# drain_node TARGET: hivemind node drain, measured; then eligibility
+# --enable, and a check that nothing moved back or ran twice.
+drain_node() {
+	local T=$1 name=drain-worker id pre=$SOAK_DIR/pre-drain-worker.tsv out
+	begin "$name" "$T"
+	id=$(id_of "$T")
+	ev event "$name $T fault drain"
+	out=$(SSH_TIMEOUT=900 hm "$SERVER" node drain "$id" 2>&1)
+	ev event "$name $T drain-returned rc=$? $(tr '\n' ';' <<<"$out" | cut -c1-600)"
+	watch_moves "$name" "$T" "$pre" 120 '[ "$oldrm" = 1 ] && [ "$conv" = yes ]'
+	ev event "$name $T nodes $(hm "$SERVER" nodes --json | jq -c --arg i "$id" '.[] | select(.id == $i) | {state, eligible, replicas, drain: (.drain.state // null)}')"
+	hm "$SERVER" node eligibility "$id" --enable >/dev/null || die "$name: eligibility --enable"
+	ev event "$name $T enabled"
+	sleep 10
+	snapshot "$SOAK_DIR/now.tsv" || true
+	ev event "$name $T after-enable converged=$(check_converged "$SOAK_DIR/now.tsv" >/dev/null && echo yes || echo no) on-node=$(movable "$SOAK_DIR/now.tsv" "$id" | tr '\n' ' ') eligible=$(hm "$SERVER" nodes --json | jq -r --arg i "$id" '.[] | select(.id == $i) | .eligible')"
+	end_scenario "$name"
+}
+
+# remove_node TARGET: drain TARGET, then hivemind node remove; check that the
+# removed worker's agent stops. The machine is replaced afterwards, outside
+# this script, and join-new joins the new one.
+remove_node() {
+	local T=$1 name=replace-worker id pre=$SOAK_DIR/pre-replace-worker.tsv out
+	begin "$name" "$T"
+	id=$(id_of "$T")
+	ev event "$name $T fault drain-and-remove"
+	out=$(SSH_TIMEOUT=900 hm "$SERVER" node drain "$id" 2>&1)
+	ev event "$name $T drain-returned rc=$? $(tr '\n' ';' <<<"$out" | cut -c1-600)"
+	watch_moves "$name" "$T" "$pre" 120 '[ "$oldrm" = 1 ] && [ "$conv" = yes ]'
+	out=$(hm "$SERVER" node remove "$id" 2>&1)
+	ev event "$name $T removed rc=$? $(tr '\n' ';' <<<"$out" | cut -c1-300)"
+	wait_for 30 on "$T" "! systemctl is-active --quiet hivemind" &&
+		ev event "$name $T agent-stopped $(on "$T" "sudo journalctl -u hivemind -n 3 --no-pager -o cat" | tr '\n' ';' | cut -c1-400)"
+	ev event "$name $T containers-left $(on "$T" "sudo docker ps -q --filter label=hivemind.app | wc -l")"
+	ev event "$name $T nodes $(hm "$SERVER" nodes --json | jq -c '[.[] | {id, state}]')"
+}
+
+# join_new TARGET: after the machine was replaced with an empty one at the
+# same address, install, prepare and join it with a new token, as a new
+# machine; then measure until it is ready and the cluster has converged.
+join_new() {
+	local T=$1 name=join-worker t0 id end
+	ev scenario "$name begin target=$T"
+	# Until the address answers as a new machine: Docker installed by its
+	# user data, and no hivemind data directory. The old machine may still
+	# be up when this starts, and the new one has a new host key.
+	end=$(($(date +%s) + 1200))
+	until on "$T" "test -f /var/lib/hm-ready && ! sudo test -e $DATA" >/dev/null 2>&1; do
+		[ "$(date +%s)" -lt "$end" ] || die "$name: $T is not a new, empty machine after 1200 s"
+		forget_host "$T"
+		sleep 2
+	done
+	forget_host "$T"
+	ev event "$name $T machine-ready"
+	install_bin "$T"
+	if [ "$SOAK_ROUTES" = 1 ]; then prepare_node "$T"; fi
+	t0=$(now_ms)
+	ev event "$name $T join"
+	join_worker "$T"
+	id=$(on "$T" "sudo jq -r .node_id $DATA/node.json")
+	awk -v n="$T" -v i="$id" '$2 == n { $1 = i } { print }' "$IDS_FILE" >"$IDS_FILE.tmp" && mv "$IDS_FILE.tmp" "$IDS_FILE"
+	ev ids "$(tr '\n' ' ' <"$IDS_FILE")"
+	wait_for 120 node_is "$id" ready && ev event "$name $T node-ready id=$id after_ms=$(($(now_ms) - t0))"
+	wait_for 300 converged_now && ev event "$name converged-yes"
+	ev event "$name $T machine $(on "$T" "uname -r; docker version --format '{{.Server.Version}}'" | tr '\n' ' ')"
+	end_scenario "$name"
+}
+
+node_is() { [ "$(hm "$SERVER" nodes --json | jq -r --arg i "$1" '.[] | select(.id == $i) | .state')" = "$2" ]; }
+
 cmd=${1:-}
 shift || true
 case "$cmd" in
+fault) ev event "$1 $2 fault ${*:3}" ;;
+rollout) rollout "$@" ;;
+drain) drain_node "$@" ;;
+remove) remove_node "$@" ;;
+join-new) join_new "$@" ;;
+place-spread) place_spread ;;
 probe-start) bg_start probe "$HERE/probe.sh" ;;
 probe-stop) bg_stop probe ;;
 watch-start) bg_start watch "$HERE/watch.sh" ;;

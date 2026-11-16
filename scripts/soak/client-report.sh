@@ -1,0 +1,138 @@
+#!/usr/bin/env bash
+# The numbers of the HTTPS clients (outside.sh), by window of the soak log.
+#
+#   scripts/soak/client-report.sh LOG CLIENT_DIR
+#
+# CLIENT_DIR has the stream logs HOST@ROUTER.log, certs.log and pebble.log,
+# as outside.sh fetch copies them. Needs gawk.
+#
+# Windows: each scenario of LOG, from its "scenario NAME begin" line to its
+# "scenario NAME end" line, with its fault at the first "event NAME ... fault"
+# line inside it; and the steady window, "mark steady begin" to "mark steady
+# end". A request belongs to the window its end time falls in. The client
+# times are the outside machine's clock, the log's the control machine's;
+# both are synchronised by chrony.
+#
+# Per window and stream: requests; failed (not a 200, or a curl error), with
+# the codes ("000/28" is curl's timeout, "000/7" a refused connection);
+# the longest gap between two successful requests, and when it began; the
+# first and last failure, in seconds after the fault; and the total time of
+# the successful requests, p50, p99 and max, in ms.
+set -euo pipefail
+LOG=${1:?log}
+DIR=${2:?client dir}
+NODES_FILE=${NODES_FILE:-$(dirname "$LOG")/nodes}
+W=$(mktemp)
+trap 'rm -f "$W"' EXIT
+
+# name start end fault (Unix seconds; fault 0 when there is none)
+awk '
+$3 == "scenario" && $5 == "begin" { s[$4] = $2 / 1000; order[++n] = $4; f[$4] = 0 }
+$3 == "event" && ($4 in s) && !($4 in e) && f[$4] == 0 && / fault / { f[$4] = $2 / 1000 }
+$3 == "scenario" && $5 == "end" && ($4 in s) && !($4 in e) { e[$4] = $2 / 1000 }
+$3 == "mark" && $4 == "steady" && $5 == "begin" { s["steady"] = $2 / 1000; order[++n] = "steady"; f["steady"] = 0 }
+$3 == "mark" && $4 == "steady" && $5 == "end" { e["steady"] = $2 / 1000 }
+END {
+	for (i = 1; i <= n; i++) {
+		w = order[i]; if (!(w in e)) continue
+		# 60 s past the end, for failures that outlast the measure, but not into the next window
+		x = e[w] + 60; if (i < n && s[order[i + 1]] < x) x = s[order[i + 1]]; if (w == "steady") x = e[w]
+		printf "%s %.3f %.3f %.3f\n", w, s[w], x, f[w]
+	}
+}' "$LOG" >"$W"
+
+label() { # label FILE: host@node-name
+	local b ip host
+	b=$(basename "$1" .log)
+	host=${b%@*} ip=${b#*@}
+	echo "$host@$(awk -v ip="$ip" '$2 == ip { print $1 }' "$NODES_FILE" | sed 's/^.*-\([0-9]*\)$/\1/;s/^/node-/')"
+}
+
+while read -r name ws we wf; do
+	echo "### $name"
+	echo
+	echo "From $(date -u -d @"${ws%.*}" +%T) to $(date -u -d @"${we%.*}" +%T) UTC, $(awk -v a="$ws" -v b="$we" 'BEGIN { printf "%.0f", b - a }') s$( [ "$wf" != 0.000 ] && echo ", fault at $(date -u -d @"${wf%.*}" +%T)")."
+	echo
+	echo "| Stream (host@router) | Requests | Failed | Codes of the failures | Longest gap (s) | Gap began | First / last failure (s after the fault) | p50 / p99 / max (ms) |"
+	echo "|---|---|---|---|---|---|---|---|"
+	for f in "$DIR"/*@*.log; do
+		gawk -v ws="$ws" -v we="$we" -v wf="$wf" -v lab="$(label "$f")" '
+		function pct(p,   i) { i = int(p * nl + 0.999999); if (i < 1) i = 1; if (i > nl) i = nl; return sprintf("%.0f", lat[i] * 1000) }
+		NF < 8 || $1 + 0 < ws || $1 + 0 > we { next }
+		{
+			t = $1 + 0; n++
+			if ($2 == "200" && $3 == "0") {
+				if (lastok) { g = t - lastok; if (g > gap) { gap = g; gapat = lastok } }
+				lastok = t; lat[++nl] = $7 + 0
+			} else {
+				bad++; codes[$2 "/" $3]++
+				if (!ff) ff = t - $7
+				lf = t
+			}
+		}
+		END {
+			c = ""; for (k in codes) c = c (c == "" ? "" : ", ") k " x" codes[k]
+			if (nl) asort(lat)
+			ref = (wf > 0 ? wf : ws)
+			printf "| %s | %d | %d | %s | %.2f | %s | %s | %s |\n", lab, n, bad, (c == "" ? "-" : c), gap,
+				(gapat ? strftime("%H:%M:%S", int(gapat), 1) : "-"),
+				(bad ? sprintf("%+.1f / %+.1f", ff - ref, lf - ref) : "-"),
+				(nl ? pct(0.5) " / " pct(0.99) " / " pct(1) : "-")
+		}' "$f"
+	done
+	echo
+done <"$W"
+
+# The steady window over every stream: success rate and latency.
+read -r _ ss se _ < <(grep '^steady ' "$W" || echo "- 0 0 0")
+if [ "$ss" != 0 ]; then
+	echo "### steady, all streams"
+	echo
+	cat "$DIR"/*@*.log | gawk -v ws="$ss" -v we="$se" '
+	function pct(a, n, p,   i) { i = int(p * n + 0.999999); if (i < 1) i = 1; if (i > n) i = n; return sprintf("%.1f", a[i] * 1000) }
+	NF < 8 || $1 + 0 < ws || $1 + 0 > we { next }
+	{ n++; if ($2 == "200" && $3 == "0") { ok++; tt[ok] = $7 + 0; px[ok] = $6 - $5; tl[ok] = $5 - $4 } }
+	END {
+		asort(tt); asort(px); asort(tl)
+		printf "| Requests | Succeeded | Success rate |\n|---|---|---|\n| %d | %d | %.5f %% |\n\n", n, ok, (n ? 100 * ok / n : 0)
+		printf "| Time, ms | p50 | p90 | p99 | p99.9 | max |\n|---|---|---|---|---|---|\n"
+		printf "| Total (TCP + TLS handshake + request) | %s | %s | %s | %s | %s |\n", pct(tt, ok, .5), pct(tt, ok, .9), pct(tt, ok, .99), pct(tt, ok, .999), pct(tt, ok, 1)
+		printf "| TLS handshake | %s | %s | %s | %s | %s |\n", pct(tl, ok, .5), pct(tl, ok, .9), pct(tl, ok, .99), pct(tl, ok, .999), pct(tl, ok, 1)
+		printf "| TLS done to first byte (router and replica) | %s | %s | %s | %s | %s |\n", pct(px, ok, .5), pct(px, ok, .9), pct(px, ok, .99), pct(px, ok, .999), pct(px, ok, 1)
+	}'
+	echo
+fi
+
+# Certificates: each issuance by Pebble, and when each router served it.
+if [ -f "$DIR/pebble.log" ] && [ -f "$DIR/certs.log" ]; then
+	echo "### Certificates"
+	echo
+	echo "Pebble's issuances (its log, UTC), and when the certificate watcher first saw each router serve the new serial:"
+	echo
+	echo "| Issued (Pebble) | Host | Serial | First served by each router (s after issuance) |"
+	echo "|---|---|---|---|"
+	# The host of each serial is the one the watcher saw it served for.
+	gawk -v names="$(awk '{ printf "%s=%s ", $2, $1 }' "$NODES_FILE")" '
+	BEGIN { n = split(names, a, " "); for (i = 1; i <= n; i++) { split(a[i], b, "="); nm[b[1]] = b[2]; sub(/^.*-/, "node-", nm[b[1]]) } }
+	FILENAME ~ /pebble.log$/ && /Issued certificate serial/ {
+		match($0, /([0-9]{4})\/([0-9]{2})\/([0-9]{2}) ([0-9]{2}):([0-9]{2}):([0-9]{2})/, d)
+		t = mktime(d[1] " " d[2] " " d[3] " " d[4] " " d[5] " " d[6], 1)
+		match($0, /serial ([0-9a-f]+)/, s)
+		sr = toupper(s[1]); sub(/^0+/, "", sr)
+		ni++; it[ni] = t; is[ni] = sr; next
+	}
+	FILENAME ~ /certs.log$/ && $3 ~ /^serial=/ {
+		sr = substr($3, 8); sub(/^0+/, "", sr); split($2, hp, "@"); rt[hp[2]] = 1; host[sr] = hp[1]
+		k = sr "|" hp[2]
+		if (!(k in seen)) seen[k] = $1 + 0
+	}
+	END {
+		for (i = 1; i <= ni; i++) {
+			sr = is[i]; w = ""
+			for (r in rt) { k = sr "|" r; w = w (w == "" ? "" : ", ") (r in nm ? nm[r] : r) " " ((k in seen) ? sprintf("%+.0f", seen[k] - it[i]) : "never") }
+			printf "| %s | %s | %s | %s |\n", strftime("%H:%M:%S", it[i], 1), (sr in host ? host[sr] : "never served"), substr(sr, 1, 12), w
+		}
+	}' "$DIR/pebble.log" "$DIR/certs.log"
+	echo
+	echo "Certificate checks that failed (no answer, or a chain that does not verify): $(awk '$3 == "fail"' "$DIR/certs.log" | wc -l) of $(wc -l <"$DIR/certs.log")."
+fi

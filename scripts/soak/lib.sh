@@ -41,6 +41,23 @@ done <"$NODES_FILE"
 SERVER=${NAMES[0]}
 SERVER_IP=${IPS[0]}
 
+# The outside machine, for the routing soak: Pebble, its DNS, a private
+# registry and the HTTPS clients. One "name private-ip" line in
+# $OUTSIDE_FILE (default $SOAK_DIR/outside); it is not a cluster node.
+OUTSIDE_FILE=${OUTSIDE_FILE:-$SOAK_DIR/outside}
+OUT_NAME="" OUT_IP=""
+[ -f "$OUTSIDE_FILE" ] && read -r OUT_NAME OUT_IP _ <"$OUTSIDE_FILE"
+
+# Routing: with SOAK_ROUTES=1 every node runs a router on its own private
+# address, with certificates from the ACME CA at $ACME_CA (Pebble on the
+# outside machine, which /etc/hosts on each node names "pebble").
+SOAK_ROUTES=${SOAK_ROUTES:-0}
+ACME_CA=${ACME_CA:-https://pebble:14000/dir}
+ACME_EMAIL=${ACME_EMAIL:-ops@soak.test}
+REGISTRY=${REGISTRY:-registry.soak.test}
+# The files prepare_node installs on each node, fetched by outside.sh.
+OUT_FILES=$SOAK_DIR/outside-files
+
 # The connection to each node is shared (ControlMaster), so a probe costs one
 # round trip. ServerAlive gives up on a dead master after about 4 s.
 SSH_OPTS=(-i "$SSH_KEY" -o IdentitiesOnly=yes -o BatchMode=yes -o StrictHostKeyChecking=accept-new
@@ -56,6 +73,10 @@ ip_of() {
 			return 0
 		}
 	done
+	[ -n "$OUT_NAME" ] && [ "$1" = "$OUT_NAME" ] && {
+		echo "$OUT_IP"
+		return 0
+	}
 	echo "soak: unknown node $1" >&2
 	return 1
 }
@@ -241,7 +262,7 @@ Wants=network-online.target docker.service
 After=network-online.target docker.service
 
 [Service]
-ExecStart=/usr/local/bin/hivemind serve --advertise $1
+ExecStart=/usr/local/bin/hivemind serve --advertise $1$(route_flags "$1")
 Restart=on-failure
 RestartSec=5
 
@@ -250,8 +271,16 @@ WantedBy=multi-user.target
 EOF
 }
 
+# route_flags IP: the router's flags for a node at IP, with SOAK_ROUTES=1.
+# The router listens on the node's own private address, on ports 80 and 443.
+route_flags() {
+	[ "$SOAK_ROUTES" = 1 ] || return 0
+	printf ' --route-addr %s --acme-email %s --acme-ca %s' "$1" "$ACME_EMAIL" "$ACME_CA"
+}
+
+# worker_unit [IP]: IP is the worker's private address, for its router.
 worker_unit() {
-	cat <<'EOF'
+	cat <<EOF
 [Unit]
 Description=hivemind worker
 Documentation=https://github.com/ao/hivemind
@@ -259,7 +288,7 @@ Wants=network-online.target docker.service
 After=network-online.target docker.service
 
 [Service]
-ExecStart=/usr/local/bin/hivemind serve --role worker
+ExecStart=/usr/local/bin/hivemind serve --role worker$(route_flags "${1:-}")
 Restart=on-failure
 RestartSec=5
 
@@ -299,3 +328,45 @@ VOLUME_APPS=${VOLUME_APPS:-kv}
 # those that should run. The convergence check also accepts a replica that is
 # pending with a placement reason; this count does not.
 running() { awk -F'\t' '$1 == "R" && $9 == "running" { n++; if ($5 == "running") r++ } END { printf "%d/%d", r, n }' "$1"; }
+
+# prepare_node NAME: the machine set-up a routed, private-registry cluster
+# needs on each node besides hivemind, as an operator would do it: the
+# outside machine's names in /etc/hosts (Pebble's ACME API and the
+# registry), Pebble's TLS root in the system trust store (the routers' ACME
+# client uses the system roots), and the registry's CA for Docker in
+# /etc/docker/certs.d. Needs $OUT_FILES from outside.sh setup.
+prepare_node() {
+	local n=$1
+	[ -n "$OUT_IP" ] || die "prepare_node: no outside machine in $OUTSIDE_FILE"
+	[ -s "$OUT_FILES/pebble-minica.pem" ] && [ -s "$OUT_FILES/registry-ca.crt" ] || die "prepare_node: run outside.sh setup first"
+	on "$n" "sudo sed -i '/ # soak-outside\$/d' /etc/hosts && echo '$OUT_IP pebble $REGISTRY # soak-outside' | sudo tee -a /etc/hosts >/dev/null" || return 1
+	on "$n" "sudo tee /etc/pki/ca-trust/source/anchors/pebble-minica.pem >/dev/null && sudo update-ca-trust" <"$OUT_FILES/pebble-minica.pem" || return 1
+	on "$n" "sudo install -d /etc/docker/certs.d/$REGISTRY && sudo tee /etc/docker/certs.d/$REGISTRY/ca.crt >/dev/null" <"$OUT_FILES/registry-ca.crt" || return 1
+	on "$n" "curl -fsS -m 5 -o /dev/null https://pebble:14000/dir" || die "$n: Pebble's ACME directory does not answer, or is not trusted"
+	ev prepare "$n hosts+trust+certs.d done"
+}
+
+# www_spec VERSION: the routed app on the private image; scenario.sh deploys
+# version 2 for the rolling update.
+www_spec() {
+	cat <<EOF
+{"name":"www","image":"$REGISTRY/soak/whoami:$1","replicas":3,
+ "routes":[{"host":"www.soak.test","port":80}],
+ "health":{"http":{"port":80,"path":"/health"},"interval":"2s","timeout":"1s"}}
+EOF
+}
+
+# join_worker NAME: join with a one-hour token, then hand over to systemd.
+join_worker() {
+	local n=$1 tok ip
+	ip=$(ip_of "$n")
+	tok=$(hm "$SERVER" join-token --ttl 1h 2>/dev/null) || die "join-token on $SERVER"
+	note "joining $n"
+	# The token goes on stdin, so it is in no sudo log; join takes it only as a flag.
+	on "$n" "sudo sh -c 'read -r T; nohup $HM join $SERVER_IP --token \"\$T\"$(route_flags "$ip") >/var/log/hivemind-join.log 2>&1 </dev/null &'" <<<"$tok"
+	wait_for 60 on "$n" "sudo test -s $DATA/node.json" || die "$n did not join: $(on "$n" 'sudo tail -n 5 /var/log/hivemind-join.log' 2>&1)"
+	# join keeps running as the agent. Stop it, and let systemd run the worker.
+	on "$n" "sudo pkill -TERM -f '^$HM join' ; for i in \$(seq 1 20); do pgrep -f '^$HM join' >/dev/null || exit 0; sleep 0.5; done; exit 1" ||
+		die "$n: the foreground join did not stop"
+	install_unit "$n" "$(worker_unit "$ip")"
+}

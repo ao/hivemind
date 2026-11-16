@@ -27,7 +27,7 @@ KV_VALUE=$(cat "$SOAK_DIR/kv-value" 2>/dev/null || true)
 
 # On a node: the checks for the apps it should serve, one line each.
 read -r -d '' REMOTE_WEB <<'EOF' || true
-r=$(curl -sS -o /dev/null -m 3 -w '%{http_code} %{time_total}' http://127.0.0.1:8080/ 2>&1) && [ "${r%% *}" = 200 ] && echo "ok code=${r% *} s=${r#* }" || echo "fail err=\"$(echo "$r" | tr -d '\n"' | cut -c1-80)\""
+r=$(curl -sS -o /dev/null -m 3 -w '%{http_code} %{time_total}' http://127.0.0.1:$P/ 2>&1) && [ "${r%% *}" = 200 ] && echo "ok code=${r% *} s=${r#* }" || echo "fail err=\"$(echo "$r" | tr -d '\n"' | cut -c1-80)\""
 EOF
 read -r -d '' REMOTE_KV <<'EOF' || true
 v=$(timeout 3 bash -c 'exec 3<>/dev/tcp/127.0.0.1/6379 || exit 1; printf "GET soak:canary\r\n" >&3; IFS= read -r -t 2 a <&3; IFS= read -r -t 2 b <&3; printf "%s|%s" "${a%$(printf "\r")}" "${b%$(printf "\r")}"' 2>/dev/null) && echo "ok reply=$v" || echo "fail err=connect"
@@ -69,7 +69,8 @@ reach_node() {
 	local n=$1 id=$2 rows=$3 cmd="" line out
 	while IFS=$'\t' read -r _ app idx _; do
 		case "$app" in
-		web) cmd+="printf 'web $idx '; $REMOTE_WEB"$'\n' ;;
+		web) cmd+="P=8080; printf 'web $idx '; $REMOTE_WEB"$'\n' ;;
+		front) cmd+="P=8081; printf 'front $idx '; $REMOTE_WEB"$'\n' ;;
 		kv) cmd+="printf 'kv $idx '; $REMOTE_KV"$'\n' ;;
 		esac
 	done <<<"$rows"
@@ -84,7 +85,7 @@ reach_node() {
 		done <<<"$out"
 	else
 		while IFS=$'\t' read -r _ app idx _; do
-			case "$app" in web | kv) ev reach "app=$app replica=$idx node=$n fail err=ssh" ;; esac
+			case "$app" in web | kv | front) ev reach "app=$app replica=$idx node=$n fail err=ssh" ;; esac
 		done <<<"$rows"
 	fi
 }
@@ -112,7 +113,7 @@ probe_once() {
 	for i in "${!NAMES[@]}"; do
 		n=${NAMES[$i]}
 		id=$(id_of "$n")
-		rows=$(awk -F'\t' -v id="$id" '$1 == "R" && $4 == id && $9 == "running" && ($2 == "web" || $2 == "kv")' "$LAST")
+		rows=$(awk -F'\t' -v id="$id" '$1 == "R" && $4 == id && $9 == "running" && ($2 == "web" || $2 == "kv" || $2 == "front")' "$LAST")
 		[ -n "$rows" ] || continue
 		reach_node "$n" "$id" "$rows" &
 		pids+=($!)
