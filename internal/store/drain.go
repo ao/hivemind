@@ -232,18 +232,18 @@ func (s *Store) DrainNode(ctx context.Context, id string, deadline time.Duration
 // GetDrain returns the node's drain, in progress or finished. A node without
 // one is ErrNotFound.
 func (s *Store) GetDrain(ctx context.Context, id string) (Drain, error) {
-	return getDrain(ctx, s.db, id)
+	return getDrain(ctx, s.rdb, id)
 }
 
 // ListDrains returns every drain, in progress or finished, sorted by node.
 func (s *Store) ListDrains(ctx context.Context) ([]Drain, error) {
-	ids, err := drainIDs(ctx, s.db, `1`)
+	ids, err := drainIDs(ctx, s.rdb, `1`)
 	if err != nil {
 		return nil, err
 	}
 	out := make([]Drain, 0, len(ids))
 	for _, id := range ids {
-		d, err := getDrain(ctx, s.db, id)
+		d, err := getDrain(ctx, s.rdb, id)
 		if errors.Is(err, ErrNotFound) {
 			// Removed, or made eligible, since the list was read.
 			continue

@@ -153,7 +153,7 @@ func (s *Store) RemoveNode(ctx context.Context, id string, force bool) (Removal,
 
 // IsNodeRemoved reports whether id is on the denylist of removed nodes.
 func (s *Store) IsNodeRemoved(ctx context.Context, id string) (bool, error) {
-	return isRemoved(ctx, s.db, id)
+	return isRemoved(ctx, s.rdb, id)
 }
 
 type rowQuerier interface {
@@ -170,7 +170,7 @@ func isRemoved(ctx context.Context, q rowQuerier, id string) (bool, error) {
 
 // RemovedNodes returns the denylist, sorted by ID.
 func (s *Store) RemovedNodes(ctx context.Context) ([]RemovedNode, error) {
-	rows, err := s.db.QueryContext(ctx, `SELECT id, name, removed_at FROM removed_nodes ORDER BY id`)
+	rows, err := s.rdb.QueryContext(ctx, `SELECT id, name, removed_at FROM removed_nodes ORDER BY id`)
 	if err != nil {
 		return nil, err
 	}

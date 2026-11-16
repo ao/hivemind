@@ -47,7 +47,7 @@ func (s *Store) GetCluster(ctx context.Context) (Cluster, error) {
 	var c Cluster
 	var hash []byte
 	var created int64
-	err := s.db.QueryRowContext(ctx, `SELECT admin_token_hash, node_id, created_at FROM cluster WHERE id = 1`).
+	err := s.rdb.QueryRowContext(ctx, `SELECT admin_token_hash, node_id, created_at FROM cluster WHERE id = 1`).
 		Scan(&hash, &c.NodeID, &created)
 	if errors.Is(err, sql.ErrNoRows) {
 		return Cluster{}, fmt.Errorf("cluster: %w", ErrNotFound)

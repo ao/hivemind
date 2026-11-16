@@ -9,7 +9,9 @@ package store
 
 import (
 	"context"
+	"crypto/sha256"
 	"database/sql"
+	"encoding/binary"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -18,6 +20,7 @@ import (
 	"path/filepath"
 	"slices"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/ao/hivemind/internal/scheduler"
@@ -226,13 +229,27 @@ func WithLogger(log *slog.Logger) Option { return func(s *Store) { s.log = log }
 
 // Store is the desired-state database. It is safe for concurrent use.
 type Store struct {
-	db          *sql.DB
+	// db is the one connection every write and every transaction uses.
+	db *sql.DB
+	// rdb is a pool of read-only connections for the reads outside a
+	// transaction, the API's GETs and the node API's reads among them. In
+	// WAL mode they run beside the writer, and each sees the last commit.
+	rdb         *sql.DB
 	place       PlaceFunc
 	now         func() time.Time
 	minReady    time.Duration
 	minReadySet bool
 	log         *slog.Logger
+
+	// reportMu makes one status report at a time, and guards reported: the
+	// digest of each node's last report this process stored. A report the
+	// same as the last one renews the lease and does not rewrite its rows.
+	reportMu sync.Mutex
+	reported map[string][sha256.Size]byte
 }
+
+// readConns is the size of the read-only pool.
+const readConns = 4
 
 // Open opens or creates the store at path and applies any pending migrations.
 // The file's directory is created with mode 0700 if missing, and tightened to
@@ -251,11 +268,10 @@ func Open(ctx context.Context, path string, opts ...Option) (*Store, error) {
 	if err != nil {
 		return nil, fmt.Errorf("opening %s: %w", path, err)
 	}
-	// One connection: writes are serialised in the process, and a reader never
-	// sees a half-applied change from this process. Other processes are kept
-	// out by SQLite's locks and wait up to busy_timeout.
+	// One connection for writes: they are serialised in the process. Other
+	// processes are kept out by SQLite's locks and wait up to busy_timeout.
 	db.SetMaxOpenConns(1)
-	s := &Store{db: db, now: time.Now}
+	s := &Store{db: db, now: time.Now, reported: map[string][sha256.Size]byte{}}
 	for _, o := range opts {
 		o(s)
 	}
@@ -269,6 +285,17 @@ func Open(ctx context.Context, path string, opts ...Option) (*Store, error) {
 		db.Close()
 		return nil, fmt.Errorf("opening %s: %w", path, err)
 	}
+	// Readers see only committed transactions, so never a half-applied
+	// change, and a read that starts after a commit sees it. query_only
+	// refuses any write on them.
+	rdb, err := sql.Open("sqlite", path+"?_pragma=busy_timeout(10000)&_pragma=foreign_keys(1)&_pragma=query_only(1)")
+	if err != nil {
+		db.Close()
+		return nil, fmt.Errorf("opening %s: %w", path, err)
+	}
+	rdb.SetMaxOpenConns(readConns)
+	rdb.SetMaxIdleConns(readConns)
+	s.rdb = rdb
 	return s, nil
 }
 
@@ -313,7 +340,7 @@ func (s *Store) init(ctx context.Context) error {
 }
 
 // Close closes the database.
-func (s *Store) Close() error { return s.db.Close() }
+func (s *Store) Close() error { return errors.Join(s.rdb.Close(), s.db.Close()) }
 
 // tx runs fn in one IMMEDIATE transaction and commits it if fn returns nil.
 func (s *Store) tx(ctx context.Context, fn func(*sql.Tx) error) error {
@@ -626,7 +653,7 @@ func (s *Store) ListApps(ctx context.Context) ([]App, error) {
 }
 
 func (s *Store) listApps(ctx context.Context, where string, args ...any) ([]App, error) {
-	rows, err := s.db.QueryContext(ctx, `SELECT spec, generation, created_at, updated_at, origin FROM apps WHERE `+where+` ORDER BY name`, args...)
+	rows, err := s.rdb.QueryContext(ctx, `SELECT spec, generation, created_at, updated_at, origin FROM apps WHERE `+where+` ORDER BY name`, args...)
 	if err != nil {
 		return nil, err
 	}
@@ -735,7 +762,7 @@ func (s *Store) Replicas(ctx context.Context, app string) ([]Replica, error) {
 	if app != "" {
 		where, args = `r.app = ?`, []any{app}
 	}
-	as, err := queryAssignments(ctx, s.db, where, args...)
+	as, err := queryAssignments(ctx, s.rdb, where, args...)
 	if err != nil {
 		return nil, err
 	}
@@ -752,16 +779,16 @@ func (s *Store) Replicas(ctx context.Context, app string) ([]Replica, error) {
 // Each one that is to run carries the credential stored for its image's
 // registry, if there is one, so the node can pull the image.
 func (s *Store) AssignmentsForNode(ctx context.Context, nodeID string) ([]Assignment, error) {
-	out, err := queryAssignments(ctx, s.db, `r.node_id = ?`, nodeID)
+	out, err := queryAssignments(ctx, s.rdb, `r.node_id = ?`, nodeID)
 	if err != nil {
 		return nil, err
 	}
-	surges, err := querySurges(ctx, s.db, `s.node_id = ?`, nodeID)
+	surges, err := querySurges(ctx, s.rdb, `s.node_id = ?`, nodeID)
 	if err != nil {
 		return nil, err
 	}
 	out = append(out, surges...)
-	if err := attachRegistryAuth(ctx, s.db, out); err != nil {
+	if err := attachRegistryAuth(ctx, s.rdb, out); err != nil {
 		return nil, err
 	}
 	return out, nil
@@ -801,7 +828,7 @@ func (s *Store) UpsertNode(ctx context.Context, n Node) error {
 
 // GetNode returns one node.
 func (s *Store) GetNode(ctx context.Context, id string) (Node, error) {
-	nodes, err := listNodes(ctx, s.db)
+	nodes, err := listNodes(ctx, s.rdb)
 	if err != nil {
 		return Node{}, err
 	}
@@ -814,7 +841,7 @@ func (s *Store) GetNode(ctx context.Context, id string) (Node, error) {
 }
 
 // ListNodes returns every node, sorted by ID.
-func (s *Store) ListNodes(ctx context.Context) ([]Node, error) { return listNodes(ctx, s.db) }
+func (s *Store) ListNodes(ctx context.Context) ([]Node, error) { return listNodes(ctx, s.rdb) }
 
 func listNodes(ctx context.Context, q querier) ([]Node, error) {
 	rows, err := q.QueryContext(ctx, `SELECT n.id, n.name, n.cpu, n.memory, n.last_lease, n.ready_since, coalesce(c.not_after, 0), coalesce(c.issued_at, 0), n.eligible, n.address, n.version
@@ -901,35 +928,53 @@ func (s *Store) renewLease(ctx context.Context, tx *sql.Tx, nodeID string, now i
 // renews the node's lease. Replicas marked for removal that the node no
 // longer reports a container for are then deleted, and so are deleted apps
 // with no replicas left.
+//
+// A node reports every 2 s, and most reports are the same as the one before.
+// Such a report renews the lease and stamps the node's rows with the time,
+// and does not delete and insert them again. The digest of each node's last
+// report is kept in memory, so the first report to a process always writes
+// its rows.
 func (s *Store) ReportStatus(ctx context.Context, nodeID string, st []Status) error {
 	seen := make(map[string]bool, len(st))
-	for _, x := range st {
+	rps := make([]string, len(st))
+	for i, x := range st {
 		if x.Name == "" || seen[x.Name] {
 			return fmt.Errorf("%w: status needs a unique container name, got %q", ErrInvalid, x.Name)
 		}
 		seen[x.Name] = true
+		if x.RestartCount < 0 {
+			return fmt.Errorf("%w: restart count must not be negative, got %d for %s", ErrInvalid, x.RestartCount, x.Name)
+		}
+		rp, err := encodeRoutePorts(x.RoutePorts)
+		if err != nil {
+			return fmt.Errorf("%w: container %s: %v", ErrInvalid, x.Name, err)
+		}
+		rps[i] = rp
 	}
-	return s.tx(ctx, func(tx *sql.Tx) error {
+	sum := reportDigest(st, rps)
+	s.reportMu.Lock()
+	defer s.reportMu.Unlock()
+	last, ok := s.reported[nodeID]
+	same := ok && last == sum
+	// Until this transaction commits, the stored rows are not known.
+	delete(s.reported, nodeID)
+	err := s.tx(ctx, func(tx *sql.Tx) error {
 		now := s.now().UnixNano()
 		if err := s.renewLease(ctx, tx, nodeID, now); err != nil {
 			return err
 		}
-		if _, err := tx.ExecContext(ctx, `DELETE FROM container_status WHERE node_id = ?`, nodeID); err != nil {
-			return err
-		}
-		for _, x := range st {
-			if x.RestartCount < 0 {
-				return fmt.Errorf("%w: restart count must not be negative, got %d for %s", ErrInvalid, x.RestartCount, x.Name)
-			}
-			rp, err := encodeRoutePorts(x.RoutePorts)
+		rewrite := true
+		if same {
+			res, err := tx.ExecContext(ctx, `UPDATE container_status SET updated_at = ? WHERE node_id = ?`, now, nodeID)
 			if err != nil {
-				return fmt.Errorf("%w: container %s: %v", ErrInvalid, x.Name, err)
+				return err
 			}
-			if _, err := tx.ExecContext(ctx, `INSERT INTO container_status (node_id, name, app, idx, generation, container_id, state, error, updated_at,
-				restart_count, health, ready, crash_looping, next_restart, route_ports)
-				VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-				nodeID, x.Name, x.App, x.Replica, x.Generation, x.ContainerID, x.State, x.Error, now,
-				x.RestartCount, x.Health, x.Ready, x.CrashLooping, nanos(x.NextRestart), rp); err != nil {
+			// Rows deleted since, as by a node removal, are written again.
+			n, err := res.RowsAffected()
+			rewrite = err != nil || n != int64(len(st))
+		}
+		if rewrite {
+			if err := writeStatus(ctx, tx, nodeID, now, st, rps); err != nil {
 				return err
 			}
 		}
@@ -951,6 +996,85 @@ func (s *Store) ReportStatus(ctx context.Context, nodeID string, st []Status) er
 		// was pending on them can be placed now rather than at the next sweep.
 		return s.placePending(ctx, tx)
 	})
+	if err == nil {
+		s.reported[nodeID] = sum
+	}
+	return err
+}
+
+// writeStatus replaces the node's container rows with st, whose encoded
+// route ports are rps. The INSERT is prepared once for all of them: the
+// driver compiles each statement it runs, and compiling was a fifth of the
+// server's CPU on the scale run.
+func writeStatus(ctx context.Context, tx *sql.Tx, nodeID string, now int64, st []Status, rps []string) error {
+	if _, err := tx.ExecContext(ctx, `DELETE FROM container_status WHERE node_id = ?`, nodeID); err != nil {
+		return err
+	}
+	if len(st) == 0 {
+		return nil
+	}
+	ins, err := tx.PrepareContext(ctx, `INSERT INTO container_status (node_id, name, app, idx, generation, container_id, state, error, updated_at,
+		restart_count, health, ready, crash_looping, next_restart, route_ports)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
+	if err != nil {
+		return err
+	}
+	defer ins.Close()
+	for i, x := range st {
+		if _, err := ins.ExecContext(ctx, nodeID, x.Name, x.App, x.Replica, x.Generation, x.ContainerID, x.State, x.Error, now,
+			x.RestartCount, x.Health, x.Ready, x.CrashLooping, nanos(x.NextRestart), rps[i]); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// reportDigest is the SHA-256 of a report's content, the same for the same
+// containers in any order. NodeID and UpdatedAt, which the store sets, are
+// left out.
+func reportDigest(st []Status, rps []string) [sha256.Size]byte {
+	idx := make([]int, len(st))
+	for i := range idx {
+		idx[i] = i
+	}
+	slices.SortFunc(idx, func(a, b int) int { return strings.Compare(st[a].Name, st[b].Name) })
+	h := sha256.New()
+	var buf []byte
+	str := func(s string) {
+		buf = binary.AppendUvarint(buf[:0], uint64(len(s)))
+		h.Write(buf)
+		h.Write([]byte(s))
+	}
+	num := func(n int64) {
+		buf = binary.AppendVarint(buf[:0], n)
+		h.Write(buf)
+	}
+	flag := func(b bool) {
+		if b {
+			num(1)
+		} else {
+			num(0)
+		}
+	}
+	for _, i := range idx {
+		x := st[i]
+		str(x.Name)
+		str(x.ContainerID)
+		str(x.App)
+		num(int64(x.Replica))
+		num(int64(x.Generation))
+		str(x.State)
+		str(x.Error)
+		num(int64(x.RestartCount))
+		str(x.Health)
+		flag(x.Ready)
+		flag(x.CrashLooping)
+		num(nanos(x.NextRestart))
+		str(rps[i])
+	}
+	var out [sha256.Size]byte
+	h.Sum(out[:0])
+	return out
 }
 
 // purgeDeleted deletes deleted apps that have no replicas or surges left.
@@ -968,13 +1092,13 @@ func (s *Store) ListStatus(ctx context.Context, app string) ([]Status, error) {
 	if app != "" {
 		where, args = `app = ?`, []any{app}
 	}
-	return queryStatus(ctx, s.db, where+` ORDER BY app, idx, name`, args...)
+	return queryStatus(ctx, s.rdb, where+` ORDER BY app, idx, name`, args...)
 }
 
 // StatusForNode returns what one node last reported, sorted by app, replica
 // and name. An agent reads it at start-up to recover its restart counts.
 func (s *Store) StatusForNode(ctx context.Context, nodeID string) ([]Status, error) {
-	return queryStatus(ctx, s.db, `node_id = ? ORDER BY app, idx, name`, nodeID)
+	return queryStatus(ctx, s.rdb, `node_id = ? ORDER BY app, idx, name`, nodeID)
 }
 
 func queryStatus(ctx context.Context, q querier, where string, args ...any) ([]Status, error) {

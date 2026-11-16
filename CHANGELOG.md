@@ -49,6 +49,8 @@ Notable changes to hivemind, newest first. Versions follow [Semantic Versioning]
 - `hivemind nodes` prints a LEASE AGE of 48 hours or more in days (`123d`), as CERT EXPIRES does, rather than as `2952h0m46s`.
 - `serve` and `join` whose user may not open the Docker socket say to add the user to the docker group (`sudo usermod -aG docker $USER`, then log in again) or to run as root. A worker stops at once then, rather than retrying every 5 s, since the group takes effect only for a new login.
 - `init` offers `export HIVEMIND_SERVER=...` to another machine only for an API it can reach. For the default loopback API, the line is for another shell on this machine, and a note says how to serve the API to other machines; for a wildcard `--api-addr`, the URL has a placeholder for one of this machine's addresses rather than `127.0.0.1`.
+- The server's store has a pool of four read-only connections beside its one write connection. Reads outside a transaction, the API's GETs and the workers' fetches of their assignments among them, run beside the writes, as SQLite's WAL mode allows, and see each commit as soon as it is made. On the scale run a `GET /v1/status` waited 510.6 ms behind 20 deploys in flight.
+- A node's status report that is the same as its last one renews the lease and stamps the node's rows with the time, without deleting and inserting them again; a changed report prepares its `INSERT` once. Every report used to rewrite every row, one compiled `INSERT` per container: on the scale run, reports were 30% of the server's CPU and compiling statements 20%. [docs/scale.md](docs/scale.md) has the benchmarks before and after.
 
 ### Fixed
 

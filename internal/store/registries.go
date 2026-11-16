@@ -124,7 +124,7 @@ func (s *Store) PutRegistry(ctx context.Context, host, username, password string
 // ListRegistries returns every stored credential by host, without the
 // passwords.
 func (s *Store) ListRegistries(ctx context.Context) ([]Registry, error) {
-	rows, err := s.db.QueryContext(ctx, `SELECT host, username, created_at, updated_at FROM registries ORDER BY host`)
+	rows, err := s.rdb.QueryContext(ctx, `SELECT host, username, created_at, updated_at FROM registries ORDER BY host`)
 	if err != nil {
 		return nil, err
 	}

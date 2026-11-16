@@ -47,7 +47,7 @@ func (s *Store) RecordNodeCertValidity(ctx context.Context, id string, issued, n
 // error wrapping ErrNotFound when there is no record.
 func (s *Store) NodeCertExpiry(ctx context.Context, id string) (time.Time, error) {
 	var na int64
-	err := s.db.QueryRowContext(ctx, `SELECT not_after FROM node_certs WHERE id = ?`, id).Scan(&na)
+	err := s.rdb.QueryRowContext(ctx, `SELECT not_after FROM node_certs WHERE id = ?`, id).Scan(&na)
 	if errors.Is(err, sql.ErrNoRows) {
 		return time.Time{}, fmt.Errorf("certificate of node %q: %w", id, ErrNotFound)
 	}

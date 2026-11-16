@@ -102,7 +102,7 @@ type Route struct {
 // RouteTable returns the routing table, sorted by host. Every host that a
 // live app routes is in it, with or without endpoints.
 func (s *Store) RouteTable(ctx context.Context) ([]Route, error) {
-	rows, err := s.db.QueryContext(ctx, `SELECT h.host, h.app, h.port FROM app_hosts h JOIN apps a ON a.name = h.app
+	rows, err := s.rdb.QueryContext(ctx, `SELECT h.host, h.app, h.port FROM app_hosts h JOIN apps a ON a.name = h.app
 		WHERE a.deleted = 0 ORDER BY h.host`)
 	if err != nil {
 		return nil, err
@@ -128,7 +128,7 @@ func (s *Store) RouteTable(ctx context.Context) ([]Route, error) {
 	}
 
 	cutoff := s.now().Add(-scheduler.DefaultLeaseTimeout).UnixNano()
-	rows, err = s.db.QueryContext(ctx, `SELECT c.app, c.route_ports, n.address FROM container_status c JOIN nodes n ON n.id = c.node_id
+	rows, err = s.rdb.QueryContext(ctx, `SELECT c.app, c.route_ports, n.address FROM container_status c JOIN nodes n ON n.id = c.node_id
 		WHERE c.ready = 1 AND c.route_ports != '' AND n.address != '' AND n.last_lease >= ?
 		AND (EXISTS (SELECT 1 FROM replicas r WHERE r.app = c.app AND r.idx = c.idx AND r.node_id = c.node_id
 				AND r.generation = c.generation AND r.desired = 'running')

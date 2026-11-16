@@ -131,7 +131,7 @@ func (s *Store) startRollout(ctx context.Context, tx *sql.Tx, app string, target
 func (s *Store) GetRollout(ctx context.Context, app string) (Rollout, error) {
 	var r rolloutRow
 	var since int64
-	err := s.db.QueryRowContext(ctx, `SELECT app, target, state, reason, step_idx, step_from, step_since FROM rollouts WHERE app = ?`, app).
+	err := s.rdb.QueryRowContext(ctx, `SELECT app, target, state, reason, step_idx, step_from, step_since FROM rollouts WHERE app = ?`, app).
 		Scan(&r.app, &r.target, &r.state, &r.reason, &r.stepIdx, &r.stepFrom, &since)
 	if errors.Is(err, sql.ErrNoRows) {
 		return Rollout{}, fmt.Errorf("app %q: %w", app, ErrNoRollout)

@@ -158,7 +158,7 @@ func (s *Store) TLSLoad(ctx context.Context, key string) ([]byte, error) {
 		return nil, err
 	}
 	var v []byte
-	err := s.db.QueryRowContext(ctx, `SELECT value FROM tls_storage WHERE key = ?`, key).Scan(&v)
+	err := s.rdb.QueryRowContext(ctx, `SELECT value FROM tls_storage WHERE key = ?`, key).Scan(&v)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, errTLSNotExist(key)
 	}
@@ -186,7 +186,7 @@ func (s *Store) TLSExists(ctx context.Context, key string) (bool, error) {
 	}
 	lo, hi := descendants(key)
 	var n int
-	err := s.db.QueryRowContext(ctx, `SELECT EXISTS (SELECT 1 FROM tls_storage WHERE key = ? OR (key >= ? AND key < ?))`, key, lo, hi).Scan(&n)
+	err := s.rdb.QueryRowContext(ctx, `SELECT EXISTS (SELECT 1 FROM tls_storage WHERE key = ? OR (key >= ? AND key < ?))`, key, lo, hi).Scan(&n)
 	return n == 1, err
 }
 
@@ -197,7 +197,7 @@ func (s *Store) TLSStat(ctx context.Context, key string) (TLSKeyInfo, error) {
 		return TLSKeyInfo{}, err
 	}
 	var size, mod int64
-	err := s.db.QueryRowContext(ctx, `SELECT length(value), modified FROM tls_storage WHERE key = ?`, key).Scan(&size, &mod)
+	err := s.rdb.QueryRowContext(ctx, `SELECT length(value), modified FROM tls_storage WHERE key = ?`, key).Scan(&size, &mod)
 	if err == nil {
 		return TLSKeyInfo{Key: key, Modified: time.Unix(0, mod), Size: size, Terminal: true}, nil
 	}
@@ -206,7 +206,7 @@ func (s *Store) TLSStat(ctx context.Context, key string) (TLSKeyInfo, error) {
 	}
 	lo, hi := descendants(key)
 	var latest sql.NullInt64
-	if err := s.db.QueryRowContext(ctx, `SELECT max(modified) FROM tls_storage WHERE key >= ? AND key < ?`, lo, hi).Scan(&latest); err != nil {
+	if err := s.rdb.QueryRowContext(ctx, `SELECT max(modified) FROM tls_storage WHERE key >= ? AND key < ?`, lo, hi).Scan(&latest); err != nil {
 		return TLSKeyInfo{}, err
 	}
 	if !latest.Valid {
@@ -226,7 +226,7 @@ func (s *Store) TLSList(ctx context.Context, prefix string, recursive bool) ([]s
 		return nil, err
 	}
 	lo, hi := descendants(prefix)
-	rows, err := s.db.QueryContext(ctx, `SELECT key FROM tls_storage WHERE key >= ? AND key < ? ORDER BY key`, lo, hi)
+	rows, err := s.rdb.QueryContext(ctx, `SELECT key FROM tls_storage WHERE key >= ? AND key < ? ORDER BY key`, lo, hi)
 	if err != nil {
 		return nil, err
 	}
@@ -259,7 +259,7 @@ func (s *Store) TLSList(ctx context.Context, prefix string, recursive bool) ([]s
 	}
 	if len(out) == 0 {
 		var n int
-		if err := s.db.QueryRowContext(ctx, `SELECT count(*) FROM tls_storage WHERE key = ?`, prefix).Scan(&n); err != nil {
+		if err := s.rdb.QueryRowContext(ctx, `SELECT count(*) FROM tls_storage WHERE key = ?`, prefix).Scan(&n); err != nil {
 			return nil, err
 		}
 		if n == 0 {
