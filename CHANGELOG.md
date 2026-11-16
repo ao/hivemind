@@ -42,6 +42,7 @@ Notable changes to hivemind, newest first. Versions follow [Semantic Versioning]
 - `hivemind logs` of a replica that has no container yet says it is pending, on which node, and why, as `status` does: `app "web" replica 0 is pending on node node-..., so it has no container to read a log from yet: <the pull error>; hivemind status web shows when it runs`, or `is pending, with no node` and the placement reason. Before, it said `has no container on this node`.
 - `hivemind join <host>:4485` that reaches nothing says that 4485 is the default join port, and that join takes the cluster port, 4484, or no port, and dials the port above it.
 - `hivemind join` on a machine whose data directory holds a node that was removed asks that server, with the node's certificate, and says the files cannot be used again: move the directory aside, or use another `--data-dir`, and join again; the token was not used. Before, it said to run `serve --role worker`, which fails for a removed node.
+- `serve` logs one line for each schema step it applies to an existing store, as `store schema migrated from=6 to=7 adds="node certificate expiry"`. Before, the migration was silent.
 
 ### Fixed
 

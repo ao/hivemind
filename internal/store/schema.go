@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
+	"log/slog"
 )
 
 // migrations lists the schema changes in order. migrations[i] moves the schema
@@ -266,6 +267,23 @@ ALTER TABLE nodes ADD COLUMN version TEXT NOT NULL DEFAULT '';
 `,
 }
 
+// migrationNotes says in a few words what each migration adds, for the log:
+// migrationNotes[i] is migrations[i]'s.
+var migrationNotes = []string{
+	"apps, replicas, nodes and container status",
+	"container health and restarts",
+	"the cluster record",
+	"rolling updates",
+	"join tokens and node readiness",
+	"node removal",
+	"node certificate expiry",
+	"node eligibility and drains",
+	"routing",
+	"registry credentials",
+	"reserved; no change",
+	"node versions",
+}
+
 // SchemaVersion is the schema version this build writes.
 var SchemaVersion = len(migrations)
 
@@ -273,6 +291,13 @@ var SchemaVersion = len(migrations)
 // whose version is newer than list is refused, because this build does not
 // know what the newer schema means.
 func migrate(ctx context.Context, db *sql.DB, list []string) error {
+	return migrateLogged(ctx, db, list, nil)
+}
+
+// migrateLogged is migrate, and once the transaction commits it logs one
+// line to log for each step it took, unless the store was new. Nil logs
+// nothing.
+func migrateLogged(ctx context.Context, db *sql.DB, list []string, log *slog.Logger) error {
 	tx, err := db.BeginTx(ctx, nil)
 	if err != nil {
 		return err
@@ -310,5 +335,17 @@ func migrate(ctx context.Context, db *sql.DB, list []string) error {
 	if _, err := tx.ExecContext(ctx, `UPDATE schema_version SET version = ?`, len(list)); err != nil {
 		return err
 	}
-	return tx.Commit()
+	if err := tx.Commit(); err != nil {
+		return err
+	}
+	if log != nil && n == 1 {
+		for v := version + 1; v <= len(list); v++ {
+			note := ""
+			if v <= len(migrationNotes) {
+				note = migrationNotes[v-1]
+			}
+			log.Info("store schema migrated", "from", v-1, "to", v, "adds", note)
+		}
+	}
+	return nil
 }

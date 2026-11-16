@@ -13,6 +13,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"slices"
@@ -215,6 +216,10 @@ func WithMinReady(d time.Duration) Option {
 	}
 }
 
+// WithLogger makes Open log one line for each schema migration it applies
+// to an existing store. The default logs nothing.
+func WithLogger(log *slog.Logger) Option { return func(s *Store) { s.log = log } }
+
 // Store is the desired-state database. It is safe for concurrent use.
 type Store struct {
 	db          *sql.DB
@@ -222,6 +227,7 @@ type Store struct {
 	now         func() time.Time
 	minReady    time.Duration
 	minReadySet bool
+	log         *slog.Logger
 }
 
 // Open opens or creates the store at path and applies any pending migrations.
@@ -299,7 +305,7 @@ func (s *Store) init(ctx context.Context) error {
 	if fk != 1 {
 		return errors.New("foreign keys are off")
 	}
-	return migrate(ctx, s.db, migrations)
+	return migrateLogged(ctx, s.db, migrations, s.log)
 }
 
 // Close closes the database.

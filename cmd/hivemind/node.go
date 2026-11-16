@@ -441,7 +441,8 @@ func runServe(ctx context.Context, cfg *config.Config, log *slog.Logger, rt runt
 	if w, err := readWorkerState(cfg.DataDir); err == nil {
 		return fmt.Errorf("%s holds worker %s of the cluster at %s: run hivemind serve --role worker", cfg.DataDir, w.NodeID, w.Server)
 	}
-	st, err := store.Open(ctx, filepath.Join(cfg.DataDir, storeFileName), store.WithMinReady(cfg.MinReady))
+	st, err := store.Open(ctx, filepath.Join(cfg.DataDir, storeFileName), store.WithMinReady(cfg.MinReady),
+		store.WithLogger(log.With("component", "store")))
 	if err != nil {
 		return err
 	}
