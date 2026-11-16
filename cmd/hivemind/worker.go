@@ -346,8 +346,9 @@ func runWorker(ctx context.Context, cfg *config.Config, log *slog.Logger, rt run
 	}
 	renewCtx, stopRenew := context.WithCancel(ctx)
 	defer stopRenew()
+	renewLog := log.With("component", "renew")
 	go (&renewer{dir: cfg.DataDir, nodeID: w.state.NodeID, ca: w.ca, holder: w.holder, client: client,
-		log: log.With("component", "renew"), now: time.Now}).run(renewCtx)
+		log: renewLog, now: time.Now, missing: nodeapi.NewMissingRoute(client, "certificate renewal", renewLog)}).run(renewCtx)
 	hostname, _ := os.Hostname()
 	// addr is the node's private address, where its routed replicas publish
 	// their ports. It is found before the first registration, and kept.
@@ -387,16 +388,19 @@ func runWorker(ctx context.Context, cfg *config.Config, log *slog.Logger, rt run
 	// so, rather than retrying for ever. Its containers are left running.
 	runCtx, stop := context.WithCancelCause(ctx)
 	defer stop(nil)
+	agentLog := log.With("component", "agent")
 	ag, err := agent.New(agent.Config{NodeID: w.state.NodeID, Runtime: rt,
-		Source: workerSource{client: client, register: register, onRemoved: stop}, Interval: cfg.ReconcileInterval,
-		Logger: log.With("component", "agent"), RouteBind: addr})
+		Source: workerSource{client: client, register: register, onRemoved: stop,
+			lease: nodeapi.NewMissingRoute(client, "lease renewal between status reports", agentLog)},
+		Interval: cfg.ReconcileInterval, Logger: agentLog, RouteBind: addr})
 	if err != nil {
 		return err
 	}
 	// The router reads the routing table and keeps its certificates through
 	// the node API, so it needs nothing from this machine but its listeners.
 	if cfg.RouteAddr != "" {
-		rtr, err := newRouter(cfg, log, nodeRoutes(client, w.state.NodeID), client.TLS(w.state.NodeID))
+		routes := nodeRoutes(client, w.state.NodeID, nodeapi.NewMissingRoute(client, "routing table", log.With("component", "router")))
+		rtr, err := newRouter(cfg, log, routes, client.TLS(w.state.NodeID))
 		if err != nil {
 			return err
 		}
@@ -482,6 +486,9 @@ type workerSource struct {
 	client    workerClient
 	register  func(context.Context) error
 	onRemoved func(error)
+	// lease holds off the lease route when the server lacks it, as 2.0
+	// does. Nil holds nothing off.
+	lease *nodeapi.MissingRoute
 }
 
 // check passes err through, and calls onRemoved when it says the node was
@@ -511,13 +518,19 @@ func (w workerSource) ReportStatus(ctx context.Context, id string, st []store.St
 
 // RenewLease makes the worker's agent renew its lease on a timer, apart from
 // its passes (agent.LeaseRenewer). A node the server does not know yet gets
-// ErrNotRegistered, which the next report handles.
+// ErrNotRegistered, which the next report handles. A server without the
+// route (2.0) is logged once and left alone until it changes: its leases
+// come from the reports alone.
 func (w workerSource) RenewLease(ctx context.Context, id string) error {
 	lr, ok := w.client.(agent.LeaseRenewer)
-	if !ok {
+	if !ok || w.lease.Skip() {
 		return nil
 	}
-	return w.check(lr.RenewLease(ctx, id))
+	err := w.lease.Check(lr.RenewLease(ctx, id))
+	if errors.Is(err, nodeapi.ErrNoRoute) {
+		return nil
+	}
+	return w.check(err)
 }
 
 func (w workerSource) StatusForNode(ctx context.Context, id string) ([]store.Status, error) {

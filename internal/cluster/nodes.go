@@ -253,6 +253,9 @@ func (a *nodeAPI) fail(w http.ResponseWriter, r *http.Request, err error) {
 	case errors.Is(err, store.ErrNodeRemoved):
 		writeError(w, http.StatusForbidden, nodeapi.RemovedMessage)
 	case errors.Is(err, store.ErrNotFound):
+		// The mark tells this 404 from one for a route the server lacks,
+		// which a worker newer than the server gets (nodeapi.ErrNoRoute).
+		w.Header().Set(nodeapi.ErrorHeader, nodeapi.ErrorNotRegistered)
 		writeError(w, http.StatusNotFound, "this node is not registered")
 	case errors.Is(err, store.ErrInvalid):
 		writeError(w, http.StatusBadRequest, "invalid request")

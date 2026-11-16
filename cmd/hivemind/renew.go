@@ -56,6 +56,9 @@ type renewer struct {
 	client certRenewer
 	log    *slog.Logger
 	now    func() time.Time
+	// missing logs, once, that the server has no renewal route (it is older
+	// than 2.1). Nil logs each failure as any other.
+	missing *nodeapi.MissingRoute
 }
 
 // renewIfDue renews when the certificate is due. It reports whether it
@@ -111,6 +114,10 @@ func (r *renewer) run(ctx context.Context) {
 		switch {
 		case err != nil && ctx.Err() != nil:
 			return
+		case errors.Is(err, nodeapi.ErrNoRoute) && r.missing != nil:
+			// The server cannot renew; it says so once, with the date that
+			// matters, and the check is tried again on schedule.
+			_ = r.missing.Check(err, "not_after", old.NotAfter.UTC())
 		case err != nil:
 			r.log.Error("renewing the node certificate failed; trying again at the next check", "err", err,
 				"not_after", old.NotAfter.UTC(), "next_check", pki.RenewCheckInterval(old))

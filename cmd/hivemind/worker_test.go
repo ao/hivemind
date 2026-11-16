@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"encoding/pem"
 	"errors"
+	"fmt"
 	"io"
 	"log/slog"
 	"os"
@@ -257,6 +258,46 @@ func (f *fakeWorkerClient) ReportStatus(context.Context, string, []store.Status)
 
 func (f *fakeWorkerClient) StatusForNode(context.Context, string) ([]store.Status, error) {
 	return nil, nil
+}
+
+// leaseClient is a worker client whose lease calls return err.
+type leaseClient struct {
+	fakeWorkerClient
+	err    error
+	leases int
+}
+
+func (l *leaseClient) RenewLease(context.Context, string) error {
+	l.leases++
+	return l.err
+}
+
+// sameServer is a server whose version never changes.
+type sameServer struct{ changed chan struct{} }
+
+func (s sameServer) ServerVersion() string          { return "" }
+func (s sameServer) ServerChanged() <-chan struct{} { return s.changed }
+
+// A server without the lease route, as 2.0 is, gets one lease call, which is
+// logged once as a missing feature and not as an unregistered node; the
+// heartbeat then leaves it alone.
+func TestWorkerSourceLeaseWithAServerWithoutTheRoute(t *testing.T) {
+	c := &leaseClient{err: fmt.Errorf("%w (POST /node/v1/nodes/node-a/lease)", nodeapi.ErrNoRoute)}
+	logs := &syncLog{}
+	src := workerSource{client: c, register: func(context.Context) error { return nil },
+		lease: nodeapi.NewMissingRoute(sameServer{make(chan struct{})}, "lease renewal between status reports",
+			slog.New(slog.NewTextHandler(logs, nil)))}
+	for range 5 {
+		if err := src.RenewLease(context.Background(), "node-a"); err != nil {
+			t.Fatalf("lease: %v", err)
+		}
+	}
+	if c.leases != 1 {
+		t.Fatalf("%d lease calls to a server without the route, want 1", c.leases)
+	}
+	if n := strings.Count(logs.String(), "has no lease renewal between status reports; upgrade the server"); n != 1 {
+		t.Fatalf("logged %d times:\n%s", n, logs)
+	}
 }
 
 // ErrNodeRemoved from any call stops the worker; other errors do not.

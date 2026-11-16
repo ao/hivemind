@@ -28,16 +28,23 @@ type LogServer struct {
 	Runtime runtime.Runtime
 	// Logger receives a line when polling fails. Nil means slog.Default().
 	Logger *slog.Logger
+	// OldServerRetry is how often to poll a server that has no log
+	// streaming, unless its version changes first. Zero means
+	// DefaultOldServerRetry.
+	OldServerRetry time.Duration
 }
 
 // Run polls until ctx ends, and returns nil then. It returns ErrNodeRemoved
 // when the server says the node was removed. It waits for the streams it
-// started before it returns.
+// started before it returns. A server older than 2.1 has no log streaming:
+// that is logged once, and the poll waits for the server to change.
 func (s *LogServer) Run(ctx context.Context) error {
 	log := s.Logger
 	if log == nil {
 		log = slog.Default()
 	}
+	missing := NewMissingRoute(s.Client, "log streaming", log)
+	missing.Retry = s.OldServerRetry
 	var wg sync.WaitGroup
 	defer wg.Wait()
 	backoff := time.Duration(0)
@@ -50,6 +57,11 @@ func (s *LogServer) Run(ctx context.Context) error {
 			if errors.Is(err, ErrNodeRemoved) {
 				return err
 			}
+			if errors.Is(missing.Check(err), ErrNoRoute) {
+				backoff = 0
+				missing.Wait(ctx)
+				continue
+			}
 			backoff = min(max(2*backoff, logPollMinBackoff), logPollMaxBackoff)
 			log.Warn("polling the server for log requests; retrying", "in", backoff, "err", err)
 			select {
@@ -60,6 +72,7 @@ func (s *LogServer) Run(ctx context.Context) error {
 			continue
 		}
 		backoff = 0
+		missing.Check(nil)
 		if q == nil {
 			continue
 		}

@@ -24,7 +24,8 @@ import (
 const clientTimeout = 30 * time.Second
 
 // ErrNotRegistered means the server has no record of this node. It happens
-// when the server's database was replaced. A worker registers again.
+// when the server's database was replaced. A worker registers again. A 404
+// for a route the server lacks is ErrNoRoute instead.
 var ErrNotRegistered = errors.New("this node is not registered with the server")
 
 // RemovedMessage is the error text the node API sends, with 403, to a node
@@ -68,7 +69,7 @@ func NewClient(base string, tlsCfg *tls.Config, opts ...ClientOption) (*Client, 
 	if !strings.HasPrefix(base, "https://") {
 		return nil, fmt.Errorf("server URL %q must start with https://", base)
 	}
-	tr := &swapTransport{}
+	tr := &swapTransport{server: newServerState()}
 	tr.cur.Store(&http.Transport{TLSClientConfig: tlsCfg, IdleConnTimeout: idleConnTimeout})
 	c := &Client{base: strings.TrimRight(base, "/"), tr: tr,
 		http: &http.Client{Transport: tr, Timeout: clientTimeout}, stream: &http.Client{Transport: tr}}
@@ -81,10 +82,11 @@ func NewClient(base string, tlsCfg *tls.Config, opts ...ClientOption) (*Client, 
 // swapTransport sends each request on the transport it holds.
 // ResetConnections replaces that transport, so no request made after a reset
 // reuses a connection opened before it. Each request carries the worker's
-// version.
+// version, and each reply's server version is recorded.
 type swapTransport struct {
 	cur     atomic.Pointer[http.Transport]
 	version string
+	server  *serverState
 }
 
 func (s *swapTransport) RoundTrip(r *http.Request) (*http.Response, error) {
@@ -93,7 +95,11 @@ func (s *swapTransport) RoundTrip(r *http.Request) (*http.Response, error) {
 		r = r.Clone(r.Context())
 		r.Header.Set(VersionHeader, s.version)
 	}
-	return s.cur.Load().RoundTrip(r)
+	resp, err := s.cur.Load().RoundTrip(r)
+	if err == nil {
+		s.server.see(resp.Header.Get(VersionHeader))
+	}
+	return resp, err
 }
 
 // CloseIdleConnections is what http.Client.CloseIdleConnections calls.
@@ -155,8 +161,8 @@ func (c *Client) ReportStatus(ctx context.Context, nodeID string, st []store.Sta
 }
 
 // RenewLease renews the node's lease without a status report. It implements
-// the agent's LeaseRenewer. A 2.0 server has no such route and answers 404,
-// which comes back as ErrNotRegistered; the reports still renew the lease.
+// the agent's LeaseRenewer. A 2.0 server has no such route, which comes back
+// as ErrNoRoute; the reports still renew the lease.
 func (c *Client) RenewLease(ctx context.Context, nodeID string) error {
 	return c.do(ctx, http.MethodPost, LeasePath(nodeID), nil, nil)
 }
@@ -211,17 +217,35 @@ func (c *Client) do(ctx context.Context, method, path string, body []byte, out a
 	return nil
 }
 
-// statusError turns a refusal into an error. A 404 on a node route means the
-// node is not registered; the server's own text says why.
+// statusError turns a refusal into an error. A 404 is one of three things:
+//
+//   - the server has no record of the node: ErrNotRegistered. The server
+//     marks this 404 with ErrorHeader. A server older than 2.2 does not, but
+//     its handlers answer 404 for nothing else.
+//   - the server has no such route, being older than this worker:
+//     ErrNoRoute. The reply is http.ServeMux's, in plain text, not an
+//     ErrorBody.
+//   - any other 404 from a handler, which is a RefusedError.
 func statusError(resp *http.Response) error {
 	var e ErrorBody
 	b, _ := io.ReadAll(io.LimitReader(resp.Body, 4<<10))
 	msg := resp.Status
-	if json.Unmarshal(b, &e) == nil && e.Error != "" {
+	isErrorBody := json.Unmarshal(b, &e) == nil && e.Error != ""
+	if isErrorBody {
 		msg = e.Error
 	}
 	if resp.StatusCode == http.StatusNotFound {
-		return fmt.Errorf("%w: %s", ErrNotRegistered, msg)
+		switch {
+		case resp.Header.Get(ErrorHeader) == ErrorNotRegistered:
+			return fmt.Errorf("%w: %s", ErrNotRegistered, msg)
+		case !isErrorBody:
+			if r := resp.Request; r != nil && r.URL != nil {
+				return fmt.Errorf("%w (%s %s)", ErrNoRoute, r.Method, r.URL.Path)
+			}
+			return ErrNoRoute
+		case resp.Header.Get(VersionHeader) == "":
+			return fmt.Errorf("%w: %s", ErrNotRegistered, msg)
+		}
 	}
 	if resp.StatusCode == http.StatusForbidden && e.Error == RemovedMessage {
 		return ErrNodeRemoved

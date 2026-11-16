@@ -3,7 +3,10 @@ package cluster
 import (
 	"context"
 	"crypto/tls"
+	"errors"
+	"io"
 	"net/http"
+	"strings"
 	"testing"
 	"time"
 
@@ -120,5 +123,34 @@ func TestCleanVersion(t *testing.T) {
 		if got := nodeapi.CleanVersion(in); got != want {
 			t.Errorf("CleanVersion(%q) = %q, want %q", in, got, want)
 		}
+	}
+}
+
+// The node API marks its 404 for a node it does not know. A route it lacks
+// gets http.ServeMux's plain 404 without the mark, which a worker reads as
+// nodeapi.ErrNoRoute.
+func TestNotRegisteredIsMarked(t *testing.T) {
+	fx := newFixtureWith(t, func(c *Config) { c.Version = "v2.2.0" })
+	ctx := context.Background()
+	c, id, cert := joinedClient(t, fx)
+	if err := c.ReportStatus(ctx, id, nil); !errors.Is(err, nodeapi.ErrNotRegistered) {
+		t.Fatalf("report before register: %v", err)
+	}
+	if err := c.RenewLease(ctx, id); !errors.Is(err, nodeapi.ErrNotRegistered) {
+		t.Fatalf("lease before register: %v", err)
+	}
+
+	req, err := http.NewRequest(http.MethodGet, "https://"+fx.nodeAddr+nodeapi.Prefix+"/nodes/"+id+"/no-such-route", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp, err := fx.nodeClient(cert).Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	b, _ := io.ReadAll(resp.Body)
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusNotFound || resp.Header.Get(nodeapi.ErrorHeader) != "" || strings.HasPrefix(string(b), "{") {
+		t.Fatalf("a route the server lacks: %d %v %q", resp.StatusCode, resp.Header, b)
 	}
 }

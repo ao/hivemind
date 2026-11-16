@@ -48,11 +48,15 @@ func storeRoutes(st *store.Store) func(context.Context) (router.Table, error) {
 }
 
 // nodeRoutes reads the routing table over the node API, for a worker's
-// router.
-func nodeRoutes(c *nodeapi.Client, nodeID string) func(context.Context) (router.Table, error) {
+// router. A server without the route (older than 2.2) is asked again only
+// when missing lets it.
+func nodeRoutes(c *nodeapi.Client, nodeID string, missing *nodeapi.MissingRoute) func(context.Context) (router.Table, error) {
 	return func(ctx context.Context) (router.Table, error) {
+		if missing.Skip() {
+			return nil, nodeapi.ErrNoRoute
+		}
 		rs, err := c.Routes(ctx, nodeID)
-		if err != nil {
+		if err := missing.Check(err); err != nil {
 			return nil, err
 		}
 		t := make(router.Table, len(rs))
