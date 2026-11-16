@@ -696,14 +696,22 @@ func retryAddress(ctx context.Context, w nodeapi.ServerWatcher, refused func() b
 	}
 }
 
+// exitRemoved is the exit status of a worker that the server says was
+// removed. It is its own, so a service manager can be told not to start the
+// worker again (RestartPreventExitStatus=3 in docs/systemd.md): every start
+// after a removal fails the same way.
+const exitRemoved = 3
+
 // removedError is what a worker exits with once the server says it was
 // removed. The server refuses the node's certificate for good, so retrying
 // cannot help. The containers are not touched: the server has already placed
-// their replicas elsewhere, and the operator decides when they stop.
+// their replicas elsewhere, and the operator decides when they stop. They
+// may have stopped already, as after a power cycle, so the message does not
+// say they run.
 func removedError(id string) error {
-	return fmt.Errorf("node %s was removed from the cluster, and the server refuses its certificate; "+
-		"its containers are still running on this machine (remove them with: docker rm -f $(docker ps -aq --filter label=hivemind.app)); "+
-		"to join again, use an empty --data-dir and a new join token", id)
+	return &exitError{code: exitRemoved, err: fmt.Errorf("node %s was removed from the cluster, and the server refuses its certificate; "+
+		"its containers may still be on this machine (remove them with: docker rm -f $(docker ps -aq --filter label=hivemind.app)); "+
+		"to join again, use an empty --data-dir and a new join token", id)}
 }
 
 // workerClient is what the worker's agent reads and reports through.

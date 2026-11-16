@@ -60,7 +60,7 @@
 #     With --force, its spread replica moves to another node, its web replica
 #     waits on the host port, hivemind nodes no longer lists it, its worker
 #     exits with the removal message, the server logs the refused request,
-#     and starting the worker again fails at once
+#     and starting the worker again fails at once, with exit status 3
 #
 # It publishes no ports. On exit it removes the containers, the network and the
 # volumes it created, also after a failure or Ctrl-C. The Go build cache volume
@@ -578,11 +578,14 @@ docker exec "$W1" grep -q "was removed from the cluster" /var/log/hivemind.log |
 	cl_fail "the worker on $W1 did not log its removal"
 docker exec "$S" grep -q "request from a removed node refused" /var/log/hivemind.log ||
 	cl_fail "the server did not log a refused request from $W1_ID"
-if out=$(docker exec "$W1" hivemind serve --role worker 2>&1); then
-	cl_fail "the removed worker started again: $out"
-fi
+rc=0
+out=$(docker exec "$W1" hivemind serve --role worker 2>&1) || rc=$?
+[ "$rc" -ne 0 ] || cl_fail "the removed worker started again: $out"
 grep -q "was removed from the cluster" <<<"$out" || cl_fail "a restart of the removed worker failed for another reason: $out"
-cl_note "the removed worker exited, and a restart is refused: $(tail -n 1 <<<"$out")"
+grep -q "its containers may still be on this machine" <<<"$out" || cl_fail "the removal message does not say the containers may still be there: $out"
+# The systemd units in docs/systemd.md do not restart on this status.
+[ "$rc" -eq 3 ] || cl_fail "a restart of the removed worker exited with status $rc, not 3: $out"
+cl_note "the removed worker exited, and a restart is refused with status 3: $(tail -n 1 <<<"$out")"
 
 # Its containers are left running, as documented; remove them by hand, then
 # no replica is duplicated and spread is at its replica count.

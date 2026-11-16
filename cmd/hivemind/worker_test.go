@@ -361,8 +361,12 @@ func TestWorkerExitsWhenRemoved(t *testing.T) {
 	}
 	select {
 	case err := <-done:
-		if err == nil || !strings.Contains(err.Error(), "node node-w1 was removed from the cluster") || !strings.Contains(err.Error(), "still running") {
+		if err == nil || !strings.Contains(err.Error(), "node node-w1 was removed from the cluster") ||
+			!strings.Contains(err.Error(), "its containers may still be on this machine") {
 			t.Fatalf("worker exit: %v", err)
+		}
+		if c := exitCode(err); c != exitRemoved {
+			t.Fatalf("exit status %d for the removal, want %d", c, exitRemoved)
 		}
 	case <-time.After(15 * time.Second):
 		t.Fatal("the worker did not stop within 15 s of its removal")
@@ -378,6 +382,31 @@ func TestWorkerExitsWhenRemoved(t *testing.T) {
 	err = runWorker(ctx, cfg, quiet, rt)
 	if err == nil || !strings.Contains(err.Error(), "was removed from the cluster") || time.Since(start) > 5*time.Second {
 		t.Fatalf("restarted worker: %v after %s", err, time.Since(start))
+	}
+	// The same status at every start, which RestartPreventExitStatus in the
+	// systemd units matches.
+	if c := exitCode(err); c != exitRemoved {
+		t.Fatalf("exit status %d for a restart after the removal, want %d", c, exitRemoved)
+	}
+}
+
+// main exits with 1 for an error, and with an exitError's own status, also
+// when it is wrapped.
+func TestExitCode(t *testing.T) {
+	for _, c := range []struct {
+		err  error
+		want int
+	}{
+		{errors.New("unauthorized"), 1},
+		{removedError("node-1"), exitRemoved},
+		{fmt.Errorf("serve: %w", removedError("node-1")), exitRemoved},
+	} {
+		if got := exitCode(c.err); got != c.want {
+			t.Errorf("exitCode(%v) = %d, want %d", c.err, got, c.want)
+		}
+	}
+	if exitRemoved == 1 {
+		t.Fatal("the removal's status must differ from other errors'")
 	}
 }
 

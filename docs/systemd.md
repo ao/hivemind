@@ -24,6 +24,7 @@ After=network-online.target docker.service
 [Service]
 ExecStart=/usr/local/bin/hivemind serve --advertise 10.0.0.5
 Restart=on-failure
+RestartPreventExitStatus=3
 RestartSec=5
 
 [Install]
@@ -59,6 +60,7 @@ After=network-online.target docker.service
 [Service]
 ExecStart=/usr/local/bin/hivemind serve --role worker
 Restart=on-failure
+RestartPreventExitStatus=3
 RestartSec=5
 
 [Install]
@@ -78,7 +80,7 @@ On the server, `sudo hivemind nodes` lists the worker as `ready`.
 - `After=docker.service` starts hivemind once Docker has started. Containers that hivemind starts have the restart policy `no`, so after a reboot Docker leaves them stopped, and the agent starts them, or removes them if their replica moved, on its first pass.
 - `After=network-online.target` waits for the network. If the `--advertise` address is not configured yet, `serve` cannot bind it and exits; `Restart=on-failure` tries again 5 s later.
 - `systemctl stop hivemind` sends SIGTERM. hivemind stops, and its containers keep running, as with Ctrl-C.
-- A worker that was removed from the cluster with `hivemind node remove` exits with an error at every start, and `Restart=on-failure` restarts it every 5 s. Run `systemctl disable --now hivemind` on a machine you remove.
+- A worker that was removed from the cluster with `hivemind node remove` exits with status 3, at once and at every start after, and says its containers may still be on the machine. `RestartPreventExitStatus=3` keeps systemd from starting it again; without it, `Restart=on-failure` restarts it every 5 s, and the server logs a refused request each time. Every other error exits with status 1. Run `systemctl disable --now hivemind` on a machine you remove. The server never exits with 3; the line is in its unit too so that both units are the same.
 - Logs go to the journal: `journalctl -u hivemind`. The server logs one line at `info` for each API request.
 
 ## Measured with these units
