@@ -2,10 +2,13 @@
 # The numbers, computed from the soak log.
 #
 #   scripts/soak/report.sh LOG
+#   SOAK_DURATIONS=scripts/soak/durations-routing.txt scripts/soak/report.sh LOG
 #
 # 1. Durations. Each is "from" to "to": the first line matching FROM after the
 #    window's start, then the first line matching TO after that. Times are the
 #    log's Unix milliseconds, from the control machine's clock.
+#    The list is below, for the first soak's machine names; SOAK_DURATIONS
+#    names a file of the same lines for another run.
 # 2. Probe results in each window: a scenario's window runs from its "begin"
 #    line to its "end" line; the steady window from "mark steady begin" to
 #    "mark steady end".
@@ -15,7 +18,7 @@ set -euo pipefail
 LOG=${1:?log file}
 
 # label | window start | from | to   (extended regular expressions)
-DURATIONS=$(
+DURATIONS=$([ -n "${SOAK_DURATIONS:-}" ] && cat "$SOAK_DURATIONS" ||
 	cat <<'EOF'
 kill-worker: command sent to port 22 closed|scenario kill-worker begin|mark kill-worker poweroff command|watch port22 hivemind-soak-3 down
 kill-worker: port 22 closed to node lost|scenario kill-worker begin|watch port22 hivemind-soak-3 down|watch node hivemind-soak-3 lost

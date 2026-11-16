@@ -7,15 +7,18 @@
 # as outside.sh fetch copies them. Needs gawk.
 #
 # Windows: each scenario of LOG, from its "scenario NAME begin" line to its
-# "scenario NAME end" line, with its fault at the first "event NAME ... fault"
+# "scenario NAME end" line and 60 s more (less if the next window starts
+# sooner), with its fault at the first "event NAME ... fault"
 # line inside it; and the steady window, "mark steady begin" to "mark steady
 # end". A request belongs to the window its end time falls in. The client
 # times are the outside machine's clock, the log's the control machine's;
 # both are synchronised by chrony.
 #
 # Per window and stream: requests; failed (not a 200, or a curl error), with
-# the codes ("000/28" is curl's timeout, "000/7" a refused connection);
-# the longest gap between two successful requests, and when it began; the
+# the codes ("000/28" is curl's timeout, "000/7" a refused connection,
+# "000/35" a failed TLS handshake);
+# the longest gap between two successful requests (or from the window's
+# first request, or to its last), and when it began; the
 # first and last failure, in seconds after the fault; and the total time of
 # the successful requests, p50, p99 and max, in ms.
 set -euo pipefail
@@ -58,11 +61,12 @@ while read -r name ws we wf; do
 	for f in "$DIR"/*@*.log; do
 		gawk -v ws="$ws" -v we="$we" -v wf="$wf" -v lab="$(label "$f")" '
 		function pct(p,   i) { i = int(p * nl + 0.999999); if (i < 1) i = 1; if (i > nl) i = nl; return sprintf("%.0f", lat[i] * 1000) }
-		NF < 8 || $1 + 0 < ws || $1 + 0 > we { next }
+		NF < 8 || $2 !~ /^[0-9][0-9][0-9]$/ || $1 + 0 < ws || $1 + 0 > we { next }
 		{
-			t = $1 + 0; n++
+			t = $1 + 0; n++; if (!t0) t0 = t - $7; tl = t
 			if ($2 == "200" && $3 == "0") {
-				if (lastok) { g = t - lastok; if (g > gap) { gap = g; gapat = lastok } }
+				if (lastok) { g = t - lastok } else { g = t - t0 }
+				if (g > gap) { gap = g; gapat = (lastok ? lastok : t0) }
 				lastok = t; lat[++nl] = $7 + 0
 			} else {
 				bad++; codes[$2 "/" $3]++
@@ -71,6 +75,8 @@ while read -r name ws we wf; do
 			}
 		}
 		END {
+			# A gap still open at the end of the window counts up to the last request.
+			if (n && lf > lastok) { g = tl - (lastok ? lastok : t0); if (g > gap) { gap = g; gapat = (lastok ? lastok : t0) } }
 			c = ""; for (k in codes) c = c (c == "" ? "" : ", ") k " x" codes[k]
 			if (nl) asort(lat)
 			ref = (wf > 0 ? wf : ws)
@@ -88,13 +94,17 @@ read -r _ ss se _ < <(grep '^steady ' "$W" || echo "- 0 0 0")
 if [ "$ss" != 0 ]; then
 	echo "### steady, all streams"
 	echo
-	cat "$DIR"/*@*.log | gawk -v ws="$ss" -v we="$se" '
+	# awk 1 ends each file with a newline, so a last line that curl had not
+	# finished writing does not run into the next file's first.
+	awk 1 "$DIR"/*@*.log | gawk -v ws="$ss" -v we="$se" '
 	function pct(a, n, p,   i) { i = int(p * n + 0.999999); if (i < 1) i = 1; if (i > n) i = n; return sprintf("%.1f", a[i] * 1000) }
-	NF < 8 || $1 + 0 < ws || $1 + 0 > we { next }
+	NF < 8 || $2 !~ /^[0-9][0-9][0-9]$/ { partial++; next }
+	$1 + 0 < ws || $1 + 0 > we { next }
 	{ n++; if ($2 == "200" && $3 == "0") { ok++; tt[ok] = $7 + 0; px[ok] = $6 - $5; tl[ok] = $5 - $4 } }
 	END {
 		asort(tt); asort(px); asort(tl)
 		printf "| Requests | Succeeded | Success rate |\n|---|---|---|\n| %d | %d | %.5f %% |\n\n", n, ok, (n ? 100 * ok / n : 0)
+		printf "Lines skipped as incomplete, in all the logs (the last line of a log that curl had not finished writing when it was read or stopped): %d.\n\n", partial
 		printf "| Time, ms | p50 | p90 | p99 | p99.9 | max |\n|---|---|---|---|---|---|\n"
 		printf "| Total (TCP + TLS handshake + request) | %s | %s | %s | %s | %s |\n", pct(tt, ok, .5), pct(tt, ok, .9), pct(tt, ok, .99), pct(tt, ok, .999), pct(tt, ok, 1)
 		printf "| TLS handshake | %s | %s | %s | %s | %s |\n", pct(tl, ok, .5), pct(tl, ok, .9), pct(tl, ok, .99), pct(tl, ok, .999), pct(tl, ok, 1)

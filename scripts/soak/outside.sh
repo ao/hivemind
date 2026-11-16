@@ -220,7 +220,8 @@ client_status() {
 
 fetch() {
 	mkdir -p "$SOAK_DIR/client"
-	SSH_TIMEOUT=600 out "cd $CDIR && tar -czf - *.log" | tar -xzf - -C "$SOAK_DIR/client"
+	# The stream logs grow while they are read: tar exits 1 for that, which is fine.
+	SSH_TIMEOUT=600 out "cd $CDIR && { tar --warning=no-file-changed -czf - *.log || [ \$? = 1 ]; }" | tar -xzf - -C "$SOAK_DIR/client"
 	SSH_TIMEOUT=60 out "sudo docker logs soak-pebble 2>&1" >"$SOAK_DIR/client/pebble.log"
 	ev client "fetched $(ls "$SOAK_DIR/client" | wc -l) files"
 }

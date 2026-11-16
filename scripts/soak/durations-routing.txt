@@ -1,0 +1,40 @@
+kill-worker: power-off request to port 22 closed|scenario kill-worker begin|event kill-worker .* fault poweroff|watch port22 hivemind-soakb-3 down
+kill-worker: port 22 closed to node lost|scenario kill-worker begin|watch port22 hivemind-soakb-3 down|watch node hivemind-soakb-3 lost
+kill-worker: node lost to its replicas running elsewhere|scenario kill-worker begin|watch node hivemind-soakb-3 lost|event kill-worker .* replicas-elsewhere
+kill-worker: port 22 closed to converged|scenario kill-worker begin|watch port22 hivemind-soakb-3 down|event kill-worker converged-yes
+kill-worker: start request to port 22 open|scenario kill-worker begin|event kill-worker .* fault start|watch port22 hivemind-soakb-3 up
+kill-worker: start request to node ready|scenario kill-worker begin|event kill-worker .* fault start|watch node hivemind-soakb-3 ready
+kill-worker: start request to old containers removed|scenario kill-worker begin|event kill-worker .* fault start|event kill-worker .* old-containers-removed
+reboot-worker: reboot to port 22 closed|scenario reboot-worker begin|event reboot-worker .* fault reboot|watch port22 hivemind-soakb-4 down
+reboot-worker: reboot to node lost|scenario reboot-worker begin|event reboot-worker .* fault reboot|watch node hivemind-soakb-4 lost
+reboot-worker: reboot to replicas elsewhere|scenario reboot-worker begin|event reboot-worker .* fault reboot|event reboot-worker .* replicas-elsewhere
+reboot-worker: reboot to port 22 open|scenario reboot-worker begin|event reboot-worker .* fault reboot|watch port22 hivemind-soakb-4 up
+reboot-worker: reboot to node ready|scenario reboot-worker begin|event reboot-worker .* fault reboot|watch node hivemind-soakb-4 ready
+reboot-worker: reboot to converged|scenario reboot-worker begin|event reboot-worker .* fault reboot|event reboot-worker converged-yes
+partition-worker: partition to node lost|scenario partition-worker begin|event partition-worker .* fault partition|watch node hivemind-soakb-2 lost
+partition-worker: partition to replicas elsewhere|scenario partition-worker begin|event partition-worker .* fault partition|event partition-worker .* replicas-elsewhere
+partition-worker: partition to first duplicate|scenario partition-worker begin|event partition-worker .* fault partition|event partition-worker dups [^n]
+partition-worker: heal to node ready|scenario partition-worker begin|event partition-worker .* heal|watch node hivemind-soakb-2 ready
+partition-worker: heal to no duplicate|scenario partition-worker begin|event partition-worker .* heal|event partition-worker dups none
+partition-worker: heal to converged|scenario partition-worker begin|event partition-worker .* heal|event partition-worker converged-yes
+lose-server: replace request to API down|scenario lose-server begin|event lose-server .* fault replace|event lose-server api-down
+lose-server: API down to new machine ready|scenario lose-server begin|event lose-server api-down|event lose-server machine-ready
+lose-server: new machine ready to restored|scenario lose-server begin|event lose-server machine-ready|event lose-server restored
+lose-server: restored to service started|scenario lose-server begin|event lose-server restored|event lose-server service-started
+lose-server: service started to API up|scenario lose-server begin|event lose-server service-started|event lose-server api-up
+lose-server: API down to API up (outage)|scenario lose-server begin|event lose-server api-down|event lose-server api-up
+lose-server: API up to hivemind-soakb-2 ready|scenario lose-server begin|event lose-server api-up|event lose-server hivemind-soakb-2 node-ready
+lose-server: API up to hivemind-soakb-3 ready|scenario lose-server begin|event lose-server api-up|event lose-server hivemind-soakb-3 node-ready
+lose-server: API up to hivemind-soakb-4 ready|scenario lose-server begin|event lose-server api-up|event lose-server hivemind-soakb-4 node-ready
+lose-server: API up to converged|scenario lose-server begin|event lose-server api-up|event lose-server converged-yes
+rollout: deploy to the first replica moved|scenario rollout begin|event rollout www fault|event rollout www in_progress target=2 moving=1
+rollout: deploy to rollout done|scenario rollout begin|event rollout www fault|event rollout www none
+rollout: deploy to converged|scenario rollout begin|event rollout www fault|event rollout converged-yes
+drain-worker: drain to the command's return|scenario drain-worker begin|event drain-worker .* fault drain|event drain-worker .* drain-returned
+drain-worker: drain to converged|scenario drain-worker begin|event drain-worker .* fault drain|event drain-worker converged-yes
+replace-worker: drain to the command's return|scenario replace-worker begin|event replace-worker .* fault drain-and-remove|event replace-worker .* drain-returned
+replace-worker: drain returned to removed|scenario replace-worker begin|event replace-worker .* drain-returned|event replace-worker .* removed rc=
+replace-worker: removed to the old agent stopped|scenario replace-worker begin|event replace-worker .* removed rc=|event replace-worker .* agent-stopped
+join-worker: new machine ready to join started|scenario join-worker begin|event join-worker .* machine-ready|event join-worker .* join$
+join-worker: join started to node ready|scenario join-worker begin|event join-worker .* join$|event join-worker .* node-ready
+upgrade: server restart to API up|scenario upgrade begin|event upgrade hivemind-soakb-1 restart|event upgrade api-up
