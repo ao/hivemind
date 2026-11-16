@@ -527,7 +527,9 @@ func syncHosts(ctx context.Context, tx *sql.Tx, a spec.App) error {
 // With keepGen false, every replica moves to generation gen now. With keepGen
 // true, a replica that is on a node keeps its generation: a rollout moves it
 // later, one at a time. A replica with no node has nothing running, so it
-// takes gen at once.
+// takes gen at once, and so does one marked for removal that is wanted
+// again: its container is going, and a rollout that finished while it was
+// marked would never move it.
 func (s *Store) syncReplicas(ctx context.Context, tx *sql.Tx, app string, n, gen int, keepGen bool) error {
 	now := s.now().UnixNano()
 	for i := range n {
@@ -536,7 +538,7 @@ func (s *Store) syncReplicas(ctx context.Context, tx *sql.Tx, app string, n, gen
 			_, err = tx.ExecContext(ctx, `INSERT INTO replicas (app, idx, node_id, generation, desired, pending_reason, updated_at)
 				VALUES (?, ?, NULL, ?, 'running', '', ?)
 				ON CONFLICT (app, idx) DO UPDATE SET
-					generation = CASE WHEN replicas.node_id IS NULL THEN excluded.generation ELSE replicas.generation END,
+					generation = CASE WHEN replicas.node_id IS NULL OR replicas.desired != 'running' THEN excluded.generation ELSE replicas.generation END,
 					held = CASE WHEN replicas.node_id IS NULL AND replicas.generation != excluded.generation THEN 0 ELSE replicas.held END,
 					desired = 'running', updated_at = excluded.updated_at
 				WHERE replicas.desired != 'running' OR (replicas.node_id IS NULL AND replicas.generation != excluded.generation)`,

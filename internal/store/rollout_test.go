@@ -603,3 +603,34 @@ func TestReplicaReleasedDuringRolloutTakesTheTarget(t *testing.T) {
 	}
 	checkInvariants(t, e.s)
 }
+
+// A replica marked for removal whose container is still reported keeps its
+// row. Wanted again after a rollout finished without it, it must not run its
+// old generation, which no rollout would move. The concurrent writers test
+// found this too, with scales between deploys.
+func TestReplicaWantedAgainAfterARolloutTakesItsGeneration(t *testing.T) {
+	e := newRolloutEnv(t, node1)
+	e.put(web(3))
+	e.report(node1, container("web", 0, 1), container("web", 1, 1), container("web", 2, 1))
+	if _, err := e.s.Scale(e.ctx, "web", 2); err != nil {
+		t.Fatal(err)
+	}
+	e.put(withEnv(2, "2"))
+	// On one node the rollout moves each replica in place; replica 2's
+	// container is still being removed.
+	e.advance()
+	e.report(node1, container("web", 0, 2), container("web", 1, 1), container("web", 2, 1))
+	e.advance()
+	e.report(node1, container("web", 0, 2), container("web", 1, 2), container("web", 2, 1))
+	e.advance()
+	if ro := e.rollout("web"); ro.State != RolloutDone {
+		t.Fatalf("rollout: %+v", ro)
+	}
+	if _, err := e.s.Scale(e.ctx, "web", 3); err != nil {
+		t.Fatal(err)
+	}
+	if g := e.gens("web"); !eqInts(g, []int{2, 2, 2}) {
+		t.Fatalf("generations after the scale up: %v, want all at 2", g)
+	}
+	checkInvariants(t, e.s)
+}
