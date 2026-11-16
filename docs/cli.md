@@ -191,13 +191,20 @@ hivemind delete <app> [flags]
 Create or update an app, either from flags or from a YAML or JSON file:
 
   hivemind deploy --name web --image nginx:alpine --replicas 2 --port 8080:80 --env MODE=prod
+  hivemind deploy --name db --image postgres:17 --volume data:/var/lib/postgresql/data
+  hivemind deploy --name sleeper --image busybox:stable -- sleep 86400
   hivemind deploy -f app.yaml
 
 --port is [bind:]host:container[/udp]. A port is published on 127.0.0.1 unless
-it names another bind address. -f - reads the spec from standard input.
+it names another bind address. --volume is name:/path, a named volume on the
+replica's node mounted at that path; an app with a volume has one replica.
+The words after -- are the container's command, in place of the image's. A
+health check, resources and routes need a file. -f - reads the spec from
+standard input. A key the spec does not have is refused with its line, and
+the key it is closest to.
 
 ```
-hivemind deploy [flags]
+hivemind deploy [-- command [arg...]] [flags]
 ```
 
 | Flag | Type | Default | Environment | Description |
@@ -213,6 +220,7 @@ hivemind deploy [flags]
 | `--replicas` | int | - | - | number of replicas (default 1) |
 | `--server` | string | - | `HIVEMIND_SERVER` | server URL (env HIVEMIND_SERVER; default from the client config, then http://127.0.0.1:4483) |
 | `--token` | string | - | `HIVEMIND_TOKEN` | API token (env HIVEMIND_TOKEN; default from the client config's token file) |
+| `--volume` | string, repeatable | - | - | named volume, name:/path in the container (repeatable) |
 
 ### hivemind init
 

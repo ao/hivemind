@@ -158,6 +158,41 @@ An app with routes and no host ports is the exception: its surge may go on the r
 
 An app is a desired state: a container image, the command, environment, ports, volumes, resources, a health check, and a replica count. Replicas are numbered from 0 to the count minus one. The count is 1 by default and may be at most 100.
 
+`hivemind deploy` takes the name, image, replica count, ports, environment, volumes and command as flags; the command goes after `--`. The rest needs an app file, in YAML or JSON, with the keys of the [app spec](api.md#app-spec):
+
+```yaml
+# web.yaml; deploy it with: hivemind deploy -f web.yaml
+name: web
+image: nginx:alpine
+replicas: 1
+env:
+  NGINX_ENTRYPOINT_QUIET_LOGS: "1"
+ports:
+  - host: 8080        # published on 127.0.0.1 unless bind names another address
+    container: 80
+resources:
+  cpu: 0.5
+  memory: 128Mi
+health:
+  http:
+    path: /
+    port: 80
+  interval: 5s
+  retries: 3
+```
+
+```yaml
+# ticker.yaml: a command, and a volume on the replica's node
+name: ticker
+image: busybox:stable
+command: ["sh", "-c", "while true; do date >> /data/ticks; sleep 60; done"]
+volumes:
+  - name: data
+    path: /data
+```
+
+The same ticker from flags is `hivemind deploy --name ticker --image busybox:stable --volume data:/data -- sh -c 'while true; do date >> /data/ticks; sleep 60; done'`. A key the spec does not have is refused with its line and the nearest key, such as `line 3: unknown key replica in the app (did you mean replicas?)`.
+
 An image from a private registry needs a credential stored with `hivemind registry login <host>` (see [registries](registries.md)). The agent sends it with each pull of an image from that host. `docker login` on the node does not help: the Docker Engine API takes credentials with each pull request. Without one, the replica stays `pending`, and `status` says which registry wants a login. A failed pull is tried again after 10 s, doubling to 5 minutes.
 
 `hivemind compose` makes one app of each service in a Docker Compose file. The CLI does the conversion, so the server stores and runs those apps like any other. See [Compose files](compose.md).

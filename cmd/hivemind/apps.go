@@ -9,6 +9,8 @@ import (
 	"io"
 	"net/url"
 	"os"
+	"reflect"
+	"regexp"
 	"strconv"
 	"strings"
 	"text/tabwriter"
@@ -26,21 +28,33 @@ const maxSpecFile = server.MaxBodyBytes
 
 func deployCmd() *cobra.Command {
 	var (
-		file, name, image string
-		replicas          int
-		ports, env        []string
+		file, name, image   string
+		replicas            int
+		ports, env, volumes []string
 	)
 	cmd := &cobra.Command{
-		Use:   "deploy",
+		Use:   "deploy [-- command [arg...]]",
 		Short: "Create or update an app",
 		Long: `Create or update an app, either from flags or from a YAML or JSON file:
 
   hivemind deploy --name web --image nginx:alpine --replicas 2 --port 8080:80 --env MODE=prod
+  hivemind deploy --name db --image postgres:17 --volume data:/var/lib/postgresql/data
+  hivemind deploy --name sleeper --image busybox:stable -- sleep 86400
   hivemind deploy -f app.yaml
 
 --port is [bind:]host:container[/udp]. A port is published on 127.0.0.1 unless
-it names another bind address. -f - reads the spec from standard input.`,
-		Args: cobra.NoArgs,
+it names another bind address. --volume is name:/path, a named volume on the
+replica's node mounted at that path; an app with a volume has one replica.
+The words after -- are the container's command, in place of the image's. A
+health check, resources and routes need a file. -f - reads the spec from
+standard input. A key the spec does not have is refused with its line, and
+the key it is closest to.`,
+		Args: func(cmd *cobra.Command, args []string) error {
+			if len(args) > 0 && cmd.ArgsLenAtDash() != 0 {
+				return fmt.Errorf("unexpected argument %q: put the container's command after --, as in hivemind deploy --name x --image busybox -- sleep 60", args[0])
+			}
+			return nil
+		},
 	}
 	cf := addClientFlags(cmd)
 	fl := cmd.Flags()
@@ -50,13 +64,17 @@ it names another bind address. -f - reads the spec from standard input.`,
 	fl.IntVar(&replicas, "replicas", 0, "number of replicas (default 1)")
 	fl.StringArrayVar(&ports, "port", nil, "published port, [bind:]host:container[/udp] (repeatable)")
 	fl.StringArrayVar(&env, "env", nil, "environment variable, KEY=VALUE (repeatable)")
-	cmd.RunE = func(cmd *cobra.Command, _ []string) error {
+	fl.StringArrayVar(&volumes, "volume", nil, "named volume, name:/path in the container (repeatable)")
+	cmd.RunE = func(cmd *cobra.Command, command []string) error {
 		var a spec.App
 		if file != "" {
-			for _, f := range []string{"name", "image", "replicas", "port", "env"} {
+			for _, f := range []string{"name", "image", "replicas", "port", "env", "volume"} {
 				if fl.Changed(f) {
 					return fmt.Errorf("use -f or the --%s flag, not both", f)
 				}
+			}
+			if len(command) > 0 {
+				return errors.New("use -f or a command after --, not both: the file's command key sets it")
 			}
 			var err error
 			if a, err = readSpecFile(cmd.InOrStdin(), file); err != nil {
@@ -66,13 +84,20 @@ it names another bind address. -f - reads the spec from standard input.`,
 			if name == "" || image == "" {
 				return errors.New("deploy needs --name and --image, or -f app.yaml")
 			}
-			a = spec.App{Name: name, Image: image, Replicas: replicas}
+			a = spec.App{Name: name, Image: image, Replicas: replicas, Command: command}
 			for _, p := range ports {
 				pp, err := parsePort(p)
 				if err != nil {
 					return err
 				}
 				a.Ports = append(a.Ports, pp)
+			}
+			for _, v := range volumes {
+				vn, vp, ok := strings.Cut(v, ":")
+				if !ok || vn == "" || vp == "" {
+					return fmt.Errorf("--volume %q: want name:/path", v)
+				}
+				a.Volumes = append(a.Volumes, spec.Volume{Name: vn, Path: vp})
 			}
 			if len(env) > 0 {
 				a.Env = map[string]string{}
@@ -137,9 +162,111 @@ func readSpecFile(stdin io.Reader, path string) (spec.App, error) {
 		if errors.Is(err, io.EOF) {
 			return a, fmt.Errorf("%s is empty", path)
 		}
-		return a, fmt.Errorf("%s: %w", path, err)
+		return a, fmt.Errorf("%s: %w", path, specKeyErrors(err))
 	}
 	return a, nil
+}
+
+// unknownKeyRE matches the YAML decoder's line for a key the spec does not
+// have, which names a Go type: "line 3: field replica not found in type
+// spec.App".
+var unknownKeyRE = regexp.MustCompile(`^line (\d+): field (.+) not found in type (\S+)$`)
+
+// specKeys maps each struct type of an app spec, by its Go name, to its
+// keys, and specPlaces names where it sits in a spec.
+var (
+	specKeys   = keysOf(reflect.TypeFor[spec.App](), map[string][]string{})
+	specPlaces = map[string]string{"spec.App": "the app", "spec.Port": "a port", "spec.Volume": "a volume",
+		"spec.Resources": "resources", "spec.Health": "health", "spec.HTTPCheck": "health.http",
+		"spec.TCPCheck": "health.tcp", "spec.Route": "a route"}
+)
+
+// keysOf adds the YAML keys of t, and of every struct type in it, to out.
+func keysOf(t reflect.Type, out map[string][]string) map[string][]string {
+	for t.Kind() == reflect.Pointer || t.Kind() == reflect.Slice {
+		t = t.Elem()
+	}
+	if t.Kind() != reflect.Struct || out[t.String()] != nil {
+		return out
+	}
+	out[t.String()] = []string{}
+	var keys []string
+	for i := range t.NumField() {
+		f := t.Field(i)
+		if k, _, _ := strings.Cut(f.Tag.Get("yaml"), ","); k != "" && k != "-" {
+			keys = append(keys, k)
+			keysOf(f.Type, out)
+		}
+	}
+	out[t.String()] = keys
+	return out
+}
+
+// specKeyErrors rewrites the decoder's errors for unknown keys, which name
+// a Go type, as the key, where it is, and the known key it is closest to:
+// "line 3: unknown key replica in the app (did you mean replicas?)". Other
+// errors pass as they are.
+func specKeyErrors(err error) error {
+	var te *yaml.TypeError
+	if !errors.As(err, &te) {
+		return err
+	}
+	msgs := make([]string, 0, len(te.Errors))
+	for _, e := range te.Errors {
+		m := unknownKeyRE.FindStringSubmatch(e)
+		if m == nil {
+			msgs = append(msgs, e)
+			continue
+		}
+		key, typ := m[2], m[3]
+		place := specPlaces[typ]
+		if place == "" {
+			place = strings.TrimPrefix(typ, "spec.")
+		}
+		msg := fmt.Sprintf("line %s: unknown key %s in %s", m[1], key, place)
+		if near := closestKey(key, specKeys[typ]); near != "" {
+			msg += " (did you mean " + near + "?)"
+		} else if keys := specKeys[typ]; len(keys) > 0 {
+			msg += "; its keys are " + strings.Join(keys, ", ")
+		}
+		msgs = append(msgs, msg)
+	}
+	return errors.New(strings.Join(msgs, "; "))
+}
+
+// closestKey returns the key in keys nearest to s by edit distance, ignoring
+// case and with _ read as -, when it is near enough to be a slip: at most 2
+// edits, and fewer than half the length of s. Otherwise "".
+func closestKey(s string, keys []string) string {
+	norm := func(x string) string { return strings.ReplaceAll(strings.ToLower(x), "_", "-") }
+	best, bestD := "", 3
+	for _, k := range keys {
+		if d := editDistance(norm(s), norm(k)); d < bestD && 2*d < len(s) {
+			best, bestD = k, d
+		}
+	}
+	return best
+}
+
+// editDistance is the Levenshtein distance between a and b, in bytes.
+func editDistance(a, b string) int {
+	prev := make([]int, len(b)+1)
+	cur := make([]int, len(b)+1)
+	for j := range prev {
+		prev[j] = j
+	}
+	for i := 1; i <= len(a); i++ {
+		cur[0] = i
+		for j := 1; j <= len(b); j++ {
+			cost := 1
+			if a[i-1] == b[j-1] {
+				cost = 0
+			}
+			cur[j] = min(prev[j]+1, cur[j-1]+1, prev[j-1]+cost)
+		}
+		prev, cur = cur, prev
+	}
+	return prev[len(b)]
 }
 
 // parsePort reads [bind:]host:container[/proto]. An IPv6 bind goes in
