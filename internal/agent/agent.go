@@ -102,6 +102,7 @@ type Agent struct {
 	wakeAt   time.Time                // when the next scheduled restart or route drain is due, or zero
 	unrouted map[string]time.Time     // by container name: when a routed container was first seen unassigned
 	pulls    map[pullKey]*pullState   // failed pulls, for their backoff
+	launches map[string]*launchState  // by container name: failed creates and starts, for their backoff
 }
 
 // New returns an agent. It does nothing until Run or Reconcile is called.
@@ -139,6 +140,7 @@ func New(cfg Config) (*Agent, error) {
 		probes:   map[string]*probe{},
 		unrouted: map[string]time.Time{},
 		pulls:    map[pullKey]*pullState{},
+		launches: map[string]*launchState{},
 	}, nil
 }
 
@@ -354,20 +356,29 @@ func (a *Agent) Reconcile(ctx context.Context) error {
 			if err := a.supervise(ctx, as, listed, &st); err != nil {
 				errs = append(errs, err)
 			}
+		} else if ls := a.launchWaiting(st.Name); ls != nil {
+			// The last create failed less than its backoff ago.
+			st.State, st.Error = "pending", ls.message()
 		} else {
 			id, state, err := a.create(ctx, as)
 			st.ContainerID, st.State = id, state
 			if state == "running" {
 				afterStart(as, &st)
+				delete(a.launches, st.Name)
 			}
 			if err != nil {
 				// A pull waiting out its backoff failed in an earlier
 				// pass; the status keeps saying so, and the pass is fine.
+				// A pull has its own backoff; any other failure to create
+				// or start the container waits launchBackoff.
 				var pe *pullError
 				if !errors.As(err, &pe) || !pe.waiting {
 					errs = append(errs, err)
 				}
 				st.Error = err.Error()
+				if pe == nil && ctx.Err() == nil {
+					st.Error = a.launchFailed(st.Name, err).message()
+				}
 			}
 		}
 		if len(as.Spec.Routes) > 0 && st.State == "running" && st.ContainerID != "" {

@@ -678,7 +678,15 @@ func TestStartConflictDiscardsContainer(t *testing.T) {
 		t.Fatalf("status after the refused start: %+v", st)
 	}
 
-	// Still refused on the next pass: still nothing left behind.
+	// A pass inside the launch backoff does not try again.
+	e.rt.counts(true)
+	_ = e.agent.Reconcile(ctxT(t))
+	if c := e.rt.counts(false); c["create"] != 0 {
+		t.Fatalf("%d creates inside the launch backoff", c["create"])
+	}
+
+	// Still refused once the backoff is over: still nothing left behind.
+	e.clock.Advance(launchBase)
 	_ = e.agent.Reconcile(ctxT(t))
 	if snap := e.rt.snapshot(); len(snap) != 0 {
 		t.Fatalf("containers left after a second refused start: %v", names(snap))
@@ -686,6 +694,7 @@ func TestStartConflictDiscardsContainer(t *testing.T) {
 
 	e.rt.setFail(nil)
 	e.rt.counts(true)
+	e.clock.Advance(2 * launchBase)
 	e.reconcile()
 	c := e.rt.counts(false)
 	snap := e.rt.snapshot()

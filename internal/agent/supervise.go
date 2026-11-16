@@ -106,12 +106,21 @@ func (a *Agent) supervise(ctx context.Context, as store.Assignment, c runtime.Co
 	switch c.State {
 	case "created":
 		a.stopProbe(c.Name)
+		if ls := a.launchWaiting(c.Name); ls != nil {
+			st.Error = ls.message()
+			return nil
+		}
 		if discarded, err := a.startOrDiscard(ctx, c.ID); err != nil {
 			if discarded {
 				st.ContainerID, st.State = "", "pending"
 			}
-			return a.fail(st, c.Name, err)
+			err = a.fail(st, c.Name, err)
+			if ctx.Err() == nil {
+				st.Error = a.launchFailed(c.Name, err).message()
+			}
+			return err
 		}
+		delete(a.launches, c.Name)
 		log.Info("started container", "was", c.State)
 		st.State = "running"
 		afterStart(as, st)
@@ -130,12 +139,21 @@ func (a *Agent) supervise(ctx context.Context, as store.Assignment, c runtime.Co
 			a.schedule(rs, due, st)
 			return nil
 		}
+		if ls := a.launchWaiting(c.Name); ls != nil {
+			st.Error = ls.message()
+			return nil
+		}
 		if discarded, err := a.startOrDiscard(ctx, c.ID); err != nil {
 			if discarded {
 				st.ContainerID, st.State = "", "pending"
 			}
-			return a.fail(st, c.Name, err)
+			err = a.fail(st, c.Name, err)
+			if ctx.Err() == nil {
+				st.Error = a.launchFailed(c.Name, err).message()
+			}
+			return err
 		}
+		delete(a.launches, c.Name)
 		rs.restarts++
 		a.clearSchedule(rs, st)
 		log.Warn("restarted exited container", "restarts", rs.restarts, "exit_code", ci.ExitCode, "oom_killed", ci.OOMKilled)
@@ -280,9 +298,12 @@ func (a *Agent) forget(kept map[string]bool) {
 			a.wakeAt = due
 		}
 	}
-	// A pull waiting out its backoff is tried when the wait ends.
-	if due := a.forgetPulls(); !due.IsZero() && (a.wakeAt.IsZero() || due.Before(a.wakeAt)) {
-		a.wakeAt = due
+	// A pull waiting out its backoff is tried when the wait ends, and so is
+	// a create or a start.
+	for _, due := range []time.Time{a.forgetPulls(), a.forgetLaunches()} {
+		if !due.IsZero() && (a.wakeAt.IsZero() || due.Before(a.wakeAt)) {
+			a.wakeAt = due
+		}
 	}
 }
 
