@@ -31,6 +31,7 @@ hivemind
 | `logs` | Print a replica's container log |
 | `node` | Manage one node |
 | `nodes` | List the nodes in the cluster |
+| `registry` | Store credentials for private image registries |
 | `restore` | Restore a server's state from a backup into an empty data directory |
 | `scale` | Set an app's replica count |
 | `serve` | Run the server and the agent on this node |
@@ -494,6 +495,95 @@ hivemind nodes [flags]
 | `--ca-cert` | string | - | - | PEM file of the CA certificates to trust for an https server, instead of the system's (env HIVEMIND_CA_CERT; default from the client config) |
 | `--client-config` | string | - | `HIVEMIND_CLIENT_CONFIG` | client config file (env HIVEMIND_CLIENT_CONFIG; default $XDG_CONFIG_HOME/hivemind/config.yaml or ~/.config/hivemind/config.yaml) |
 | `--json` | bool | - | - | print JSON instead of a table |
+| `--server` | string | - | `HIVEMIND_SERVER` | server URL (env HIVEMIND_SERVER; default from the client config, then http://127.0.0.1:4483) |
+| `--token` | string | - | `HIVEMIND_TOKEN` | API token (env HIVEMIND_TOKEN; default from the client config's token file) |
+
+### hivemind registry
+
+Store the username and password, or token, that nodes send when they pull an
+image from a private registry: GHCR, ECR, a private Docker Hub repository, or a
+registry of your own. See docs/registries.md.
+
+```
+hivemind registry
+```
+
+| Command | Description |
+|---|---|
+| `list` | List the registries that have a stored credential |
+| `login` | Store the credential that pulls from a registry send |
+| `logout` | Remove the stored credential for a registry |
+
+#### hivemind registry list
+
+List each registry that has a stored credential: its host, the username, and
+when it was last stored. Passwords are never shown; no API route returns one.
+
+```
+hivemind registry list [flags]
+```
+
+| Flag | Type | Default | Environment | Description |
+|---|---|---|---|---|
+| `--ca-cert` | string | - | - | PEM file of the CA certificates to trust for an https server, instead of the system's (env HIVEMIND_CA_CERT; default from the client config) |
+| `--client-config` | string | - | `HIVEMIND_CLIENT_CONFIG` | client config file (env HIVEMIND_CLIENT_CONFIG; default $XDG_CONFIG_HOME/hivemind/config.yaml or ~/.config/hivemind/config.yaml) |
+| `--json` | bool | - | - | print JSON instead of a table |
+| `--server` | string | - | `HIVEMIND_SERVER` | server URL (env HIVEMIND_SERVER; default from the client config, then http://127.0.0.1:4483) |
+| `--token` | string | - | `HIVEMIND_TOKEN` | API token (env HIVEMIND_TOKEN; default from the client config's token file) |
+
+#### hivemind registry login
+
+Store the username and password, or token, that every node sends when it
+pulls an image from host. A host is a registry as an image reference names it,
+such as ghcr.io, registry.example.com:5000 or localhost:5000. Docker Hub is
+docker.io; index.docker.io and registry-1.docker.io are the same host.
+
+The password is read from standard input with --password-stdin, or from a file
+with --password-file. No flag takes it on the command line, where the process
+list would show it and the shell history would keep it. One trailing newline is
+removed. --password-stdin refuses a terminal, which would echo the password as
+it is typed: pipe it in instead.
+
+The credential is not checked with the registry. A wrong one shows at the next
+pull, in hivemind status. Logging in again replaces it. The change applies to
+the next pull only: running containers keep running, and a node that has the
+image already does not pull it again.
+
+The server stores the password in its database as it is, like environment
+values, and sends it to each node that runs an image from host. ECR tokens last
+12 hours, so log in again before they expire, for example from cron:
+
+  aws ecr get-login-password | hivemind registry login <account>.dkr.ecr.<region>.amazonaws.com --username AWS --password-stdin
+
+```
+hivemind registry login <host> --username <name> (--password-stdin | --password-file <file>) [flags]
+```
+
+| Flag | Type | Default | Environment | Description |
+|---|---|---|---|---|
+| `--ca-cert` | string | - | - | PEM file of the CA certificates to trust for an https server, instead of the system's (env HIVEMIND_CA_CERT; default from the client config) |
+| `--client-config` | string | - | `HIVEMIND_CLIENT_CONFIG` | client config file (env HIVEMIND_CLIENT_CONFIG; default $XDG_CONFIG_HOME/hivemind/config.yaml or ~/.config/hivemind/config.yaml) |
+| `--json` | bool | - | - | print JSON instead of a table |
+| `--password-file` | string | - | - | read the password or token from this file |
+| `--password-stdin` | bool | - | - | read the password or token from standard input |
+| `--server` | string | - | `HIVEMIND_SERVER` | server URL (env HIVEMIND_SERVER; default from the client config, then http://127.0.0.1:4483) |
+| `--token` | string | - | `HIVEMIND_TOKEN` | API token (env HIVEMIND_TOKEN; default from the client config's token file) |
+| `--username` | string | - | - | the username, or AWS for ECR |
+
+#### hivemind registry logout
+
+Remove the stored credential for a registry. Containers that run an image from
+it keep running. The next pull from it sends no credential, so a new replica on
+a node that does not have the image yet cannot start.
+
+```
+hivemind registry logout <host> [flags]
+```
+
+| Flag | Type | Default | Environment | Description |
+|---|---|---|---|---|
+| `--ca-cert` | string | - | - | PEM file of the CA certificates to trust for an https server, instead of the system's (env HIVEMIND_CA_CERT; default from the client config) |
+| `--client-config` | string | - | `HIVEMIND_CLIENT_CONFIG` | client config file (env HIVEMIND_CLIENT_CONFIG; default $XDG_CONFIG_HOME/hivemind/config.yaml or ~/.config/hivemind/config.yaml) |
 | `--server` | string | - | `HIVEMIND_SERVER` | server URL (env HIVEMIND_SERVER; default from the client config, then http://127.0.0.1:4483) |
 | `--token` | string | - | `HIVEMIND_TOKEN` | API token (env HIVEMIND_TOKEN; default from the client config's token file) |
 
