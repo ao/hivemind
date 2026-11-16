@@ -78,7 +78,7 @@ with hivemind restore.`,
 			write = func(ctx context.Context, w io.Writer) error {
 				resp, err := c.send(ctx, "POST", "/v1/backup", nil)
 				if err != nil {
-					return err
+					return olderServer(err, "backup through the API", "2.1")
 				}
 				defer resp.Body.Close()
 				if _, err := io.Copy(w, resp.Body); err != nil {

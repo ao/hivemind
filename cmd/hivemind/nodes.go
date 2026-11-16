@@ -35,7 +35,8 @@ a version older than 2.2 does.
 
 ELIGIBILITY is "eligible" for a node that takes new replicas, "ineligible" for
 one that does not (hivemind node eligibility), "draining" during a drain, and
-"drained" after one, until the node is made eligible again or removed.
+"drained" after one, until the node is made eligible again or removed. "-"
+means the server does not say, as a server older than 2.2 does not.
 
 CERT EXPIRES is when the node's certificate expires, as the server recorded it
 when it issued the certificate. A worker renews its certificate once two thirds
@@ -52,7 +53,7 @@ record yet.`,
 		if err != nil {
 			return err
 		}
-		var nodes []server.NodeView
+		var nodes []nodeRow
 		if err := c.call(cmd.Context(), "GET", "/v1/nodes", nil, &nodes); err != nil {
 			return err
 		}
@@ -65,7 +66,16 @@ record yet.`,
 	return cmd
 }
 
-func printNodes(out io.Writer, nodes []server.NodeView) {
+// nodeRow is a node of GET /v1/nodes as the CLI reads it. Eligible is a
+// pointer, so that a server older than 2.2, which sends no eligible field,
+// reads as unknown rather than as ineligible. It is the shallower field, so
+// JSON reads "eligible" into it rather than into the NodeView's.
+type nodeRow struct {
+	server.NodeView
+	Eligible *bool `json:"eligible"`
+}
+
+func printNodes(out io.Writer, nodes []nodeRow) {
 	if len(nodes) == 0 {
 		fmt.Fprintln(out, "No nodes.")
 		return
@@ -86,14 +96,17 @@ func printNodes(out io.Writer, nodes []server.NodeView) {
 	tw.Flush()
 }
 
-// eligibility is the ELIGIBILITY column of hivemind nodes.
-func eligibility(n server.NodeView) string {
+// eligibility is the ELIGIBILITY column of hivemind nodes: "-" when the
+// server does not say.
+func eligibility(n nodeRow) string {
 	switch {
 	case n.Drain != nil && n.Drain.State == string(store.DrainDraining):
 		return "draining"
 	case n.Drain != nil:
 		return "drained"
-	case !n.Eligible:
+	case n.Eligible == nil:
+		return "-"
+	case !*n.Eligible:
 		return "ineligible"
 	}
 	return "eligible"
@@ -191,7 +204,7 @@ https://developer.hashicorp.com/nomad/docs/commands/node/eligibility`,
 		}
 		var reply server.EligibilityReply
 		if err := c.call(cmd.Context(), "POST", nodePath(args[0], "eligibility"), server.EligibilityRequest{Eligible: &enable}, &reply); err != nil {
-			return err
+			return olderServer(err, "node eligibility", "2.2")
 		}
 		if cf.json {
 			return printJSON(cmd.OutOrStdout(), reply)
@@ -278,7 +291,7 @@ https://developer.hashicorp.com/nomad/docs/commands/node/drain`,
 		path := nodePath(args[0], "drain")
 		var d server.DrainView
 		if err := c.call(ctx, "POST", path, req, &d); err != nil {
-			return err
+			return olderServer(err, "node drain", "2.2")
 		}
 		p := &drainPrinter{out: out, seen: map[string]bool{}, quiet: cf.json}
 		p.start(d)

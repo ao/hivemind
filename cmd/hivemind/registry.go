@@ -109,7 +109,7 @@ values, and sends it to each node that runs an image from host. ECR tokens last
 		}
 		var reg server.RegistryView
 		if err := c.call(cmd.Context(), "PUT", registryPath(host), server.RegistryLogin{Username: username, Password: password}, &reg); err != nil {
-			return err
+			return olderServer(err, "registry login", "2.2")
 		}
 		if cf.json {
 			return printJSON(cmd.OutOrStdout(), reg)
@@ -155,7 +155,7 @@ when it was last stored. Passwords are never shown; no API route returns one.`,
 		}
 		var list server.RegistryList
 		if err := c.call(cmd.Context(), "GET", "/v1/registries", nil, &list); err != nil {
-			return err
+			return olderServer(err, "registry list", "2.2")
 		}
 		if cf.json {
 			return printJSON(cmd.OutOrStdout(), list)
@@ -195,7 +195,7 @@ a node that does not have the image yet cannot start.`,
 			return err
 		}
 		if err := c.call(cmd.Context(), "DELETE", registryPath(host), nil, nil); err != nil {
-			return err
+			return olderServer(err, "registry logout", "2.2")
 		}
 		fmt.Fprintf(cmd.OutOrStdout(), "%s: credential removed; running containers keep running\n", host)
 		return nil

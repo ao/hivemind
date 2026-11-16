@@ -248,20 +248,45 @@ func (c *apiClient) send(ctx context.Context, method, path string, body any) (*h
 	}
 	var e server.ErrorBody
 	b, _ := io.ReadAll(io.LimitReader(resp.Body, 64<<10))
+	v := nodeapi.CleanVersion(resp.Header.Get(nodeapi.VersionHeader))
 	if json.Unmarshal(b, &e) == nil && e.Error != "" {
-		return nil, &apiError{status: resp.StatusCode, msg: e.Error}
+		return nil, &apiError{status: resp.StatusCode, msg: e.Error, version: v}
 	}
-	return nil, &apiError{status: resp.StatusCode, msg: "server returned " + resp.Status}
+	return nil, &apiError{status: resp.StatusCode, msg: "server returned " + resp.Status, version: v}
 }
 
 // apiError is an error reply from the server. Its text is the server's
-// message; status lets a command tell a 404 from other failures.
+// message; status lets a command tell a 404 from other failures. version is
+// the server's, or "" when it sends none.
 type apiError struct {
-	status int
-	msg    string
+	status  int
+	msg     string
+	version string
 }
 
 func (e *apiError) Error() string { return e.msg }
+
+// noRoute reports whether the server has no handler for the route: the
+// router's own 404 or 405, which the API sends as "not found" and "method
+// not allowed". A handler's 404 names what it did not find.
+func (e *apiError) noRoute() bool {
+	return e.status == http.StatusNotFound && e.msg == "not found" ||
+		e.status == http.StatusMethodNotAllowed && e.msg == "method not allowed"
+}
+
+// olderServer turns a refusal of a route the server lacks into what to do.
+// what names the command, such as "node drain", and since is the release
+// that added its route. Any other error is returned as it is.
+func olderServer(err error, what, since string) error {
+	var ae *apiError
+	if !errors.As(err, &ae) || !ae.noRoute() {
+		return err
+	}
+	if ae.version != "" {
+		return fmt.Errorf("the server runs %s, which has no %s; upgrade the server", ae.version, what)
+	}
+	return fmt.Errorf("the server is older than %s and has no %s; upgrade the server", since, what)
+}
 
 // call makes a request and decodes the JSON reply into out.
 func (c *apiClient) call(ctx context.Context, method, path string, body, out any) error {

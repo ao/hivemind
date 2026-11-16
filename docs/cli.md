@@ -501,7 +501,8 @@ a version older than 2.2 does.
 
 ELIGIBILITY is "eligible" for a node that takes new replicas, "ineligible" for
 one that does not (hivemind node eligibility), "draining" during a drain, and
-"drained" after one, until the node is made eligible again or removed.
+"drained" after one, until the node is made eligible again or removed. "-"
+means the server does not say, as a server older than 2.2 does not.
 
 CERT EXPIRES is when the node's certificate expires, as the server recorded it
 when it issued the certificate. A worker renews its certificate once two thirds
