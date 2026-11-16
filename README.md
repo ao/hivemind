@@ -135,6 +135,7 @@ In the unreleased 2.2.0, an app can name `routes: [{host: www.example.com, port:
 - [When things go wrong](docs/failures.md): Docker restarts, failing pulls, full disks, crash loops, damaged worker files, clock skew
 - [Running under systemd](docs/systemd.md)
 - [Soak test on four machines](docs/soak.md)
+- [Scale test on ten machines](docs/scale.md): 100 apps, 500 replicas
 - [CLI reference](docs/cli.md)
 - [HTTP API](docs/api.md)
 - [Upgrading from 2.0.0 or v1](docs/upgrading.md)
