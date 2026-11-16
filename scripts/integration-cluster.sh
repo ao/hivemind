@@ -51,9 +51,11 @@
 #     directory, and serve starts. Both workers, which were never restarted,
 #     reconnect with their certificates, and the apps converge with no
 #     duplicate replica
-#   - a slow pass: nine replicas of busybox sleep, which ignores SIGTERM, are
-#     deleted; each agent takes about 30 s to stop its three, and no node is
-#     lost meanwhile, because leases are renewed apart from the passes
+#   - slow removals beside a rollout: 24 replicas of busybox sleep, which
+#     ignores SIGTERM, are deleted while eight apps with an HTTP health check
+#     roll at once. No rollout pauses, every one finishes, the sleep
+#     containers are gone in under 45 s (one after another, a node's eight
+#     would take 80 s), and no node is lost meanwhile
 #   - node removal: removing w1 while it runs is refused without --force.
 #     With --force, its spread replica moves to another node, its web replica
 #     waits on the host port, hivemind nodes no longer lists it, its worker
@@ -464,33 +466,88 @@ wait_for 60 no_duplicates || cl_fail "a replica is duplicated after the restore:
 cl_check_server_listeners
 cl_note "after the restore: web $(app_rows web | awk '{ print $1, $2, $3 }' | sort | tr '\n' ';') spread at three, no duplicates"
 
-# A slow pass. busybox sleep as PID 1 ignores SIGTERM, so Docker stops each
-# container only when its 10 s grace ends, and a pass stops one container at
-# a time: with three per node, a pass takes about 30 s. The agents renew
-# their leases apart from their passes, so no node may be lost meanwhile.
+# A rolling update while containers that ignore SIGTERM are removed: the
+# scale run's 50-app rollout, shrunk to fit. hc-1 to hc-8 run nginx with an
+# HTTP health check, which gives each move a 33 s deadline, three replicas
+# each. slowstop runs 24 busybox sleep containers, about eight per node;
+# sleep as PID 1 ignores SIGTERM, so Docker stops each only when its 10 s
+# grace ends. slowstop is deleted and the eight apps are rolled at once, so
+# each node has its sleep containers to remove beside the surges it must
+# start. Removed one after another, before anything starts, they would hold
+# the surges up for about 80 s, past the deadline, and the rollouts would
+# pause. Removed in the background, 8 at a time, they are gone in about one
+# grace period, and every rollout finishes. The agents renew their leases
+# apart from their passes, so no node may be lost meanwhile.
+hc_spec() { # hc_spec N V: the spec of hc-N with V in its environment
+	cat <<EOF
+name: hc-$1
+image: nginx:alpine
+replicas: 3
+env:
+  V: "$2"
+health:
+  http:
+    path: /
+    port: 80
+  interval: 1s
+  timeout: 500ms
+  retries: 3
+EOF
+}
+HC="1 2 3 4 5 6 7 8"
+for i in $HC; do
+	hc_spec "$i" 1 | docker exec -i "$S" hivemind deploy -f - >/dev/null || cl_fail "deploy hc-$i"
+done
 docker exec -i "$S" hivemind deploy -f - >/dev/null <<'EOF' || cl_fail "deploy slowstop"
 name: slowstop
 image: busybox:1.36
-replicas: 9
+replicas: 24
 command: ["sleep", "3600"]
 EOF
-slowstop_up() { [ "$(count_running slowstop)" -eq 9 ]; }
-wait_for 120 slowstop_up || cl_fail "slowstop did not reach nine running replicas: $(app_rows slowstop | tr '\n' ';')"
-per_node=$(app_rows slowstop | awk '{ print $2 }' | sort | uniq -c | tr '\n' ';')
+# hc_at GEN: every hc app has its three replicas running at generation GEN,
+# and no rollout in progress or paused.
+hc_at() {
+	local out i
+	out=$(docker exec "$S" hivemind status) || return 1
+	for i in $HC; do
+		grep -q "^hc-$i: " <<<"$out" && return 1
+		[ "$(awk -v a="hc-$i" -v g="$1" '$1 == a && $2 ~ /^[0-9]+$/ && $4 == g && $5 == "running"' <<<"$out" | wc -l)" -eq 3 ] || return 1
+	done
+}
+slowstop_up() { [ "$(count_running slowstop)" -eq 24 ]; }
+wait_for 180 slowstop_up || cl_fail "slowstop did not reach 24 running replicas: $(app_rows slowstop | tr '\n' ';')"
+wait_for 120 hc_at 1 || cl_fail "the hc apps did not reach three running replicas: $(docker exec "$S" hivemind status | grep '^hc-' | tr '\n' ';')"
+per_node=$(app_rows slowstop | awk '{ print $2 }' | sort | uniq -c | awk '{ printf "%s%s on %s", (NR > 1 ? ", " : ""), $1, $2 }')
+
 docker exec "$S" hivemind delete slowstop >/dev/null || cl_fail "delete slowstop"
 deleted_at=$(date +%s)
-# The API hides a deleted app at once; its containers go one by one.
+for i in $HC; do
+	hc_spec "$i" 2 | docker exec -i "$S" hivemind deploy -f - >/dev/null || cl_fail "roll hc-$i"
+done
 slowstop_gone() { [ -z "$(containers_of slowstop)" ]; }
-while ! slowstop_gone; do
+gone_at="" rolled_at=""
+while [ -z "$gone_at" ] || [ -z "$rolled_at" ]; do
 	if docker exec "$S" hivemind nodes | grep -q ' lost '; then
-		cl_fail "a node was lost while its agent stopped slowstop's containers, $(($(date +%s) - deleted_at)) s after the delete: $(docker exec "$S" hivemind nodes | tr '\n' ';')"
+		cl_fail "a node was lost while its agent removed slowstop's containers, $(($(date +%s) - deleted_at)) s after the delete: $(docker exec "$S" hivemind nodes | tr '\n' ';')"
 	fi
-	[ $(($(date +%s) - deleted_at)) -lt 120 ] || cl_fail "slowstop was not removed in 120 s"
+	if paused=$(docker exec "$S" hivemind status | grep '^hc-[0-9]*: rollout to generation .* stopped'); then
+		cl_fail "a rollout paused while slowstop's containers were removed, $(($(date +%s) - deleted_at)) s after the delete: $(tr '\n' ';' <<<"$paused")"
+	fi
+	[ -n "$gone_at" ] || ! slowstop_gone || gone_at=$(date +%s)
+	[ -n "$rolled_at" ] || ! hc_at 2 || rolled_at=$(date +%s)
+	[ $(($(date +%s) - deleted_at)) -lt 240 ] ||
+		cl_fail "240 s after the delete: slowstop gone at ${gone_at:-never}, hc rolled at ${rolled_at:-never}: $(docker exec "$S" hivemind status | grep '^hc-' | tr '\n' ';')"
 	sleep 1
 done
-took=$(($(date +%s) - deleted_at))
-[ "$took" -gt 15 ] || cl_fail "slowstop was removed in $took s, under the 15 s lease, so the check proves nothing"
-cl_note "slowstop ($per_node) was removed in $took s, and no node was lost meanwhile"
+took=$((gone_at - deleted_at))
+# One after another, a node's eight would take 80 s.
+[ "$took" -lt 45 ] || cl_fail "slowstop ($per_node) took $took s to remove; 8 at a time, a node's take about one 10 s grace period"
+cl_note "slowstop ($per_node) was removed in $took s, and the eight health-checked rollouts finished $((rolled_at - deleted_at)) s after the delete, none paused; no node was lost"
+for i in $HC; do
+	docker exec "$S" hivemind delete "hc-$i" >/dev/null || cl_fail "delete hc-$i"
+done
+hc_gone() { local i; for i in $HC; do [ -z "$(containers_of "hc-$i")" ] || return 1; done; }
+wait_for 60 hc_gone || cl_fail "the hc apps' containers were not removed"
 
 # worker_stopped NODE: no hivemind process runs in NODE.
 worker_stopped() { ! docker exec "$1" pgrep -x hivemind >/dev/null 2>&1; }
