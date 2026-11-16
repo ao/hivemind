@@ -72,6 +72,7 @@ Every error is a JSON object with one field:
 | 502 | A worker could not read a log, or broke the stream before it started |
 | 503 | The container engine cannot be reached: `the container engine is unavailable`. For logs, also a lost node, the engine on the replica's node, or a server without `--advertise` |
 | 504 | A worker did not answer a log request in 10 seconds |
+| 507 | The server's disk is full: `the server's disk is full, so the change was not saved: ...`. Nothing of the change is stored, and reads still work |
 
 ## Limits
 

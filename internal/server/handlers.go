@@ -533,6 +533,12 @@ func (s *Server) fail(w http.ResponseWriter, r *http.Request, err error) {
 	case errors.Is(err, runtime.ErrUnavailable):
 		s.log.Error("container engine unavailable", "method", r.Method, "path", r.URL.Path, "err", err)
 		writeError(w, http.StatusServiceUnavailable, "the container engine is unavailable")
+	case store.IsDiskFull(err):
+		// 507 says the server could not store the change, which is so, and
+		// tells a client apart from a 500 it may retry at once, or a 503 that
+		// passes by itself. Nothing was written; reads go on working.
+		s.log.Error("the disk of the data directory is full; a change was refused", "method", r.Method, "path", r.URL.Path, "err", err)
+		writeError(w, http.StatusInsufficientStorage, diskFullMessage)
 	case r.Context().Err() != nil:
 		// The client went away; there is no one to answer.
 	default:
@@ -540,6 +546,10 @@ func (s *Server) fail(w http.ResponseWriter, r *http.Request, err error) {
 		writeError(w, http.StatusInternalServerError, "internal error")
 	}
 }
+
+// diskFullMessage is the error of a write refused because the server's disk
+// is full.
+const diskFullMessage = "the server's disk is full, so the change was not saved: free space on the disk of the server's data directory, then try again"
 
 // requestError is a decoding or validation failure, reported to the client
 // with its status.

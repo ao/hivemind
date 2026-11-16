@@ -261,6 +261,10 @@ func (a *nodeAPI) fail(w http.ResponseWriter, r *http.Request, err error) {
 		writeError(w, http.StatusBadRequest, "invalid request")
 	case r.Context().Err() != nil:
 		// The node went away; there is no one to answer.
+	case store.IsDiskFull(err):
+		// The worker logs the message, so it says what is wrong.
+		a.log.Error("the disk of the data directory is full; a node's write was refused", "path", r.URL.Path, "err", err)
+		writeError(w, http.StatusInsufficientStorage, "the server's disk is full, so it cannot save this node's report")
 	default:
 		a.log.Error("node request failed", "path", r.URL.Path, "err", err)
 		writeError(w, http.StatusInternalServerError, "internal error")

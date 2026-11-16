@@ -66,18 +66,21 @@ func sweep(ctx context.Context, st *store.Store, log *slog.Logger, every time.Du
 		}
 		nodes, err := st.ReconcileNodes(ctx, started)
 		if err != nil {
+			// Nothing was released, as on a full disk: a loss is logged
+			// when a sweep releases the node.
 			if ctx.Err() == nil {
 				log.Warn("node sweep", "err", err)
 			}
-		}
-		now := make(map[string]bool, len(nodes))
-		for _, id := range nodes {
-			now[id] = true
-			if !lost[id] {
-				log.Warn("node lost: its replicas are placed again, and volume replicas wait for it", "node", id)
+		} else {
+			now := make(map[string]bool, len(nodes))
+			for _, id := range nodes {
+				now[id] = true
+				if !lost[id] {
+					log.Warn("node lost: its replicas are placed again, and volume replicas wait for it", "node", id)
+				}
 			}
+			lost = now
 		}
-		lost = now
 		if n, err := st.PruneJoinTokens(ctx, time.Now()); err != nil {
 			if ctx.Err() == nil {
 				log.Warn("pruning join tokens", "err", err)
