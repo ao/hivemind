@@ -20,6 +20,12 @@ func fakeOldServer(t *testing.T, version string) {
 			w.Header().Set("Hivemind-Version", version)
 		}
 		w.Header().Set("Content-Type", "application/json")
+		if r.Method == http.MethodGet && r.URL.Path == "/v1/status" {
+			// 2.0.0 sends no ready count.
+			_, _ = w.Write([]byte(`[{"name":"web","image":"nginx:alpine","generation":1,"desired":2,"running":2,
+				"replicas":[{"index":0,"node_id":"node-acc3d9097247","generation":1,"desired":"running","state":"running","restarts":0,"ready":true}]}]`))
+			return
+		}
 		if r.Method == http.MethodGet && r.URL.Path == "/v1/nodes" {
 			_, _ = w.Write([]byte(`[{"id":"node-acc3d9097247","name":"srv","cpu":2,"memory":4000000000,
 				"last_lease":"2026-11-16T00:00:00Z","lease_age_seconds":1,"state":"ready","server":true,"replicas":0}]`))
@@ -44,6 +50,13 @@ func TestCLIAgainstAnOlderServer(t *testing.T) {
 	rows := tableRows(t, out)
 	if len(rows) != 1 || rows[0]["ELIGIBILITY"] != "-" || rows[0]["VERSION"] != "-" || rows[0]["ADDRESS"] != "-" || rows[0]["STATE"] != "ready" {
 		t.Fatalf("nodes from a 2.0.0 server:\n%s", out)
+	}
+	out, _, err = run(t, "", "status")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if apps := tableRows(t, out); len(apps) < 1 || apps[0]["APP"] != "web" || apps[0]["RUNNING"] != "2" || apps[0]["READY"] != "-" {
+		t.Fatalf("status from a 2.0.0 server, which sends no ready count: READY must be -, not 0:\n%s", out)
 	}
 	out, _, err = run(t, "", "nodes", "--json")
 	if err != nil || !strings.Contains(out, `"eligible": null`) {

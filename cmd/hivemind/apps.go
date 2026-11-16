@@ -315,31 +315,51 @@ engine's last error for it.`,
 		if err != nil {
 			return err
 		}
-		var apps []server.AppStatus
+		var got []appStatus
 		if len(args) == 1 {
-			var one server.AppStatus
+			var one appStatus
 			if err := c.call(cmd.Context(), "GET", appPath(args[0], "status"), nil, &one); err != nil {
 				return err
 			}
 			if cf.json {
 				return printJSON(cmd.OutOrStdout(), one)
 			}
-			apps = []server.AppStatus{one}
+			got = []appStatus{one}
 		} else {
-			if err := c.call(cmd.Context(), "GET", "/v1/status", nil, &apps); err != nil {
+			if err := c.call(cmd.Context(), "GET", "/v1/status", nil, &got); err != nil {
 				return err
 			}
 			if cf.json {
-				return printJSON(cmd.OutOrStdout(), apps)
+				return printJSON(cmd.OutOrStdout(), got)
 			}
 		}
-		printStatus(cmd.OutOrStdout(), apps)
+		apps := make([]server.AppStatus, len(got))
+		readyKnown := true
+		for i, a := range got {
+			apps[i] = a.AppStatus
+			if a.Ready == nil {
+				readyKnown = false
+			} else {
+				apps[i].Ready = *a.Ready
+			}
+		}
+		printStatus(cmd.OutOrStdout(), apps, readyKnown)
 		return nil
 	}
 	return cmd
 }
 
-func printStatus(out io.Writer, apps []server.AppStatus) {
+// appStatus is an app's status as the CLI reads it. A server older than 2.2
+// sends no ready count, so Ready is nil, and READY prints "-" rather than 0,
+// which would say that nothing is ready.
+type appStatus struct {
+	server.AppStatus
+	Ready *int `json:"ready"`
+}
+
+// printStatus prints the apps and their replicas. readyKnown is false when
+// the server sent no ready counts.
+func printStatus(out io.Writer, apps []server.AppStatus, readyKnown bool) {
 	if len(apps) == 0 {
 		fmt.Fprintln(out, "No apps.")
 		return
@@ -347,7 +367,11 @@ func printStatus(out io.Writer, apps []server.AppStatus) {
 	tw := tabwriter.NewWriter(out, 0, 4, 2, ' ', 0)
 	fmt.Fprintln(tw, "APP\tIMAGE\tGENERATION\tDESIRED\tRUNNING\tREADY")
 	for _, a := range apps {
-		fmt.Fprintf(tw, "%s\t%s\t%d\t%d\t%d\t%d\n", a.Name, a.Image, a.Generation, a.Desired, a.Running, a.Ready)
+		ready := "-"
+		if readyKnown {
+			ready = strconv.Itoa(a.Ready)
+		}
+		fmt.Fprintf(tw, "%s\t%s\t%d\t%d\t%d\t%s\n", a.Name, a.Image, a.Generation, a.Desired, a.Running, ready)
 	}
 	tw.Flush()
 	for _, a := range apps {

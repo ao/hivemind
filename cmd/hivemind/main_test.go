@@ -377,7 +377,7 @@ func TestPrintStatusShowsReadyAndTheReason(t *testing.T) {
 			{Index: 0, NodeID: "node-a", Generation: 1, Desired: "running", State: "running", Health: "healthy", Ready: true},
 			{Index: 1, NodeID: "node-b", Generation: 1, Desired: "running", State: "created", Error: "bind: cannot assign requested address",
 				PendingReason: "host port 10.0.0.2:5432/tcp binds address 10.0.0.2, and node node-b has address 10.0.0.3"},
-		}}})
+		}}}, true)
 	lines := strings.Split(b.String(), "\n")
 	if f := strings.Fields(lines[0]); strings.Join(f, " ") != "APP IMAGE GENERATION DESIRED RUNNING READY" {
 		t.Fatalf("header: %q", lines[0])
