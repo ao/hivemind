@@ -1,6 +1,6 @@
 # Compose files
 
-`hivemind compose` reads a Docker Compose file and turns each service into an app spec. The work is done by the CLI: the server receives ordinary app specs, as from `hivemind deploy -f`, and knows nothing of Compose.
+`hivemind compose` reads a Docker Compose file and turns each service into an app spec. The work is done by the CLI: the server receives ordinary app specs, as from `hivemind deploy -f`, and knows nothing of Compose. This is new in the unreleased 2.2.0.
 
 ```sh
 hivemind compose convert compose.yaml   # print the app specs as YAML
