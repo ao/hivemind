@@ -3,7 +3,6 @@ package store
 import (
 	"context"
 	"database/sql"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"slices"
@@ -538,6 +537,7 @@ func querySurges(ctx context.Context, q querier, where string, args ...any) ([]A
 		return nil, err
 	}
 	defer rows.Close()
+	c := cacheOf(q)
 	var out []Assignment
 	for rows.Next() {
 		var x Assignment
@@ -545,8 +545,8 @@ func querySurges(ctx context.Context, q querier, where string, args ...any) ([]A
 		if err := rows.Scan(&x.App, &x.Index, &x.NodeID, &x.Generation, &x.Desired, &specJSON); err != nil {
 			return nil, err
 		}
-		if err := json.Unmarshal([]byte(specJSON), &x.Spec); err != nil {
-			return nil, fmt.Errorf("app %s: stored spec: %w", x.App, err)
+		if x.Spec, err = c.decode(x.App, x.Generation, specJSON); err != nil {
+			return nil, err
 		}
 		out = append(out, x)
 	}

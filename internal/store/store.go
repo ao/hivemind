@@ -246,6 +246,15 @@ type Store struct {
 	// same as the last one renews the lease and does not rewrite its rows.
 	reportMu sync.Mutex
 	reported map[string][sha256.Size]byte
+
+	// defaultPlace is true when place is the scheduler, which reads nothing
+	// but its arguments, so a placement whose inputs did not change can be
+	// skipped. placeMu guards placeKey, the inputs of the last placement
+	// that placed nothing (placecache.go).
+	defaultPlace bool
+	placeMu      sync.Mutex
+	placeKey     [sha256.Size]byte
+	placeSet     bool
 }
 
 // readConns is the size of the read-only pool.
@@ -279,7 +288,7 @@ func Open(ctx context.Context, path string, opts ...Option) (*Store, error) {
 		s.minReady = scheduler.DefaultMinReady
 	}
 	if s.place == nil {
-		s.place = s.schedulerPlace
+		s.place, s.defaultPlace = s.schedulerPlace, true
 	}
 	if err := s.init(ctx); err != nil {
 		db.Close()
@@ -343,11 +352,14 @@ func (s *Store) init(ctx context.Context) error {
 func (s *Store) Close() error { return errors.Join(s.rdb.Close(), s.db.Close()) }
 
 // tx runs fn in one IMMEDIATE transaction and commits it if fn returns nil.
+// The transaction has a txCache (placecache.go) while it is open.
 func (s *Store) tx(ctx context.Context, fn func(*sql.Tx) error) error {
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
 		return err
 	}
+	txCaches.Store(tx, &txCache{})
+	defer txCaches.Delete(tx)
 	defer tx.Rollback()
 	if err := fn(tx); err != nil {
 		return err
@@ -554,28 +566,48 @@ func (s *Store) syncReplicas(ctx context.Context, tx *sql.Tx, app string, n, gen
 }
 
 // placePending gives a node to every running replica that has none, except
-// held replicas: their volume was on a removed node.
+// held replicas: their volume was on a removed node. With the scheduler as
+// the placement function, it does nothing when what it reads is the same as
+// when it last ran and placed nothing (placecache.go).
 func (s *Store) placePending(ctx context.Context, tx *sql.Tx) error {
-	pending, err := queryAssignments(ctx, tx, `r.desired = 'running' AND r.node_id IS NULL AND r.held = 0`)
-	if err != nil || len(pending) == 0 {
+	rows, err := queryPending(ctx, tx)
+	if err != nil || len(rows) == 0 {
 		return err
 	}
 	nodes, err := listNodes(ctx, tx)
 	if err != nil {
 		return err
 	}
+	at := s.now()
+	var fp *[sha256.Size]byte
+	reasons := make([]string, len(rows))
+	if s.defaultPlace {
+		f, err := placedPrint(ctx, tx)
+		if err != nil {
+			return err
+		}
+		fp = &f
+		for i, r := range rows {
+			reasons[i] = r.as.PendingReason
+		}
+		if s.placeSkip(s.placeInputs(nodes, rows, reasons, f, at)) {
+			return nil
+		}
+	}
 	// Every replica that still has a container on a node holds its host
 	// ports and capacity, marked for removal or not, and so does every surge.
-	placed, err := placedOn(ctx, tx)
+	placed, err := placedFrom(ctx, tx, fp)
 	if err != nil {
 		return err
 	}
-	now := s.now().UnixNano()
-	for _, p := range pending {
+	now := at.UnixNano()
+	placedAny := false
+	for k, r := range rows {
+		p := r.as
 		var id string
 		candidates, perr := nodesFor(nodes, p.Spec)
 		if perr == nil {
-			id, perr = s.place(candidates, slices.Clone(placed), p.Spec, p.Index, s.now())
+			id, perr = s.place(candidates, slices.Clone(placed), p.Spec, p.Index, at)
 			if perr != nil && len(candidates) > 0 && len(candidates) < len(nodes) && len(boundAddrs(p.Spec)) > 0 {
 				// Placement saw only the nodes with the address, so its
 				// reason, such as "no node is ready", is about those.
@@ -591,8 +623,9 @@ func (s *Store) placePending(ctx context.Context, tx *sql.Tx) error {
 			}
 		}
 		if perr != nil {
+			reasons[k] = perr.Error()
 			if _, err := tx.ExecContext(ctx, `UPDATE replicas SET pending_reason = ?, updated_at = ? WHERE app = ? AND idx = ?`,
-				perr.Error(), now, p.App, p.Index); err != nil {
+				reasons[k], now, p.App, p.Index); err != nil {
 				return err
 			}
 			continue
@@ -603,6 +636,12 @@ func (s *Store) placePending(ctx context.Context, tx *sql.Tx) error {
 		}
 		p.NodeID, p.PendingReason = id, ""
 		placed = append(placed, p)
+		placedAny = true
+	}
+	// Nothing was placed, so the rows are as they were but for the reasons
+	// just written: the next run with the same inputs reaches the same end.
+	if fp != nil && !placedAny {
+		s.placeDone(s.placeInputs(nodes, rows, reasons, *fp, at))
 	}
 	return nil
 }
@@ -620,6 +659,7 @@ func queryAssignments(ctx context.Context, q querier, where string, args ...any)
 		return nil, err
 	}
 	defer rows.Close()
+	c := cacheOf(q)
 	var out []Assignment
 	for rows.Next() {
 		var a Assignment
@@ -627,8 +667,8 @@ func queryAssignments(ctx context.Context, q querier, where string, args ...any)
 		if err := rows.Scan(&a.App, &a.Index, &a.NodeID, &a.Generation, &a.Desired, &a.PendingReason, &specJSON); err != nil {
 			return nil, err
 		}
-		if err := json.Unmarshal([]byte(specJSON), &a.Spec); err != nil {
-			return nil, fmt.Errorf("app %s: stored spec: %w", a.App, err)
+		if a.Spec, err = c.decode(a.App, a.Generation, specJSON); err != nil {
+			return nil, err
 		}
 		out = append(out, a)
 	}

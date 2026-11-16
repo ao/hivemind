@@ -84,17 +84,10 @@ func schedReplica(app string, idx, gen int, a spec.App) scheduler.Replica {
 }
 
 // placedOn returns every assignment that holds a node, including replicas
-// marked for removal (their containers still run) and surges.
+// marked for removal (their containers still run) and surges. In a
+// transaction it reads them once, and again only when they changed.
 func placedOn(ctx context.Context, q querier) ([]Assignment, error) {
-	as, err := queryAssignments(ctx, q, `r.node_id IS NOT NULL`)
-	if err != nil {
-		return nil, err
-	}
-	surges, err := querySurges(ctx, q, `1`)
-	if err != nil {
-		return nil, err
-	}
-	return append(as, surges...), nil
+	return placedFrom(ctx, q, nil)
 }
 
 // ReconcileNodes is the server's sweep. It marks nodes whose lease has lapsed
