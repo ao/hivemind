@@ -1,6 +1,9 @@
 package store
 
 import (
+	"database/sql"
+	"reflect"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -147,3 +150,53 @@ var errNoNode = errString("no node will do")
 type errString string
 
 func (e errString) Error() string { return string(e) }
+
+// placedOn in a transaction, read and then from its cache, returns what
+// the queries of replicas and surges return, replicas marked for removal
+// included, in the same order, with specs decoded once.
+func TestPlacedOnReadsWhatTheJoinReads(t *testing.T) {
+	e := newRolloutEnv(t, node1, nodeB)
+	e.put(web(3))
+	e.put(withEnv(3, "2"))
+	e.advance() // a surge of replica 0 on nodeB
+	if _, err := e.s.PutApp(e.ctx, spec.App{Name: "db", Image: "redis:7-alpine", Replicas: 2,
+		Ports: []spec.Port{{Host: 6379, Container: 6379}}}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := e.s.Scale(e.ctx, "web", 2); err != nil { // replica 2 is marked for removal
+		t.Fatal(err)
+	}
+	err := e.s.tx(e.ctx, func(tx *sql.Tx) error {
+		as, err := queryAssignments(e.ctx, tx, `r.node_id IS NOT NULL`)
+		if err != nil {
+			return err
+		}
+		surges, err := querySurges(e.ctx, tx, `1`)
+		if err != nil {
+			return err
+		}
+		want := append(as, surges...)
+		got, err := placedOn(e.ctx, tx)
+		if err != nil {
+			return err
+		}
+		if len(surges) == 0 || !slices.ContainsFunc(as, func(a Assignment) bool { return a.Desired == Removed }) {
+			t.Fatalf("the store has no surge or no replica marked for removal: %+v %+v", as, surges)
+		}
+		if !reflect.DeepEqual(got, want) {
+			t.Fatalf("placedOn:\n%+v\nthe join:\n%+v", got, want)
+		}
+		// The second read in the transaction is the cached one.
+		again, err := placedOn(e.ctx, tx)
+		if err != nil {
+			return err
+		}
+		if !reflect.DeepEqual(again, want) {
+			t.Fatalf("placedOn again: %+v", again)
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+}
