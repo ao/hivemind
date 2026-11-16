@@ -137,6 +137,18 @@ func (m *Monitor) Run(ctx context.Context) {
 	}
 }
 
+// AssumeHealthy starts the monitor as healthy rather than starting. An agent
+// that restarted uses it for a container its last report called healthy,
+// which has run on since. Failures from the next checks count as usual, so
+// a container that broke meanwhile becomes unhealthy after Retries of them.
+func (m *Monitor) AssumeHealthy() {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.tr.state == Starting && m.checked.IsZero() {
+		m.tr.state = Healthy
+	}
+}
+
 // Result returns the latest view.
 func (m *Monitor) Result() Result {
 	m.mu.Lock()

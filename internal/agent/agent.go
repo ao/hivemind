@@ -99,6 +99,7 @@ type Agent struct {
 	restarts map[string]*restartState // by container name
 	probes   map[string]*probe        // by container name, for running containers with a health check
 	seeded   bool                     // restart counts have been read from the store
+	healthy  map[string]bool          // by container ID: healthy in the node's last report, until its probe starts
 	wakeAt   time.Time                // when the next scheduled restart or route drain is due, or zero
 	unrouted map[string]time.Time     // by container name: when a routed container was first seen unassigned
 	pulls    map[pullKey]*pullState   // failed pulls, for their backoff
@@ -138,6 +139,7 @@ func New(cfg Config) (*Agent, error) {
 		trigger:  make(chan struct{}, 1),
 		restarts: map[string]*restartState{},
 		probes:   map[string]*probe{},
+		healthy:  map[string]bool{},
 		unrouted: map[string]time.Time{},
 		pulls:    map[pullKey]*pullState{},
 		launches: map[string]*launchState{},

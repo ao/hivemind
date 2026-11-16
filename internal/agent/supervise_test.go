@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/ao/hivemind/internal/spec"
+	"github.com/ao/hivemind/internal/store"
 )
 
 // fakeClock is a clock the test moves by hand.
@@ -370,5 +371,59 @@ func TestContainerWithoutHealthCheckIsReadyWhenRunning(t *testing.T) {
 	st := e.status("web")[0]
 	if !st.Ready || st.Health != "" || st.CrashLooping || st.RestartCount != 0 {
 		t.Fatalf("status: %+v", st)
+	}
+}
+
+// An agent that restarts while its containers run on, as in an upgrade of
+// hivemind, keeps a container its last report called healthy healthy and
+// ready, rather than starting it over as "starting" until its first check
+// passes. The soak through the routers saw every routed replica on a node
+// leave the routing table for a few seconds whenever its agent restarted.
+func TestRestartedAgentKeepsAHealthyContainerReady(t *testing.T) {
+	e := newEnv(t)
+	app := web(1)
+	app.Ports = nil
+	// No check runs during the test: the interval is an hour.
+	app.Health = &spec.Health{Exec: []string{"true"}, Interval: spec.Duration(time.Hour),
+		Timeout: spec.Duration(time.Second), Retries: 2}
+	e.put(app)
+	e.rt.setExec(func(context.Context, string, []string) (int, error) { return 0, nil })
+	e.reconcile()
+	st := e.status("web")[0]
+	if st.Ready || st.Health != "starting" {
+		t.Fatalf("a new container before its first check: %+v, want starting and not ready", st)
+	}
+	id := st.ContainerID
+
+	for _, c := range []struct {
+		name      string
+		health    string
+		ready     bool
+		container string
+		want      bool
+	}{
+		{"healthy in the last report", "healthy", true, id, true},
+		{"starting in the last report", "starting", false, id, false},
+		{"unhealthy in the last report", "unhealthy", false, id, false},
+		{"healthy, but another container", "healthy", true, "c-other", false},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			if err := e.st.ReportStatus(ctxT(t), nodeID, []store.Status{{Name: st.Name, ContainerID: c.container,
+				App: "web", Replica: 0, Generation: st.Generation, State: "running", Health: c.health, Ready: c.ready}}); err != nil {
+				t.Fatal(err)
+			}
+			e.newAgent() // the agent restarts; the container runs on
+			e.reconcile()
+			got := e.status("web")[0]
+			if got.ContainerID != id {
+				t.Fatalf("the container was replaced: %s, want %s", got.ContainerID, id)
+			}
+			if got.Ready != c.want || (c.want && got.Health != "healthy") || (!c.want && got.Health != "starting") {
+				t.Fatalf("after the restart: health %q, ready %v; want ready %v", got.Health, got.Ready, c.want)
+			}
+		})
+	}
+	if n := e.rt.counts(false)["exec"]; n != 0 {
+		t.Fatalf("%d checks ran; the test relies on none", n)
 	}
 }

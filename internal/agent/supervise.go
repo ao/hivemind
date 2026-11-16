@@ -75,7 +75,13 @@ func (a *Agent) restartsOf(name string) *restartState {
 
 // seedRestarts loads the restart counts from the node's last status report.
 // It runs once per agent, before the first pass that creates or restarts
-// anything.
+// anything. It also remembers which containers that report called healthy,
+// by container ID: a restarted agent's new probe starts from that, rather
+// than from "starting", so a container that kept running while the agent
+// restarted (an upgrade of hivemind) stays ready, and in the routing table.
+// Without it, every routed replica with a health check on the node left the
+// table until its first check passed again, and an upgrade of every node at
+// once answered 503 for a few seconds.
 func (a *Agent) seedRestarts(ctx context.Context) error {
 	sr, ok := a.cfg.Source.(statusReader)
 	if !ok {
@@ -88,6 +94,9 @@ func (a *Agent) seedRestarts(ctx context.Context) error {
 	for _, x := range reported {
 		if x.RestartCount > 0 {
 			a.restartsOf(x.Name).restarts = x.RestartCount
+		}
+		if x.ContainerID != "" && x.State == "running" && x.Health == string(health.Healthy) && x.Ready {
+			a.healthy[x.ContainerID] = true
 		}
 	}
 	return nil
@@ -277,6 +286,12 @@ func (a *Agent) probeFor(ctx context.Context, c runtime.Container, h spec.Health
 	}
 	pctx, cancel := context.WithCancel(context.Background())
 	mon := health.NewMonitor(h, health.Target{ContainerID: c.ID, IP: ci.IPAddress}, a.cfg.Runtime, ci.StartedAt, a.cfg.Clock)
+	if a.healthy[c.ID] {
+		// The same container, healthy in the last report before this agent
+		// started: its next check decides, as it would have.
+		mon.AssumeHealthy()
+	}
+	delete(a.healthy, c.ID)
 	p := &probe{mon: mon, cancel: cancel}
 	a.probes[c.Name] = p
 	go mon.Run(pctx)
@@ -294,6 +309,9 @@ func (a *Agent) stopProbe(name string) {
 // forget drops the restart state and probes of containers that are not kept
 // this pass, and records when the next scheduled restart is due.
 func (a *Agent) forget(kept map[string]bool) {
+	// Only the first pass after a start can use the last report's health;
+	// later passes have their own probes.
+	clear(a.healthy)
 	for name := range a.restarts {
 		if !kept[name] {
 			delete(a.restarts, name)
