@@ -105,7 +105,8 @@ health:
 EOF
 hivemind deploy -f web.yaml
 hivemind status web
-curl -s localhost:4483/v1/routes -H "Authorization: Bearer $HIVEMIND_TOKEN"
+# HIVEMIND_TOKEN: the admin token that init printed, also in <data-dir>/admin.token.
+curl -s http://127.0.0.1:4483/v1/routes -H "Authorization: Bearer $HIVEMIND_TOKEN"
 ```
 
 Once the certificate is issued, `https://www.example.com/` answers from any of the three machines. In the integration test, against Pebble with its validation delays off, all three routers served the host 7 seconds after the deploy (three Docker-in-Docker nodes on one EC2 c8g.4xlarge); a real CA takes as long as it takes. A second deploy that changes the spec rolls the replicas over without a failed request.
