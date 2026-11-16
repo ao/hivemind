@@ -141,6 +141,9 @@ func TestParseImage(t *testing.T) {
 		"nginx@sha256:" + strings.Repeat("a", 64):     "docker.io/library/nginx@sha256:" + strings.Repeat("a", 64),
 		"nginx:1.2@sha256:" + strings.Repeat("0", 64): "docker.io/library/nginx:1.2@sha256:" + strings.Repeat("0", 64),
 		"my_org/my-app.v2__x:Tag_1.2-rc":              "docker.io/my_org/my-app.v2__x:Tag_1.2-rc",
+		// Docker reads index.docker.io as docker.io, and so adds library/.
+		"index.docker.io/nginx":      "docker.io/library/nginx:latest",
+		"index.docker.io/user/app:1": "docker.io/user/app:1",
 	}
 	for in, want := range cases {
 		img, err := ParseImage(in)
@@ -155,6 +158,89 @@ func TestParseImage(t *testing.T) {
 	for _, bad := range []string{"", "Nginx", "nginx:", ":tag", "a//b", "nginx@sha256:abc", "-x", "x-", "a b", "nginx:-x", strings.Repeat("a", 256), "host:99999999/x"} {
 		if _, err := ParseImage(bad); err == nil {
 			t.Errorf("%q accepted", bad)
+		}
+	}
+}
+
+// The registry of an image, whose credential a pull sends, follows Docker's
+// rules: the first component is a registry when it has a dot or a colon, is
+// localhost, or has an upper-case letter; otherwise the image is on Docker
+// Hub. Docker Hub's three names are one host.
+func TestImageRegistry(t *testing.T) {
+	digest := "@sha256:" + strings.Repeat("b", 64)
+	cases := []struct{ ref, want string }{
+		{"nginx", "docker.io"},
+		{"nginx:alpine", "docker.io"},
+		{"user/app:1", "docker.io"},
+		{"myregistry/app", "docker.io"}, // a Docker Hub namespace, not a host
+		{"docker.io/library/nginx", "docker.io"},
+		{"index.docker.io/nginx", "docker.io"},
+		{"registry-1.docker.io/library/nginx:1", "docker.io"},
+		{"ghcr.io/o/r:tag", "ghcr.io"},
+		{"localhost/app", "localhost"},
+		{"localhost:5000/app", "localhost:5000"},
+		{"localhost:5000/app:dev", "localhost:5000"},
+		{"127.0.0.1:5000/app", "127.0.0.1:5000"},
+		{"host:5000/a/b" + digest, "host:5000"},
+		{"host:5000/a/b:1" + digest, "host:5000"},
+		{"registry.example.com:443/a/b/c:1", "registry.example.com:443"},
+		{"Registry.Example.COM/app", "registry.example.com"},
+		{"MyRegistry/app", "myregistry"}, // upper case makes it a host, as in Docker
+	}
+	for _, c := range cases {
+		got, err := RegistryHost(c.ref)
+		if err != nil || got != c.want {
+			t.Errorf("RegistryHost(%q) = %q, %v; want %q", c.ref, got, err, c.want)
+		}
+	}
+	if _, err := RegistryHost("Bad Name"); err == nil {
+		t.Error("RegistryHost of an invalid reference succeeded")
+	}
+}
+
+func TestParseRegistryHost(t *testing.T) {
+	ok := map[string]string{
+		"ghcr.io":                  "ghcr.io",
+		"GHCR.io":                  "ghcr.io",
+		"docker.io":                "docker.io",
+		"index.docker.io":          "docker.io",
+		"registry-1.docker.io":     "docker.io",
+		"localhost":                "localhost",
+		"localhost:5000":           "localhost:5000",
+		"registry.example.com:443": "registry.example.com:443",
+		"10.0.0.5:5000":            "10.0.0.5:5000",
+		"MyRegistry":               "myregistry",
+	}
+	for in, want := range ok {
+		got, err := ParseRegistryHost(in)
+		if err != nil || got != want {
+			t.Errorf("ParseRegistryHost(%q) = %q, %v; want %q", in, got, err, want)
+		}
+		// The host of a credential is the registry of an image on it.
+		if img, err := RegistryHost(in + "/app"); err != nil || img != got {
+			t.Errorf("an image on %q has registry %q, %v; the credential is for %q", in, img, err, got)
+		}
+	}
+	bad := map[string]string{
+		"":                "required",
+		"https://ghcr.io": "without a scheme",
+		"ghcr.io/":        "without a path",
+		"ghcr.io/org":     "without a path",
+		"myregistry":      "repository on Docker Hub",
+		"ghcr.io:0":       "port must be",
+		"ghcr.io:65536":   "port must be",
+		"ghcr.io:":        "want a host name",
+		"-bad.io":         "want a host name",
+		"a b.io":          "want a host name",
+		"[::1]:5000":      "want a host name",
+		"ghcr.io:5000:1":  "want a host name",
+		"ghcr.io\n":       "want a host name",
+		"user@ghcr.io":    "want a host name",
+	}
+	bad[strings.Repeat("a", 253)+".io"] = "longer than"
+	for in, want := range bad {
+		if _, err := ParseRegistryHost(in); err == nil || !strings.Contains(err.Error(), want) {
+			t.Errorf("ParseRegistryHost(%q): %v, want an error with %q", in, err, want)
 		}
 	}
 }

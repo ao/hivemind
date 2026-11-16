@@ -165,21 +165,24 @@ func ParseImage(ref string) (Image, error) {
 		}
 	}
 	parts := strings.Split(rest, "/")
-	if len(parts) > 1 && (strings.ContainsAny(parts[0], ".:") || parts[0] == "localhost" || strings.ToLower(parts[0]) != parts[0]) {
+	if len(parts) > 1 && isRegistryName(parts[0]) {
 		img.Domain = parts[0]
 		parts = parts[1:]
 		if !domainRE.MatchString(img.Domain) {
 			return Image{}, fmt.Errorf("%q: invalid registry %q", ref, img.Domain)
 		}
+		if img.Domain == dockerHubLegacy {
+			img.Domain = DockerHub
+		}
 	} else {
-		img.Domain = "docker.io"
+		img.Domain = DockerHub
 	}
 	for _, p := range parts {
 		if !pathRE.MatchString(p) {
 			return Image{}, fmt.Errorf("%q: invalid repository name", ref)
 		}
 	}
-	if img.Domain == "docker.io" && len(parts) == 1 {
+	if img.Domain == DockerHub && len(parts) == 1 {
 		parts = append([]string{"library"}, parts...)
 	}
 	img.Path = strings.Join(parts, "/")
@@ -194,6 +197,77 @@ func ParseImage(ref string) (Image, error) {
 
 // Repository returns domain/path.
 func (i Image) Repository() string { return i.Domain + "/" + i.Path }
+
+// Docker Hub's names. Docker reads index.docker.io in an image reference as
+// docker.io (legacyDefaultDomain in github.com/distribution/reference, the
+// package the Docker CLI and daemon parse references with).
+// registry-1.docker.io is the host Docker Hub serves the registry API on; a
+// reference keeps it as written, but the account behind it is the same.
+const (
+	DockerHub        = "docker.io"
+	dockerHubLegacy  = "index.docker.io"
+	dockerHubAPIHost = "registry-1.docker.io"
+)
+
+// isRegistryName reports whether the first component of a reference names a
+// registry rather than a Docker Hub namespace. This is Docker's rule
+// (splitDockerDomain in github.com/distribution/reference): it has a dot or
+// a colon, is localhost, or has an upper-case letter.
+func isRegistryName(s string) bool {
+	return strings.ContainsAny(s, ".:") || s == "localhost" || strings.ToLower(s) != s
+}
+
+// Registry returns the host whose credentials a pull of the image uses: the
+// reference's registry in lower case, with registry-1.docker.io given as
+// docker.io. ParseRegistryHost gives a credential's host in the same form.
+func (i Image) Registry() string { return canonicalRegistry(i.Domain) }
+
+func canonicalRegistry(d string) string {
+	d = strings.ToLower(d)
+	if d == dockerHubLegacy || d == dockerHubAPIHost {
+		return DockerHub
+	}
+	return d
+}
+
+// RegistryHost returns Image.Registry for an image reference.
+func RegistryHost(ref string) (string, error) {
+	img, err := ParseImage(ref)
+	if err != nil {
+		return "", err
+	}
+	return img.Registry(), nil
+}
+
+// ParseRegistryHost checks the host of a registry credential and returns it
+// in the form Image.Registry gives: lower case, with index.docker.io and
+// registry-1.docker.io as docker.io. The host is a registry as an image
+// reference names one: a DNS name or IPv4 address with an optional port, or
+// localhost. A name Docker would read as a Docker Hub namespace, such as
+// "myregistry" in "myregistry/app", is refused, since no image could use it.
+func ParseRegistryHost(h string) (string, error) {
+	switch {
+	case h == "":
+		return "", errors.New("registry host is required")
+	case len(h) > maxImageLen:
+		return "", fmt.Errorf("registry host is longer than %d characters", maxImageLen)
+	case strings.Contains(h, "://"):
+		return "", fmt.Errorf("registry host %q: give the host without a scheme, such as ghcr.io", h)
+	case strings.Contains(h, "/"):
+		return "", fmt.Errorf("registry host %q: give the host without a path, such as ghcr.io or registry.example.com:5000", h)
+	case !domainRE.MatchString(h):
+		return "", fmt.Errorf("registry host %q: want a host name or IPv4 address with an optional port, such as ghcr.io or registry.example.com:5000", h)
+	case !isRegistryName(h):
+		return "", fmt.Errorf("registry host %q: Docker reads %s/<name> as a repository on Docker Hub, so no image can use it; give a host with a dot or a port, or localhost", h, h)
+	}
+	if i := strings.LastIndex(h, ":"); i >= 0 {
+		port, err := strconv.Atoi(h[i+1:])
+		if err != nil || port < 1 || port > 65535 {
+			return "", fmt.Errorf("registry host %q: port must be 1 to 65535", h)
+		}
+	}
+	return canonicalRegistry(h), nil
+}
 
 // String returns the normalised reference.
 func (i Image) String() string {
