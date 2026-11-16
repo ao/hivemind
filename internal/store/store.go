@@ -21,6 +21,7 @@ import (
 	"slices"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/ao/hivemind/internal/scheduler"
@@ -213,6 +214,11 @@ func WithClock(now func() time.Time) Option { return func(s *Store) { s.now = no
 // the time to judge their age by.
 func (s *Store) Now() time.Time { return s.now() }
 
+// SetStarted records when serve started. The routing table then leaves out
+// the server's own node's reports from before it, and counts other nodes'
+// leases from it at the earliest (see RouteTable). serve calls it once.
+func (s *Store) SetStarted(t time.Time) { s.started.Store(t.UnixNano()) }
+
 // WithMinReady sets how long a node must have been ready before it gets new
 // replicas. The default is scheduler.DefaultMinReady (30 s). Zero means no
 // wait; tests that place replicas straight after registering a node use it.
@@ -234,9 +240,12 @@ type Store struct {
 	// rdb is a pool of read-only connections for the reads outside a
 	// transaction, the API's GETs and the node API's reads among them. In
 	// WAL mode they run beside the writer, and each sees the last commit.
-	rdb         *sql.DB
-	place       PlaceFunc
-	now         func() time.Time
+	rdb   *sql.DB
+	place PlaceFunc
+	now   func() time.Time
+	// started is when serve started, in Unix nanoseconds (SetStarted); 0
+	// before it is set.
+	started     atomic.Int64
 	minReady    time.Duration
 	minReadySet bool
 	log         *slog.Logger

@@ -135,8 +135,6 @@ A worker has no metrics listener, so its router's counters are not exported yet.
 - The table a router serves is up to a second old, longer while it cannot reach the server. For up to 15 seconds after a node is lost, its replicas stay in the table and their dials fail; each such request costs up to 2 seconds before it goes to another replica.
 - A request whose body has started to go to a replica is not retried on another one.
 - A router keeps idle connections to each replica. When a replica's machine stops without closing them (power off), the next request on such a connection waits for a reply that never comes, up to the 60 seconds above, and then gets `502`. In the [second soak](soak.md#second-soak-routing-a-private-registry-and-clients-outside-the-cluster) that was one request per router and host; the requests after it dialled, waited the 2 seconds, and went to another replica.
-- After `hivemind restore`, the server's first routing table can hold only the server's own replicas as they were at the backup, whose containers no longer exist on a new machine. Until the workers report to the new server, about a second, the routers answer `502` for every routed host.
-- A new host's first certificate can fail its HTTP-01 challenge if the CA reaches a router that has not read the new table yet: that router answers `404`, and certmagic tries again a minute later.
 - A worker's router needs a 2.2 server. Workers older than 2.2 take no routed replicas.
 - The routers share one ACME account and one set of certificates. Each router on each node holds every routed host's private key in memory.
 

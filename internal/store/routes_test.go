@@ -339,3 +339,54 @@ func TestDrainOfARoutedAppLeavesTheNode(t *testing.T) {
 		t.Fatalf("drain surge: %+v", surges)
 	}
 }
+
+// After serve starts, the table leaves out the server's own replicas as the
+// store last had them (after a restore on a new machine they are gone), and
+// keeps a worker's for the lease timeout, as the worker was up before the
+// start: its containers ran on, and its router served them. The soak
+// through the routers saw 502s for a second after a restore, from the
+// restored machine's stale endpoints.
+func TestRouteTableAfterAStart(t *testing.T) {
+	e := newRolloutEnv(t)
+	if err := e.s.InitCluster(e.ctx, Cluster{AdminTokenHash: [32]byte{1}, NodeID: node1}); err != nil {
+		t.Fatal(err)
+	}
+	e.renewAt(node1, "10.0.0.1")                 // the server's own node
+	e.renewAt(nodeB, "10.0.0.2")                 // a worker
+	e.put(routed("web", 1, "www.example.com"))   // placed on node1
+	e.put(routed("blocker", 1, "b.example.com")) // placed on nodeB
+	if got := e.nodesOf("web"); !slices.Equal(got, []string{node1}) {
+		t.Fatalf("web on %v", got)
+	}
+	if got := e.nodesOf("blocker"); !slices.Equal(got, []string{nodeB}) {
+		t.Fatalf("blocker on %v", got)
+	}
+	e.report(node1, routedContainer("web", 0, 1, 32768))
+	e.report(nodeB, routedContainer("blocker", 0, 1, 33000))
+
+	// The server is down for a minute and starts again. Its own node renews
+	// its lease at once; the worker has not reported yet.
+	e.clock.Advance(time.Minute)
+	e.s.SetStarted(e.clock.Now())
+	e.renewAt(node1, "10.0.0.1")
+	e.clock.Advance(time.Second)
+	tab := e.table()
+	if len(tab["www.example.com"]) != 0 {
+		t.Fatalf("the server's own replica from before the start: %v; want none until it reports", tab["www.example.com"])
+	}
+	if !slices.Equal(tab["b.example.com"], []string{"10.0.0.2:33000"}) {
+		t.Fatalf("the worker's replica 1 s after the start: %v; want it kept until the worker reports", tab["b.example.com"])
+	}
+
+	// The server's agent reports: its replica is back, at its new port.
+	e.report(node1, routedContainer("web", 0, 1, 40000))
+	if got := e.table()["www.example.com"]; !slices.Equal(got, []string{"10.0.0.1:40000"}) {
+		t.Fatalf("after the server's report: %v", got)
+	}
+
+	// The worker never reports: it leaves the table when the grace ends.
+	e.clock.Advance(15 * time.Second)
+	if got := e.table()["b.example.com"]; len(got) != 0 {
+		t.Fatalf("16 s after the start, the worker silent: %v", got)
+	}
+}

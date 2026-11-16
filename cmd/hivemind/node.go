@@ -532,6 +532,7 @@ func runServe(ctx context.Context, cfg *config.Config, log *slog.Logger, rt runt
 	// reports.
 	agentLog := log.With("component", "agent")
 	started := time.Now()
+	st.SetStarted(started)
 	onPass := func(d time.Duration, err error) {
 		m.ObserveReconcile(d, err)
 		if aerr := st.AdvanceRollouts(context.Background()); aerr != nil {
