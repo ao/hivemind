@@ -20,6 +20,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
+	"slices"
 	"testing"
 	"time"
 
@@ -238,6 +239,60 @@ func BenchmarkScalePut(b *testing.B) {
 				}
 				b.StartTimer()
 			}
+		})
+	}
+}
+
+// One node's report when it changed since the last: one container's
+// readiness flips at every report, so every report writes its rows.
+func BenchmarkScaleReportChanged(b *testing.B) {
+	for _, n := range benchSizes {
+		b.Run(fmt.Sprintf("replicas=%d", n*5), func(b *testing.B) {
+			e := benchStore(b, n, false)
+			ctx := context.Background()
+			id := e.nodes[3]
+			rep := [2][]store.Status{reportFor(b, e.st, id), reportFor(b, e.st, id)}
+			rep[1][0].Ready = false
+			b.ResetTimer()
+			for i := 0; i < b.N; i++ {
+				if err := e.st.ReportStatus(ctx, id, rep[i%2]); err != nil {
+					b.Fatal(err)
+				}
+			}
+		})
+	}
+}
+
+// GET /v1/status while the ten nodes report, one after another as fast as
+// the store takes them, each report changed from the node's last.
+func BenchmarkScaleStatusUnderReports(b *testing.B) {
+	for _, n := range benchSizes {
+		b.Run(fmt.Sprintf("replicas=%d", n*5), func(b *testing.B) {
+			e := benchStore(b, n, false)
+			ctx, cancel := context.WithCancel(context.Background())
+			done := make(chan struct{})
+			go func() {
+				defer close(done)
+				for flip := true; ctx.Err() == nil; flip = !flip {
+					for _, id := range e.nodes {
+						rep := slices.Clone(e.reports[id])
+						if flip && len(rep) > 0 {
+							rep[0].Ready = false
+						}
+						_ = e.st.ReportStatus(ctx, id, rep)
+					}
+				}
+			}()
+			b.Cleanup(func() {
+				cancel()
+				<-done
+			})
+			time.Sleep(100 * time.Millisecond)
+			b.ResetTimer()
+			for i := 0; i < b.N; i++ {
+				e.get(b, "/v1/status")
+			}
+			b.StopTimer()
 		})
 	}
 }
