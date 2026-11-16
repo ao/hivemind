@@ -54,7 +54,7 @@ cleanup() {
 		kill "$stopper" 2>/dev/null || true
 	fi
 	docker rm -f "$gocont" >/dev/null 2>&1 || true
-	docker rm -f "$regcont" >/dev/null 2>&1 || true
+	docker rm -fv "$regcont" >/dev/null 2>&1 || true
 	docker rm -fv "$dind" >/dev/null 2>&1 || true
 	docker network rm "$net" >/dev/null 2>&1 || true
 	docker volume rm "$sockvol" "$datavol" "$regvol" >/dev/null 2>&1 || true
@@ -199,12 +199,12 @@ stopper=$!
 docker logs -f "$gocont" || true
 rc=$(docker wait "$gocont")
 # The private registry test must have run, not been skipped or filtered out.
-if [ "$rc" = 0 ] && ! docker logs "$gocont" 2>&1 | grep -q -- '--- PASS: TestCLIPrivateRegistry'; then
+if [ "$rc" = 0 ] && ! docker logs "$gocont" 2>&1 | grep -- '--- PASS: TestCLIPrivateRegistry' >/dev/null; then
 	echo "integration-docker: TestCLIPrivateRegistry did not pass" >&2
 	rc=1
 fi
 # The daemon got the password in X-Registry-Auth; its log must not have it.
-if docker logs "$dind" 2>&1 | grep -qF -- "$regpw"; then
+if docker logs "$dind" 2>&1 | grep -F -- "$regpw" >/dev/null; then
 	echo "integration-docker: the Docker daemon's log has the registry password" >&2
 	rc=1
 fi
