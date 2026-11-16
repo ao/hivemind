@@ -2,7 +2,7 @@
 
 A backup is a copy of the server's state, enough to start the same cluster on another machine: the store, the cluster CA, and the admin token file. Workers keep no state that the server needs, so there is nothing to back up on them.
 
-A backup holds the cluster CA's private key. Whoever has the file can sign a certificate for any node ID, join machines to the cluster, and read every app's environment values from the store. It also holds the admin token in plain text, when the data directory has the token file. Keep a backup as private as the data directory: mode 0600, on a disk only root or the hivemind user can read, and encrypted when it leaves the machine.
+A backup holds the cluster CA's private key. Whoever has the file can sign a certificate for any node ID, join machines to the cluster, and read every app's environment values and every registry password from the store. It also holds the admin token in plain text, when the data directory has the token file. Keep a backup as private as the data directory: mode 0600, on a disk only root or the hivemind user can read, and encrypted when it leaves the machine.
 
 ## Taking a backup
 
