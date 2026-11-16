@@ -178,6 +178,8 @@ func FuzzDecodeStatus(f *testing.F) {
 func FuzzDecodeAssignments(f *testing.F) {
 	f.Add([]byte(`{"assignments":[{"app":"web","index":0,"node_id":"node-a","generation":1,"desired":"running","spec":{"name":"web","image":"nginx","replicas":1}}]}`))
 	f.Add([]byte(`{"assignments":[]}`))
+	f.Add([]byte(`{"assignments":[{"app":"p","index":0,"node_id":"node-a","generation":1,"desired":"running","spec":{"name":"p","image":"ghcr.io/a/b:1"},"registry_auth":{"host":"ghcr.io","username":"u","password":"p"}}]}`))
+	f.Add([]byte(`{"assignments":[{"app":"p","generation":1,"desired":"running","spec":{"image":"x"},"registry_auth":{"host":"GHCR.io"}}]}`))
 	f.Add([]byte(`{"assignments":[{"app":"web","desired":"removed","spec":{"image":"x"}}],"extra":1}`))
 	f.Add([]byte(`{"assignments":[{"app":"web","index":-5,"generation":-1,"spec":{"image":""}}]}`))
 	f.Fuzz(func(t *testing.T, data []byte) {

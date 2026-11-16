@@ -404,7 +404,7 @@ func (l AssignmentList) Validate() error {
 			return fmt.Errorf("%w: assignment desired %q is not running or removed", ErrInvalid, a.Desired)
 		}
 		if a.RegistryAuth != nil {
-			if err := a.RegistryAuth.validate(a.Spec.Image); err != nil {
+			if err := a.RegistryAuth.validate(); err != nil {
 				return fmt.Errorf("%w: assignment for %q replica %d: %v", ErrInvalid, a.App, a.Index, err)
 			}
 		}
@@ -412,18 +412,21 @@ func (l AssignmentList) Validate() error {
 	return nil
 }
 
-// validate checks a credential that came with an assignment for image: its
-// host is the image's registry, and the username and password pass the
-// store's rules. Errors hold neither.
-func (r RegistryAuth) validate(image string) error {
-	host, err := spec.ParseRegistryHost(r.Host)
-	if err != nil || host != r.Host {
+// validate checks the form of a credential that came with an assignment: a
+// host in canonical form, and a username and password. The size and
+// character rules are the server's, which checks them when it stores the
+// credential; a worker that refused a credential would refuse every
+// assignment on its node with it. The agent sends a credential only for
+// the registry of the image, and drops one for another. Errors hold neither
+// the username nor the password.
+func (r RegistryAuth) validate() error {
+	if host, err := spec.ParseRegistryHost(r.Host); err != nil || host != r.Host {
 		return errors.New("registry credential has a malformed host")
 	}
-	if img, err := spec.RegistryHost(image); err != nil || img != host {
-		return errors.New("registry credential is for another registry than the image's")
+	if r.Username == "" || r.Password == "" {
+		return errors.New("registry credential has no username or no password")
 	}
-	return store.ValidateRegistryCredential(r.Username, r.Password)
+	return nil
 }
 
 // Validate checks every container in the report.

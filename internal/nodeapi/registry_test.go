@@ -49,16 +49,13 @@ func TestAssignmentCarriesRegistryAuth(t *testing.T) {
 }
 
 func TestAssignmentRegistryAuthValidate(t *testing.T) {
-	cases := map[string]store.RegistryAuth{
-		"another registry":   {Host: "registry.example.com", Username: "u", Password: wirePassword},
+	bad := map[string]store.RegistryAuth{
 		"host not canonical": {Host: "GHCR.io", Username: "u", Password: wirePassword},
 		"bad host":           {Host: "https://ghcr.io", Username: "u", Password: wirePassword},
 		"no username":        {Host: "ghcr.io", Password: wirePassword},
 		"no password":        {Host: "ghcr.io", Username: "u"},
-		"newline":            {Host: "ghcr.io", Username: "u", Password: wirePassword + "\n"},
-		"long password":      {Host: "ghcr.io", Username: "u", Password: strings.Repeat("p", store.MaxRegistryPasswordLen+1)},
 	}
-	for name, auth := range cases {
+	for name, auth := range bad {
 		list := AssignmentList{Assignments: FromStore([]store.Assignment{credAssignment(&auth)}, true)}
 		err := list.Validate()
 		if !errors.Is(err, ErrInvalid) {
@@ -66,6 +63,19 @@ func TestAssignmentRegistryAuthValidate(t *testing.T) {
 		}
 		if err != nil && strings.Contains(err.Error(), wirePassword) {
 			t.Errorf("%s: the error %q has the password", name, err)
+		}
+	}
+	// The size and character rules are the server's, and a credential for
+	// another registry is the agent's to drop: neither refuses the list,
+	// and so every assignment on the node.
+	ok := map[string]store.RegistryAuth{
+		"another registry": {Host: "registry.example.com", Username: "u", Password: wirePassword},
+		"long password":    {Host: "ghcr.io", Username: "u", Password: strings.Repeat("p", store.MaxRegistryPasswordLen+1)},
+	}
+	for name, auth := range ok {
+		list := AssignmentList{Assignments: FromStore([]store.Assignment{credAssignment(&auth)}, true)}
+		if err := list.Validate(); err != nil {
+			t.Errorf("%s: %v", name, err)
 		}
 	}
 }
