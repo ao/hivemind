@@ -29,6 +29,9 @@ func TestMain(m *testing.M) {
 		release()
 		os.Exit(0)
 	}
+	if os.Getenv(otherUserHelperEnv) != "" {
+		os.Exit(otherUserHelper())
+	}
 	os.Exit(m.Run())
 }
 

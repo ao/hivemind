@@ -37,7 +37,7 @@ sudo systemctl enable --now hivemind
 sudo hivemind status
 ```
 
-`init` wrote the CLI's config for root, so `sudo hivemind ...` on the server finds the API and the token.
+`init` wrote the CLI's config for root, so `sudo hivemind ...` on the server finds the API and the token. Without `sudo`, the CLI cannot read `/var/lib/hivemind` and says so: `hivemind on this machine was set up by root: this user cannot read /var/lib/hivemind, so this CLI has no API token for its cluster; run sudo hivemind status, or give the token with --token or HIVEMIND_TOKEN`. Do not run `hivemind init` as that user: it would make a second cluster, whose `serve` cannot take port 4483 while the first one runs.
 
 ## Worker
 

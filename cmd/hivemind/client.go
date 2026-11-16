@@ -123,6 +123,9 @@ type clientFlags struct {
 	clientConfig string
 	caCert       string
 	json         bool
+	// cmd is the command the flags belong to, for messages that say how
+	// to run it again. It may be nil.
+	cmd *cobra.Command
 }
 
 // addClientFlags registers the connection flags and --json.
@@ -135,7 +138,7 @@ func addClientFlags(cmd *cobra.Command) *clientFlags {
 // addConnFlags registers the flags that say which server to call and how,
 // for a command whose output has no JSON form.
 func addConnFlags(cmd *cobra.Command) *clientFlags {
-	f := &clientFlags{}
+	f := &clientFlags{cmd: cmd}
 	fl := cmd.Flags()
 	fl.StringVar(&f.server, "server", "", "server URL (env "+envServer+"; default from the client config, then "+defaultServer+")")
 	fl.StringVar(&f.token, "token", "", "API token (env "+envToken+"; default from the client config's token file)")
@@ -162,6 +165,11 @@ func (f *clientFlags) client() (*apiClient, error) {
 	var cc clientConfig
 	if err == nil {
 		if cc, err = readClientConfig(ccPath, explicit); err != nil {
+			if errors.Is(err, fs.ErrPermission) {
+				if oerr := othersFilesError(ccPath, commandLine(f.cmd)); oerr != nil {
+					return nil, oerr
+				}
+			}
 			return nil, err
 		}
 	} else if explicit {
@@ -180,11 +188,22 @@ func (f *clientFlags) client() (*apiClient, error) {
 			return nil, fmt.Errorf("client config %s: token-file must name an %s file", ccPath, auth.TokenFileName)
 		}
 		if token, err = auth.ReadAdminToken(filepath.Dir(cc.TokenFile)); err != nil {
+			if errors.Is(err, fs.ErrPermission) {
+				if oerr := othersFilesError(cc.TokenFile, commandLine(f.cmd)); oerr != nil {
+					return nil, oerr
+				}
+			}
 			return nil, err
 		}
 	}
 	if token == "" {
 		if err := workerHereError(config.DataDir(), "it has no API token"); err != nil {
+			return nil, err
+		}
+		// Without a token, init is the advice only when no one else set
+		// up hivemind here: on a server that root set up, init would make
+		// a second cluster beside it.
+		if err := othersClusterError(commandLine(f.cmd)); err != nil {
 			return nil, err
 		}
 		return nil, fmt.Errorf("no API token: pass --token, set %s, or run `hivemind init` on this machine", envToken)

@@ -143,6 +143,15 @@ inside() {
 			token=$(grep -o 'hm_[A-Za-z0-9_-]*' "$work/init.out" | head -n 1 || true)
 			[ "${#token}" = 46 ] || fail "init printed no admin token"
 			[ "$(cat /var/lib/hivemind/admin.token)" = "$token" ] || fail "the token init printed is not the one in admin.token"
+			# Another user on this machine cannot read root's data directory,
+			# and is told to use sudo, not to run init.
+			other=$(env -i PATH=/usr/local/bin:/usr/bin:/bin HOME=/nonexistent \
+				setpriv --reuid=65534 --regid=65534 --clear-groups hivemind status 2>&1 || true)
+			case "$other" in
+			*"set up by root: this user cannot read /var/lib/hivemind,"*"run sudo hivemind status,"*)
+				echo "quickstart-check: as another user, status says: $other" ;;
+			*) fail "hivemind status as another user says: $other" ;;
+			esac
 			;;
 		"hivemind serve")
 			hivemind serve </dev/null >"$work/serve.log" 2>&1 &
