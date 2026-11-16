@@ -25,16 +25,23 @@ Admin token, shown only this once:
 
 It is also saved in /var/lib/hivemind/admin.token (mode 0600). The server keeps only its SHA-256 digest.
 The CLI on this machine reads the server address and token file from /root/.config/hivemind/config.yaml.
+
+Start the node with `hivemind serve`. From another shell or machine, use
+
+    export HIVEMIND_SERVER=http://127.0.0.1:4483
+    export HIVEMIND_TOKEN=<the token above>
 ```
 
 The paths depend on who runs `init`. On Linux, a user other than root gets `~/.local/state/hivemind` and `~/.config/hivemind/config.yaml`. Setting `--data-dir` or `HIVEMIND_DATA_DIR` moves the data directory.
 
-You do not need to copy the token for the CLI on this machine. `init` wrote a client config that names the server and the token file. From another machine, or to use `curl`, pass the token yourself:
+You do not need to copy the token for the CLI on this machine. `init` wrote a client config that names the server and the token file. As another user on this machine, or to use `curl`, pass the token yourself:
 
 ```sh
 export HIVEMIND_SERVER=http://127.0.0.1:4483
 export HIVEMIND_TOKEN=hm_...
 ```
+
+The API listens on loopback only, so the CLI on another machine cannot reach it at that address. To use the CLI from another machine, serve the API on a non-loopback `--api-addr` with `--api-tls-cert` and `--api-tls-key`, and give that CLI the certificate with `--ca-cert`; see [the API](api.md#tls).
 
 `init` refuses to run again on the same data directory, so a second run cannot replace the token.
 
@@ -74,13 +81,13 @@ hivemind status
 APP  IMAGE         GENERATION  DESIRED  RUNNING
 web  nginx:alpine  1           1        1
 
-APP  REPLICA  NODE               GENERATION  STATE    CONTAINER     DETAIL
-web  0        node-ea6188a5133b  1           running  fe8344510103  -
+APP  REPLICA  NODE               GENERATION  STATE    HEALTH  RESTARTS  CONTAINER     DETAIL
+web  0        node-ea6188a5133b  1           running  -       0         fe8344510103  -
 ```
 
-`DESIRED` is the replica count the spec asks for, and `RUNNING` counts the replicas whose container is running at the current generation. In the second table, `STATE` is the container's state from the engine, and `DETAIL` shows the last error or the reason a replica is pending.
+`DESIRED` is the replica count the spec asks for, and `RUNNING` counts the replicas whose container is running at the current generation. In the second table, `STATE` is the container's state from the engine, `HEALTH` is the health check's result (`-` when the app has none), `RESTARTS` counts the agent's restarts of the container, and `DETAIL` shows the last error or the reason a replica is pending.
 
-When `STATE` is `running`, the port answers:
+Until the image is pulled, `STATE` is `pending` and `CONTAINER` is `-`. Run `status` again. When `STATE` is `running`, the port answers:
 
 ```sh
 curl -fsS http://127.0.0.1:8080/ > /dev/null
@@ -105,6 +112,7 @@ hivemind status worker
 ```
 
 ```
+worker: created, generation 1, 1 replica
 worker: 2 replicas
 ```
 
@@ -112,9 +120,9 @@ worker: 2 replicas
 APP     IMAGE         GENERATION  DESIRED  RUNNING
 worker  nginx:alpine  1           2        2
 
-APP     REPLICA  NODE               GENERATION  STATE    CONTAINER     DETAIL
-worker  0        node-ea6188a5133b  1           running  425040ec2a1e  -
-worker  1        node-ea6188a5133b  1           running  b49469bbab0e  -
+APP     REPLICA  NODE               GENERATION  STATE    HEALTH  RESTARTS  CONTAINER     DETAIL
+worker  0        node-ea6188a5133b  1           running  -       0         425040ec2a1e  -
+worker  1        node-ea6188a5133b  1           running  -       0         b49469bbab0e  -
 ```
 
 Scaling does not change the generation. Scaling down removes the highest-numbered replicas.
