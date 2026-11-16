@@ -35,33 +35,6 @@ const (
 // has an address.
 var errNoRoutableNode = errors.New("routed apps run only on nodes that report a private address (hivemind 2.2 or later), and no node does")
 
-// routable returns, in a new slice, the nodes that can run a replica of a:
-// every node for an app without routes, and the nodes with an address for
-// one with routes.
-func routable(nodes []Node, a spec.App) []Node {
-	if len(a.Routes) == 0 {
-		return slices.Clone(nodes)
-	}
-	out := make([]Node, 0, len(nodes))
-	for _, n := range nodes {
-		if n.Address != "" {
-			out = append(out, n)
-		}
-	}
-	return out
-}
-
-// nodeRoutable reports whether the node reported an address, and so can run
-// a routed replica.
-func nodeRoutable(ctx context.Context, tx *sql.Tx, id string) (bool, error) {
-	var addr string
-	err := tx.QueryRowContext(ctx, `SELECT address FROM nodes WHERE id = ?`, id).Scan(&addr)
-	if errors.Is(err, sql.ErrNoRows) {
-		return false, nil
-	}
-	return addr != "", err
-}
-
 // releaseUnroutable takes the running replicas of a routed app off nodes that
 // reported no address, so they are placed again where they can run. Without
 // it, a recreated app would get its routes on the nodes of its old replicas.

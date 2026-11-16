@@ -231,7 +231,10 @@ func printStatus(out io.Writer, apps []server.AppStatus) {
 			if r.Desired != "running" {
 				state += " (removing)"
 			}
-			detail := firstNonEmpty(r.Error, r.PendingReason, "-")
+			// A replica on a node has a reason only when the server knows
+			// why it cannot run there, which says more than the engine's
+			// error from the last attempt.
+			detail := firstNonEmpty(r.PendingReason, r.Error, "-")
 			if r.CrashLooping {
 				detail = "crash-looping"
 				if r.NextRestart != nil {

@@ -275,7 +275,9 @@ func (s *Store) pause(ctx context.Context, tx *sql.Tx, r rolloutRow, surged bool
 
 // startMove starts the move of replica rep to the rollout's target. It takes a
 // surge on another node when one can take the replica, and otherwise changes
-// the replica's generation in place.
+// the replica's generation in place. When the replica's node cannot run the
+// new generation (see nodeMisfit), the replica is placed again instead, and a
+// replica with a volume, whose data is on that node, pauses the rollout.
 func (s *Store) startMove(ctx context.Context, tx *sql.Tx, r rolloutRow, a spec.App, rep Assignment) error {
 	now := s.now().UnixNano()
 	placed, err := queryAssignments(ctx, tx, `r.desired = 'running' AND r.node_id IS NOT NULL`)
@@ -286,7 +288,7 @@ func (s *Store) startMove(ctx context.Context, tx *sql.Tx, r rolloutRow, a spec.
 	if err != nil {
 		return err
 	}
-	routable, err := nodeRoutable(ctx, tx, rep.NodeID)
+	misfit, err := nodeMisfit(ctx, tx, rep.NodeID, a)
 	if err != nil {
 		return err
 	}
@@ -295,10 +297,20 @@ func (s *Store) startMove(ctx context.Context, tx *sql.Tx, r rolloutRow, a spec.
 		if err := s.placeSurge(ctx, tx, rep.App, rep.Index, surgeNode, r.target); err != nil {
 			return err
 		}
-	case len(a.Routes) > 0 && !routable:
-		// The new generation has routes, and the replica's node reported no
-		// address: a worker older than 2.2, which cannot run it. The replica
-		// gives up the node and is placed again, on a node with an address.
+	case misfit != "" && len(a.Volumes) > 0:
+		// The new generation cannot run on the replica's node, and its
+		// volume is there. Moving it would start it with an empty volume,
+		// so the rollout stops before it touches the replica.
+		_, err := tx.ExecContext(ctx, `UPDATE rollouts SET state = 'paused', reason = ?, step_idx = -1, step_from = 0, step_since = 0,
+			updated_at = ? WHERE app = ?`,
+			fmt.Sprintf("rollout to generation %d stopped: replica %d has its volume on node %s, which cannot run generation %d: %s",
+				r.target, rep.Index, rep.NodeID, r.target, misfit), now, rep.App)
+		return err
+	case misfit != "":
+		// The new generation cannot run on the replica's node: it has
+		// routes and the node reported no address (a worker older than
+		// 2.2), or a host port binds an address the node does not have. The
+		// replica gives up the node and is placed again, where it can run.
 		if _, err := tx.ExecContext(ctx, `UPDATE replicas SET generation = ?, node_id = NULL, pending_reason = '', updated_at = ?
 			WHERE app = ? AND idx = ?`, r.target, now, rep.App, rep.Index); err != nil {
 			return err
@@ -327,7 +339,8 @@ func (s *Store) startMove(ctx context.Context, tx *sql.Tx, r rolloutRow, a spec.
 
 // surgeNode picks the node for a surge of rep, whose spec is a. A node can
 // take it when it is not rep's node, its lease is current, it is eligible,
-// and nothing on it publishes a host port that a publishes. Placement then
+// it can run a (nodesFor: an address for routes, the address a host port
+// binds), and nothing on it publishes a host port that a publishes. Placement then
 // chooses among those nodes, with placed counted against them. A replica with
 // a volume is never surged: a copy elsewhere would start with an empty
 // volume.
@@ -351,12 +364,14 @@ func (s *Store) surgeNode(ctx context.Context, tx *sql.Tx, a spec.App, rep Assig
 		return "", "", err
 	}
 	now := s.now()
+	fit, _ := nodesFor(nodes, a)
 	var candidates []Node
-	portsInUse := false
-	for _, n := range routable(nodes, a) {
+	portsInUse, others := false, false
+	for _, n := range fit {
 		if n.ID == rep.NodeID && !(sameNode && len(a.Routes) > 0) {
 			continue
 		}
+		others = true
 		if !n.Eligible || now.Sub(n.LastLease) > scheduler.DefaultLeaseTimeout {
 			continue
 		}
@@ -367,7 +382,10 @@ func (s *Store) surgeNode(ctx context.Context, tx *sql.Tx, a spec.App, rep Assig
 		candidates = append(candidates, n)
 	}
 	if len(candidates) == 0 {
-		if portsInUse {
+		switch addrs := boundAddrs(a); {
+		case !others && len(addrs) > 0:
+			return "", bindPhrase(a, addrs[0]) + ", which no other node has", nil
+		case portsInUse:
 			return "", hostPortsReason(a), nil
 		}
 		return "", "no other node is ready and eligible", nil

@@ -17,6 +17,9 @@
 #   - Task 9: four replicas that publish host port 8080 land as three replicas
 #     on three different nodes, and the fourth stays pending with the
 #     host-port reason; each node answers on 127.0.0.1:8080
+#   - a port bound to w1's address runs only on w1, and answers there; a
+#     deploy on w2's address moves it to w2; a port bound to an address no
+#     node has stays pending, with the address in its reason
 #   - logs: hivemind logs on the server reads a spread replica on w1, with
 #     --tail and in full, stdout and stderr. With -f it shows a line written
 #     after it started, exits 0 on SIGINT, and the worker logs that its stream
@@ -186,6 +189,36 @@ for id in "$CL_S_ID" "$W1_ID" "$W2_ID"; do
 	fi
 done
 cl_note "each node answers on 127.0.0.1:8080 for its web replica"
+
+# A port bound to a node's own address. The replica goes to that node, and to
+# no other, where the bind would fail. A rollout to w2's address moves it to
+# w2. A port on an address that no node has stays pending, and the reason
+# names the address.
+W1_IP=$(cl_ip_of "$W1")
+W2_IP=$(cl_ip_of "$W2")
+docker exec "$S" hivemind deploy --name pinned --image nginx:alpine --port "$W1_IP:8081:80" >/dev/null || cl_fail "deploy pinned"
+pinned_on() { [ "$(running_on pinned "$1")" -eq 1 ]; }
+wait_for 90 pinned_on "$W1_ID" || cl_fail "pinned, bound to $W1_IP, does not run on $W1_ID: $(app_rows pinned | tr '\n' ';')"
+wait_for 30 docker exec "$W1" sh -c "wget -q -O - http://$W1_IP:8081/ | grep -q nginx" ||
+	cl_fail "pinned does not answer on $W1_IP:8081"
+[ "$(containers_of pinned | awk '{ print $1 }' | sort -u)" = "$W1" ] ||
+	cl_fail "pinned has containers outside $W1: $(containers_of pinned | tr '\n' ';')"
+cl_note "pinned, bound to $W1_IP:8081, runs on $W1_ID and answers there"
+docker exec "$S" hivemind deploy --name pinned --image nginx:alpine --port "$W2_IP:8081:80" >/dev/null || cl_fail "deploy pinned on $W2_IP"
+wait_for 90 pinned_on "$W2_ID" || cl_fail "pinned, bound to $W2_IP, did not move to $W2_ID: $(app_rows pinned | tr '\n' ';')"
+wait_for 30 docker exec "$W2" sh -c "wget -q -O - http://$W2_IP:8081/ | grep -q nginx" ||
+	cl_fail "pinned does not answer on $W2_IP:8081"
+cl_note "after a deploy on $W2_IP:8081, pinned runs on $W2_ID"
+NOWHERE_IP=192.0.2.10
+docker exec "$S" hivemind deploy --name nowhere --image nginx:alpine --port "$NOWHERE_IP:8082:80" >/dev/null || cl_fail "deploy nowhere"
+nowhere_pending() { app_rows nowhere | awk '$3 == "pending"' | grep -q "no node has address $NOWHERE_IP"; }
+wait_for 20 nowhere_pending || cl_fail "nowhere, bound to $NOWHERE_IP, is not pending with the address in its reason: $(app_rows nowhere | tr '\n' ';')"
+[ -z "$(containers_of nowhere)" ] || cl_fail "nowhere has containers: $(containers_of nowhere | tr '\n' ';')"
+cl_note "nowhere, bound to $NOWHERE_IP, is pending: $(app_rows nowhere | tr '\n' ';')"
+docker exec "$S" hivemind delete pinned >/dev/null || cl_fail "delete pinned"
+docker exec "$S" hivemind delete nowhere >/dev/null || cl_fail "delete nowhere"
+pinned_gone() { [ -z "$(containers_of pinned)" ]; }
+wait_for 60 pinned_gone || cl_fail "pinned's containers were not removed: $(containers_of pinned | tr '\n' ';')"
 
 # Task 10: spread has three replicas without ports, one per node.
 docker exec "$S" hivemind deploy --name spread --image nginx:alpine --replicas 3 >/dev/null || cl_fail "deploy spread"

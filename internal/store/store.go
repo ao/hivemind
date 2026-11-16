@@ -479,11 +479,14 @@ func (s *Store) placePending(ctx context.Context, tx *sql.Tx) error {
 	now := s.now().UnixNano()
 	for _, p := range pending {
 		var id string
-		var perr error
-		if candidates := routable(nodes, p.Spec); len(p.Spec.Routes) > 0 && len(candidates) == 0 {
-			perr = errNoRoutableNode
-		} else {
+		candidates, perr := nodesFor(nodes, p.Spec)
+		if perr == nil {
 			id, perr = s.place(candidates, slices.Clone(placed), p.Spec, p.Index, s.now())
+			if perr != nil && len(candidates) > 0 && len(candidates) < len(nodes) && len(boundAddrs(p.Spec)) > 0 {
+				// Placement saw only the nodes with the address, so its
+				// reason, such as "no node is ready", is about those.
+				perr = fmt.Errorf("%v (%s)", perr, onlyOn(candidates, p.Spec))
+			}
 		}
 		if perr == nil {
 			switch i := slices.IndexFunc(nodes, func(n Node) bool { return n.ID == id }); {

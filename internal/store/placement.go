@@ -99,7 +99,9 @@ func placedOn(ctx context.Context, q querier) ([]Assignment, error) {
 
 // ReconcileNodes is the server's sweep. It marks nodes whose lease has lapsed
 // as lost and releases their replicas, drops the replica reasons on nodes
-// that are back, and places every pending replica. It returns the IDs of the
+// that are back, releases the replicas whose host ports bind an address their
+// node does not have (see placeMisplaced), and places every pending replica.
+// It returns the IDs of the
 // lost nodes, sorted. It is safe to call at any time.
 //
 // A lease counts from the node's last renewal or from since, whichever is
@@ -136,6 +138,9 @@ func (s *Store) ReconcileNodes(ctx context.Context, since time.Time) ([]string, 
 			WHERE pending_reason != '' AND node_id IS NOT NULL
 			AND node_id IN (SELECT id FROM nodes WHERE last_lease >= ?)`,
 			now.UnixNano(), now.UnixNano()-int64(scheduler.DefaultLeaseTimeout)); err != nil {
+			return err
+		}
+		if err := s.placeMisplaced(ctx, tx); err != nil {
 			return err
 		}
 		return s.placePending(ctx, tx)

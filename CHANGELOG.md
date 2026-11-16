@@ -31,6 +31,10 @@ Notable changes to hivemind, newest first. Versions follow [Semantic Versioning]
 - `hivemind node remove` of a node that is ineligible and runs nothing, as after a drain, needs no `--force`, though the node still renews its lease.
 - `serve`, `init` and `join` no longer accept `--server`, and `serve` and `init` no longer accept `--token`. They never used them. `logs` no longer accepts `--json`, which it ignored. Passing one of these flags is now an error. `join --token` is unchanged.
 
+### Fixed
+
+- A host port bound to a specific address (not loopback or a wildcard) is placed only on the node that has that address: its reported `address`, or the server's `--advertise` address. Before, such a replica could land on any node, where every pass created a container whose bind failed and removed it again. With no such node it is `pending`, and the reason names the address. The sweep places again a replica already on the wrong node whose container is not running; one with a volume stays with its data, and its reason says how to run it. A rollout to another node's address moves the replicas there, or pauses for a replica with a volume. A server without `--advertise` takes any address, as it has no workers. A routed replica with a volume on a node without an address now pauses its rollout, rather than being placed again away from its data. In `hivemind status`, `DETAIL` shows the server's reason before the engine's last error.
+
 ## [2.1.0] - Unreleased
 
 ### Added
