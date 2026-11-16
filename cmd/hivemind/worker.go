@@ -13,6 +13,7 @@ import (
 	"log/slog"
 	"net"
 	"net/http"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -188,6 +189,14 @@ func enroll(ctx context.Context, log *slog.Logger, dir, host string, port int, t
 	joinAddr := net.JoinHostPort(host, strconv.Itoa(port+1))
 	reply, err := nodeapi.Join(ctx, joinAddr, token, csr)
 	if err != nil {
+		// The address takes the cluster port, and join dials the port above
+		// it. Given the join port itself, join dials one too high and
+		// reaches nothing.
+		var ue *url.Error
+		if port == defaultClusterPort+1 && errors.As(err, &ue) {
+			return fmt.Errorf("%w; %s is the default join port, but join takes the server's cluster port, %s, or no port, and dials the join port above it",
+				err, net.JoinHostPort(host, strconv.Itoa(port)), net.JoinHostPort(host, strconv.Itoa(defaultClusterPort)))
+		}
 		return err
 	}
 	st := workerState{NodeID: reply.NodeID, Server: net.JoinHostPort(host, strconv.Itoa(port)), Joined: time.Now().UTC()}

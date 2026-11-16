@@ -379,3 +379,19 @@ func TestWorkerExitsWhenRemoved(t *testing.T) {
 		t.Fatalf("restarted worker: %v after %s", err, time.Since(start))
 	}
 }
+
+// join given the join port, 4485, dials 4486 and reaches nothing; the error
+// says the address takes the cluster port.
+func TestJoinOnTheJoinPortSaysToUseTheClusterPort(t *testing.T) {
+	dir := filepath.Join(t.TempDir(), "worker")
+	log := slog.New(slog.NewTextHandler(io.Discard, nil))
+	err := enroll(context.Background(), log, dir, "127.0.0.1", defaultClusterPort+1, pki.JoinToken{}.String())
+	if err == nil || !strings.Contains(err.Error(), "127.0.0.1:4485 is the default join port, but join takes the server's cluster port, 127.0.0.1:4484, or no port") {
+		t.Fatalf("join on 4485: %v", err)
+	}
+	// Another port gets no such note.
+	err = enroll(context.Background(), log, dir, "127.0.0.1", 1, pki.JoinToken{}.String())
+	if err == nil || strings.Contains(err.Error(), "join port") {
+		t.Fatalf("join on port 1: %v", err)
+	}
+}
