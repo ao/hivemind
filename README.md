@@ -135,7 +135,7 @@ In the unreleased 2.2.0, an app can name `routes: [{host: www.example.com, port:
 - [Soak test on four machines](docs/soak.md)
 - [CLI reference](docs/cli.md)
 - [HTTP API](docs/api.md)
-- [Upgrading from v1](docs/upgrading.md)
+- [Upgrading from 2.0.0 or v1](docs/upgrading.md)
 - [Roadmap](ROADMAP.md)
 - [Assessment of v1](docs/ASSESSMENT.md) and [the v2 plan](docs/PLAN.md)
 
