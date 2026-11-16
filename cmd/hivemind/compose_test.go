@@ -227,12 +227,12 @@ func TestComposeDeployAndDelete(t *testing.T) {
 	}
 
 	// Again, unchanged, and as JSON.
-	if out, _, err = run(t, "", "compose", "deploy", path); err != nil || out != "db: updated, generation 1, 1 replica\nweb: updated, generation 1, 2 replicas\n" {
+	if out, _, err = run(t, "", "compose", "deploy", path); err != nil || out != "db: unchanged, generation 1, 1 replica\nweb: unchanged, generation 1, 2 replicas\n" {
 		t.Fatalf("second deploy: %v\n%s", err, out)
 	}
 	out, _, err = run(t, "", "compose", "deploy", path, "--json")
 	var prs []server.PutResult
-	if err != nil || json.Unmarshal([]byte(out), &prs) != nil || len(prs) != 2 || prs[0].App.Name != "db" || prs[1].Created {
+	if err != nil || json.Unmarshal([]byte(out), &prs) != nil || len(prs) != 2 || prs[0].App.Name != "db" || prs[1].Created || !prs[0].Unchanged || !prs[1].Unchanged {
 		t.Fatalf("deploy --json: %v\n%s", err, out)
 	}
 
@@ -376,7 +376,7 @@ func TestComposeDeployRefusesAnAppItDidNotDeploy(t *testing.T) {
 	if web, err := st.GetApp(ctx, "web"); err != nil || web.Spec.Image != "nginx:alpine" || web.Origin != "compose:shopapp" {
 		t.Fatalf("web after --replace: %+v, %v", web, err)
 	}
-	if out, _, err = run(t, "", "compose", "deploy", shop); err != nil || out != "api: updated, generation 1, 1 replica\nweb: updated, generation 2, 1 replica\n" {
+	if out, _, err = run(t, "", "compose", "deploy", shop); err != nil || out != "api: unchanged, generation 1, 1 replica\nweb: unchanged, generation 2, 1 replica\n" {
 		t.Fatalf("compose deploy again: %q, %v", out, err)
 	}
 

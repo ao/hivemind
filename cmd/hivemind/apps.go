@@ -141,12 +141,7 @@ the spec stays deployed.`,
 		if cf.json {
 			progress = cmd.ErrOrStderr()
 		} else {
-			verb := "updated"
-			if res.Created {
-				verb = "created"
-			}
-			fmt.Fprintf(cmd.OutOrStdout(), "%s: %s, generation %d, %d %s\n", res.App.Name, verb, res.App.Generation,
-				res.App.Replicas, plural(res.App.Replicas, "replica", "replicas"))
+			printPut(cmd.OutOrStdout(), res)
 		}
 		if wf.wait {
 			if err := waitReady(cmd.Context(), c, progress, res.App.Name, res.App.Generation, wf.timeout); err != nil {
@@ -159,6 +154,20 @@ the spec stays deployed.`,
 		return nil
 	}
 	return cmd
+}
+
+// printPut prints the line for a put: whether it created the app, updated
+// it, or found it as it was, and the generation and replica count.
+func printPut(out io.Writer, res server.PutResult) {
+	verb := "updated"
+	switch {
+	case res.Created:
+		verb = "created"
+	case res.Unchanged:
+		verb = "unchanged"
+	}
+	fmt.Fprintf(out, "%s: %s, generation %d, %d %s\n", res.App.Name, verb, res.App.Generation,
+		res.App.Replicas, plural(res.App.Replicas, "replica", "replicas"))
 }
 
 // readSpecFile decodes one app spec. YAML is a superset of JSON, so one

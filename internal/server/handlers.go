@@ -36,6 +36,9 @@ type AppView struct {
 type PutResult struct {
 	App     AppView `json:"app"`
 	Created bool    `json:"created"`
+	// Unchanged is set when the app existed with the same spec and origin,
+	// so the put changed nothing but its update time.
+	Unchanged bool `json:"unchanged,omitempty"`
 }
 
 // ScaleRequest is the body of POST /v1/apps/{name}/scale.
@@ -217,7 +220,7 @@ func (s *Server) put(w http.ResponseWriter, r *http.Request, a spec.App) {
 		writeError(w, http.StatusBadRequest, "the replace parameter must be true or false")
 		return
 	}
-	_, err := s.cfg.Store.GetApp(r.Context(), a.Name)
+	old, err := s.cfg.Store.GetApp(r.Context(), a.Name)
 	created := errors.Is(err, store.ErrNotFound)
 	if err != nil && !created {
 		s.fail(w, r, err)
@@ -233,7 +236,16 @@ func (s *Server) put(w http.ResponseWriter, r *http.Request, a spec.App) {
 	if created {
 		code = http.StatusCreated
 	}
-	writeJSON(w, code, PutResult{App: view(got), Created: created})
+	unchanged := !created && got.Generation == old.Generation && got.Origin == old.Origin && sameSpec(got.Spec, old.Spec)
+	writeJSON(w, code, PutResult{App: view(got), Created: created, Unchanged: unchanged})
+}
+
+// sameSpec reports whether two stored specs are the same, as the store
+// writes them.
+func sameSpec(a, b spec.App) bool {
+	ja, err1 := json.Marshal(a)
+	jb, err2 := json.Marshal(b)
+	return err1 == nil && err2 == nil && bytes.Equal(ja, jb)
 }
 
 func (s *Server) scaleApp(w http.ResponseWriter, r *http.Request) {

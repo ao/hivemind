@@ -114,3 +114,28 @@ func TestConceptsAppFilesAreValid(t *testing.T) {
 		}
 	}
 }
+
+// deploy of a spec the app already has says unchanged, and one that
+// changes it says updated, with or without a new generation.
+func TestDeployUnchanged(t *testing.T) {
+	apiServer(t, "")
+	for _, c := range []struct {
+		args []string
+		want string
+	}{
+		{[]string{"--name", "web", "--image", "nginx:alpine", "--env", "A=1"}, "web: created, generation 1, 1 replica\n"},
+		{[]string{"--name", "web", "--image", "nginx:alpine", "--env", "A=1"}, "web: unchanged, generation 1, 1 replica\n"},
+		{[]string{"--name", "web", "--image", "nginx:alpine", "--env", "A=1", "--replicas", "2"}, "web: updated, generation 1, 2 replicas\n"},
+		{[]string{"--name", "web", "--image", "nginx:alpine", "--env", "A=2", "--replicas", "2"}, "web: updated, generation 2, 2 replicas\n"},
+		{[]string{"--name", "web", "--image", "nginx:alpine", "--env", "A=2", "--replicas", "2"}, "web: unchanged, generation 2, 2 replicas\n"},
+	} {
+		out, _, err := run(t, "", append([]string{"deploy"}, c.args...)...)
+		if err != nil || out != c.want {
+			t.Fatalf("deploy %v: %q, %v; want %q", c.args, out, err, c.want)
+		}
+	}
+	out, _, err := run(t, "", "deploy", "--name", "web", "--image", "nginx:alpine", "--env", "A=2", "--replicas", "2", "--json")
+	if err != nil || !strings.Contains(out, `"unchanged": true`) {
+		t.Fatalf("deploy --json of the same spec: %v\n%s", err, out)
+	}
+}

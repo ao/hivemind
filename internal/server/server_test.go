@@ -632,3 +632,47 @@ func TestStatusShowsHealthAndRestarts(t *testing.T) {
 		t.Fatalf("replica 1: %+v", r1)
 	}
 }
+
+// A put of the spec and origin an app already has says unchanged; a change
+// to the replica count, the template or the origin does not.
+func TestPutUnchanged(t *testing.T) {
+	h := newHarness(t)
+	put := func(path, body string) PutResult {
+		t.Helper()
+		rec := h.do(t, "PUT", path, body)
+		if rec.Code/100 != 2 {
+			t.Fatalf("PUT %s: %d %s", path, rec.Code, rec.Body)
+		}
+		var pr PutResult
+		if err := json.Unmarshal(rec.Body.Bytes(), &pr); err != nil {
+			t.Fatal(err)
+		}
+		return pr
+	}
+	if pr := put("/v1/apps/web", nginx2); !pr.Created || pr.Unchanged {
+		t.Fatalf("create: %+v", pr)
+	}
+	if pr := put("/v1/apps/web", nginx2); pr.Created || !pr.Unchanged || pr.App.Generation != 1 {
+		t.Fatalf("the same spec again: %+v", pr)
+	}
+	if pr := put("/v1/apps/web", strings.Replace(nginx2, `"replicas":2`, `"replicas":3`, 1)); pr.Unchanged {
+		t.Fatalf("a new replica count: %+v", pr)
+	}
+	if pr := put("/v1/apps/web", strings.Replace(nginx2, `"replicas":2`, `"replicas":3`, 1)); !pr.Unchanged {
+		t.Fatalf("the new count again: %+v", pr)
+	}
+	if pr := put("/v1/apps/web", strings.Replace(nginx2, "nginx:alpine", "nginx:1.27", 1)); pr.Unchanged || pr.App.Generation != 2 {
+		t.Fatalf("a new image: %+v", pr)
+	}
+	if pr := put("/v1/apps/web?origin=compose:shop&replace=true", strings.Replace(nginx2, "nginx:alpine", "nginx:1.27", 1)); pr.Unchanged {
+		t.Fatalf("the same spec, taken over by a project: %+v", pr)
+	}
+	if pr := put("/v1/apps/web?origin=compose:shop", strings.Replace(nginx2, "nginx:alpine", "nginx:1.27", 1)); !pr.Unchanged {
+		t.Fatalf("the same spec from the same project: %+v", pr)
+	}
+	// The reply has no unchanged key when it is false.
+	rec := h.do(t, "PUT", "/v1/apps/api", `{"name":"api","image":"nginx:alpine"}`)
+	if strings.Contains(rec.Body.String(), "unchanged") {
+		t.Fatalf("create reply: %s", rec.Body)
+	}
+}

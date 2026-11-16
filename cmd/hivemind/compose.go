@@ -132,12 +132,7 @@ so an app that another deploy took in the meantime is still refused.`,
 			done = append(done, a.Spec.Name)
 			results = append(results, r)
 			if !cf.json {
-				verb := "updated"
-				if r.Created {
-					verb = "created"
-				}
-				fmt.Fprintf(cmd.OutOrStdout(), "%s: %s, generation %d, %d %s\n", r.App.Name, verb, r.App.Generation,
-					r.App.Replicas, plural(r.App.Replicas, "replica", "replicas"))
+				printPut(cmd.OutOrStdout(), r)
 			}
 		}
 		if cf.json {

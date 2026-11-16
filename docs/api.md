@@ -234,7 +234,7 @@ A write that changes the spec other than the replica count starts a rollout, whi
 
 `origin` is what deployed the app, as the `origin` of its put named it; `hivemind compose deploy` sends `compose:<project>`. It is absent for an app deployed without one.
 
-`PutResult` wraps it: `{"app": AppView, "created": true}`.
+`PutResult` wraps it: `{"app": AppView, "created": true}`. `unchanged` is `true` when the app existed with the same spec and origin, so the put changed nothing but its `updated_at`; it is absent otherwise, and from servers older than 2.2.
 
 `AppStatus` is one app's replicas:
 
