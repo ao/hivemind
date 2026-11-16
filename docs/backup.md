@@ -31,8 +31,10 @@ A cron job that keeps a week of daily backups, in the directory made above. cron
 ## Restoring
 
 ```sh
-hivemind restore hivemind-20261114.tar --data-dir /var/lib/hivemind
+sudo hivemind restore hivemind-20261114.tar --data-dir /var/lib/hivemind
 ```
+
+As a user other than root, `restore` cannot create `/var/lib/hivemind` (`error: mkdir /var/lib/hivemind: permission denied`). Run it as the user that will run `serve`.
 
 `restore` needs a data directory that is missing or empty, and refuses anything else. It checks the backup before it keeps anything:
 
@@ -49,8 +51,8 @@ The workers keep running their containers while the server is gone (see [concept
 
 1. Give the new machine the address the old server advertised. Each worker dials the address in its `node.json`, and checks that the server's certificate names it.
 2. Install the same or a newer hivemind, and Docker Engine.
-3. Copy the latest backup to the machine, and run `hivemind restore <file> --data-dir /var/lib/hivemind`.
-4. Start the server with the same address: `hivemind serve --advertise <address>`, with the same `--cluster-port` as before if you changed it.
+3. Copy the latest backup to the machine, and run `sudo hivemind restore <file> --data-dir /var/lib/hivemind`.
+4. Start the server with the same address: `sudo hivemind serve --advertise <address>`, or the [server unit](systemd.md#server), with the same `--cluster-port` as before if you changed it.
 
 The workers reconnect on their next pass, without joining again: the CA is the same, so the new server's certificate chains to the CA each worker trusts, and each worker's certificate chains to the CA the server trusts. The server's own replicas start again on the new machine. Replicas that ran on workers keep running there. `scripts/integration-cluster.sh` tests this with three nodes in Docker: it backs up a running server, destroys its container, data directory and Docker volume, restores the backup on a new container at the same IP, and checks that both workers, which were not restarted, reconnect, and that the apps return to their replica counts with no replica running twice.
 
