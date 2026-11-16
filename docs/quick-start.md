@@ -62,14 +62,15 @@ The server listens on `127.0.0.1:4483`, and the agent starts with it. Logs go to
 In a second terminal:
 
 ```sh
-hivemind deploy --name web --image nginx:alpine --port 127.0.0.1:8080:80
+hivemind deploy --name web --image nginx:alpine --port 127.0.0.1:8080:80 --wait
 ```
 
 ```
 web: created, generation 1, 1 replica
+web: 1 replica running and ready
 ```
 
-`deploy` returns once the server has stored the spec. The agent pulls the image and starts the container on its next pass, which the server triggers at once. The first pull can take a while.
+The server stores the spec, and the agent pulls the image and starts the container on its next pass, which the server triggers at once. The first pull can take a while. Without `--wait`, `deploy` returns once the spec is stored, after the first line. With it, `deploy` waits until the replica is running and ready, and has stayed so for 3 seconds. While it waits it prints why the replica waits each time the reason changes, such as `web: replica 0: pulling nginx:alpine, started 10:02:11 UTC; the registry has not answered yet`. After 5 minutes, or `--timeout`, it prints the app's status and exits with status 1; the app stays deployed. `--wait` is new in the unreleased 2.2.0.
 
 `--port 127.0.0.1:8080:80` publishes container port 80 on host address 127.0.0.1, port 8080. The address is optional, and it defaults to 127.0.0.1.
 
@@ -89,7 +90,7 @@ web  0        node-ea6188a5133b  1           running  -       0         fe834451
 
 `DESIRED` is the replica count the spec asks for, `RUNNING` counts the replicas whose container is running, and `READY` those of them that pass their health check, or have none, and are not crash-looping. A replica that runs but fails its health check counts in `RUNNING` and not in `READY`. During a rollout, a copy at the old generation counts until it is replaced. In the second table, `STATE` is the container's state from the engine, `HEALTH` is the health check's result (`-` when the app has none), `RESTARTS` counts the agent's restarts of the container, and `DETAIL` shows the reason a replica is pending or cannot run on its node, or else the last error.
 
-Until the image is pulled, `STATE` is `pending` and `CONTAINER` is `-`. Run `status` again. When `STATE` is `running`, the port answers:
+Until the image is pulled, `STATE` is `pending` and `CONTAINER` is `-`, which is what `status` shows right after a `deploy` without `--wait`. When `STATE` is `running`, the port answers:
 
 ```sh
 curl -fsS http://127.0.0.1:8080/ > /dev/null
@@ -109,14 +110,17 @@ This prints the log of replica 0's container. Add `-f` to keep the stream open u
 
 ```sh
 hivemind deploy --name worker --image nginx:alpine
-hivemind scale worker 2
+hivemind scale worker 2 --wait
 hivemind status worker
 ```
 
 ```
 worker: created, generation 1, 1 replica
 worker: 2 replicas
+worker: 2 replicas running and ready
 ```
+
+`scale --wait` waits for every replica, the new one too, as `deploy --wait` does.
 
 ```
 APP     IMAGE         GENERATION  DESIRED  RUNNING  READY

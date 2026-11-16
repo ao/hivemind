@@ -2,13 +2,18 @@
 # Runs the quick start from README.md against a real one-node cluster.
 #
 # The commands in the first sh block under "## Quick start" are read from the
-# README in order and run as written. The script itself handles four things:
+# README in order and run as written, with no waits added: a block a reader
+# pastes must work. The script checks what some of them did:
 #
-#   hivemind init    checks that the token it prints is the one in admin.token;
-#   hivemind serve   runs in the background, after which the script checks
-#                    that the API answers, that the token is not in the log,
-#                    and that no listener is wildcard;
-#   deploy, scale    wait until the running replicas match the desired count;
+#   hivemind init    checks that the token it prints is the one in admin.token,
+#                    and that status run as another user says to use sudo;
+#   hivemind serve   runs in the background, as the README's second terminal
+#                    does, after which the script checks that the API
+#                    answers, that the token is not in the log, and that no
+#                    listener is wildcard;
+#   deploy, scale    with --wait, checks that every replica is running and
+#                    ready when the command returns;
+#   logs             checks that the log shows the quick start's request;
 #   delete           waits until the app is gone and no container carries its
 #                    label.
 #
@@ -87,19 +92,23 @@ inside() {
 		hivemind status "$1" --json 2>/dev/null | sed -n "s/^  \"$2\": \([0-9]*\),\{0,1\}$/\1/p" | head -n 1
 	}
 
-	wait_replicas() {
-		local app=$1 desired running
-		for _ in $(seq 1 120); do
-			desired=$(status_field "$app" desired)
-			running=$(status_field "$app" running)
-			if [ -n "$desired" ] && [ "$desired" = "$running" ]; then
-				echo "quickstart-check: $app has $running of $desired replicas running"
-				return 0
-			fi
-			sleep 1
-		done
-		hivemind status "$app" >&2 || true
-		fail "$app did not reach its desired replica count within 120 seconds"
+	# check_waited APP CMD: after a deploy or scale with --wait, which the
+	# README uses so that the next line does not race the pull, every
+	# replica of APP is running and ready at once, with no wait here.
+	check_waited() {
+		local app=$1 desired running ready
+		case " $2 " in
+		*" --wait "*) ;;
+		*) return 0 ;;
+		esac
+		desired=$(status_field "$app" desired)
+		running=$(status_field "$app" running)
+		ready=$(status_field "$app" ready)
+		if [ -z "$desired" ] || [ "$desired" != "$running" ] || [ "$desired" != "$ready" ]; then
+			hivemind status "$app" >&2 || true
+			fail "right after '$2', $app has $running running and $ready ready of $desired"
+		fi
+		echo "quickstart-check: right after --wait, $app has $ready of $desired replicas running and ready"
 	}
 
 	# containers_with_label counts every container, running or not, that
@@ -165,15 +174,15 @@ inside() {
 			echo "quickstart-check: the API answers 401 without a token, and 200 with the token from init"
 			;;
 		"hivemind deploy "*)
-			eval "$cmd"
+			eval "$cmd" || fail "$cmd exited with $?"
 			app=$(printf '%s\n' "$cmd" | sed -n 's/.*--name \([a-z0-9-]*\).*/\1/p')
-			wait_replicas "$app"
+			check_waited "$app" "$cmd"
 			;;
 		"hivemind scale "*)
-			read -r _ _ app count <<<"$cmd"
-			eval "$cmd"
-			wait_replicas "$app"
+			read -r _ _ app count _ <<<"$cmd"
+			eval "$cmd" || fail "$cmd exited with $?"
 			[ "$(status_field "$app" desired)" = "$count" ] || fail "$app does not have $count desired replicas"
+			check_waited "$app" "$cmd"
 			;;
 		"hivemind delete "*)
 			read -r _ _ app <<<"$cmd"

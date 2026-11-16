@@ -48,7 +48,14 @@ replica's node mounted at that path; an app with a volume has one replica.
 The words after -- are the container's command, in place of the image's. A
 health check, resources and routes need a file. -f - reads the spec from
 standard input. A key the spec does not have is refused with its line, and
-the key it is closest to.`,
+the key it is closest to.
+
+deploy returns once the server has stored the spec; the image is pulled and
+the containers started after that. --wait waits until every replica that
+should run is running and ready at the new generation, and has stayed so for
+3 seconds, printing why a replica waits each time the reason changes. After
+--timeout (default 5m) it prints the app's status and exits with status 1;
+the spec stays deployed.`,
 		Args: func(cmd *cobra.Command, args []string) error {
 			if len(args) > 0 && cmd.ArgsLenAtDash() != 0 {
 				return fmt.Errorf("unexpected argument %q: put the container's command after --, as in hivemind deploy --name x --image busybox -- sleep 60", args[0])
@@ -65,6 +72,7 @@ the key it is closest to.`,
 	fl.StringArrayVar(&ports, "port", nil, "published port, [bind:]host:container[/udp] (repeatable)")
 	fl.StringArrayVar(&env, "env", nil, "environment variable, KEY=VALUE (repeatable)")
 	fl.StringArrayVar(&volumes, "volume", nil, "named volume, name:/path in the container (repeatable)")
+	wf := addWaitFlags(cmd)
 	cmd.RunE = func(cmd *cobra.Command, command []string) error {
 		var a spec.App
 		if file != "" {
@@ -114,6 +122,9 @@ the key it is closest to.`,
 		if a.Name == "" {
 			return errors.New("the app spec has no name")
 		}
+		if err := wf.check(cmd); err != nil {
+			return err
+		}
 		c, err := cf.client()
 		if err != nil {
 			return err
@@ -122,15 +133,25 @@ the key it is closest to.`,
 		if err := c.call(cmd.Context(), "PUT", appPath(a.Name), a, &res); err != nil {
 			return err
 		}
+		progress := cmd.OutOrStdout()
+		if cf.json {
+			progress = cmd.ErrOrStderr()
+		} else {
+			verb := "updated"
+			if res.Created {
+				verb = "created"
+			}
+			fmt.Fprintf(cmd.OutOrStdout(), "%s: %s, generation %d, %d %s\n", res.App.Name, verb, res.App.Generation,
+				res.App.Replicas, plural(res.App.Replicas, "replica", "replicas"))
+		}
+		if wf.wait {
+			if err := waitReady(cmd.Context(), c, progress, res.App.Name, res.App.Generation, wf.timeout); err != nil {
+				return err
+			}
+		}
 		if cf.json {
 			return printJSON(cmd.OutOrStdout(), res)
 		}
-		verb := "updated"
-		if res.Created {
-			verb = "created"
-		}
-		fmt.Fprintf(cmd.OutOrStdout(), "%s: %s, generation %d, %d %s\n", res.App.Name, verb, res.App.Generation,
-			res.App.Replicas, plural(res.App.Replicas, "replica", "replicas"))
 		return nil
 	}
 	return cmd
@@ -333,20 +354,26 @@ engine's last error for it.`,
 				return printJSON(cmd.OutOrStdout(), got)
 			}
 		}
-		apps := make([]server.AppStatus, len(got))
-		readyKnown := true
-		for i, a := range got {
-			apps[i] = a.AppStatus
-			if a.Ready == nil {
-				readyKnown = false
-			} else {
-				apps[i].Ready = *a.Ready
-			}
-		}
+		apps, readyKnown := statusRows(got)
 		printStatus(cmd.OutOrStdout(), apps, readyKnown)
 		return nil
 	}
 	return cmd
+}
+
+// statusRows turns the statuses the CLI read into printStatus's arguments.
+func statusRows(got []appStatus) ([]server.AppStatus, bool) {
+	apps := make([]server.AppStatus, len(got))
+	readyKnown := true
+	for i, a := range got {
+		apps[i] = a.AppStatus
+		if a.Ready == nil {
+			readyKnown = false
+		} else {
+			apps[i].Ready = *a.Ready
+		}
+	}
+	return apps, readyKnown
 }
 
 // appStatus is an app's status as the CLI reads it. A server older than 2.2
@@ -507,13 +534,23 @@ func scaleCmd() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "scale <app> <replicas>",
 		Short: "Set an app's replica count",
-		Args:  cobra.ExactArgs(2),
+		Long: `Set an app's replica count. Scaling keeps the generation: new replicas start
+from the same spec, and scaling down removes the highest-numbered replicas.
+
+--wait waits until every replica that should run is running and ready, and
+has stayed so for 3 seconds, as deploy --wait does; after --timeout (default
+5m) it prints the app's status and exits with status 1.`,
+		Args: cobra.ExactArgs(2),
 	}
 	cf := addClientFlags(cmd)
+	wf := addWaitFlags(cmd)
 	cmd.RunE = func(cmd *cobra.Command, args []string) error {
 		n, err := strconv.Atoi(args[1])
 		if err != nil {
 			return fmt.Errorf("replicas %q: want a number", args[1])
+		}
+		if err := wf.check(cmd); err != nil {
+			return err
 		}
 		c, err := cf.client()
 		if err != nil {
@@ -523,10 +560,20 @@ func scaleCmd() *cobra.Command {
 		if err := c.call(cmd.Context(), "POST", appPath(args[0], "scale"), server.ScaleRequest{Replicas: n}, &v); err != nil {
 			return err
 		}
+		progress := cmd.OutOrStdout()
+		if cf.json {
+			progress = cmd.ErrOrStderr()
+		} else {
+			fmt.Fprintf(cmd.OutOrStdout(), "%s: %d %s\n", v.Name, v.Replicas, plural(v.Replicas, "replica", "replicas"))
+		}
+		if wf.wait {
+			if err := waitReady(cmd.Context(), c, progress, v.Name, v.Generation, wf.timeout); err != nil {
+				return err
+			}
+		}
 		if cf.json {
 			return printJSON(cmd.OutOrStdout(), v)
 		}
-		fmt.Fprintf(cmd.OutOrStdout(), "%s: %d %s\n", v.Name, v.Replicas, plural(v.Replicas, "replica", "replicas"))
 		return nil
 	}
 	return cmd

@@ -207,6 +207,13 @@ health check, resources and routes need a file. -f - reads the spec from
 standard input. A key the spec does not have is refused with its line, and
 the key it is closest to.
 
+deploy returns once the server has stored the spec; the image is pulled and
+the containers started after that. --wait waits until every replica that
+should run is running and ready at the new generation, and has stayed so for
+3 seconds, printing why a replica waits each time the reason changes. After
+--timeout (default 5m) it prints the app's status and exits with status 1;
+the spec stays deployed.
+
 ```
 hivemind deploy [-- command [arg...]] [flags]
 ```
@@ -223,8 +230,10 @@ hivemind deploy [-- command [arg...]] [flags]
 | `--port` | string, repeatable | - | - | published port, [bind:]host:container[/udp] (repeatable) |
 | `--replicas` | int | - | - | number of replicas (default 1) |
 | `--server` | string | - | `HIVEMIND_SERVER` | server URL (env HIVEMIND_SERVER; default from the client config, then http://127.0.0.1:4483) |
+| `--timeout` | duration | `5m0s` | - | with --wait, how long to wait |
 | `--token` | string | - | `HIVEMIND_TOKEN` | API token (env HIVEMIND_TOKEN; default from the client config's token file) |
 | `--volume` | string, repeatable | - | - | named volume, name:/path in the container (repeatable) |
+| `--wait` | bool | - | - | wait until every replica that should run is running and ready |
 
 ### hivemind init
 
@@ -669,7 +678,12 @@ hivemind restore <file> [flags]
 
 ### hivemind scale
 
-Set an app's replica count
+Set an app's replica count. Scaling keeps the generation: new replicas start
+from the same spec, and scaling down removes the highest-numbered replicas.
+
+--wait waits until every replica that should run is running and ready, and
+has stayed so for 3 seconds, as deploy --wait does; after --timeout (default
+5m) it prints the app's status and exits with status 1.
 
 ```
 hivemind scale <app> <replicas> [flags]
@@ -681,7 +695,9 @@ hivemind scale <app> <replicas> [flags]
 | `--client-config` | string | - | `HIVEMIND_CLIENT_CONFIG` | client config file (env HIVEMIND_CLIENT_CONFIG; default $XDG_CONFIG_HOME/hivemind/config.yaml or ~/.config/hivemind/config.yaml) |
 | `--json` | bool | - | - | print JSON instead of a table |
 | `--server` | string | - | `HIVEMIND_SERVER` | server URL (env HIVEMIND_SERVER; default from the client config, then http://127.0.0.1:4483) |
+| `--timeout` | duration | `5m0s` | - | with --wait, how long to wait |
 | `--token` | string | - | `HIVEMIND_TOKEN` | API token (env HIVEMIND_TOKEN; default from the client config's token file) |
+| `--wait` | bool | - | - | wait until every replica that should run is running and ready |
 
 ### hivemind serve
 

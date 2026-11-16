@@ -57,16 +57,16 @@ hivemind init
 # Terminal 1, and keep it running.
 hivemind serve
 
-# Terminal 2.
-hivemind deploy --name web --image nginx:alpine --port 127.0.0.1:8080:80
-# deploy returns before the image is pulled. Run status again until STATE is running.
+# Terminal 2. --wait returns once the replica runs and is ready; the first pull
+# can take a while. 2.0.0 has no --wait: leave it out, and run status until STATE is running.
+hivemind deploy --name web --image nginx:alpine --port 127.0.0.1:8080:80 --wait
 hivemind status
 curl -fsS http://127.0.0.1:8080/ > /dev/null
 hivemind logs web
 
 # worker publishes no port. Two replicas of an app with a host port would clash.
 hivemind deploy --name worker --image nginx:alpine
-hivemind scale worker 2
+hivemind scale worker 2 --wait
 hivemind status worker
 hivemind delete worker
 hivemind delete web
