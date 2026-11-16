@@ -13,7 +13,6 @@ import (
 	"log/slog"
 	"net"
 	"net/http"
-	"net/url"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -73,7 +72,9 @@ func joinCmd() *cobra.Command {
   hivemind join 10.0.0.5 --token <token>
 
 <server> is the server's address, host or host:port, where the port is its
-cluster port (4484 by default). The worker generates a key and a certificate
+cluster port (4484 by default). Port 4485, the default join port, is refused
+before anything is dialled, since join dials the port above the one it is
+given. The worker generates a key and a certificate
 request, presents the join token to the server's join port (the cluster port
 plus one), and checks the reply against the CA fingerprint in the token. It
 then stores its key (mode 0600), its certificate, the cluster CA and its node
@@ -108,6 +109,12 @@ certificates through the server.`,
 			host, port, err := splitServer(args[0])
 			if err != nil {
 				return err
+			}
+			// Given the join port itself, join would dial the port above
+			// it and reach nothing, after the dial's timeout.
+			if port == defaultClusterPort+1 {
+				return fmt.Errorf("%s is the default join port, but join takes the server's cluster port, %s, or no port, and dials the join port above it",
+					net.JoinHostPort(host, strconv.Itoa(port)), net.JoinHostPort(host, strconv.Itoa(defaultClusterPort)))
 			}
 			log, err := newLogger(cfg, cmd.ErrOrStderr())
 			if err != nil {
@@ -194,14 +201,6 @@ func enroll(ctx context.Context, log *slog.Logger, dir, host string, port int, t
 	joinAddr := net.JoinHostPort(host, strconv.Itoa(port+1))
 	reply, err := nodeapi.Join(ctx, joinAddr, token, csr)
 	if err != nil {
-		// The address takes the cluster port, and join dials the port above
-		// it. Given the join port itself, join dials one too high and
-		// reaches nothing.
-		var ue *url.Error
-		if port == defaultClusterPort+1 && errors.As(err, &ue) {
-			return fmt.Errorf("%w; %s is the default join port, but join takes the server's cluster port, %s, or no port, and dials the join port above it",
-				err, net.JoinHostPort(host, strconv.Itoa(port)), net.JoinHostPort(host, strconv.Itoa(defaultClusterPort)))
-		}
 		return err
 	}
 	st := workerState{NodeID: reply.NodeID, Server: net.JoinHostPort(host, strconv.Itoa(port)), Joined: time.Now().UTC()}

@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"log/slog"
 	"os"
 	"path/filepath"
@@ -410,16 +411,27 @@ func TestExitCode(t *testing.T) {
 	}
 }
 
-// join given the join port, 4485, dials 4486 and reaches nothing; the error
-// says the address takes the cluster port.
+// join given the join port, 4485, would dial 4486 and reach nothing after
+// the dial's timeout. It is refused before anything is dialled or written,
+// and the error says the address takes the cluster port. 10.255.255.1 is
+// an address that does not answer, so a dial would take the full timeout.
 func TestJoinOnTheJoinPortSaysToUseTheClusterPort(t *testing.T) {
+	isolate(t)
 	dir := filepath.Join(t.TempDir(), "worker")
-	log := slog.New(slog.NewTextHandler(io.Discard, nil))
-	err := enroll(context.Background(), log, dir, "127.0.0.1", defaultClusterPort+1, pki.JoinToken{}.String())
-	if err == nil || !strings.Contains(err.Error(), "127.0.0.1:4485 is the default join port, but join takes the server's cluster port, 127.0.0.1:4484, or no port") {
-		t.Fatalf("join on 4485: %v", err)
+	start := time.Now()
+	_, _, err := run(t, "", "join", "10.255.255.1:4485", "--token", pki.JoinToken{}.String(), "--data-dir", dir)
+	want := "10.255.255.1:4485 is the default join port, but join takes the server's cluster port, 10.255.255.1:4484, or no port, and dials the join port above it"
+	if err == nil || err.Error() != want {
+		t.Fatalf("join on 4485: %v, want %q", err, want)
+	}
+	if d := time.Since(start); d > 5*time.Second {
+		t.Fatalf("join on 4485 took %s: it dialled", d)
+	}
+	if _, err := os.Stat(dir); !errors.Is(err, fs.ErrNotExist) {
+		t.Fatalf("join on 4485 made its data directory: %v", err)
 	}
 	// Another port gets no such note.
+	log := slog.New(slog.NewTextHandler(io.Discard, nil))
 	err = enroll(context.Background(), log, dir, "127.0.0.1", 1, pki.JoinToken{}.String())
 	if err == nil || strings.Contains(err.Error(), "join port") {
 		t.Fatalf("join on port 1: %v", err)
