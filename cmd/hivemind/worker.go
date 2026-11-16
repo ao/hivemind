@@ -542,6 +542,7 @@ func runWorker(ctx context.Context, cfg *config.Config, log *slog.Logger, rt run
 		}
 	}
 	log.Info("worker running", "node", w.state.NodeID, "server", w.state.Server, "address", addr)
+	go watchClock(renewCtx, client, log, time.Minute)
 	// A removal is final, so the worker stops at the first refusal that says
 	// so, rather than retrying for ever. Its containers are left running.
 	runCtx, stop := context.WithCancelCause(ctx)
@@ -598,6 +599,48 @@ func runWorker(ctx context.Context, cfg *config.Config, log *slog.Logger, rt run
 		return cause // the router failed
 	}
 	return err
+}
+
+// skewReader is the part of the node API client that measures the clock.
+type skewReader interface {
+	ClockSkew() (time.Duration, bool)
+}
+
+// watchClock checks every period how far this machine's clock is from the
+// server's, as the server's replies show it, and warns while it is more than
+// nodeapi.MaxClockSkew off: at once, and then once an hour. A worker whose
+// clock is hours off otherwise works on until a certificate falls outside
+// its validity, and status times from it are off by as much.
+func watchClock(ctx context.Context, c skewReader, log *slog.Logger, every time.Duration) {
+	var warned time.Time
+	check := func() {
+		d, ok := c.ClockSkew()
+		if !ok || (d <= nodeapi.MaxClockSkew && d >= -nodeapi.MaxClockSkew) {
+			warned = time.Time{}
+			return
+		}
+		if !warned.IsZero() && time.Since(warned) < time.Hour {
+			return
+		}
+		warned = time.Now()
+		if d > 0 {
+			log.Warn(fmt.Sprintf("this machine's clock is %s ahead of the server's; times this node reports are off by as much, "+
+				"and once it passes the expiry of the node's certificate the worker stops; run NTP on both machines", d), "skew", d)
+			return
+		}
+		log.Warn(fmt.Sprintf("this machine's clock is %s behind the server's; a certificate the server issues starts 5 minutes "+
+			"before its issue time, so this machine takes a renewed one as not valid yet; run NTP on both machines", -d), "skew", d)
+	}
+	t := time.NewTicker(every)
+	defer t.Stop()
+	for {
+		check()
+		select {
+		case <-ctx.Done():
+			return
+		case <-t.C:
+		}
+	}
 }
 
 // registrar is the part of the node API client that registers a node.

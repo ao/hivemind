@@ -32,8 +32,9 @@ const (
 // valid one, so the node cannot recover by itself.
 func certExpiredError(id string, notAfter time.Time) error {
 	return fmt.Errorf("the certificate of node %s expired at %s, so the server refuses it and it cannot be renewed; "+
-		"on the server, run `hivemind node remove %s`, then join this machine again with an empty --data-dir and a new join token",
-		id, notAfter.UTC().Format(time.RFC3339), id)
+		"on the server, run `hivemind node remove %s`, then join this machine again with an empty --data-dir and a new join token. "+
+		"If this machine's clock is wrong (it reads %s), set it right (NTP) instead, and start the worker again",
+		id, notAfter.UTC().Format(time.RFC3339), id, time.Now().UTC().Format(time.RFC3339))
 }
 
 // certRenewer is the part of the node API client a renewal uses.
@@ -151,6 +152,13 @@ func checkRenewedCert(ca *pki.CA, nodeID string, key *ecdsa.PrivateKey, certPEM 
 	pool.AddCert(ca.Cert)
 	if _, err := leaf.Verify(x509.VerifyOptions{Roots: pool, CurrentTime: now,
 		KeyUsages: []x509.ExtKeyUsage{x509.ExtKeyUsageClientAuth}}); err != nil {
+		var ie x509.CertificateInvalidError
+		if errors.As(err, &ie) && ie.Reason == x509.Expired {
+			// The server issued it a moment ago, so the clocks disagree.
+			return tls.Certificate{}, fmt.Errorf("is valid from %s to %s, and this machine's clock reads %s: "+
+				"this clock or the server's is wrong; set them right (NTP), and the renewal is tried again at the next check",
+				leaf.NotBefore.UTC().Format(time.RFC3339), leaf.NotAfter.UTC().Format(time.RFC3339), now.UTC().Format(time.RFC3339))
+		}
 		return tls.Certificate{}, fmt.Errorf("does not chain to the cluster CA: %w", err)
 	}
 	if id, err := pki.NodeIDFromCert(leaf); err != nil || id != nodeID {

@@ -47,6 +47,7 @@ type Client struct {
 	// stream shares the transport but has no overall timeout, for the log
 	// poll, which sets its own, and for log streams, which run until ended.
 	stream *http.Client
+	clock  *clock // the last measured skew from the server's clock
 }
 
 // idleConnTimeout closes a pooled connection that has not been used for this
@@ -69,9 +70,9 @@ func NewClient(base string, tlsCfg *tls.Config, opts ...ClientOption) (*Client, 
 	if !strings.HasPrefix(base, "https://") {
 		return nil, fmt.Errorf("server URL %q must start with https://", base)
 	}
-	tr := &swapTransport{server: newServerState()}
+	tr := &swapTransport{server: newServerState(), clock: &clock{}}
 	tr.cur.Store(&http.Transport{TLSClientConfig: tlsCfg, IdleConnTimeout: idleConnTimeout})
-	c := &Client{base: strings.TrimRight(base, "/"), tr: tr,
+	c := &Client{base: strings.TrimRight(base, "/"), tr: tr, clock: tr.clock,
 		http: &http.Client{Transport: tr, Timeout: clientTimeout}, stream: &http.Client{Transport: tr}}
 	for _, o := range opts {
 		o(c)
@@ -82,11 +83,12 @@ func NewClient(base string, tlsCfg *tls.Config, opts ...ClientOption) (*Client, 
 // swapTransport sends each request on the transport it holds.
 // ResetConnections replaces that transport, so no request made after a reset
 // reuses a connection opened before it. Each request carries the worker's
-// version, and each reply's server version is recorded.
+// version, and each reply's server version and clock are recorded.
 type swapTransport struct {
 	cur     atomic.Pointer[http.Transport]
 	version string
 	server  *serverState
+	clock   *clock
 }
 
 func (s *swapTransport) RoundTrip(r *http.Request) (*http.Response, error) {
@@ -95,11 +97,14 @@ func (s *swapTransport) RoundTrip(r *http.Request) (*http.Response, error) {
 		r = r.Clone(r.Context())
 		r.Header.Set(VersionHeader, s.version)
 	}
+	sent := time.Now()
 	resp, err := s.cur.Load().RoundTrip(r)
-	if err == nil {
-		s.server.see(resp.Header.Get(VersionHeader))
+	if err != nil {
+		return nil, clockHint(err)
 	}
-	return resp, err
+	s.server.see(resp.Header.Get(VersionHeader))
+	s.clock.observe(sent, time.Now(), resp)
+	return resp, nil
 }
 
 // CloseIdleConnections is what http.Client.CloseIdleConnections calls.
@@ -299,7 +304,7 @@ func Join(ctx context.Context, addr, token string, csr []byte) (JoinReply, error
 	req.Header.Set("Content-Type", "application/json")
 	resp, err := hc.Do(req)
 	if err != nil {
-		return JoinReply{}, fmt.Errorf("joining %s: %w", addr, err)
+		return JoinReply{}, clockHint(fmt.Errorf("joining %s: %w", addr, err))
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
