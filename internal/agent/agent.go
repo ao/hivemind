@@ -36,7 +36,29 @@ const (
 	// ones in flight have had time to finish. Load balancers call this a
 	// deregistration delay.
 	DefaultRouteDrain = 5 * time.Second
+	// DefaultUnreachableWait is the longest wait between passes while the
+	// server cannot be reached. The wait starts at the interval and doubles
+	// with each pass that fails to reach it.
+	DefaultUnreachableWait = 30 * time.Second
+	// DefaultOutageLogEvery is how often Run logs, while the server cannot
+	// be reached, that it still cannot, after the line for the first failed
+	// pass.
+	DefaultOutageLogEvery = time.Minute
 )
+
+// unreachable is what a Source's error has when its request did not reach
+// the server, or got no reply: nodeapi.UnreachableError. The store, the
+// server's own Source, has no such errors.
+type unreachable interface {
+	Unreachable() bool
+}
+
+// serverUnreachable reports whether err says the Source could not reach
+// the server.
+func serverUnreachable(err error) bool {
+	var u unreachable
+	return errors.As(err, &u) && u.Unreachable()
+}
 
 // LeaseRenewer is a Source that can renew the node's lease without a status
 // report. Run renews it every Heartbeat, beside the passes, because a pass
@@ -86,6 +108,12 @@ type Config struct {
 	// keeps running before it is stopped. Zero means DefaultRouteDrain; a
 	// negative value means no wait.
 	RouteDrain time.Duration
+	// UnreachableWait is the longest wait between passes while the Source
+	// cannot reach the server. Zero means DefaultUnreachableWait.
+	UnreachableWait time.Duration
+	// OutageLogEvery is how often a server outage is logged after its first
+	// line. Zero means DefaultOutageLogEvery.
+	OutageLogEvery time.Duration
 }
 
 // Agent reconciles one node.
@@ -121,6 +149,12 @@ func New(cfg Config) (*Agent, error) {
 	}
 	if cfg.Heartbeat <= 0 {
 		cfg.Heartbeat = DefaultHeartbeat
+	}
+	if cfg.UnreachableWait <= 0 {
+		cfg.UnreachableWait = DefaultUnreachableWait
+	}
+	if cfg.OutageLogEvery <= 0 {
+		cfg.OutageLogEvery = DefaultOutageLogEvery
 	}
 	switch {
 	case cfg.RouteDrain == 0:
@@ -166,9 +200,58 @@ func (a *Agent) Trigger() {
 	}
 }
 
+// outage is a run of passes that could not reach the server.
+type outage struct {
+	failures int       // passes in a row that could not reach it
+	since    time.Time // when the first of them ended
+	logged   time.Time // when the outage was last logged
+}
+
+// wait is the time before the next pass during the outage: interval after
+// the first failed pass, doubling with each one after it, up to most, and
+// never less than interval.
+func (o outage) wait(interval, most time.Duration) time.Duration {
+	d := interval
+	for i := 1; i < o.failures && d < most; i++ {
+		d *= 2
+	}
+	return max(interval, min(d, most))
+}
+
+// notePass keeps the outage up to date after a pass that ended with err, and
+// logs it: the first pass that cannot reach the server, then one line every
+// OutageLogEvery with the count, and one when the server answers again.
+// Any other error of the pass is logged as it is.
+func (a *Agent) notePass(o *outage, err error) {
+	now := time.Now()
+	down := err != nil && serverUnreachable(err)
+	switch {
+	case down && o.failures == 0:
+		*o = outage{failures: 1, since: now, logged: now}
+		a.log.Warn(fmt.Sprintf("cannot reach the server; passes back off, up to one every %s, until it answers", a.cfg.UnreachableWait), "err", err)
+		return
+	case down:
+		o.failures++
+		if now.Sub(o.logged) >= a.cfg.OutageLogEvery {
+			o.logged = now
+			a.log.Warn("the server is still unreachable", "for", now.Sub(o.since).Round(time.Second), "failed_passes", o.failures, "err", err)
+		}
+		return
+	case o.failures > 0:
+		a.log.Info("the server answers again", "after", now.Sub(o.since).Round(time.Second), "failed_passes", o.failures)
+		*o = outage{}
+	}
+	if err != nil {
+		a.log.Warn("reconcile pass failed", "err", err)
+	}
+}
+
 // Run makes a pass at once, then one per interval and one per Trigger, until
-// ctx is cancelled. Errors are logged and the next pass retries. It returns
-// nil when ctx is cancelled.
+// ctx is cancelled. Errors are logged and the next pass retries. While the
+// Source cannot reach the server, the passes back off, from the interval
+// doubling to UnreachableWait, and the outage is logged at its start, every
+// OutageLogEvery, and at its end; the lease heartbeat keeps its own timer.
+// It returns nil when ctx is cancelled.
 func (a *Agent) Run(ctx context.Context) error {
 	defer a.Close()
 	if lr, ok := a.cfg.Source.(LeaseRenewer); ok {
@@ -185,11 +268,16 @@ func (a *Agent) Run(ctx context.Context) error {
 	}
 	t := time.NewTicker(a.cfg.Interval)
 	defer t.Stop()
+	var down outage
 	for {
 		start := time.Now()
 		err := a.Reconcile(ctx)
-		if err != nil && ctx.Err() == nil {
-			a.log.Warn("reconcile pass failed", "err", err)
+		if ctx.Err() == nil {
+			wasDown := down.failures > 0
+			a.notePass(&down, err)
+			if wasDown && down.failures == 0 {
+				t.Reset(a.cfg.Interval)
+			}
 		}
 		if a.cfg.OnPass != nil && ctx.Err() == nil {
 			a.cfg.OnPass(time.Since(start), err)
@@ -202,18 +290,28 @@ func (a *Agent) Run(ctx context.Context) error {
 			timer = time.NewTimer(max(0, w.Sub(a.cfg.Clock())))
 			due = timer.C
 		}
+		// While the server cannot be reached, the next pass waits out the
+		// backoff instead of the tick.
+		tick := t.C
+		var backoff *time.Timer
+		if down.failures > 0 {
+			backoff = time.NewTimer(down.wait(a.cfg.Interval, a.cfg.UnreachableWait))
+			tick = backoff.C
+		}
 		select {
 		case <-ctx.Done():
-			if timer != nil {
-				timer.Stop()
-			}
-			return nil
-		case <-t.C:
+		case <-tick:
 		case <-a.trigger:
 		case <-due:
 		}
 		if timer != nil {
 			timer.Stop()
+		}
+		if backoff != nil {
+			backoff.Stop()
+		}
+		if ctx.Err() != nil {
+			return nil
 		}
 	}
 }

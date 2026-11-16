@@ -43,6 +43,11 @@
 #                   worker refuses to start and says what to do.
 #   limits          the largest spec the API accepts (every list at its limit),
 #                   and 100 replicas, deployed for real.
+#   server-down     the server stopped for SERVER_DOWN_SECS (150) under a
+#                   worker. The worker's passes back off to one every 30 s
+#                   and it logs the outage once a minute, without spinning;
+#                   it reaches the server again within one backed-off wait
+#                   of serve starting, and its replicas run on.
 #
 # Each scenario prints CHECK lines (PASS or FAIL) and a RESULT line, and the
 # suite ends with a summary; it exits 1 if any check failed. The observations
@@ -58,7 +63,7 @@ REPO=$(cd "$(dirname "$0")/.." && pwd)
 # shellcheck source=lib/cluster.sh
 . "$REPO/scripts/lib/cluster.sh"
 
-ALL=(docker-restart pulls node-disk server-disk kill-serve crashloop logs-restart datadir limits)
+ALL=(docker-restart pulls node-disk server-disk kill-serve crashloop logs-restart datadir limits server-down)
 if [ $# -gt 0 ]; then SCENARIOS=("$@"); else SCENARIOS=("${ALL[@]}"); fi
 for s in "${SCENARIOS[@]}"; do
 	case " ${ALL[*]} " in
@@ -785,6 +790,103 @@ scenario_limits() {
 	*) fail hundred-and-one "$out" ;;
 	esac
 	result "see the CHECK lines"
+}
+
+# join_pid NODE: the PID of the hivemind join process in NODE.
+join_pid() {
+	docker exec "$1" sh -c 'for p in /proc/[0-9]*; do [ "$(cat $p/comm 2>/dev/null)" = hivemind ] && tr "\0" " " <$p/cmdline 2>/dev/null | grep -q " join " && echo ${p#/proc/}; done; true' | head -n 1
+}
+
+# Case 11. The server down under a worker, for SERVER_DOWN_SECS (150).
+scenario_server_down() {
+	local s=$CL_RUN-sd w=$CL_RUN-sw down=${SERVER_DOWN_SECS:-150} pid lines0 cpu0 cpu1 out starts still fails passes polls t1 el
+	ed_node "$s"
+	ed_node "$w"
+	ed_join "$s" "$w"
+	sleep 5
+	deploy_json "$s" '{"name":"calm","image":"'"$IMG"'","replicas":2,"command":["sleep","86400"]}'
+	wait_for 90 running_count_is "$s" calm 2 || {
+		fail setup "calm is not running on both nodes: $(docker exec "$s" hivemind status calm)"
+		return
+	}
+	pid=$(join_pid "$w")
+	[ -n "$pid" ] || {
+		fail setup "no hivemind join process on $w"
+		return
+	}
+	lines0=$(docker exec "$w" sh -c 'wc -l </var/log/hivemind.log')
+	cpu0=$(cpu_ticks "$w" "$pid")
+	kill_serve "$s" TERM
+	wait_for 30 serve_down "$s" || kill_serve "$s" KILL
+	note "serve stopped at $(date -u +%T); the server stays down for $down s"
+	sleep "$down"
+	cpu1=$(cpu_ticks "$w" "$pid")
+	out=$(docker exec "$w" sh -c "tail -n +$((lines0 + 1)) /var/log/hivemind.log")
+	printf '%s\n' "$out" >"$EDGE_OUT/server-down-worker.log"
+	starts=$(printf '%s\n' "$out" | grep -c 'cannot reach the server; passes back off' || true)
+	still=$(printf '%s\n' "$out" | grep -c 'the server is still unreachable' || true)
+	fails=$(printf '%s\n' "$out" | grep -c 'reconcile pass failed' || true)
+	polls=$(printf '%s\n' "$out" | grep -c 'polling the server for log requests' || true)
+	passes=$(printf '%s\n' "$out" | grep 'the server is still unreachable' | tail -n 1 | sed -n 's/.*failed_passes=\([0-9]*\).*/\1/p')
+	note "in $down s: $starts start line, $still 'still unreachable' lines (last failed_passes=${passes:-?}), $fails 'reconcile pass failed', $polls log-poll lines, $((cpu1 - cpu0)) CPU ticks"
+	if [ "$starts" = 1 ] && [ "$fails" = 0 ]; then
+		pass outage-start "one line when the server went away, and no line per pass"
+	else
+		fail outage-start "$starts start lines and $fails 'reconcile pass failed' lines in $down s"
+	fi
+	# One line a minute after the first.
+	if [ "$still" -ge $((down / 60 - 1)) ] && [ "$still" -le $((down / 60 + 1)) ]; then
+		pass outage-minutes "$still 'still unreachable' lines in $down s"
+	else
+		fail outage-minutes "$still 'still unreachable' lines in $down s, want about $((down / 60))"
+	fi
+	# 2, 4, 8, 16 s and then 30 s between passes: 8 passes in the first
+	# 150 s, where one every 2 s would be 75.
+	if [ -n "$passes" ] && [ "$passes" -le $((down / 30 + 6)) ]; then
+		pass backoff "failed_passes=$passes by the last line of the outage, in under $down s"
+	else
+		fail backoff "failed_passes=${passes:-none} in $down s, want at most $((down / 30 + 6))"
+	fi
+	# The log poll leaves the outage to the agent; its one warning may be
+	# the server's refusal while it shut down.
+	if [ "$polls" -le 1 ]; then
+		pass log-poll "$polls log-poll warnings in $down s"
+	else
+		fail log-poll "$polls log-poll warnings in $down s, want at most 1"
+	fi
+	# A worker that spins uses a CPU; one that waits uses next to none.
+	if [ $((cpu1 - cpu0)) -le $((down * 5)) ]; then
+		pass no-spin "$((cpu1 - cpu0)) CPU ticks in $down s"
+	else
+		fail no-spin "$((cpu1 - cpu0)) CPU ticks in $down s: the worker spins"
+	fi
+	ed_serve "$s"
+	t1=$(now)
+	if wait_for 90 sh -c "docker exec $w grep -q 'the server answers again' /var/log/hivemind.log"; then
+		el=$(($(now) - t1))
+		# serve takes a few seconds to start, and then the next pass comes
+		# within one backed-off wait, 30 s.
+		if [ "$el" -le 40 ]; then
+			pass recovers "the worker's pass reached the server $el s after serve started again"
+		else
+			fail recovers "the worker's pass reached the server $el s after serve started again, more than one backed-off wait"
+		fi
+	else
+		fail recovers "the worker did not reach the server within 90 s of serve starting again"
+	fi
+	if [ "$(docker exec "$w" grep -c 'the server answers again' /var/log/hivemind.log)" = 1 ]; then
+		pass outage-end "one line when the server came back"
+	else
+		fail outage-end "$(docker exec "$w" grep -c 'the server answers again' /var/log/hivemind.log) 'answers again' lines"
+	fi
+	if wait_for 60 sh -c "docker exec $s hivemind nodes --json | jq -e '.[] | select(.id == \"$WID\") | .state == \"ready\"'" &&
+		wait_for 60 running_count_is "$s" calm 2; then
+		pass after "the worker is ready and calm runs on both nodes"
+	else
+		fail after "after the outage: $(docker exec "$s" hivemind nodes 2>&1 | tr '\n' ' ')"
+	fi
+	docker exec "$w" sh -c 'cat /var/log/hivemind.log' >"$EDGE_OUT/server-down-worker-full.log"
+	result "see the CHECK lines; the worker's log in server-down-worker.log"
 }
 
 # ---------------------------------------------------------------- main

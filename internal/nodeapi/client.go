@@ -206,7 +206,7 @@ func (c *Client) do(ctx context.Context, method, path string, body []byte, out a
 	}
 	resp, err := c.http.Do(req)
 	if err != nil {
-		return fmt.Errorf("calling the server: %w", err)
+		return &UnreachableError{Err: err}
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode/100 != 2 {
@@ -260,6 +260,21 @@ func statusError(resp *http.Response) error {
 	}
 	return &RefusedError{Code: resp.StatusCode, Status: resp.Status, Message: msg}
 }
+
+// UnreachableError is a request that got no reply from the server: the
+// connection was refused or timed out, the TLS handshake failed, or the
+// connection broke before the reply. Err is the transport's error. The
+// agent backs its passes off while the server is unreachable (it reads
+// Unreachable).
+type UnreachableError struct {
+	Err error
+}
+
+func (e *UnreachableError) Error() string { return "calling the server: " + e.Err.Error() }
+func (e *UnreachableError) Unwrap() error { return e.Err }
+
+// Unreachable reports true: the server did not answer.
+func (e *UnreachableError) Unreachable() bool { return true }
 
 // RefusedError is a refusal from the server that has no error of its own:
 // the status and the server's message.

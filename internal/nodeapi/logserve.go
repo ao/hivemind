@@ -63,7 +63,14 @@ func (s *LogServer) Run(ctx context.Context) error {
 				continue
 			}
 			backoff = min(max(2*backoff, logPollMinBackoff), logPollMaxBackoff)
-			log.Warn("polling the server for log requests; retrying", "in", backoff, "err", err)
+			// A server that does not answer is the agent's to report: it
+			// logs the outage once a minute, where this would every 30 s.
+			level := slog.LevelWarn
+			var ue *UnreachableError
+			if errors.As(err, &ue) {
+				level = slog.LevelDebug
+			}
+			log.Log(ctx, level, "polling the server for log requests; retrying", "in", backoff, "err", err)
 			select {
 			case <-ctx.Done():
 				return nil

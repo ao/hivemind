@@ -249,7 +249,7 @@ func (c *Client) NextLogRequest(ctx context.Context, nodeID string) (*LogRequest
 	req.Header.Set("Accept", "application/json")
 	resp, err := c.stream.Do(req)
 	if err != nil {
-		return nil, fmt.Errorf("calling the server: %w", err)
+		return nil, &UnreachableError{Err: err}
 	}
 	defer resp.Body.Close()
 	switch {

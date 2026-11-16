@@ -34,6 +34,18 @@ The agent restarts a container that exits, whatever its code, and one that fails
 
 `hivemind logs -f` does not reconnect. When the server shuts down, the stream ends with `the server is shutting down, so it ended the log stream; run the command again to go on following the log`, and when the connection breaks, as when serve is killed, with `the connection to the server broke during the log ...`. Both exit 1. The end of the log, when the container stops, exits 0. A server machine that goes away without closing the connection is found by TCP keepalives in about 30 seconds.
 
+## The server down under a worker
+
+A worker keeps its containers while the server is down, and its passes back off: 2 s, 4 s, 8 s, 16 s, then one every 30 s. It logs the start of the outage, then a line a minute with the count of failed passes, and one line when the server answers:
+
+```
+level=WARN msg="cannot reach the server; passes back off, up to one every 30s, until it answers" component=agent err="fetching assignments: calling the server: ... connect: connection refused"
+level=WARN msg="the server is still unreachable" component=agent for=1m0s failed_passes=6 err=...
+level=INFO msg="the server answers again" component=agent after=2m30s failed_passes=8
+```
+
+The log poll's retries are logged at debug level while the server does not answer. The lease heartbeat keeps its 5 s timer. In the edge suite's `server-down` case (serve stopped for 150 s under one worker, two Docker-in-Docker nodes on the c8g.4xlarge build host), the worker made 8 passes in the 150 s and logged the start line and two `still unreachable` lines for them, plus one log-poll warning for the server's refusal as it shut down and one line when it answered again. Before, it made a pass and logged a warning every 2 s, and the log poll a warning every 30 s. It used 2 CPU ticks (20 ms) in the 150 s, and reached the server 2 s after serve started again; the bound is one backed-off wait, 30 s.
+
 ## A damaged worker data directory
 
 A worker refuses to start when a file in its data directory is missing or does not fit the others: `node.key` gone, `node.json` cut short or empty, `ca.crt` from another cluster, `node.crt` gone, or a key that is not the certificate's. The error names the file and the node, and the two ways out: restore the directory from a backup of the machine, or run `hivemind node remove <id> --force` on the server and join again with an empty `--data-dir` and a new token. A key file readable by others is refused with the `chmod` that fixes it.
