@@ -151,6 +151,9 @@ func addConnFlags(cmd *cobra.Command) *clientFlags {
 type apiClient struct {
 	base  string
 	token string
+	// tokenFrom says where the token came from, for the error when the
+	// server refuses it: "--token", "HIVEMIND_TOKEN" or the token file.
+	tokenFrom string
 	// caPath is the --ca-cert file, or "" for the system's roots. Errors
 	// name it.
 	caPath string
@@ -182,8 +185,12 @@ func (f *clientFlags) client() (*apiClient, error) {
 		return nil, fmt.Errorf("server %q must be an http or https URL, such as %s", srv, defaultServer)
 	}
 
-	token := firstNonEmpty(f.token, os.Getenv(envToken))
+	token, tokenFrom := f.token, "--token"
+	if token == "" {
+		token, tokenFrom = os.Getenv(envToken), envToken
+	}
 	if token == "" && cc.TokenFile != "" {
+		tokenFrom = fmt.Sprintf("the token file %s, which the client config %s names", cc.TokenFile, ccPath)
 		if filepath.Base(cc.TokenFile) != auth.TokenFileName {
 			return nil, fmt.Errorf("client config %s: token-file must name an %s file", ccPath, auth.TokenFileName)
 		}
@@ -228,7 +235,7 @@ func (f *clientFlags) client() (*apiClient, error) {
 	// TCP keepalives find a server machine that went away, which closes
 	// nothing, in about 30 s, where the defaults take some minutes.
 	tr.DialContext = (&net.Dialer{Timeout: 30 * time.Second, KeepAliveConfig: clientKeepAlive}).DialContext
-	return &apiClient{base: strings.TrimRight(srv, "/"), token: token, caPath: caPath, http: &http.Client{Transport: tr}}, nil
+	return &apiClient{base: strings.TrimRight(srv, "/"), token: token, tokenFrom: tokenFrom, caPath: caPath, http: &http.Client{Transport: tr}}, nil
 }
 
 func firstNonEmpty(vs ...string) string {
@@ -275,7 +282,7 @@ func (c *apiClient) send(ctx context.Context, method, path string, body any) (*h
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode == http.StatusUnauthorized {
-		return nil, errUnauthorized
+		return nil, c.refused()
 	}
 	var e server.ErrorBody
 	b, _ := io.ReadAll(io.LimitReader(resp.Body, 64<<10))
@@ -288,6 +295,20 @@ func (c *apiClient) send(ctx context.Context, method, path string, body any) (*h
 		return nil, &apiError{status: resp.StatusCode, msg: e.Error, version: v}
 	}
 	return nil, &apiError{status: resp.StatusCode, msg: "server returned " + resp.Status, version: v}
+}
+
+// refused is the error for a 401: the server refused the token. It says
+// where the token came from, so that a token meant for another cluster, as
+// the client config's is when --server names another server, is found.
+func (c *apiClient) refused() error {
+	if c.tokenFrom == "" {
+		return errUnauthorized
+	}
+	msg := fmt.Sprintf("the server at %s refused the token from %s", c.base, c.tokenFrom)
+	if c.tokenFrom != "--token" && c.tokenFrom != envToken {
+		msg += "; for another cluster's server, give its token with --token or " + envToken
+	}
+	return fmt.Errorf("%w: %s", errUnauthorized, msg)
 }
 
 // apiError is an error reply from the server. Its text is the server's

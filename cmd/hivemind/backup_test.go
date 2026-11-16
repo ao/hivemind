@@ -146,7 +146,7 @@ func TestBackupThroughTheAPI(t *testing.T) {
 		t.Fatalf("backup --api: %v", err)
 	}
 	if _, _, err := run(t, "", "backup", filepath.Join(home, "bad.tar"), "--api", "--server", ts.URL, "--token", "hm_wrong"); err == nil ||
-		err.Error() != "unauthorized" {
+		err.Error() != "unauthorized: the server at "+ts.URL+" refused the token from --token" {
 		t.Fatalf("backup --api with a wrong token: %v", err)
 	}
 	if _, err := os.Stat(filepath.Join(home, "bad.tar")); !os.IsNotExist(err) {

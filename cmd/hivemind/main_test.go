@@ -359,11 +359,11 @@ func TestClientAgainstAPI(t *testing.T) {
 	other, _ := auth.NewToken()
 	for _, args := range [][]string{{"status"}, {"deploy", "--name", "web", "--image", "nginx"}, {"logs", "api"}, {"scale", "api", "2"}, {"delete", "api"}} {
 		_, _, err := run(t, "", append(args, "--token", other)...)
-		if err == nil || err.Error() != "unauthorized" {
+		if err == nil || !refusedFromFlag(err) {
 			t.Errorf("%v with a wrong token: %v", args, err)
 		}
 	}
-	if _, _, err := run(t, "", "status", "--token", "hm_wrong"); err == nil || err.Error() != "unauthorized" {
+	if _, _, err := run(t, "", "status", "--token", "hm_wrong"); err == nil || !refusedFromFlag(err) {
 		t.Errorf("malformed token: %v", err)
 	}
 }
