@@ -373,6 +373,11 @@ func runServe(ctx context.Context, cfg *config.Config, log *slog.Logger, rt runt
 	if err := upgrade.CheckDataDir(cfg.DataDir); err != nil {
 		return err
 	}
+	release, err := lockDataDir(cfg.DataDir)
+	if err != nil {
+		return err
+	}
+	defer release()
 	st, err := store.Open(ctx, filepath.Join(cfg.DataDir, storeFileName), store.WithMinReady(cfg.MinReady))
 	if err != nil {
 		return err

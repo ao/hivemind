@@ -267,8 +267,10 @@ The web UI is not built. The API has the login and logout routes a browser would
 
 ## Data directories
 
-The server's data directory holds the database (`hivemind.db`, with the SQLite WAL files beside it), the admin token file (`admin.token`), the cluster CA (`ca.key` and `ca.crt`), and an optional config file (`hivemind.yaml`). The default is `/var/lib/hivemind` for root, and `$XDG_STATE_HOME/hivemind` or `~/.local/state/hivemind` for other users. `--data-dir` or `HIVEMIND_DATA_DIR` changes it. `hivemind backup` copies everything in it but `hivemind.yaml` into one file, and `hivemind restore` puts that file into an empty directory on another machine. See [backup](backup.md).
+The server's data directory holds the database (`hivemind.db`, with the SQLite WAL files beside it), the admin token file (`admin.token`), the cluster CA (`ca.key` and `ca.crt`), and an optional config file (`hivemind.yaml`). The default is `/var/lib/hivemind` for root, and `$XDG_STATE_HOME/hivemind` or `~/.local/state/hivemind` for other users. `--data-dir` or `HIVEMIND_DATA_DIR` changes it. `hivemind backup` copies everything in it but `hivemind.yaml` and `hivemind.lock` into one file, and `hivemind restore` puts that file into an empty directory on another machine. See [backup](backup.md).
 
 A worker's data directory holds its key (`node.key`), its certificate (`node.crt`), the cluster CA certificate (`ca.crt`), and `node.json`, which records the node ID and the server it joined. `node.json` is written last, so its presence means the join finished. A renewal replaces `node.key` and `node.crt`. There is nothing on a worker to back up. [Security](security.md#files) lists the file modes.
+
+`serve` and `join` hold an exclusive lock (flock) on `hivemind.lock` in the data directory while they run, and write their pid in it. A second `serve` or `join` on the same directory is refused with `another hivemind (pid N) runs on the data directory ...`, before it changes anything. The kernel drops the lock when the process exits, after a crash too; the file stays, and the next `serve` or `join` takes it.
 
 The database uses SQLite in WAL mode, with `synchronous=FULL`. Every change is one transaction. The schema has a version number, and a newer schema is refused. A v1 data directory is refused with a message, so use a new directory for v2. See [upgrading](upgrading.md).

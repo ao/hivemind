@@ -113,6 +113,13 @@ certificates through the server.`,
 				return err
 			}
 			slog.SetDefault(log)
+			// The lock covers the join and the agent after it, so a second
+			// join or serve on this directory is refused, not run beside.
+			release, err := lockDataDir(cfg.DataDir)
+			if err != nil {
+				return err
+			}
+			defer release()
 			if err := enroll(cmd.Context(), log, cfg.DataDir, host, port, token); err != nil {
 				return err
 			}
@@ -130,8 +137,14 @@ certificates through the server.`,
 	return cmd
 }
 
-// runWorkerServe is serve --role worker: it runs an already joined node.
+// runWorkerServe is serve --role worker: it runs an already joined node,
+// with the data directory locked.
 func runWorkerServe(ctx context.Context, cfg *config.Config, log *slog.Logger) error {
+	release, err := lockDataDir(cfg.DataDir)
+	if err != nil {
+		return err
+	}
+	defer release()
 	rt, err := docker.New(cfg.DockerHost)
 	if err != nil {
 		return err
