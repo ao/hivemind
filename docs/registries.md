@@ -73,10 +73,10 @@ aws ecr get-login-password --region <region> |
 An ECR token lasts 12 hours. hivemind has no credential helper and does not renew it, so run the login again before it expires, for example every 6 hours from cron on the server:
 
 ```
-0 */6 * * * aws ecr get-login-password --region <region> | hivemind registry login <account>.dkr.ecr.<region>.amazonaws.com --username AWS --password-stdin
+0 */6 * * * aws ecr get-login-password --region <region> | /usr/local/bin/hivemind registry login <account>.dkr.ecr.<region>.amazonaws.com --username AWS --password-stdin
 ```
 
-The cron job needs the CLI's server and token: run it as the user that ran `hivemind init`, whose client config names them, or set `HIVEMIND_SERVER` and `HIVEMIND_TOKEN`. Once a token has expired, a pull says `refused the stored credential (the token has expired)`. Replicas that run already are not affected.
+cron's `PATH` does not include `/usr/local/bin`, so the job names `hivemind` in full, as in [backup](backup.md#taking-a-backup); name `aws` in full too if it is installed there. If `aws` fails, `registry login` gets no password, refuses it, and keeps the stored credential. The cron job needs the CLI's server and token: run it as the user that ran `hivemind init`, whose client config names them, or set `HIVEMIND_SERVER` and `HIVEMIND_TOKEN`. Once a token has expired, a pull says `refused the stored credential (the token has expired)`. Replicas that run already are not affected.
 
 ## A registry of your own
 
