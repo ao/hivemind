@@ -28,7 +28,7 @@ func TestUpstreamConnectionsHaveAUserTimeout(t *testing.T) {
 	var got int
 	var gerr error
 	if err := raw.Control(func(fd uintptr) {
-		got, gerr = syscall.GetsockoptInt(int(fd), syscall.IPPROTO_TCP, syscall.TCP_USER_TIMEOUT)
+		got, gerr = syscall.GetsockoptInt(int(fd), syscall.IPPROTO_TCP, tcpUserTimeout)
 	}); err != nil {
 		t.Fatal(err)
 	}
