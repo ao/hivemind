@@ -192,6 +192,16 @@ jobs:
       - uses: actions/checkout@v4
       - run: ./scripts/integration-cluster.sh
 
+  # A cluster of mixed versions: the 2.0.0 release binary as the server and
+  # as a worker, and this build as a worker and then as the upgraded server.
+  integration-mixed:
+    name: Integration (mixed versions)
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - run: ./scripts/integration-mixed.sh
+
   # HTTPS routing on three nodes with a router each, against Pebble, a test
   # ACME CA, on the runner's private Docker network.
   integration-routing:

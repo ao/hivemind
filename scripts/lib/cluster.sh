@@ -125,14 +125,14 @@ cl_create_network() {
 }
 
 # cl_build builds the hivemind binary into $CL_WORK/hivemind, with the build
-# tags in CL_GO_TAGS (none by default).
+# tags in CL_GO_TAGS and the linker flags in CL_GO_LDFLAGS (none by default).
 cl_build() {
 	mkdir -p "$CL_WORK"
 	cl_note "building the hivemind binary for linux in $GO_IMAGE${CL_GO_TAGS:+ with tags $CL_GO_TAGS}"
 	docker run --rm -v "$REPO:/src" -v "$CACHE_VOLUME:/cache" -w /src \
 		-e GOMODCACHE=/cache/mod -e GOCACHE=/cache/build -e GOFLAGS=-buildvcs=false \
 		-e GOPROXY=direct -e GOSUMDB=off -e GOTOOLCHAIN=local -e CGO_ENABLED=0 \
-		"$GO_IMAGE" go build -trimpath -tags "${CL_GO_TAGS:-}" -o "/src/${CL_WORK#"$REPO"/}/hivemind" ./cmd/hivemind
+		"$GO_IMAGE" go build -trimpath -tags "${CL_GO_TAGS:-}" -ldflags "${CL_GO_LDFLAGS:-}" -o "/src/${CL_WORK#"$REPO"/}/hivemind" ./cmd/hivemind
 }
 
 # cl_run_node NAME [DOCKER-RUN-OPTIONS...]: start one node as dind on the

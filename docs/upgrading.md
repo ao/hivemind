@@ -16,6 +16,8 @@ A 2.0.0 worker keeps working with a newer server: `status`, `nodes`, `deploy` an
 
 Upgrading the workers first also works. A new worker with a 2.0.0 server logs one warning for each feature the server lacks, such as `the server is older than this worker and has no log streaming; upgrade the server`, and the same for lease renewal between status reports, certificate renewal and, with `--route-addr`, the routing table. It does not call those routes again until the server's version changes, or for 10 minutes. The node is registered: do not join it again. A 2.0.0 server refuses the worker's address, so the worker registers without one and takes no routed replicas; `hivemind nodes` shows `-` for its ADDRESS. Once the server is upgraded, the worker sees the server's new version in its next reply and registers its address, without a restart, and logs `the server took this node's address; it takes routed replicas now`.
 
+`scripts/integration-mixed.sh` runs these mixed states in Docker: a 2.0.0 server with a worker of this build and a 2.0.0 worker, then the server upgraded in place, and checks the messages above.
+
 A 2.0.0 binary refuses a migrated store, and leaves its files unchanged:
 
 ```
