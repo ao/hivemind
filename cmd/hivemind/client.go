@@ -21,6 +21,7 @@ import (
 	"gopkg.in/yaml.v3"
 
 	"github.com/ao/hivemind/internal/auth"
+	"github.com/ao/hivemind/internal/nodeapi"
 	"github.com/ao/hivemind/internal/server"
 )
 
@@ -278,6 +279,19 @@ func (c *apiClient) call(ctx context.Context, method, path string, body, out any
 		return fmt.Errorf("reading the reply from %s: %w", c.base, err)
 	}
 	return nil
+}
+
+// serverVersion asks the server for its version: GET /v1/status, whose reply
+// carries it in nodeapi.VersionHeader, as every authenticated reply does. ""
+// means the server reports none.
+func (c *apiClient) serverVersion(ctx context.Context) (string, error) {
+	resp, err := c.send(ctx, "GET", "/v1/status", nil)
+	if err != nil {
+		return "", err
+	}
+	defer resp.Body.Close()
+	_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, maxResponse))
+	return nodeapi.CleanVersion(resp.Header.Get(nodeapi.VersionHeader)), nil
 }
 
 // reachReason shortens a transport error to its cause, such as

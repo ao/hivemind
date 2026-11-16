@@ -63,6 +63,8 @@ type Relay struct {
 	done   chan struct{}
 	nodes  map[string]*node
 	reqs   map[string]*request
+	// started is when the relay was made.
+	started time.Time
 }
 
 type node struct {
@@ -70,6 +72,7 @@ type node struct {
 	wake   chan struct{} // closed and replaced when the queue grows
 	active int           // requests not yet released, queued or streaming
 	polls  int
+	polled bool // a poll for the node has reached the relay
 }
 
 type state int
@@ -110,7 +113,22 @@ func New(o Options) *Relay {
 	if o.MaxPollsPerNode <= 0 {
 		o.MaxPollsPerNode = nodeapi.MaxLogPollsPerNode
 	}
-	return &Relay{opts: o, done: make(chan struct{}), nodes: map[string]*node{}, reqs: map[string]*request{}}
+	return &Relay{opts: o, done: make(chan struct{}), nodes: map[string]*node{}, reqs: map[string]*request{},
+		started: time.Now()}
+}
+
+// Started is when the relay was made, which is when serve started.
+func (r *Relay) Started() time.Time { return r.started }
+
+// Polled reports whether a poll for nodeID has reached the relay since it
+// was made. A worker that streams logs (2.1 and later) holds a poll open
+// nearly all the time, and polls again within half a minute of losing the
+// server; a 2.0 worker never polls.
+func (r *Relay) Polled(nodeID string) bool {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	n := r.nodes[nodeID]
+	return n != nil && n.polled
 }
 
 // PickupTimeout is how long Open waits for a worker.
@@ -203,6 +221,7 @@ func (r *Relay) Next(ctx context.Context, nodeID string) (*nodeapi.LogRequest, e
 		return nil, ErrClosed
 	}
 	n := r.node(nodeID)
+	n.polled = true
 	if n.polls >= r.opts.MaxPollsPerNode {
 		r.mu.Unlock()
 		return nil, ErrBusy

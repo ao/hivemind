@@ -340,7 +340,7 @@ func runWorker(ctx context.Context, cfg *config.Config, log *slog.Logger, rt run
 	if err != nil {
 		return err
 	}
-	client, err := nodeapi.NewClient("https://"+w.state.Server, w.tlsCfg)
+	client, err := nodeapi.NewClient("https://"+w.state.Server, w.tlsCfg, nodeapi.WithVersion(version))
 	if err != nil {
 		return err
 	}

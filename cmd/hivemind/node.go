@@ -26,6 +26,7 @@ import (
 	"github.com/ao/hivemind/internal/logging"
 	"github.com/ao/hivemind/internal/logrelay"
 	"github.com/ao/hivemind/internal/metrics"
+	"github.com/ao/hivemind/internal/nodeapi"
 	"github.com/ao/hivemind/internal/pki"
 	"github.com/ao/hivemind/internal/router"
 	"github.com/ao/hivemind/internal/runtime"
@@ -405,7 +406,8 @@ func runServe(ctx context.Context, cfg *config.Config, log *slog.Logger, rt runt
 		return err
 	}
 	hostname, _ := os.Hostname()
-	if err := st.UpsertNode(ctx, store.Node{ID: cl.NodeID, Name: hostname, CPU: info.NCPU, Memory: info.MemTotal, Address: nodeAddr}); err != nil {
+	if err := st.UpsertNode(ctx, store.Node{ID: cl.NodeID, Name: hostname, CPU: info.NCPU, Memory: info.MemTotal, Address: nodeAddr,
+		Version: nodeapi.CleanVersion(version)}); err != nil {
 		return err
 	}
 
@@ -474,7 +476,7 @@ func runServe(ctx context.Context, cfg *config.Config, log *slog.Logger, rt runt
 	}
 	api, err := server.New(server.Config{Store: st, Runtime: rt, NodeID: cl.NodeID, Auth: authn,
 		Trigger: ag.Trigger, Logger: log.With("component", "api"), Metrics: m, IssueJoinToken: issue,
-		Backup: writeBackup, Logs: logs, RouterMetrics: routerMetrics, Started: started})
+		Backup: writeBackup, Logs: logs, RouterMetrics: routerMetrics, Started: started, Version: version})
 	if err != nil {
 		closeRouter()
 		return err
@@ -518,7 +520,7 @@ func runServe(ctx context.Context, cfg *config.Config, log *slog.Logger, rt runt
 		}
 		c, err := cluster.Listen(cluster.Config{Store: st, CA: ca, Tokens: pki.NewTokens(st.JoinTokens()),
 			Advertise: cfg.Advertise, Port: cfg.ClusterPort, LocalNodeID: cl.NodeID,
-			Logger: log.With("component", "cluster"), NodeCertLifetime: lifetime, Logs: logs})
+			Logger: log.With("component", "cluster"), NodeCertLifetime: lifetime, Logs: logs, Version: version})
 		if err == nil {
 			if err = checkBoundAddress(c.NodeAddr(), nodeAddr); err != nil {
 				_ = c.Shutdown()

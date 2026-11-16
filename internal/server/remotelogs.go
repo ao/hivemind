@@ -69,7 +69,7 @@ func (s *Server) remoteLogs(w http.ResponseWriter, r *http.Request, node string,
 			"node %s already has %d log streams open; end one and try again", node, s.cfg.Logs.MaxStreamsPerNode()))
 		return
 	case errors.Is(err, logrelay.ErrNoAnswer):
-		writeError(w, http.StatusGatewayTimeout, noAnswer(node, s.cfg.Logs.PickupTimeout()))
+		writeError(w, http.StatusGatewayTimeout, s.noAnswer(n))
 		return
 	case errors.Is(err, logrelay.ErrClosed):
 		writeError(w, http.StatusServiceUnavailable, "the server is shutting down")
@@ -96,7 +96,7 @@ func (s *Server) remoteLogs(w http.ResponseWriter, r *http.Request, node string,
 		switch {
 		case ctx.Err() != nil:
 		case errors.Is(err, logrelay.ErrNoAnswer):
-			writeError(w, http.StatusGatewayTimeout, noAnswer(node, s.cfg.Logs.PickupTimeout()))
+			writeError(w, http.StatusGatewayTimeout, s.noAnswer(n))
 		default:
 			s.log.Warn("log stream from a worker broke before it started", "node", node, "err", err)
 			writeError(w, http.StatusBadGateway, fmt.Sprintf("node %s ended the log stream before it started", node))
@@ -152,8 +152,24 @@ func (s *Server) remoteLogs(w http.ResponseWriter, r *http.Request, node string,
 	}
 }
 
-func noAnswer(node string, d time.Duration) string {
-	return fmt.Sprintf("worker %s did not answer within %s; is it running?", node, d)
+// neverPolledAfter is how long after serve starts a live worker that has
+// not polled for log requests is taken to have no log streaming. A worker
+// that has it polls again within half a minute of losing the server. Tests
+// change it.
+var neverPolledAfter = time.Minute
+
+// noAnswer says why worker n did not take a log request. A worker that
+// reports no version and has not polled since the server started is older
+// than 2.1, which added log streaming, so the message says to upgrade it.
+func (s *Server) noAnswer(n store.Node) string {
+	d := s.cfg.Logs.PickupTimeout()
+	switch {
+	case n.Version == "" && !s.cfg.Logs.Polled(n.ID) && timeNow().Sub(s.cfg.Logs.Started()) >= neverPolledAfter:
+		return fmt.Sprintf("worker %s runs a hivemind older than 2.1, which cannot stream logs; upgrade it", n.ID)
+	case n.Version != "":
+		return fmt.Sprintf("worker %s, which runs %s, did not answer within %s; is it running?", n.ID, n.Version, d)
+	}
+	return fmt.Sprintf("worker %s did not answer within %s; is it running?", n.ID, d)
 }
 
 // clean makes a node's message safe to log and to show: no control

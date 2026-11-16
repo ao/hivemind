@@ -18,6 +18,60 @@ import (
 	"github.com/ao/hivemind/internal/store"
 )
 
+// tableRows reads a table that tabwriter printed: each column starts where
+// its header starts, and a header is the text up to two spaces.
+func tableRows(t *testing.T, out string) []map[string]string {
+	t.Helper()
+	lines := strings.Split(strings.TrimRight(out, "\n"), "\n")
+	header := lines[0]
+	var names []string
+	var starts []int
+	for i := 0; i < len(header); {
+		if header[i] == ' ' {
+			i++
+			continue
+		}
+		end := strings.Index(header[i:], "  ")
+		if end < 0 {
+			end = len(header) - i
+		}
+		names = append(names, header[i:i+end])
+		starts = append(starts, i)
+		i += end
+	}
+	var rows []map[string]string
+	for _, l := range lines[1:] {
+		row := map[string]string{}
+		for k, s := range starts {
+			e := len(l)
+			if k+1 < len(starts) && starts[k+1] < e {
+				e = starts[k+1]
+			}
+			if s < e {
+				row[names[k]] = strings.TrimSpace(l[s:e])
+			}
+		}
+		rows = append(rows, row)
+	}
+	return rows
+}
+
+// hasRow reports whether a row has every value in want.
+func hasRow(rows []map[string]string, want map[string]string) bool {
+	for _, r := range rows {
+		ok := true
+		for k, v := range want {
+			if r[k] != v {
+				ok = false
+			}
+		}
+		if ok {
+			return true
+		}
+	}
+	return false
+}
+
 // TestNodesCommands drives hivemind nodes and hivemind node remove against
 // the real API handler.
 func TestNodesCommands(t *testing.T) {
@@ -31,7 +85,7 @@ func TestNodesCommands(t *testing.T) {
 	if err := st.InitCluster(ctx, store.Cluster{AdminTokenHash: [32]byte{1}, NodeID: "node-s"}); err != nil {
 		t.Fatal(err)
 	}
-	for _, n := range []store.Node{{ID: "node-s", Name: "srv", CPU: 4, Memory: 8 << 30}, {ID: "node-w", Name: "wrk", CPU: 2, Memory: 1 << 30}} {
+	for _, n := range []store.Node{{ID: "node-s", Name: "srv", CPU: 4, Memory: 8 << 30, Version: "v2.2.0"}, {ID: "node-w", Name: "wrk", CPU: 2, Memory: 1 << 30}} {
 		if err := st.UpsertNode(ctx, n); err != nil {
 			t.Fatal(err)
 		}
@@ -57,20 +111,17 @@ func TestNodesCommands(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	lines := strings.Split(strings.TrimSpace(out), "\n")
-	if len(lines) != 3 || !strings.HasPrefix(lines[0], "ID") || !strings.Contains(lines[0], "LEASE AGE") {
+	rows := tableRows(t, out)
+	if len(rows) != 2 {
 		t.Fatalf("nodes table:\n%s", out)
 	}
-	for _, want := range [][]string{{"node-s", "srv", "server", "4", "8.0Gi", "ready", "eligible", "1"}, {"node-w", "wrk", "worker", "2", "1.0Gi", "ready", "eligible", "1"}} {
-		found := false
-		for _, l := range lines[1:] {
-			f := strings.Fields(l)
-			if len(f) == 10 && f[9] == "-" && f[0] == want[0] && f[1] == want[1] && f[2] == want[2] && f[3] == want[3] && f[4] == want[4] &&
-				f[6] == want[5] && f[7] == want[6] && f[8] == want[7] {
-				found = true
-			}
-		}
-		if !found {
+	for _, want := range []map[string]string{
+		{"ID": "node-s", "NAME": "srv", "ROLE": "server", "VERSION": "v2.2.0", "CPU": "4", "MEMORY": "8.0Gi", "STATE": "ready",
+			"ELIGIBILITY": "eligible", "REPLICAS": "1", "CERT EXPIRES": "-"},
+		{"ID": "node-w", "NAME": "wrk", "ROLE": "worker", "VERSION": "-", "CPU": "2", "MEMORY": "1.0Gi", "STATE": "ready",
+			"ELIGIBILITY": "eligible", "REPLICAS": "1", "CERT EXPIRES": "-"},
+	} {
+		if !hasRow(rows, want) {
 			t.Errorf("no row %v in:\n%s", want, out)
 		}
 	}
@@ -216,10 +267,8 @@ func eligibilityOf(t *testing.T) map[string]string {
 		t.Fatal(err)
 	}
 	got := map[string]string{}
-	for _, l := range strings.Split(strings.TrimSpace(out), "\n")[1:] {
-		if f := strings.Fields(l); len(f) == 10 {
-			got[f[0]] = f[7]
-		}
+	for _, r := range tableRows(t, out) {
+		got[r["ID"]] = r["ELIGIBILITY"]
 	}
 	return got
 }

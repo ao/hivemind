@@ -6,6 +6,7 @@ import (
 	"io"
 	"log/slog"
 	"net/http"
+	"sync"
 	"time"
 
 	"github.com/ao/hivemind/internal/logrelay"
@@ -27,14 +28,18 @@ type nodeAPI struct {
 	lifetime time.Duration
 	now      func() time.Time
 	certs    *certNotes
+	// versions is the version this process last stored for each node, so
+	// the store is written only when a node's version changes.
+	mu       sync.Mutex
+	versions map[string]string
 }
 
 // nodeRoutes returns the handler of the mTLS listener. It has no join route.
 // Every request passes the denylist check first, then the check that the
-// client certificate is valid now.
+// client certificate is valid now. Every reply carries the server's version.
 func nodeRoutes(cfg Config, log *slog.Logger) http.Handler {
 	a := &nodeAPI{st: cfg.Store, log: log, logs: cfg.Logs,
-		ca: cfg.CA, lifetime: cfg.NodeCertLifetime, now: cfg.now(), certs: &certNotes{}}
+		ca: cfg.CA, lifetime: cfg.NodeCertLifetime, now: cfg.now(), certs: &certNotes{}, versions: map[string]string{}}
 	mux := http.NewServeMux()
 	mux.HandleFunc("POST "+nodeapi.Prefix+"/nodes/{id}/register", a.register)
 	mux.HandleFunc("GET "+nodeapi.Prefix+"/nodes/{id}/assignments", a.assignments)
@@ -46,7 +51,52 @@ func nodeRoutes(cfg Config, log *slog.Logger) http.Handler {
 	mux.HandleFunc("POST "+nodeapi.Prefix+"/nodes/{id}/logs/streams/{req}", a.logStream)
 	mux.HandleFunc("GET "+nodeapi.Prefix+"/nodes/{id}/routes", a.routes)
 	mux.HandleFunc("POST "+nodeapi.Prefix+"/nodes/{id}/tls/{op}", a.tls)
-	return a.denyRemoved(a.requireCurrentCert(mux))
+	return withVersion(nodeapi.CleanVersion(cfg.Version), a.denyRemoved(a.requireCurrentCert(mux)))
+}
+
+// withVersion sets the server's version on every reply. A worker learns from
+// it that the server was upgraded, and that a 404 without the
+// not-registered mark is a route the server lacks (see nodeapi).
+func withVersion(v string, next http.Handler) http.Handler {
+	if v == "" {
+		return next
+	}
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set(nodeapi.VersionHeader, v)
+		next.ServeHTTP(w, r)
+	})
+}
+
+// nodeVersion is the version the request says the node runs, or "".
+func nodeVersion(r *http.Request) string {
+	return nodeapi.CleanVersion(r.Header.Get(nodeapi.VersionHeader))
+}
+
+// noteVersion stores the version the node sent with a lease or a report,
+// when it differs from the one this process last stored for it: once per
+// node after the server starts, and after the node is upgraded. A failure is
+// logged; the lease has been renewed all the same.
+func (a *nodeAPI) noteVersion(r *http.Request, id string) {
+	v := nodeVersion(r)
+	a.mu.Lock()
+	old, ok := a.versions[id]
+	a.mu.Unlock()
+	if ok && old == v {
+		return
+	}
+	if err := a.st.SetNodeVersion(r.Context(), id, v); err != nil {
+		if r.Context().Err() == nil {
+			a.log.Warn("recording a node's version", "node", id, "err", err)
+		}
+		return
+	}
+	a.rememberVersion(id, v)
+}
+
+func (a *nodeAPI) rememberVersion(id, v string) {
+	a.mu.Lock()
+	a.versions[id] = v
+	a.mu.Unlock()
 }
 
 // denyRemoved refuses, with 403, every request whose client certificate names
@@ -110,10 +160,12 @@ func (a *nodeAPI) register(w http.ResponseWriter, r *http.Request) {
 		writeDecodeError(w, err)
 		return
 	}
-	if err := a.st.UpsertNode(r.Context(), store.Node{ID: id, Name: g.Name, CPU: g.CPU, Memory: g.Memory, Address: g.Address}); err != nil {
+	v := nodeVersion(r)
+	if err := a.st.UpsertNode(r.Context(), store.Node{ID: id, Name: g.Name, CPU: g.CPU, Memory: g.Memory, Address: g.Address, Version: v}); err != nil {
 		a.fail(w, r, err)
 		return
 	}
+	a.rememberVersion(id, v)
 	w.WriteHeader(http.StatusNoContent)
 }
 
@@ -132,6 +184,7 @@ func (a *nodeAPI) lease(w http.ResponseWriter, r *http.Request) {
 		a.fail(w, r, err)
 		return
 	}
+	a.noteVersion(r, id)
 	w.WriteHeader(http.StatusNoContent)
 }
 
@@ -174,6 +227,7 @@ func (a *nodeAPI) postStatus(w http.ResponseWriter, r *http.Request) {
 		a.fail(w, r, err)
 		return
 	}
+	a.noteVersion(r, id)
 	w.WriteHeader(http.StatusNoContent)
 }
 

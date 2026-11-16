@@ -258,6 +258,12 @@ ALTER TABLE drains ADD COLUMN lost_at INTEGER NOT NULL DEFAULT 0;
 	`
 ALTER TABLE apps ADD COLUMN origin TEXT NOT NULL DEFAULT '';
 `,
+	// 13: node versions. nodes.version is the hivemind version the node
+	// last sent with a request, such as v2.2.0; '' for a node that sent
+	// none, a build older than 2.2.
+	`
+ALTER TABLE nodes ADD COLUMN version TEXT NOT NULL DEFAULT '';
+`,
 }
 
 // SchemaVersion is the schema version this build writes.

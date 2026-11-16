@@ -36,7 +36,7 @@ hivemind
 | `scale` | Set an app's replica count |
 | `serve` | Run the server and the agent on this node |
 | `status` | Show apps, their replicas and container state |
-| `version` | Print the version |
+| `version` | Print the version of the CLI and of the server |
 
 ### hivemind backup
 
@@ -490,6 +490,10 @@ List the nodes: ID, name, CPU and memory as each node's Docker daemon reports
 them, the age of its lease, whether it is ready or lost, and how many replicas
 are placed on it. A node is lost when its lease is more than 15 s old.
 
+VERSION is the hivemind version the node reports with each request; the
+server's own node shows the server's. "-" means the node reports none, which
+a version older than 2.2 does.
+
 ELIGIBILITY is "eligible" for a node that takes new replicas, "ineligible" for
 one that does not (hivemind node eligibility), "draining" during a drain, and
 "drained" after one, until the node is made eligible again or removed.
@@ -730,9 +734,19 @@ hivemind status [app] [flags]
 
 ### hivemind version
 
-Print the version
+Print the version of this binary. When the CLI has a server and a token, from
+its flags, the environment or the client config, it also asks the server for
+its version, which every reply to an authenticated request carries. A server
+older than 2.2 reports none. hivemind nodes shows the version of each node.
 
 ```
-hivemind version
+hivemind version [flags]
 ```
+
+| Flag | Type | Default | Environment | Description |
+|---|---|---|---|---|
+| `--ca-cert` | string | - | - | PEM file of the CA certificates to trust for an https server, instead of the system's (env HIVEMIND_CA_CERT; default from the client config) |
+| `--client-config` | string | - | `HIVEMIND_CLIENT_CONFIG` | client config file (env HIVEMIND_CLIENT_CONFIG; default $XDG_CONFIG_HOME/hivemind/config.yaml or ~/.config/hivemind/config.yaml) |
+| `--server` | string | - | `HIVEMIND_SERVER` | server URL (env HIVEMIND_SERVER; default from the client config, then http://127.0.0.1:4483) |
+| `--token` | string | - | `HIVEMIND_TOKEN` | API token (env HIVEMIND_TOKEN; default from the client config's token file) |
 

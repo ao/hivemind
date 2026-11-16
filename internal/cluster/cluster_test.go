@@ -38,6 +38,12 @@ type fixture struct {
 
 func newFixture(t *testing.T, limiter *ratelimit.FailLimiter, opts ...store.Option) *fixture {
 	t.Helper()
+	return newFixtureWith(t, func(c *Config) { c.Limiter = limiter }, opts...)
+}
+
+// newFixtureWith is newFixture with mod applied to the listener's config.
+func newFixtureWith(t *testing.T, mod func(*Config), opts ...store.Option) *fixture {
+	t.Helper()
 	dir := t.TempDir()
 	ca, err := pki.CreateCA(filepath.Join(dir, "ca"))
 	if err != nil {
@@ -48,8 +54,12 @@ func newFixture(t *testing.T, limiter *ratelimit.FailLimiter, opts ...store.Opti
 		t.Fatal(err)
 	}
 	tokens := pki.NewTokens(st.JoinTokens())
-	c, err := Listen(Config{Store: st, CA: ca, Tokens: tokens, Advertise: "127.0.0.1", Port: 0,
-		LocalNodeID: "node-server", Limiter: limiter, Logger: slog.New(slog.NewTextHandler(io.Discard, nil))})
+	cfg := Config{Store: st, CA: ca, Tokens: tokens, Advertise: "127.0.0.1", Port: 0,
+		LocalNodeID: "node-server", Logger: slog.New(slog.NewTextHandler(io.Discard, nil))}
+	if mod != nil {
+		mod(&cfg)
+	}
+	c, err := Listen(cfg)
 	if err != nil {
 		st.Close()
 		t.Fatal(err)

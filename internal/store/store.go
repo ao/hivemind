@@ -126,7 +126,13 @@ type Node struct {
 	// publish their ports and where routers reach them. Empty for a node
 	// that reported none, which takes no routed replicas.
 	Address string
+	// Version is the hivemind version the node last reported, such as
+	// v2.2.0. Empty for a node that reported none: a build older than 2.2.
+	Version string
 }
+
+// MaxNodeVersionLen caps Node.Version.
+const MaxNodeVersionLen = 64
 
 // RoutePort is one container port of a routed container and the host port
 // the engine published it on, on its node's Address.
@@ -762,6 +768,9 @@ func (s *Store) UpsertNode(ctx context.Context, n Node) error {
 	if err := checkNodeAddress(n.Address); err != nil {
 		return err
 	}
+	if err := checkNodeVersion(n.Version); err != nil {
+		return err
+	}
 	return s.tx(ctx, func(tx *sql.Tx) error {
 		if removed, err := isRemoved(ctx, tx, n.ID); err != nil {
 			return err
@@ -769,11 +778,11 @@ func (s *Store) UpsertNode(ctx context.Context, n Node) error {
 			return fmt.Errorf("node %q: %w", n.ID, ErrNodeRemoved)
 		}
 		now := s.now().UnixNano()
-		if _, err := tx.ExecContext(ctx, `INSERT INTO nodes (id, name, cpu, memory, last_lease, ready_since, address)
-			VALUES (?, ?, ?, ?, ?, CASE WHEN ? = (SELECT node_id FROM cluster WHERE id = 1) THEN 0 ELSE ? END, ?)
+		if _, err := tx.ExecContext(ctx, `INSERT INTO nodes (id, name, cpu, memory, last_lease, ready_since, address, version)
+			VALUES (?, ?, ?, ?, ?, CASE WHEN ? = (SELECT node_id FROM cluster WHERE id = 1) THEN 0 ELSE ? END, ?, ?)
 			ON CONFLICT (id) DO UPDATE SET name = excluded.name, cpu = excluded.cpu, memory = excluded.memory,
-				address = excluded.address, ready_since = `+readySinceExpr+`, last_lease = excluded.last_lease`,
-			n.ID, n.Name, n.CPU, n.Memory, now, n.ID, now, n.Address, now-int64(scheduler.DefaultLeaseTimeout), now); err != nil {
+				address = excluded.address, version = excluded.version, ready_since = `+readySinceExpr+`, last_lease = excluded.last_lease`,
+			n.ID, n.Name, n.CPU, n.Memory, now, n.ID, now, n.Address, n.Version, now-int64(scheduler.DefaultLeaseTimeout), now); err != nil {
 			return err
 		}
 		return s.placePending(ctx, tx)
@@ -798,7 +807,7 @@ func (s *Store) GetNode(ctx context.Context, id string) (Node, error) {
 func (s *Store) ListNodes(ctx context.Context) ([]Node, error) { return listNodes(ctx, s.db) }
 
 func listNodes(ctx context.Context, q querier) ([]Node, error) {
-	rows, err := q.QueryContext(ctx, `SELECT n.id, n.name, n.cpu, n.memory, n.last_lease, n.ready_since, coalesce(c.not_after, 0), coalesce(c.issued_at, 0), n.eligible, n.address
+	rows, err := q.QueryContext(ctx, `SELECT n.id, n.name, n.cpu, n.memory, n.last_lease, n.ready_since, coalesce(c.not_after, 0), coalesce(c.issued_at, 0), n.eligible, n.address, n.version
 		FROM nodes n LEFT JOIN node_certs c ON c.id = n.id ORDER BY n.id`)
 	if err != nil {
 		return nil, err
@@ -809,7 +818,7 @@ func listNodes(ctx context.Context, q querier) ([]Node, error) {
 		var n Node
 		var lease, ready, certNA, certIssued int64
 		var eligible int
-		if err := rows.Scan(&n.ID, &n.Name, &n.CPU, &n.Memory, &lease, &ready, &certNA, &certIssued, &eligible, &n.Address); err != nil {
+		if err := rows.Scan(&n.ID, &n.Name, &n.CPU, &n.Memory, &lease, &ready, &certNA, &certIssued, &eligible, &n.Address, &n.Version); err != nil {
 			return nil, err
 		}
 		n.Eligible = eligible == 1
@@ -820,6 +829,31 @@ func listNodes(ctx context.Context, q querier) ([]Node, error) {
 		out = append(out, n)
 	}
 	return out, rows.Err()
+}
+
+// SetNodeVersion records the hivemind version a node reported, "" for none.
+// A node that is not registered gets ErrNotFound.
+func (s *Store) SetNodeVersion(ctx context.Context, id, version string) error {
+	if err := checkNodeVersion(version); err != nil {
+		return err
+	}
+	res, err := s.db.ExecContext(ctx, `UPDATE nodes SET version = ? WHERE id = ?`, version, id)
+	if err != nil {
+		return err
+	}
+	if n, _ := res.RowsAffected(); n == 0 {
+		return fmt.Errorf("node %q: %w", id, ErrNotFound)
+	}
+	return nil
+}
+
+// checkNodeVersion refuses a version that is too long or holds a character
+// that is not printable ASCII.
+func checkNodeVersion(v string) error {
+	if len(v) > MaxNodeVersionLen || strings.IndexFunc(v, func(r rune) bool { return r <= ' ' || r > '~' }) >= 0 {
+		return fmt.Errorf("%w: node version must be at most %d printable characters", ErrInvalid, MaxNodeVersionLen)
+	}
+	return nil
 }
 
 // RenewLease renews the node's lease and changes nothing else. An agent calls

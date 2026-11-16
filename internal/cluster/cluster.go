@@ -84,6 +84,9 @@ type Config struct {
 	// certificates on each request. Nil means time.Now. Tests set it; the
 	// TLS handshake itself always uses the real time.
 	Now func() time.Time
+	// Version is the server's hivemind version, sent in
+	// nodeapi.VersionHeader on every node API reply. Empty sends none.
+	Version string
 }
 
 func (cfg Config) now() func() time.Time {

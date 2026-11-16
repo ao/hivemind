@@ -17,6 +17,7 @@ import (
 	"github.com/ao/hivemind/internal/auth"
 	"github.com/ao/hivemind/internal/logrelay"
 	"github.com/ao/hivemind/internal/metrics"
+	"github.com/ao/hivemind/internal/nodeapi"
 	"github.com/ao/hivemind/internal/ratelimit"
 	"github.com/ao/hivemind/internal/runtime"
 	"github.com/ao/hivemind/internal/store"
@@ -77,6 +78,10 @@ type Config struct {
 	// RouterMetrics, if set, adds the metrics of this node's router to
 	// GET /metrics.
 	RouterMetrics func(w *metrics.Writer)
+	// Version is the server's hivemind version. Every reply to an
+	// authenticated request carries it in nodeapi.VersionHeader; GET
+	// /healthz, which needs no token, does not. Empty sends none.
+	Version string
 }
 
 // Defaults for Config.LoginLimiter: an address may fail LoginFailLimit
@@ -131,9 +136,27 @@ func New(cfg Config) (*Server, error) {
 }
 
 // wrap puts a router behind the request log and counter, the JSON error
-// rewriter, the login limit and the credential check.
+// rewriter, the login limit and the credential check. A request that passes
+// the check gets the server's version on its reply.
 func (s *Server) wrap(r *auth.Router) http.Handler {
-	return s.logRequests(r, jsonErrors(s.limitLogins(s.cfg.Auth.Middleware(r))))
+	return s.logRequests(r, jsonErrors(s.limitLogins(s.cfg.Auth.Middleware(s.withVersion(r)))))
+}
+
+// withVersion sets the server's version on the reply. It runs behind the
+// credential check, which lets only GET /healthz through without one, so
+// that route is left out: the version is not for anyone who can reach the
+// port.
+func (s *Server) withVersion(next http.Handler) http.Handler {
+	v := nodeapi.CleanVersion(s.cfg.Version)
+	if v == "" {
+		return next
+	}
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/healthz" {
+			w.Header().Set(nodeapi.VersionHeader, v)
+		}
+		next.ServeHTTP(w, r)
+	})
 }
 
 // limitLogins counts failed logins per source address, and refuses a login

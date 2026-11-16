@@ -8,6 +8,7 @@ import (
 	"os"
 	"os/signal"
 	"syscall"
+	"time"
 
 	"github.com/spf13/cobra"
 )
@@ -62,13 +63,42 @@ func newRoot(stdin io.Reader, stdout, stderr io.Writer) *cobra.Command {
 	return root
 }
 
+// serverVersionTimeout bounds the version command's call to the server.
+const serverVersionTimeout = 5 * time.Second
+
 func versionCmd() *cobra.Command {
-	return &cobra.Command{
+	cmd := &cobra.Command{
 		Use:   "version",
-		Short: "Print the version",
-		Args:  cobra.NoArgs,
-		Run: func(cmd *cobra.Command, _ []string) {
-			fmt.Fprintf(cmd.OutOrStdout(), "hivemind %s (%s)\n", version, commit)
-		},
+		Short: "Print the version of the CLI and of the server",
+		Long: `Print the version of this binary. When the CLI has a server and a token, from
+its flags, the environment or the client config, it also asks the server for
+its version, which every reply to an authenticated request carries. A server
+older than 2.2 reports none. hivemind nodes shows the version of each node.`,
+		Args: cobra.NoArgs,
 	}
+	cf := addConnFlags(cmd)
+	cmd.RunE = func(cmd *cobra.Command, _ []string) error {
+		out := cmd.OutOrStdout()
+		fmt.Fprintf(out, "hivemind %s (%s)\n", version, commit)
+		c, err := cf.client()
+		if err != nil {
+			if cf.server == "" && cf.token == "" {
+				return nil // no server to ask
+			}
+			return err
+		}
+		ctx, cancel := context.WithTimeout(cmd.Context(), serverVersionTimeout)
+		defer cancel()
+		v, err := c.serverVersion(ctx)
+		if err != nil {
+			return err
+		}
+		if v == "" {
+			fmt.Fprintf(out, "server %s: older than 2.2, which reports no version\n", c.base)
+			return nil
+		}
+		fmt.Fprintf(out, "server %s: hivemind %s\n", c.base, v)
+		return nil
+	}
+	return cmd
 }

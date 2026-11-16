@@ -18,6 +18,8 @@ The scheme is case-insensitive. A request with more than one `Authorization` hea
 
 A request without a valid token gets `401` with the body `{"error":"unauthorized"}` and the header `WWW-Authenticate: Bearer realm="hivemind"`. The check runs before routing, so an unknown path without a token also gets `401`, not `404`.
 
+Every reply to a request that passes the check carries the server's version in the `Hivemind-Version` header, such as `Hivemind-Version: v2.2.0`; `hivemind version` reads it from `GET /v1/status`. `GET /healthz` and a `401` do not carry it. A server older than 2.2 sends no such header.
+
 The token is in `<data-dir>/admin.token`. `init` prints it once.
 
 ```sh
@@ -98,10 +100,10 @@ The token is shown once. The server keeps a SHA-256 hash of its secret, and a to
 [{"id": "node-<12 hex digits>", "name": "host-a", "cpu": 4, "memory": 8254390272,
   "last_lease": "2026-11-13T10:00:00Z", "lease_age_seconds": 1.2, "state": "ready",
   "server": true, "replicas": 2, "cert_not_after": "2027-11-14T10:00:00Z", "eligible": true,
-  "address": "10.0.0.5"}]
+  "address": "10.0.0.5", "version": "v2.2.0"}]
 ```
 
-`address` is the node's private address, where its routed replicas publish their ports. It is absent for a node that reported none, such as a worker older than 2.2, which takes no routed replicas. `cpu` and `memory` (bytes) are what the node's Docker daemon reports. `state` is `ready` while the lease is at most 15 s old, and `lost` after that. In the first 15 s after `serve` starts, a node that has not reported to it yet is `waiting`: the server counts its lease from its own start, so it is not lost yet. `server` marks the node that runs the server. `replicas` counts the replicas placed on the node that should run. `cert_not_after` is when the node's certificate expires, as the server recorded it when it issued the certificate or saw the node present it. It is absent when there is no record, as for a server without `--advertise`. `cert_not_renewing` is `true`, and present only then, when that certificate is more than a day past its renewal time, two thirds of its lifetime: the node is not renewing it, as a 2.0.0 worker never does. `eligible` is false for a node that takes no new replicas. A node with a drain, in progress or finished, also has a `drain` object, described below.
+`address` is the node's private address, where its routed replicas publish their ports. It is absent for a node that reported none, such as a worker older than 2.2, which takes no routed replicas. `version` is the hivemind version the node sends with each request to the server, and the server's own for the server's node. It is absent for a node that sends none, which a version older than 2.2 does. `cpu` and `memory` (bytes) are what the node's Docker daemon reports. `state` is `ready` while the lease is at most 15 s old, and `lost` after that. In the first 15 s after `serve` starts, a node that has not reported to it yet is `waiting`: the server counts its lease from its own start, so it is not lost yet. `server` marks the node that runs the server. `replicas` counts the replicas placed on the node that should run. `cert_not_after` is when the node's certificate expires, as the server recorded it when it issued the certificate or saw the node present it. It is absent when there is no record, as for a server without `--advertise`. `cert_not_renewing` is `true`, and present only then, when that certificate is more than a day past its renewal time, two thirds of its lifetime: the node is not renewing it, as a 2.0.0 worker never does. `eligible` is false for a node that takes no new replicas. A node with a drain, in progress or finished, also has a `drain` object, described below.
 
 `POST /v1/nodes/{id}/eligibility` with `{"eligible": false}` makes the node ineligible: it takes no new replicas, and keeps the ones it runs. `{"eligible": true}` makes it eligible again, and on a node with a drain in progress it cancels the drain: copies still starting on other nodes are removed, and the replicas stay on the node. The reply:
 
@@ -300,7 +302,7 @@ A replica on a worker is read by that worker, which sends the log to the server 
 
 - `404` when the worker has no container for the replica.
 - `503` when the node is lost (its lease is more than 15 s old), when the container engine on the node is unavailable, or when the server runs without `--advertise` and so cannot reach workers.
-- `504` with `worker node-... did not answer within 10s; is it running?` when the worker did not take the request and start the stream in 10 seconds. A worker of version 2.0.0 does not take log requests, so this is the answer for its replicas too.
+- `504` with `worker node-... did not answer within 10s; is it running?` when the worker did not take the request and start the stream in 10 seconds. The message names the worker's version when it reports one. A worker of version 2.0.0 does not take log requests: once the server has run for a minute, a worker that reports no version and has not polled for log requests gets `worker node-... runs a hivemind older than 2.1, which cannot stream logs; upgrade it`.
 - `429` when the node already has 16 log streams open.
 - `502` when the worker could not read the log for another reason.
 

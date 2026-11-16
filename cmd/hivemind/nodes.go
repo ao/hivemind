@@ -24,6 +24,10 @@ func nodesCmd() *cobra.Command {
 them, the age of its lease, whether it is ready or lost, and how many replicas
 are placed on it. A node is lost when its lease is more than 15 s old.
 
+VERSION is the hivemind version the node reports with each request; the
+server's own node shows the server's. "-" means the node reports none, which
+a version older than 2.2 does.
+
 ELIGIBILITY is "eligible" for a node that takes new replicas, "ineligible" for
 one that does not (hivemind node eligibility), "draining" during a drain, and
 "drained" after one, until the node is made eligible again or removed.
@@ -62,7 +66,7 @@ func printNodes(out io.Writer, nodes []server.NodeView) {
 		return
 	}
 	tw := tabwriter.NewWriter(out, 0, 4, 2, ' ', 0)
-	fmt.Fprintln(tw, "ID\tNAME\tROLE\tCPU\tMEMORY\tLEASE AGE\tSTATE\tELIGIBILITY\tREPLICAS\tCERT EXPIRES")
+	fmt.Fprintln(tw, "ID\tNAME\tROLE\tVERSION\tCPU\tMEMORY\tLEASE AGE\tSTATE\tELIGIBILITY\tREPLICAS\tCERT EXPIRES")
 	now := time.Now()
 	for _, n := range nodes {
 		role := "worker"
@@ -70,8 +74,9 @@ func printNodes(out io.Writer, nodes []server.NodeView) {
 			role = "server"
 		}
 		age := (time.Duration(n.LeaseAgeSeconds * float64(time.Second))).Round(time.Second)
-		fmt.Fprintf(tw, "%s\t%s\t%s\t%d\t%s\t%s\t%s\t%s\t%d\t%s\n", n.ID, firstNonEmpty(n.Name, "-"), role, n.CPU, bytesIEC(n.Memory),
-			age, n.State, eligibility(n), n.Replicas, certExpiry(n.CertNotAfter, n.CertNotRenewing, now))
+		fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%d\t%s\t%s\t%s\t%s\t%d\t%s\n", n.ID, firstNonEmpty(n.Name, "-"), role,
+			firstNonEmpty(n.Version, "-"), n.CPU, bytesIEC(n.Memory), age, n.State, eligibility(n), n.Replicas,
+			certExpiry(n.CertNotAfter, n.CertNotRenewing, now))
 	}
 	tw.Flush()
 }

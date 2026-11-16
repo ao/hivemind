@@ -52,27 +52,47 @@ type Client struct {
 // long. It is what closes the connections a ResetConnections leaves behind.
 const idleConnTimeout = 90 * time.Second
 
+// ClientOption configures NewClient.
+type ClientOption func(*Client)
+
+// WithVersion makes the client send v, the worker's hivemind version, in
+// VersionHeader on every request. A version CleanVersion refuses is not sent.
+func WithVersion(v string) ClientOption {
+	return func(c *Client) { c.tr.version = CleanVersion(v) }
+}
+
 // NewClient returns a client for the server at base, such as
 // https://10.0.0.5:4484. tlsCfg presents the node's certificate and trusts the
 // cluster CA (see pki.ClientTLSConfig).
-func NewClient(base string, tlsCfg *tls.Config) (*Client, error) {
+func NewClient(base string, tlsCfg *tls.Config, opts ...ClientOption) (*Client, error) {
 	if !strings.HasPrefix(base, "https://") {
 		return nil, fmt.Errorf("server URL %q must start with https://", base)
 	}
 	tr := &swapTransport{}
 	tr.cur.Store(&http.Transport{TLSClientConfig: tlsCfg, IdleConnTimeout: idleConnTimeout})
-	return &Client{base: strings.TrimRight(base, "/"), tr: tr,
-		http: &http.Client{Transport: tr, Timeout: clientTimeout}, stream: &http.Client{Transport: tr}}, nil
+	c := &Client{base: strings.TrimRight(base, "/"), tr: tr,
+		http: &http.Client{Transport: tr, Timeout: clientTimeout}, stream: &http.Client{Transport: tr}}
+	for _, o := range opts {
+		o(c)
+	}
+	return c, nil
 }
 
 // swapTransport sends each request on the transport it holds.
 // ResetConnections replaces that transport, so no request made after a reset
-// reuses a connection opened before it.
+// reuses a connection opened before it. Each request carries the worker's
+// version.
 type swapTransport struct {
-	cur atomic.Pointer[http.Transport]
+	cur     atomic.Pointer[http.Transport]
+	version string
 }
 
 func (s *swapTransport) RoundTrip(r *http.Request) (*http.Response, error) {
+	if s.version != "" {
+		// A RoundTripper must not change the request it is given.
+		r = r.Clone(r.Context())
+		r.Header.Set(VersionHeader, s.version)
+	}
 	return s.cur.Load().RoundTrip(r)
 }
 
