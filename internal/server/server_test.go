@@ -222,6 +222,7 @@ func TestEveryRouteNeedsToken(t *testing.T) {
 		}
 		path = strings.ReplaceAll(path, "{name}", "web")
 		path = strings.ReplaceAll(path, "{id}", testNode)
+		path = strings.ReplaceAll(path, "{host}", "ghcr.io")
 		for _, hdr := range []string{"", "Bearer nope", "Bearer " + other, "Basic " + h.token} {
 			req := httptest.NewRequest(method, path, strings.NewReader(nginx2))
 			if hdr != "" {
@@ -247,6 +248,10 @@ func TestEveryRouteNeedsToken(t *testing.T) {
 	// Nothing was created by the unauthenticated PUT and POST.
 	if apps, _ := h.store.ListApps(context.Background()); len(apps) != 0 {
 		t.Fatalf("unauthenticated requests created %d apps", len(apps))
+	}
+	// Nor stored a registry credential.
+	if rs, _ := h.store.ListRegistries(context.Background()); len(rs) != 0 {
+		t.Fatalf("unauthenticated requests stored %d registry credentials", len(rs))
 	}
 	// Nor was the node removed by the unauthenticated DELETE.
 	if removed, _ := h.store.IsNodeRemoved(context.Background(), testNode); removed {

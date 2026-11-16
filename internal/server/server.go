@@ -187,6 +187,9 @@ func (s *Server) routes() {
 	r.HandleFunc("POST /v1/nodes/{id}/drain", s.postDrain)
 	r.HandleFunc("GET /v1/nodes/{id}/drain", s.getDrain)
 	r.HandleFunc("GET /v1/routes", s.listRoutes)
+	r.HandleFunc("GET /v1/registries", s.listRegistries)
+	r.HandleFunc("PUT /v1/registries/{host}", s.putRegistry)
+	r.HandleFunc("DELETE /v1/registries/{host}", s.deleteRegistry)
 	r.HandleFunc("POST /v1/backup", s.postBackup)
 	r.HandleFunc("GET /metrics", s.metricsHandler)
 }
