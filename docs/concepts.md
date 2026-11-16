@@ -223,7 +223,7 @@ The agent runs a pass every 2 seconds (`--reconcile-interval`), and a pass also 
 4. For each assignment, supervise the container that is there, or create and start one. A missing image is pulled, with the credential stored for its registry, if any ([registries](registries.md)).
 5. Report each replica's state to the server.
 
-A failed replica does not stop the pass. The error goes in the status, and the next pass tries again, except a failed pull: that waits 10 s, then 20 s, 40 s and so on up to 5 minutes, for the same image and credential. If the assignments cannot be read, the pass changes nothing, so containers keep running, and the agent does not report, so its lease ages.
+A failed replica does not stop the pass. The error goes in the status, and a later pass tries again. A failed pull waits 10 s, then 20 s, 40 s and so on up to 5 minutes, for the same image and credential, counted from the end of the pull. A pull that takes longer than 2 seconds goes on in the background, and triggers a pass when it ends, so a slow registry holds up only the replicas of its image. A container that cannot be created or started waits 2 s, then 4 s, doubling up to a minute. If the assignments cannot be read, or the containers cannot be listed, the pass changes nothing, so containers keep running, and the next pass is at the next interval. If the assignments cannot be read the agent does not report, so its lease ages. See [failures](failures.md) for what each failure looks like.
 
 ## Health checks and restarts
 
@@ -241,7 +241,7 @@ The agent restarts a container that exits, whatever its exit code, and a contain
 
 The restart policy in the container itself is `no`. The agent is the only thing that restarts a container. A container that exits while the agent is down is not restarted until the agent runs again.
 
-Status reports the state of each replica, its node, its generation, its health, its restart count and its last error. While a restart waits out its backoff, the replica is crash-looping and status gives the time of the next restart: `hivemind status` prints "crash-looping, next restart in 40s".
+Status reports the state of each replica, its node, its generation, its health, its restart count and its last error. While a restart waits out its backoff, the replica is crash-looping, and status says why the container stopped and when the next restart is: `hivemind status` prints "crash-looping: exited with code 1, next restart in 40s", "crash-looping: killed for going over its memory limit of 64Mi (out of memory), ..." or "crash-looping: failed its health check 3 times in a row: ...".
 
 ## Ports
 

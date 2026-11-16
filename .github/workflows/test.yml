@@ -224,3 +224,17 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - run: NODES=3 ./scripts/fault-suite.sh
+
+  # The edge suite: dockerd killed and restarted under the agent, failing
+  # pulls, full disks on a node and on the server, kill -9 of serve under
+  # write load, crash loops, logs -f across a server restart, damaged worker
+  # data directories and the largest spec. It takes about 25 minutes, so it
+  # runs with the fault suite.
+  edge-suite:
+    name: Edge suite
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+      - run: ./scripts/edge-suite.sh

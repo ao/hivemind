@@ -41,7 +41,7 @@ hivemind-api-0-g1: pulling ghcr.io/acme/api:1.4: ghcr.io refused the stored cred
 
 The message has neither the username nor the password, and none of what the registry said once a credential was sent, since a registry's error can carry the username in a token URL. Docker Hub gives one answer for an image that does not exist and one that is private, so its message says "no such image, or it is private".
 
-A failed pull is not tried again at once. The node waits 10 seconds, then 20, 40 and so on up to 5 minutes, for that image and credential. A new login or a logout changes the credential, so the next pull goes at the next pass, within about 2 seconds. Before 2.2 the agent pulled again on every pass.
+A failed pull is not tried again at once. The node waits 10 seconds, then 20, 40 and so on up to 5 minutes, for that image and credential, counted from the end of the pull. A new login or a logout changes the credential, so the next pull goes at the next pass, within about 2 seconds. Before 2.2 the agent pulled again on every pass. A pull that takes more than 2 seconds goes on in the background, while the node supervises its other replicas, and the status says `pulling <image>, started <time>; the registry has not answered yet`.
 
 ## Docker Hub
 
