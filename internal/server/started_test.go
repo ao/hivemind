@@ -7,6 +7,7 @@ import (
 	"log/slog"
 	"net/http/httptest"
 	"path/filepath"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -157,5 +158,101 @@ func TestNodesWaitForTheirFirstReportAfterTheStart(t *testing.T) {
 	}
 	if s := stateOf(time.Now().Add(-5 * time.Second)); s != "ready" {
 		t.Fatalf("after a report to this process: %q, want ready", s)
+	}
+}
+
+// raw is get for a reply that is not JSON, such as /metrics.
+func (e *startedEnv) raw(path string) string {
+	e.t.Helper()
+	sessions, err := auth.NewSessions(time.Hour)
+	if err != nil {
+		e.t.Fatal(err)
+	}
+	a, err := auth.NewAuthenticator(auth.HashToken(e.tok), sessions)
+	if err != nil {
+		e.t.Fatal(err)
+	}
+	srv, err := New(Config{Store: e.st, Runtime: &fakeRuntime{}, NodeID: "node-a", Auth: a,
+		Logger: slog.New(slog.NewTextHandler(io.Discard, nil))})
+	if err != nil {
+		e.t.Fatal(err)
+	}
+	req := httptest.NewRequest("GET", path, nil)
+	req.Header.Set("Authorization", "Bearer "+e.tok)
+	rec := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(rec, req)
+	if rec.Code != 200 {
+		e.t.Fatalf("GET %s: %d %s", path, rec.Code, rec.Body.String())
+	}
+	return rec.Body.String()
+}
+
+// A volume replica keeps its node when the node is lost, and the node's last
+// report stays in the store. That report must not make the replica look
+// running and ready, in status or in metrics, while its node is down: the
+// scale run on ten machines saw 500 of 500 running with three nodes off.
+func TestALostNodesReportIsNotCurrent(t *testing.T) {
+	e := newStartedEnv(t)
+	ctx := context.Background()
+	for _, id := range []string{"node-a", "node-b"} {
+		if err := e.st.UpsertNode(ctx, store.Node{ID: id, Name: id, CPU: 2, Memory: 1 << 30}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if _, err := e.st.PutApp(ctx, spec.App{Name: "db", Image: "redis:7-alpine", Replicas: 1,
+		Volumes: []spec.Volume{{Name: "data", Path: "/data"}}}); err != nil {
+		t.Fatal(err)
+	}
+	reps, err := e.st.Replicas(ctx, "db")
+	if err != nil || len(reps) != 1 || reps[0].NodeID == "" {
+		t.Fatalf("db not placed: %+v, %v", reps, err)
+	}
+	on, other := reps[0].NodeID, "node-a"
+	if on == "node-a" {
+		other = "node-b"
+	}
+	report := func() {
+		if err := e.st.ReportStatus(ctx, on, []store.Status{{Name: "hivemind-db-0-g1", ContainerID: "c0",
+			App: "db", Replica: 0, Generation: 1, State: "running", Ready: true}}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	report()
+	var got AppStatus
+	e.get(time.Time{}, "/v1/apps/db/status", &got)
+	if got.Running != 1 || got.Ready != 1 || got.Replicas[0].State != "running" {
+		t.Fatalf("with its node up: %+v", got)
+	}
+
+	// The node goes quiet; the other renews. The sweep keeps the volume
+	// replica on its node, with a reason.
+	e.set(e.now().Add(20 * time.Second))
+	if err := e.st.RenewLease(ctx, other); err != nil {
+		t.Fatal(err)
+	}
+	if lost, err := e.st.ReconcileNodes(ctx, time.Time{}); err != nil || len(lost) != 1 || lost[0] != on {
+		t.Fatalf("sweep: lost %v, %v; want [%s]", lost, err, on)
+	}
+	e.get(time.Time{}, "/v1/apps/db/status", &got)
+	r := got.Replicas[0]
+	if got.Running != 0 || got.Ready != 0 || r.State != "unknown" || r.Ready || r.NodeID != on || r.PendingReason == "" {
+		t.Fatalf("with its node lost: running %d, ready %d, replica %+v; want unknown on %s with a reason, nothing counted",
+			got.Running, got.Ready, r, on)
+	}
+	m := e.raw("/metrics")
+	for _, line := range []string{`hivemind_replicas_running{app="db"} 0`, `hivemind_replicas_ready{app="db"} 0`} {
+		if !strings.Contains(m, line) {
+			t.Errorf("metrics lack %q while the node is lost", line)
+		}
+	}
+
+	// The node comes back and reports: running again.
+	report()
+	e.get(time.Time{}, "/v1/apps/db/status", &got)
+	if got.Running != 1 || got.Replicas[0].State != "running" {
+		t.Fatalf("after the node reports again: %+v", got)
+	}
+	if m := e.raw("/metrics"); !strings.Contains(m, `hivemind_replicas_running{app="db"} 1`) {
+		t.Error("metrics do not count the replica again after its node reports")
 	}
 }

@@ -29,7 +29,7 @@ Notable changes to hivemind, newest first. Versions follow [Semantic Versioning]
 
 ### Changed
 
-- After `serve` starts, a replica whose last report was made to an earlier server process is shown as `unknown`, not as the state it had then, until its node reports again; after a restore on a new machine those containers no longer exist. A node that has not reported since the start is `waiting` for 15 s rather than `lost`, as the sweep does not release it before then.
+- After `serve` starts, a replica whose last report was made to an earlier server process is shown as `unknown`, not as the state it had then, until its node reports again; after a restore on a new machine those containers no longer exist. The same holds for a report from a node that is lost: a volume replica held on a lost node was shown as running and ready, and counted in the status and the metrics, while its node was down. A node that has not reported since the start is `waiting` for 15 s rather than `lost`, as the sweep does not release it before then.
 - Routing reverses part of the v2 scope (decision 2 in [PLAN.md](docs/PLAN.md)), which had host-port networking and no proxy. Host ports work as before, and an app without routes is unchanged, but hivemind now runs a reverse proxy when `--route-addr` is given.
 - The router is the one listener that may bind `0.0.0.0`. It has no authentication, because it serves the apps' public traffic. `--route-addr` has no default. Every other listener still refuses a wildcard.
 - A worker can read every routed host's TLS private key and the ACME account key over the node API, whether or not it runs a router. [docs/security.md](docs/security.md#what-a-compromised-worker-can-do) lists what that means for a compromised worker.

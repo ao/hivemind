@@ -107,6 +107,12 @@ func (s *Server) writeMetrics(r *http.Request, b *bytes.Buffer) error {
 	if err != nil {
 		return err
 	}
+	now := s.metrics.now()
+	storeNow := s.cfg.Store.Now() // the clock that stamped leases and reports
+	leases := make(map[string]time.Time, len(nodes))
+	for _, n := range nodes {
+		leases[n.ID] = n.LastLease
+	}
 
 	// As in the status route, a report counts only for the node it came from.
 	type key struct {
@@ -140,11 +146,15 @@ func (s *Server) writeMetrics(r *http.Request, b *bytes.Buffer) error {
 		if !ok {
 			continue
 		}
-		if x.State == "running" {
-			c.running++
-		}
-		if x.Ready {
-			c.ready++
+		// As in status: a report from before this process, or from a lost
+		// node, does not count as running or ready.
+		if s.currentReport(x, leases, storeNow) {
+			if x.State == "running" {
+				c.running++
+			}
+			if x.Ready {
+				c.ready++
+			}
 		}
 		restarts = append(restarts, restart{rp.App, rp.Index, x.RestartCount})
 	}
@@ -172,7 +182,6 @@ func (s *Server) writeMetrics(r *http.Request, b *bytes.Buffer) error {
 	}
 
 	w.Family("hivemind_node_lease_age_seconds", "Seconds since the node last renewed its lease.", metrics.TypeGauge)
-	now := s.metrics.now()
 	for _, n := range nodes {
 		age := now.Sub(n.LastLease).Seconds()
 		if age < 0 {

@@ -14,6 +14,7 @@ import (
 
 	"github.com/ao/hivemind/internal/nodeapi"
 	"github.com/ao/hivemind/internal/runtime"
+	"github.com/ao/hivemind/internal/scheduler"
 	"github.com/ao/hivemind/internal/spec"
 	"github.com/ao/hivemind/internal/store"
 )
@@ -50,6 +51,32 @@ const stateUnknown = "unknown"
 // process started.
 func (s *Server) staleReport(updated time.Time) bool {
 	return !s.cfg.Started.IsZero() && updated.Before(s.cfg.Started)
+}
+
+// leases maps each node to the time of its last lease.
+func (s *Server) leases(ctx context.Context) (map[string]time.Time, error) {
+	nodes, err := s.cfg.Store.ListNodes(ctx)
+	if err != nil {
+		return nil, err
+	}
+	m := make(map[string]time.Time, len(nodes))
+	for _, n := range nodes {
+		m[n.ID] = n.LastLease
+	}
+	return m, nil
+}
+
+// currentReport reports whether a container report still describes the
+// container: it was made to this server process, by a node whose lease has
+// not lapsed. A lost node's last report is not current: a volume replica held
+// on it keeps its node, and without this the replica would show as running
+// and ready, and count as such in status and metrics, while its node is down.
+func (s *Server) currentReport(st store.Status, leases map[string]time.Time, now time.Time) bool {
+	if s.staleReport(st.UpdatedAt) {
+		return false
+	}
+	last, ok := leases[st.NodeID]
+	return ok && now.Sub(last) <= scheduler.DefaultLeaseTimeout
 }
 
 // ReplicaStatus is one replica and the state of its container.
@@ -301,6 +328,11 @@ func (s *Server) statusOf(r *http.Request, app string) ([]AppStatus, error) {
 	if err != nil {
 		return nil, err
 	}
+	leases, err := s.leases(ctx)
+	if err != nil {
+		return nil, err
+	}
+	now := s.cfg.Store.Now()
 	// A container report is matched by node as well as by replica and
 	// generation. A lost node's last report must not describe a replica that
 	// has moved, or that is pending on another node.
@@ -330,11 +362,12 @@ func (s *Server) statusOf(r *http.Request, app string) ([]AppStatus, error) {
 						nr := st.NextRestart.UTC()
 						rs.NextRestart = &nr
 					}
-					// A report made to an earlier server process says what
-					// was true then. After a restore on a new machine the
-					// server's own containers are gone, so it is not shown
-					// as the state until the node reports to this process.
-					if s.staleReport(st.UpdatedAt) {
+					// A report made to an earlier server process, or by a
+					// node that is lost, says what was true then: after a
+					// restore on a new machine the server's own containers
+					// are gone, and a lost node's may be. It is not shown
+					// as the state until the node reports again.
+					if !s.currentReport(st, leases, now) {
 						rs.State, rs.Ready, rs.Health, rs.Error = stateUnknown, false, "", ""
 						rs.CrashLooping, rs.NextRestart = false, nil
 					}

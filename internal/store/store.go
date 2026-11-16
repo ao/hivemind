@@ -206,6 +206,10 @@ func WithPlacement(p PlaceFunc) Option { return func(s *Store) { s.place = p } }
 // WithClock sets the time source, for tests.
 func WithClock(now func() time.Time) Option { return func(s *Store) { s.now = now } }
 
+// Now is the store's clock: the time it stamps leases and reports with, so
+// the time to judge their age by.
+func (s *Store) Now() time.Time { return s.now() }
+
 // WithMinReady sets how long a node must have been ready before it gets new
 // replicas. The default is scheduler.DefaultMinReady (30 s). Zero means no
 // wait; tests that place replicas straight after registering a node use it.
