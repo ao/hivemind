@@ -183,10 +183,10 @@ The agent runs a pass every 2 seconds (`--reconcile-interval`), and a pass also 
 1. Fetch the assignments for this node.
 2. List the containers that carry a `hivemind.app` label.
 3. Remove the containers that match no assignment, whose generation is old, or that are dead or being removed.
-4. For each assignment, supervise the container that is there, or create and start one. A missing image is pulled.
+4. For each assignment, supervise the container that is there, or create and start one. A missing image is pulled, with the credential stored for its registry, if any ([registries](registries.md)).
 5. Report each replica's state to the server.
 
-A failed replica does not stop the pass. The error goes in the status, and the next pass tries again. If the assignments cannot be read, the pass changes nothing, so containers keep running, and the agent does not report, so its lease ages.
+A failed replica does not stop the pass. The error goes in the status, and the next pass tries again, except a failed pull: that waits 10 s, then 20 s, 40 s and so on up to 5 minutes, for the same image and credential. If the assignments cannot be read, the pass changes nothing, so containers keep running, and the agent does not report, so its lease ages.
 
 ## Health checks and restarts
 

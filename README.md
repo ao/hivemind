@@ -129,6 +129,7 @@ In the unreleased 2.2.0, an app can name `routes: [{host: www.example.com, port:
 - [Concepts](docs/concepts.md)
 - [Compose files](docs/compose.md)
 - [HTTPS routing](docs/routing.md)
+- [Private registries](docs/registries.md): `hivemind registry login` for GHCR, ECR, Docker Hub and registries of your own
 - [Security](docs/security.md)
 - [Backup and restore](docs/backup.md)
 - [Running under systemd](docs/systemd.md)

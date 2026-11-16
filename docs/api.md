@@ -153,6 +153,26 @@ The archive holds the CA private key, so the server sends it only over TLS, or t
 
 `port` is the container port the route names. `endpoints` are the `address:port` of each replica that takes the host's traffic now: its container is Ready, it is the copy the replica (or its rollout surge) is assigned, and its node's lease is current. A host whose app has no such replica has `"endpoints": []`, and a router answers it with `503`. See [routing](routing.md).
 
+## Registries
+
+`PUT /v1/registries/{host}` stores the credential that every pull of an image from `{host}` sends, or replaces the one stored:
+
+```json
+{"username": "octocat", "password": "<token>"}
+```
+
+The reply is the stored record, without the password:
+
+```json
+{"host": "ghcr.io", "username": "octocat", "created_at": "2026-11-16T10:00:00Z", "updated_at": "2026-11-16T10:00:00Z"}
+```
+
+`{host}` is a registry as an image reference names it: a host name or IPv4 address with an optional port, or `localhost`, such as `ghcr.io` or `registry.example.com:5000`. It is stored in lower case, and `index.docker.io` and `registry-1.docker.io` are stored as `docker.io`. A host with a scheme or a path, a port outside 1 to 65535, or a name Docker reads as a Docker Hub namespace (no dot, no port, not `localhost`) gets `400`. The username must be 1 to 256 bytes with no colon, and the password 1 to 16,384 bytes; both must be UTF-8 without control characters, or the request gets `400`. A 101st registry gets `409`. The credential is not checked with the registry.
+
+`GET /v1/registries` lists the stored credentials by host, in the same form, as `{"registries": [...]}`. `DELETE /v1/registries/{host}` removes one and answers `204`; a host with none gets `404`. No route returns a password.
+
+A change affects the next pull only; running containers keep running. How a credential is used, and who gets it, is in [registries](registries.md).
+
 ## Node API (internal)
 
 Workers talk to the server over a second API, on the cluster port that `serve --advertise` opens. It has routes for a worker to join, register, read its assignments, report its containers, renew its certificate, take and answer log requests, read the routing table, and use the routers' shared TLS storage. It is internal. Its routes, bodies and errors may change in any release, so this document does not describe them, except that a removed node gets `403` on every one of them, and a certificate that has expired by the server's clock gets `401`. The listeners and the trust model are in [security](security.md).
@@ -180,6 +200,9 @@ Workers talk to the server over a second API, on the cluster port that `serve --
 | `POST /v1/nodes/{id}/drain` | `{"deadline": "10m"}`, or `{}` | 200, the drain | Drain a node, or set a new deadline on its drain |
 | `GET /v1/nodes/{id}/drain` | none | 200, the drain | Read a node's drain |
 | `GET /v1/routes` | none | 200, `{"routes": [...]}` | The routing table. See [routing table](#routing-table) |
+| `GET /v1/registries` | none | 200, `{"registries": [...]}` | The stored registry credentials, without passwords. See [registries](#registries) |
+| `PUT /v1/registries/{host}` | `{"username", "password"}` | 200, the record without the password | Store or replace a registry credential |
+| `DELETE /v1/registries/{host}` | none | 204 | Remove a registry credential |
 | `POST /v1/backup` | none | 200, `application/x-tar` | A backup of the data directory, CA private key included. TLS or loopback only. See [backup](#backup) |
 | `GET /metrics` | none | 200, Prometheus text | Metrics |
 
