@@ -41,3 +41,40 @@ func TestRecordNodeCertOnlyMovesForward(t *testing.T) {
 		t.Fatalf("record after removal: %v, want ErrNotFound", err)
 	}
 }
+
+// A record keeps the certificate's issue time. A record of the same
+// certificate with an earlier issue time corrects it, as an older server
+// recorded the time it first saw the certificate; a later one does not.
+func TestRecordNodeCertValidityKeepsTheIssueTime(t *testing.T) {
+	s := newT(t)
+	ctx := ctxT(t)
+	issued := time.Unix(1_900_000_000, 0)
+	notAfter := issued.Add(365 * 24 * time.Hour)
+	seen := issued.Add(100 * 24 * time.Hour)
+	issuedAt := func() time.Time {
+		t.Helper()
+		nodes, err := s.ListNodes(ctx)
+		if err != nil || len(nodes) != 1 {
+			t.Fatalf("ListNodes: %+v, %v", nodes, err)
+		}
+		return nodes[0].CertIssuedAt
+	}
+	if err := s.RecordNodeCertValidity(ctx, node1, seen, notAfter); err != nil {
+		t.Fatal(err)
+	}
+	if got := issuedAt(); !got.Equal(seen) {
+		t.Fatalf("issue time %s, want %s", got, seen)
+	}
+	if err := s.RecordNodeCertValidity(ctx, node1, issued, notAfter); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.RecordNodeCertValidity(ctx, node1, seen, notAfter); err != nil {
+		t.Fatal(err)
+	}
+	if got := issuedAt(); !got.Equal(issued) {
+		t.Fatalf("issue time after the certificate's own: %s, want %s", got, issued)
+	}
+	if err := s.RecordNodeCertValidity(ctx, node1, time.Time{}, notAfter); !errors.Is(err, ErrInvalid) {
+		t.Fatalf("no issue time: %v", err)
+	}
+}

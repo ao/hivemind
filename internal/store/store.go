@@ -97,8 +97,10 @@ type Node struct {
 	// start of time.
 	ReadySince time.Time
 	// CertNotAfter is when the node's certificate expires, as the server
-	// last recorded it. Zero means there is no record.
+	// last recorded it. Zero means there is no record. CertIssuedAt is when
+	// that certificate was issued, as recorded with it.
 	CertNotAfter time.Time
+	CertIssuedAt time.Time
 	// Eligible is false for a node that takes no new replicas, after
 	// SetNodeEligibility or DrainNode. UpsertNode ignores it: a node is
 	// eligible when it first registers, and keeps its eligibility after.
@@ -747,7 +749,7 @@ func (s *Store) GetNode(ctx context.Context, id string) (Node, error) {
 func (s *Store) ListNodes(ctx context.Context) ([]Node, error) { return listNodes(ctx, s.db) }
 
 func listNodes(ctx context.Context, q querier) ([]Node, error) {
-	rows, err := q.QueryContext(ctx, `SELECT n.id, n.name, n.cpu, n.memory, n.last_lease, n.ready_since, coalesce(c.not_after, 0), n.eligible, n.address
+	rows, err := q.QueryContext(ctx, `SELECT n.id, n.name, n.cpu, n.memory, n.last_lease, n.ready_since, coalesce(c.not_after, 0), coalesce(c.issued_at, 0), n.eligible, n.address
 		FROM nodes n LEFT JOIN node_certs c ON c.id = n.id ORDER BY n.id`)
 	if err != nil {
 		return nil, err
@@ -756,15 +758,15 @@ func listNodes(ctx context.Context, q querier) ([]Node, error) {
 	var out []Node
 	for rows.Next() {
 		var n Node
-		var lease, ready, certNA int64
+		var lease, ready, certNA, certIssued int64
 		var eligible int
-		if err := rows.Scan(&n.ID, &n.Name, &n.CPU, &n.Memory, &lease, &ready, &certNA, &eligible, &n.Address); err != nil {
+		if err := rows.Scan(&n.ID, &n.Name, &n.CPU, &n.Memory, &lease, &ready, &certNA, &certIssued, &eligible, &n.Address); err != nil {
 			return nil, err
 		}
 		n.Eligible = eligible == 1
 		n.LastLease, n.ReadySince = time.Unix(0, lease), time.Unix(0, ready)
 		if certNA != 0 {
-			n.CertNotAfter = time.Unix(0, certNA)
+			n.CertNotAfter, n.CertIssuedAt = time.Unix(0, certNA), time.Unix(0, certIssued)
 		}
 		out = append(out, n)
 	}

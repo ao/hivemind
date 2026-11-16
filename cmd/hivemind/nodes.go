@@ -30,8 +30,11 @@ one that does not (hivemind node eligibility), "draining" during a drain, and
 
 CERT EXPIRES is when the node's certificate expires, as the server recorded it
 when it issued the certificate. A worker renews its certificate once two thirds
-of its lifetime have passed, so a date less than four months away means the
-node has not renewed. "-" means the server has no record yet.`,
+of its lifetime have passed, on day 243 of 365. One that is a day late is
+marked "not renewing", as in "2027-11-16 (in 120d, not renewing)", and the
+server logs a warning for it once a day: a 2.0 worker never renews, and the
+node stops working when the certificate expires. "-" means the server has no
+record yet.`,
 		Args: cobra.NoArgs,
 	}
 	cf := addClientFlags(cmd)
@@ -68,7 +71,7 @@ func printNodes(out io.Writer, nodes []server.NodeView) {
 		}
 		age := (time.Duration(n.LeaseAgeSeconds * float64(time.Second))).Round(time.Second)
 		fmt.Fprintf(tw, "%s\t%s\t%s\t%d\t%s\t%s\t%s\t%s\t%d\t%s\n", n.ID, firstNonEmpty(n.Name, "-"), role, n.CPU, bytesIEC(n.Memory),
-			age, n.State, eligibility(n), n.Replicas, certExpiry(n.CertNotAfter, now))
+			age, n.State, eligibility(n), n.Replicas, certExpiry(n.CertNotAfter, n.CertNotRenewing, now))
 	}
 	tw.Flush()
 }
@@ -87,8 +90,10 @@ func eligibility(n server.NodeView) string {
 }
 
 // certExpiry prints a certificate's expiry as a UTC date and the time left,
-// such as "2027-11-14 (in 364d)", or "-" without a record.
-func certExpiry(t *time.Time, now time.Time) string {
+// such as "2027-11-14 (in 364d)", or "-" without a record. A certificate the
+// server says is not being renewed is marked: "2027-11-14 (in 120d, not
+// renewing)".
+func certExpiry(t *time.Time, notRenewing bool, now time.Time) string {
 	if t == nil {
 		return "-"
 	}
@@ -103,6 +108,9 @@ func certExpiry(t *time.Time, now time.Time) string {
 		rel = "in " + strings.TrimSuffix(left.Round(time.Minute).String(), "0s")
 	default:
 		rel = "in " + left.Round(time.Second).String()
+	}
+	if notRenewing && left > 0 {
+		rel += ", not renewing"
 	}
 	return t.UTC().Format("2006-01-02") + " (" + rel + ")"
 }

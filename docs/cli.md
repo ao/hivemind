@@ -488,8 +488,11 @@ one that does not (hivemind node eligibility), "draining" during a drain, and
 
 CERT EXPIRES is when the node's certificate expires, as the server recorded it
 when it issued the certificate. A worker renews its certificate once two thirds
-of its lifetime have passed, so a date less than four months away means the
-node has not renewed. "-" means the server has no record yet.
+of its lifetime have passed, on day 243 of 365. One that is a day late is
+marked "not renewing", as in "2027-11-16 (in 120d, not renewing)", and the
+server logs a warning for it once a day: a 2.0 worker never renews, and the
+node stops working when the certificate expires. "-" means the server has no
+record yet.
 
 ```
 hivemind nodes [flags]

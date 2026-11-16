@@ -63,9 +63,9 @@ func (h *CertHolder) current() (*tls.Certificate, error) {
 	return c, nil
 }
 
-// issuedAt is when the certificate was issued. IssueNodeCert backdates
+// IssuedAt is when the certificate was issued. IssueNodeCert backdates
 // NotBefore by clockSkew, so the issue time is clockSkew later.
-func issuedAt(cert *x509.Certificate) time.Time {
+func IssuedAt(cert *x509.Certificate) time.Time {
 	t := cert.NotBefore.Add(clockSkew)
 	if !t.Before(cert.NotAfter) {
 		return cert.NotBefore
@@ -78,7 +78,7 @@ func issuedAt(cert *x509.Certificate) time.Time {
 // certificate that is day 243, with 122 days left, so a node that cannot
 // reach the server has months to come back.
 func RenewAt(cert *x509.Certificate) time.Time {
-	from := issuedAt(cert)
+	from := IssuedAt(cert)
 	return from.Add(cert.NotAfter.Sub(from) * 2 / 3)
 }
 
@@ -87,11 +87,29 @@ func RenewDue(cert *x509.Certificate, now time.Time) bool {
 	return !now.Before(RenewAt(cert))
 }
 
+// RenewOverdue reports whether a certificate issued at issued, and valid
+// until notAfter, should have been renewed by now: its renewal time, two
+// thirds of its lifetime in (RenewAt), passed more than a grace ago. The grace
+// is a tenth of the lifetime, at most a day. A holder that renews checks at
+// least hourly, and every twentieth of the lifetime, so it is never this
+// late; one that is has not renewed, as a 2.0 worker never does, or cannot
+// reach the server. For a 365-day certificate that is from day 244, with
+// about 120 days left. A zero issue time, or a lifetime that is not
+// positive, is never overdue.
+func RenewOverdue(issued, notAfter, now time.Time) bool {
+	if issued.IsZero() || !notAfter.After(issued) {
+		return false
+	}
+	life := notAfter.Sub(issued)
+	grace := min(life/10, 24*time.Hour)
+	return !now.Before(issued.Add(life * 2 / 3).Add(grace))
+}
+
 // RenewCheckInterval is how often a holder of cert checks whether it is due:
 // a twentieth of its lifetime, between one second and one hour. A 365-day
 // certificate is checked hourly. Tests issue certificates that last minutes.
 func RenewCheckInterval(cert *x509.Certificate) time.Duration {
-	d := cert.NotAfter.Sub(issuedAt(cert)) / 20
+	d := cert.NotAfter.Sub(IssuedAt(cert)) / 20
 	return min(max(d, time.Second), time.Hour)
 }
 

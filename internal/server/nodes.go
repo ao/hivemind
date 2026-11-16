@@ -35,6 +35,11 @@ type NodeView struct {
 	// it. It is absent when there is no record, such as for a server
 	// without --advertise.
 	CertNotAfter *time.Time `json:"cert_not_after,omitempty"`
+	// CertNotRenewing is true when the certificate is past the time its node
+	// renews it, two thirds of the way through its lifetime, by more than a
+	// day (pki.RenewOverdue): the node is not renewing it, as a 2.0 worker
+	// does not.
+	CertNotRenewing bool `json:"cert_not_renewing,omitempty"`
 	// Eligible is false for a node that takes no new replicas: one made
 	// ineligible, or drained.
 	Eligible bool `json:"eligible"`
@@ -193,6 +198,7 @@ func (s *Server) listNodes(w http.ResponseWriter, r *http.Request) {
 		if !n.CertNotAfter.IsZero() {
 			t := n.CertNotAfter.UTC()
 			v.CertNotAfter = &t
+			v.CertNotRenewing = pki.RenewOverdue(n.CertIssuedAt, n.CertNotAfter, now)
 		}
 		if d, ok := drains[n.ID]; ok {
 			v.Drain = &d

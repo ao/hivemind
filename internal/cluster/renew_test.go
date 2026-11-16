@@ -14,6 +14,8 @@ import (
 	"net/http"
 	"net/url"
 	"path/filepath"
+	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -289,5 +291,71 @@ func TestRenewRejectsBadCSR(t *testing.T) {
 	_ = json.Unmarshal(body, &e)
 	if code != http.StatusBadRequest {
 		t.Fatalf("bad CSR: %d %q, want 400", code, e.Error)
+	}
+}
+
+// lockedBuffer is a log destination tests can read while the server writes.
+type lockedBuffer struct {
+	mu sync.Mutex
+	b  strings.Builder
+}
+
+func (l *lockedBuffer) Write(p []byte) (int, error) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return l.b.Write(p)
+}
+
+func (l *lockedBuffer) String() string {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return l.b.String()
+}
+
+// The server logs a warning for a worker whose certificate is past its
+// renewal time, at start and then once a day, and none for a worker that
+// renewed or for its own certificate.
+func TestServerWarnsOnceADayForANodeThatIsNotRenewing(t *testing.T) {
+	ctx := context.Background()
+	clock := &fakeClock{}
+	dir := t.TempDir()
+	ca, err := pki.CreateCA(filepath.Join(dir, "ca"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	st, err := store.Open(ctx, filepath.Join(dir, "hivemind.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+	day := 24 * time.Hour
+	for id, issued := range map[string]time.Time{"node-old": clock.now().Add(-245 * day), "node-new": clock.now().Add(-day)} {
+		if err := st.UpsertNode(ctx, store.Node{ID: id, Name: id, CPU: 1, Memory: 1 << 30}); err != nil {
+			t.Fatal(err)
+		}
+		if err := st.RecordNodeCertValidity(ctx, id, issued, issued.Add(365*day)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	var logs lockedBuffer
+	c, err := Listen(Config{Store: st, CA: ca, Tokens: pki.NewTokens(st.JoinTokens()), Advertise: "127.0.0.1", Port: 0,
+		LocalNodeID: "node-server", Logger: slog.New(slog.NewTextHandler(&logs, nil)), Now: clock.now})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer c.Shutdown()
+	warnings := func() int { return strings.Count(logs.String(), "has not renewed its certificate") }
+	if n := warnings(); n != 1 || !strings.Contains(logs.String(), "node=node-old") || strings.Contains(logs.String(), "node=node-new") {
+		t.Fatalf("%d warnings at start, want one for node-old:\n%s", n, logs.String())
+	}
+	clock.advance(time.Hour)
+	c.certs.check()
+	if n := warnings(); n != 1 {
+		t.Fatalf("%d warnings an hour later, want still one:\n%s", n, logs.String())
+	}
+	clock.advance(23 * time.Hour)
+	c.certs.check()
+	if n := warnings(); n != 2 {
+		t.Fatalf("%d warnings a day later, want two:\n%s", n, logs.String())
 	}
 }

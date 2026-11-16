@@ -114,18 +114,58 @@ func TestCertExpiry(t *testing.T) {
 	now := time.Date(2026, 11, 14, 12, 0, 0, 0, time.UTC)
 	at := func(d time.Duration) *time.Time { x := now.Add(d); return &x }
 	for _, c := range []struct {
-		t    *time.Time
-		want string
+		t           *time.Time
+		notRenewing bool
+		want        string
 	}{
-		{nil, "-"},
-		{at(365 * 24 * time.Hour), "2027-11-14 (in 365d)"},
-		{at(90 * time.Minute), "2026-11-14 (in 1h30m)"},
-		{at(9*time.Minute + 50*time.Second), "2026-11-14 (in 10m)"},
-		{at(30 * time.Second), "2026-11-14 (in 30s)"},
-		{at(-time.Hour), "2026-11-14 (expired)"},
+		{nil, false, "-"},
+		{at(365 * 24 * time.Hour), false, "2027-11-14 (in 365d)"},
+		{at(90 * time.Minute), false, "2026-11-14 (in 1h30m)"},
+		{at(9*time.Minute + 50*time.Second), false, "2026-11-14 (in 10m)"},
+		{at(30 * time.Second), false, "2026-11-14 (in 30s)"},
+		{at(-time.Hour), false, "2026-11-14 (expired)"},
+		{at(120*24*time.Hour + time.Hour), true, "2027-03-14 (in 120d, not renewing)"},
+		{at(-time.Hour), true, "2026-11-14 (expired)"},
 	} {
-		if got := certExpiry(c.t, now); got != c.want {
+		if got := certExpiry(c.t, c.notRenewing, now); got != c.want {
 			t.Errorf("certExpiry = %q, want %q", got, c.want)
+		}
+	}
+}
+
+// hivemind nodes marks a worker whose certificate is past its renewal time,
+// from the server's record of when it was issued, and only that worker.
+func TestNodesMarksANodeThatIsNotRenewing(t *testing.T) {
+	st := nodesAPI(t)
+	ctx := context.Background()
+	day := 24 * time.Hour
+	issued := time.Now().Add(-245*day + time.Hour) // 120 days and an hour left
+	if err := st.RecordNodeCertValidity(ctx, "node-w", issued, issued.Add(365*day)); err != nil {
+		t.Fatal(err)
+	}
+	fresh := time.Now().Add(-10 * day)
+	if err := st.RecordNodeCertValidity(ctx, "node-s", fresh, fresh.Add(365*day)); err != nil {
+		t.Fatal(err)
+	}
+	out, _, err := run(t, "", "nodes")
+	if err != nil {
+		t.Fatal(err)
+	}
+	rows := map[string]string{}
+	for _, l := range strings.Split(strings.TrimSpace(out), "\n")[1:] {
+		rows[strings.Fields(l)[0]] = l
+	}
+	if !strings.HasSuffix(rows["node-w"], "(in 120d, not renewing)") || strings.Contains(rows["node-s"], "not renewing") {
+		t.Fatalf("nodes:\n%s\nwant node-w marked not renewing, and node-s not", out)
+	}
+	out, _, err = run(t, "", "nodes", "--json")
+	var nodes []server.NodeView
+	if err != nil || json.Unmarshal([]byte(out), &nodes) != nil {
+		t.Fatalf("nodes --json: %q, %v", out, err)
+	}
+	for _, n := range nodes {
+		if n.CertNotRenewing != (n.ID == "node-w") {
+			t.Fatalf("nodes --json: %s has cert_not_renewing %v", n.ID, n.CertNotRenewing)
 		}
 	}
 }

@@ -63,7 +63,7 @@ func (a *nodeAPI) requireCurrentCert(next http.Handler) http.Handler {
 			return
 		}
 		if id, err := pki.NodeIDFromCert(leaf); err == nil && !a.certs.known(id, leaf.NotAfter) {
-			switch err := a.st.RecordNodeCert(r.Context(), id, leaf.NotAfter); {
+			switch err := a.st.RecordNodeCertValidity(r.Context(), id, pki.IssuedAt(leaf), leaf.NotAfter); {
 			case err == nil:
 				a.certs.note(id, leaf.NotAfter)
 			case errors.Is(err, store.ErrNodeRemoved):
@@ -108,7 +108,7 @@ func (a *nodeAPI) renew(w http.ResponseWriter, r *http.Request) {
 		a.fail(w, r, err)
 		return
 	}
-	if err := a.st.RecordNodeCert(r.Context(), id, leaf.NotAfter); err != nil {
+	if err := a.st.RecordNodeCertValidity(r.Context(), id, pki.IssuedAt(leaf), leaf.NotAfter); err != nil {
 		a.fail(w, r, err)
 		return
 	}
@@ -124,7 +124,7 @@ func (a *nodeAPI) renew(w http.ResponseWriter, r *http.Request) {
 func recordIssued(r *http.Request, cfg Config, log *slog.Logger, id string, der []byte) {
 	leaf, err := x509.ParseCertificate(der)
 	if err == nil {
-		err = cfg.Store.RecordNodeCert(r.Context(), id, leaf.NotAfter)
+		err = cfg.Store.RecordNodeCertValidity(r.Context(), id, pki.IssuedAt(leaf), leaf.NotAfter)
 	}
 	if err != nil {
 		log.Warn("recording a node certificate's expiry", "node", id, "err", err)
@@ -139,8 +139,10 @@ type serverCertSource struct {
 	holder *pki.CertHolder
 	log    *slog.Logger
 	now    func() time.Time
-	// caWarned is when the CA expiry was last logged.
-	caWarned time.Time
+	// caWarned is when the CA expiry was last logged, and nodeWarned when
+	// each node's late renewal was.
+	caWarned   time.Time
+	nodeWarned map[string]time.Time
 }
 
 func (s *serverCertSource) issue() (tls.Certificate, error) {
@@ -161,14 +163,15 @@ func (s *serverCertSource) issue() (tls.Certificate, error) {
 	if err != nil {
 		return tls.Certificate{}, err
 	}
-	if err := s.cfg.Store.RecordNodeCert(context.Background(), s.cfg.LocalNodeID, cert.Leaf.NotAfter); err != nil {
+	if err := s.cfg.Store.RecordNodeCertValidity(context.Background(), s.cfg.LocalNodeID, pki.IssuedAt(cert.Leaf), cert.Leaf.NotAfter); err != nil {
 		s.log.Warn("recording the server certificate's expiry", "err", err)
 	}
 	return cert, nil
 }
 
 // check renews the server certificate when it is due, and warns once a day
-// while the CA has less than pki.CAWarnBefore left.
+// while the CA has less than pki.CAWarnBefore left, and once a day for each
+// node that is late to renew its certificate.
 func (s *serverCertSource) check() {
 	now := s.now()
 	ca := s.cfg.CA.Cert
@@ -178,6 +181,7 @@ func (s *serverCertSource) check() {
 			"and when it expires no node can reach the server. Before then, create a new cluster with init in a new "+
 			"data directory and join every machine to it", "ca_not_after", ca.NotAfter.UTC(), "left", left.Round(time.Hour))
 	}
+	s.warnNotRenewing(now)
 	if !pki.RenewDue(s.holder.Leaf(), now) {
 		return
 	}
@@ -189,6 +193,37 @@ func (s *serverCertSource) check() {
 	}
 	s.holder.Store(cert)
 	s.log.Info("server certificate renewed", "node", s.cfg.LocalNodeID, "not_after", cert.Leaf.NotAfter.UTC())
+}
+
+// warnNotRenewing logs a warning, once a day for each node, for every worker
+// whose recorded certificate is past its renewal time (pki.RenewOverdue). A
+// worker renews its certificate then, so one that has not either runs 2.0,
+// which never renews, or cannot reach the server. When the certificate
+// expires, the node stops working. The server's own certificate is renewed
+// by check itself.
+func (s *serverCertSource) warnNotRenewing(now time.Time) {
+	nodes, err := s.cfg.Store.ListNodes(context.Background())
+	if err != nil {
+		s.log.Warn("reading the nodes to check their certificates", "err", err)
+		return
+	}
+	if s.nodeWarned == nil {
+		s.nodeWarned = map[string]time.Time{}
+	}
+	for _, n := range nodes {
+		if n.ID == s.cfg.LocalNodeID || !pki.RenewOverdue(n.CertIssuedAt, n.CertNotAfter, now) {
+			delete(s.nodeWarned, n.ID)
+			continue
+		}
+		if last, ok := s.nodeWarned[n.ID]; ok && now.Sub(last) < 24*time.Hour {
+			continue
+		}
+		s.nodeWarned[n.ID] = now
+		s.log.Warn("a node has not renewed its certificate, which it does two thirds of the way through its lifetime; "+
+			"a 2.0 worker never renews. Upgrade hivemind on the node, or see why it cannot reach the server, before the "+
+			"certificate expires: then the node stops working",
+			"node", n.ID, "name", n.Name, "not_after", n.CertNotAfter.UTC(), "left", max(n.CertNotAfter.Sub(now), 0).Round(time.Hour))
+	}
 }
 
 // run calls check every pki.RenewCheckInterval until ctx ends.

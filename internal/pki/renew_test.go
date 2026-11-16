@@ -169,3 +169,30 @@ func TestCertHolderExpiredClientCertRefused(t *testing.T) {
 		t.Fatal("an expired client certificate was accepted")
 	}
 }
+
+// A certificate is overdue for renewal a grace after its renewal time: a
+// tenth of its lifetime, at most a day. For a year's certificate that is day
+// 244 and 8 hours.
+func TestRenewOverdue(t *testing.T) {
+	day := 24 * time.Hour
+	issued := time.Date(2026, 11, 16, 0, 0, 0, 0, time.UTC)
+	year := issued.Add(365 * day)
+	short := issued.Add(10 * time.Minute)
+	for _, c := range []struct {
+		issued, notAfter, now time.Time
+		want                  bool
+	}{
+		{issued, year, issued.Add(243 * day), false},
+		{issued, year, issued.Add(244 * day), false},
+		{issued, year, issued.Add(244*day + 9*time.Hour), true},
+		{issued, year, year.Add(time.Hour), true},
+		{issued, short, issued.Add(7*time.Minute + 30*time.Second), false},
+		{issued, short, issued.Add(7*time.Minute + 45*time.Second), true},
+		{time.Time{}, year, year, false},
+		{year, issued, year, false},
+	} {
+		if got := RenewOverdue(c.issued, c.notAfter, c.now); got != c.want {
+			t.Errorf("RenewOverdue(issued, %s, %s after issue) = %v, want %v", c.notAfter.Sub(c.issued), c.now.Sub(c.issued), got, c.want)
+		}
+	}
+}
