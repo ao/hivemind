@@ -78,14 +78,14 @@ hivemind status
 ```
 
 ```
-APP  IMAGE         GENERATION  DESIRED  RUNNING
-web  nginx:alpine  1           1        1
+APP  IMAGE         GENERATION  DESIRED  RUNNING  READY
+web  nginx:alpine  1           1        1        1
 
 APP  REPLICA  NODE               GENERATION  STATE    HEALTH  RESTARTS  CONTAINER     DETAIL
 web  0        node-ea6188a5133b  1           running  -       0         fe8344510103  -
 ```
 
-`DESIRED` is the replica count the spec asks for, and `RUNNING` counts the replicas whose container is running at the current generation. In the second table, `STATE` is the container's state from the engine, `HEALTH` is the health check's result (`-` when the app has none), `RESTARTS` counts the agent's restarts of the container, and `DETAIL` shows the reason a replica is pending or cannot run on its node, or else the last error.
+`DESIRED` is the replica count the spec asks for, `RUNNING` counts the replicas whose container is running, and `READY` those of them that pass their health check, or have none, and are not crash-looping. A replica that runs but fails its health check counts in `RUNNING` and not in `READY`. During a rollout, a copy at the old generation counts until it is replaced. In the second table, `STATE` is the container's state from the engine, `HEALTH` is the health check's result (`-` when the app has none), `RESTARTS` counts the agent's restarts of the container, and `DETAIL` shows the reason a replica is pending or cannot run on its node, or else the last error.
 
 Until the image is pulled, `STATE` is `pending` and `CONTAINER` is `-`. Run `status` again. When `STATE` is `running`, the port answers:
 
@@ -117,8 +117,8 @@ worker: 2 replicas
 ```
 
 ```
-APP     IMAGE         GENERATION  DESIRED  RUNNING
-worker  nginx:alpine  1           2        2
+APP     IMAGE         GENERATION  DESIRED  RUNNING  READY
+worker  nginx:alpine  1           2        2        2
 
 APP     REPLICA  NODE               GENERATION  STATE    HEALTH  RESTARTS  CONTAINER     DETAIL
 worker  0        node-ea6188a5133b  1           running  -       0         425040ec2a1e  -

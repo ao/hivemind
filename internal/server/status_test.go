@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"log/slog"
 	"net/http/httptest"
@@ -116,4 +117,54 @@ func replicasFor(t *testing.T, st *store.Store, app string) []store.Replica {
 		t.Fatal(err)
 	}
 	return rs
+}
+
+// running counts replicas whose container runs; ready counts those that also
+// pass their health check and are not crash-looping. An unhealthy,
+// crash-looping container is running and not ready.
+func TestStatusCountsRunningAndReady(t *testing.T) {
+	ctx := context.Background()
+	st, err := store.Open(ctx, filepath.Join(t.TempDir(), "hivemind.db"), store.WithPlacement(store.FirstNode), store.WithMinReady(0))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+	if err := st.UpsertNode(ctx, store.Node{ID: "node-a", Name: "node-a", CPU: 2, Memory: 1 << 30}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := st.PutApp(ctx, spec.App{Name: "sick", Image: "nginx:alpine", Replicas: 4,
+		Health: &spec.Health{TCP: &spec.TCPCheck{Port: 80}}}); err != nil {
+		t.Fatal(err)
+	}
+	c := func(idx int, state, health string, ready, crash bool) store.Status {
+		return store.Status{Name: fmt.Sprintf("hivemind-sick-%d-g1", idx), ContainerID: fmt.Sprintf("c%d", idx), App: "sick",
+			Replica: idx, Generation: 1, State: state, Health: health, Ready: ready, CrashLooping: crash}
+	}
+	if err := st.ReportStatus(ctx, "node-a", []store.Status{
+		c(0, "running", "healthy", true, false),
+		c(1, "running", "unhealthy", false, true),
+		c(2, "running", "starting", false, false),
+		c(3, "exited", "", false, true),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	tok, _ := auth.NewToken()
+	sessions, _ := auth.NewSessions(time.Hour)
+	a, _ := auth.NewAuthenticator(auth.HashToken(tok), sessions)
+	srv, err := New(Config{Store: st, Runtime: &fakeRuntime{}, NodeID: "node-a", Auth: a,
+		Logger: slog.New(slog.NewTextHandler(io.Discard, nil))})
+	if err != nil {
+		t.Fatal(err)
+	}
+	req := httptest.NewRequest("GET", "/v1/apps/sick/status", nil)
+	req.Header.Set("Authorization", "Bearer "+tok)
+	rec := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(rec, req)
+	var got AppStatus
+	if rec.Code != 200 || json.Unmarshal(rec.Body.Bytes(), &got) != nil {
+		t.Fatalf("status: %d %s", rec.Code, rec.Body.String())
+	}
+	if got.Desired != 4 || got.Running != 3 || got.Ready != 1 {
+		t.Fatalf("desired %d, running %d, ready %d; want 4, 3 and 1", got.Desired, got.Running, got.Ready)
+	}
 }

@@ -73,12 +73,17 @@ type ReplicaStatus struct {
 
 // AppStatus is one app's replicas.
 type AppStatus struct {
-	Name       string          `json:"name"`
-	Image      string          `json:"image"`
-	Generation int             `json:"generation"`
-	Desired    int             `json:"desired"`
-	Running    int             `json:"running"`
-	Replicas   []ReplicaStatus `json:"replicas"`
+	Name       string `json:"name"`
+	Image      string `json:"image"`
+	Generation int    `json:"generation"`
+	Desired    int    `json:"desired"`
+	// Running counts the replicas that should run whose container is
+	// running, at the replica's own generation: during a rollout an old copy
+	// counts until it is replaced. Ready counts those of them that are ready:
+	// passing their health check, or with none, and not crash-looping.
+	Running  int             `json:"running"`
+	Ready    int             `json:"ready"`
+	Replicas []ReplicaStatus `json:"replicas"`
 	// Rollout is set while a template change is rolling out, or after one stopped.
 	Rollout *RolloutStatus `json:"rollout,omitempty"`
 }
@@ -321,6 +326,9 @@ func (s *Server) statusOf(r *http.Request, app string) ([]AppStatus, error) {
 			}
 			if rp.Desired == store.Running && rs.State == "running" {
 				as.Running++
+				if rs.Ready && !rs.CrashLooping {
+					as.Ready++
+				}
 			}
 			as.Replicas = append(as.Replicas, rs)
 		}

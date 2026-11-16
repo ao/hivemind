@@ -367,3 +367,31 @@ func TestClientAgainstAPI(t *testing.T) {
 		t.Errorf("malformed token: %v", err)
 	}
 }
+
+// The app table has a READY column beside RUNNING. A replica with a reason
+// shows it in DETAIL before the engine's error.
+func TestPrintStatusShowsReadyAndTheReason(t *testing.T) {
+	var b strings.Builder
+	printStatus(&b, []server.AppStatus{{Name: "sick", Image: "nginx:alpine", Generation: 1, Desired: 2, Running: 2, Ready: 1,
+		Replicas: []server.ReplicaStatus{
+			{Index: 0, NodeID: "node-a", Generation: 1, Desired: "running", State: "running", Health: "healthy", Ready: true},
+			{Index: 1, NodeID: "node-b", Generation: 1, Desired: "running", State: "created", Error: "bind: cannot assign requested address",
+				PendingReason: "host port 10.0.0.2:5432/tcp binds address 10.0.0.2, and node node-b has address 10.0.0.3"},
+		}}})
+	lines := strings.Split(b.String(), "\n")
+	if f := strings.Fields(lines[0]); strings.Join(f, " ") != "APP IMAGE GENERATION DESIRED RUNNING READY" {
+		t.Fatalf("header: %q", lines[0])
+	}
+	if f := strings.Fields(lines[1]); strings.Join(f, " ") != "sick nginx:alpine 1 2 2 1" {
+		t.Fatalf("app row: %q", lines[1])
+	}
+	var row []string
+	for _, l := range lines {
+		if f := strings.Fields(l); len(f) > 2 && f[0] == "sick" && f[1] == "1" {
+			row = f
+		}
+	}
+	if len(row) < 9 || strings.Join(row[8:], " ") != "host port 10.0.0.2:5432/tcp binds address 10.0.0.2, and node node-b has address 10.0.0.3" {
+		t.Fatalf("status:\n%s\nwant the reason in replica 1's DETAIL, not the engine's error", b.String())
+	}
+}

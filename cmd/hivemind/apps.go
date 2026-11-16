@@ -170,7 +170,17 @@ func statusCmd() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "status [app]",
 		Short: "Show apps, their replicas and container state",
-		Args:  cobra.MaximumNArgs(1),
+		Long: `Show each app, then each of its replicas and the state of its container.
+
+DESIRED is the replica count the spec asks for. RUNNING counts the replicas
+whose container is running, and READY those of them that are ready to take
+traffic: passing their health check, or with none, and not crash-looping. A
+replica that is running but unhealthy counts in RUNNING and not in READY.
+During a rollout, a copy at the old generation counts until it is replaced.
+
+DETAIL shows why a replica is pending or cannot run on its node, or else the
+engine's last error for it.`,
+		Args: cobra.MaximumNArgs(1),
 	}
 	cf := addClientFlags(cmd)
 	cmd.RunE = func(cmd *cobra.Command, args []string) error {
@@ -208,9 +218,9 @@ func printStatus(out io.Writer, apps []server.AppStatus) {
 		return
 	}
 	tw := tabwriter.NewWriter(out, 0, 4, 2, ' ', 0)
-	fmt.Fprintln(tw, "APP\tIMAGE\tGENERATION\tDESIRED\tRUNNING")
+	fmt.Fprintln(tw, "APP\tIMAGE\tGENERATION\tDESIRED\tRUNNING\tREADY")
 	for _, a := range apps {
-		fmt.Fprintf(tw, "%s\t%s\t%d\t%d\t%d\n", a.Name, a.Image, a.Generation, a.Desired, a.Running)
+		fmt.Fprintf(tw, "%s\t%s\t%d\t%d\t%d\t%d\n", a.Name, a.Image, a.Generation, a.Desired, a.Running, a.Ready)
 	}
 	tw.Flush()
 	for _, a := range apps {
