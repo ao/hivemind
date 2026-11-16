@@ -104,11 +104,11 @@ func (c *Client) Register(ctx context.Context, nodeID string, g Register) error 
 	return c.do(ctx, http.MethodPost, RegisterPath(nodeID), b, nil)
 }
 
-// AssignmentsForNode returns the replicas placed on the node. It implements
-// agent.Source.
+// AssignmentsForNode returns the replicas placed on the node, with the
+// registry credentials they need. It implements agent.Source.
 func (c *Client) AssignmentsForNode(ctx context.Context, nodeID string) ([]store.Assignment, error) {
 	var list AssignmentList
-	if err := c.do(ctx, http.MethodGet, AssignmentsPath(nodeID), nil, &list); err != nil {
+	if err := c.do(ctx, http.MethodGet, AssignmentsPath(nodeID)+"?"+RegistryAuthParam+"=1", nil, &list); err != nil {
 		return nil, err
 	}
 	if err := list.Validate(); err != nil {

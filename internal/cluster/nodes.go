@@ -136,7 +136,10 @@ func (a *nodeAPI) lease(w http.ResponseWriter, r *http.Request) {
 }
 
 // assignments returns every replica placed on the node, marked for removal
-// included, as the agent expects.
+// included, as the agent expects. A node that asks for registry credentials
+// (2.2 and later) gets the one for each replica's image that is to run, if
+// one is stored; a node only ever reads its own assignments, so a credential
+// goes only to nodes that run an image from its registry.
 func (a *nodeAPI) assignments(w http.ResponseWriter, r *http.Request) {
 	id, ok := a.node(w, r)
 	if !ok {
@@ -147,7 +150,8 @@ func (a *nodeAPI) assignments(w http.ResponseWriter, r *http.Request) {
 		a.fail(w, r, err)
 		return
 	}
-	writeJSON(w, http.StatusOK, nodeapi.AssignmentList{Assignments: nodeapi.FromStore(as)})
+	withAuth := r.URL.Query().Get(nodeapi.RegistryAuthParam) == "1"
+	writeJSON(w, http.StatusOK, nodeapi.AssignmentList{Assignments: nodeapi.FromStore(as, withAuth)})
 }
 
 // postStatus replaces what the node reported with the body, and renews its

@@ -125,7 +125,7 @@ func TestAssignmentRoundTrip(t *testing.T) {
 		Replica: store.Replica{App: "web", Index: 1, NodeID: "node-a", Generation: 4, Desired: store.Removed, PendingReason: "why"},
 		Spec:    spec.App{Name: "web", Image: "nginx:alpine", Replicas: 2},
 	}}
-	b, err := json.Marshal(AssignmentList{Assignments: FromStore(in)})
+	b, err := json.Marshal(AssignmentList{Assignments: FromStore(in, true)})
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -169,15 +169,33 @@ type TLSKeyInfo struct {
 }
 
 // Assignment is one replica placed on a node, with the spec to run it from.
+// RegistryAuth is the credential for the registry of the spec's image, sent
+// only to a node that asks for credentials (RegistryAuthParam), and only
+// when one is stored and the replica is to run. A 2.1 worker's decoder
+// refuses unknown fields, and so the whole list, if any assignment had one;
+// it does not ask, and gets none.
 type Assignment struct {
-	App           string   `json:"app"`
-	Index         int      `json:"index"`
-	NodeID        string   `json:"node_id"`
-	Generation    int      `json:"generation"`
-	Desired       string   `json:"desired"`
-	PendingReason string   `json:"pending_reason,omitempty"`
-	Spec          spec.App `json:"spec"`
+	App           string        `json:"app"`
+	Index         int           `json:"index"`
+	NodeID        string        `json:"node_id"`
+	Generation    int           `json:"generation"`
+	Desired       string        `json:"desired"`
+	PendingReason string        `json:"pending_reason,omitempty"`
+	Spec          spec.App      `json:"spec"`
+	RegistryAuth  *RegistryAuth `json:"registry_auth,omitempty"`
 }
+
+// RegistryAuth is a registry credential in an assignment.
+type RegistryAuth struct {
+	Host     string `json:"host"`
+	Username string `json:"username"`
+	Password string `json:"password"`
+}
+
+// RegistryAuthParam is the query parameter a node adds to GET assignments,
+// with the value "1", to say it takes registry credentials (2.2 and later).
+// A server older than 2.2 ignores it.
+const RegistryAuthParam = "registry_auth"
 
 // AssignmentList is the reply to GET assignments.
 type AssignmentList struct {
@@ -385,8 +403,27 @@ func (l AssignmentList) Validate() error {
 		default:
 			return fmt.Errorf("%w: assignment desired %q is not running or removed", ErrInvalid, a.Desired)
 		}
+		if a.RegistryAuth != nil {
+			if err := a.RegistryAuth.validate(a.Spec.Image); err != nil {
+				return fmt.Errorf("%w: assignment for %q replica %d: %v", ErrInvalid, a.App, a.Index, err)
+			}
+		}
 	}
 	return nil
+}
+
+// validate checks a credential that came with an assignment for image: its
+// host is the image's registry, and the username and password pass the
+// store's rules. Errors hold neither.
+func (r RegistryAuth) validate(image string) error {
+	host, err := spec.ParseRegistryHost(r.Host)
+	if err != nil || host != r.Host {
+		return errors.New("registry credential has a malformed host")
+	}
+	if img, err := spec.RegistryHost(image); err != nil || img != host {
+		return errors.New("registry credential is for another registry than the image's")
+	}
+	return store.ValidateRegistryCredential(r.Username, r.Password)
 }
 
 // Validate checks every container in the report.
@@ -426,19 +463,29 @@ func (s StatusReport) Validate() error {
 
 // ToStore converts an assignment to the store's form.
 func (a Assignment) ToStore() store.Assignment {
-	return store.Assignment{
+	out := store.Assignment{
 		Replica: store.Replica{App: a.App, Index: a.Index, NodeID: a.NodeID, Generation: a.Generation,
 			Desired: store.Desired(a.Desired), PendingReason: a.PendingReason},
 		Spec: a.Spec,
 	}
+	if r := a.RegistryAuth; r != nil {
+		out.Auth = &store.RegistryAuth{Host: r.Host, Username: r.Username, Password: r.Password}
+	}
+	return out
 }
 
-// FromStore converts store assignments to the wire form.
-func FromStore(as []store.Assignment) []Assignment {
+// FromStore converts store assignments to the wire form. With withAuth
+// false, which is what a node that did not ask for credentials gets, no
+// assignment carries one.
+func FromStore(as []store.Assignment, withAuth bool) []Assignment {
 	out := make([]Assignment, 0, len(as))
 	for _, a := range as {
-		out = append(out, Assignment{App: a.App, Index: a.Index, NodeID: a.NodeID, Generation: a.Generation,
-			Desired: string(a.Desired), PendingReason: a.PendingReason, Spec: a.Spec})
+		w := Assignment{App: a.App, Index: a.Index, NodeID: a.NodeID, Generation: a.Generation,
+			Desired: string(a.Desired), PendingReason: a.PendingReason, Spec: a.Spec}
+		if withAuth && a.Auth != nil {
+			w.RegistryAuth = &RegistryAuth{Host: a.Auth.Host, Username: a.Auth.Username, Password: a.Auth.Password}
+		}
+		out = append(out, w)
 	}
 	return out
 }
