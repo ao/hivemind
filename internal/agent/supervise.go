@@ -19,7 +19,9 @@ import (
 //
 // The waits are measured from the container's FinishedAt, which the engine
 // keeps, so an agent that restarts in the middle of a wait still waits the
-// rest of it. The restart count comes from the node's last status report in
+// rest of it. A FinishedAt later than the agent's clock, after the clock was
+// set back, counts as now, so a wait is never longer than backoff(n). The
+// restart count comes from the node's last status report in
 // the store, read once at start-up. Together these mean a restarted agent
 // never restarts a crashing container faster than the policy allows.
 const (
@@ -49,6 +51,12 @@ func backoff(restarts int) time.Duration {
 type restartState struct {
 	restarts    int
 	nextRestart time.Time // zero when no restart is scheduled
+	// futureExit is the exit time, by the engine, of a container that
+	// exited later than the agent's clock says it is now (the clock was set
+	// back), and futureSeen is when the agent first saw it: the wait counts
+	// from then, and stays put on later passes.
+	futureExit time.Time
+	futureSeen time.Time
 }
 
 // probe is the health monitor of one running container.
@@ -142,7 +150,21 @@ func (a *Agent) supervise(ctx context.Context, as store.Assignment, c runtime.Co
 		}
 		due := now
 		if !ci.FinishedAt.IsZero() {
-			due = ci.FinishedAt.Add(backoff(rs.restarts))
+			finished := ci.FinishedAt
+			if finished.After(now) {
+				// The container stopped "in the future": the clock was set
+				// back after it stopped, by NTP after a boot, by hand, or by
+				// restoring a VM. Waiting from that time would hold the
+				// restart for as long as the clock was ahead; wait from
+				// when the agent first saw it instead.
+				if !rs.futureExit.Equal(finished) {
+					rs.futureExit, rs.futureSeen = finished, now
+					log.Warn("the container stopped after this machine's clock says it is now; the clock was set back, so its restart waits from now",
+						"finished_at", finished.UTC(), "now", now.UTC())
+				}
+				finished = rs.futureSeen
+			}
+			due = finished.Add(backoff(rs.restarts))
 		}
 		if now.Before(due) {
 			a.schedule(rs, due, st)

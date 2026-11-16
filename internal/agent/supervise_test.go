@@ -6,6 +6,7 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -425,5 +426,36 @@ func TestRestartedAgentKeepsAHealthyContainerReady(t *testing.T) {
 	}
 	if n := e.rt.counts(false)["exec"]; n != 0 {
 		t.Fatalf("%d checks ran; the test relies on none", n)
+	}
+}
+
+// A container that stopped while the clock was ahead has a FinishedAt in the
+// future once the clock is set back, by NTP after a boot or by hand. Its
+// restart waits backoff(n) from now, not from that time: the second
+// acceptance run saw "next restart in 5880h" after a clock that had been 245
+// days ahead was put right, and nothing ran.
+func TestClockSetBackDoesNotHoldARestart(t *testing.T) {
+	e := newEnv(t)
+	e.put(web(1))
+	e.reconcile()
+	id := e.running()[webName].ID
+	starts := startsOf(e)
+
+	// The clock is a day ahead when the container exits, then set back.
+	e.clock.Advance(24 * time.Hour)
+	e.rt.exit(id, 1)
+	e.clock.Advance(-24 * time.Hour)
+
+	e.reconcile() // the first restart waits 1 s from now
+	if startsOf(e) != starts {
+		t.Fatal("restarted at once; the first restart waits its 1 s")
+	}
+	e.clock.Advance(2 * time.Second)
+	e.reconcile()
+	if startsOf(e) != starts+1 {
+		t.Fatalf("not restarted 2 s after the clock was set back: status %+v", e.status("web"))
+	}
+	if !strings.Contains(e.logs.String(), "the clock was set back") {
+		t.Error("the agent did not log the clock step")
 	}
 }
