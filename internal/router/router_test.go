@@ -592,3 +592,66 @@ func TestStartLoadsStoredCertificatesBeforeTLS(t *testing.T) {
 		t.Fatal("the router served another certificate than the stored one")
 	}
 }
+
+// resetter is a replica whose connections fail after the request is sent:
+// it reads the request and resets the connection, with no reply, as a
+// connection to a machine that lost power fails once TCP_USER_TIMEOUT ends
+// it.
+func resetter(t *testing.T) string {
+	t.Helper()
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { ln.Close() })
+	go func() {
+		for {
+			c, err := ln.Accept()
+			if err != nil {
+				return
+			}
+			go func(c net.Conn) {
+				buf := make([]byte, 4096)
+				_, _ = c.Read(buf)
+				if tc, ok := c.(*net.TCPConn); ok {
+					_ = tc.SetLinger(0) // a reset, not a clean close
+				}
+				c.Close()
+			}(c)
+		}
+	}()
+	return ln.Addr().String()
+}
+
+// A request that can be sent twice goes to the next replica when the first
+// one's connection fails before it replies; one with a body, or a method
+// that is not safe to repeat, gets 502. The router soak saw a request on a
+// connection to a machine that had just lost power wait for its timeout.
+func TestRetryWhenAConnectionFailsBeforeTheReply(t *testing.T) {
+	up := upstream(t, "up")
+	tr := newTestRouter(t, Table{"www.example.com": {resetter(t), up.Listener.Addr().String()}})
+	c := tr.client(true)
+	for i := range 4 {
+		req, _ := http.NewRequest(http.MethodGet, "https://www.example.com/", nil)
+		if resp, _, _ := get(t, c, req); resp.StatusCode != http.StatusOK {
+			t.Fatalf("GET %d: %d, want 200 from the replica that answers", i, resp.StatusCode)
+		}
+	}
+	if m := tr.metrics(t); !strings.Contains(m, `hivemind_router_upstream_errors_total{host="www.example.com",kind="connection"}`) {
+		t.Fatalf("no connection error counted:\n%s", m)
+	}
+	// A fresh router: the GETs marked the failing replica down for a while.
+	tr = newTestRouter(t, Table{"www.example.com": {resetter(t), up.Listener.Addr().String()}})
+	c = tr.client(true)
+	bad := 0
+	for range 4 {
+		req, _ := http.NewRequest(http.MethodPost, "https://www.example.com/", strings.NewReader("body"))
+		resp, _, _ := get(t, c, req)
+		if resp.StatusCode == http.StatusBadGateway {
+			bad++
+		}
+	}
+	if bad == 0 {
+		t.Fatal("a POST was retried on another replica after the first one's connection failed")
+	}
+}

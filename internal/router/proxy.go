@@ -27,6 +27,11 @@ const (
 	// downFor is how long an endpoint whose dial failed is skipped. After it,
 	// the endpoint is tried again in its turn.
 	downFor = 3 * time.Second
+
+	// upstreamUserTimeout is TCP_USER_TIMEOUT on Linux: how long data the
+	// replica's machine has not acknowledged may wait before the connection
+	// fails (see setUserTimeout).
+	upstreamUserTimeout = 5 * time.Second
 )
 
 // Table is the routing table: for each host, the address:port of every
@@ -44,7 +49,7 @@ type endpoint struct {
 }
 
 func newEndpoint(addr string) *endpoint {
-	d := &net.Dialer{Timeout: upstreamDialTimeout, KeepAlive: 30 * time.Second}
+	d := &net.Dialer{Timeout: upstreamDialTimeout, KeepAlive: 30 * time.Second, Control: setUserTimeout}
 	return &endpoint{addr: addr, tr: &http.Transport{
 		// Never an HTTP proxy from the environment: replicas are on the
 		// private network.
@@ -255,7 +260,19 @@ func (b balancer) RoundTrip(req *http.Request) (*http.Response, error) {
 		}
 		lastErr = err
 		if !isDialError(err) {
-			return nil, err
+			// A connection that failed before any reply, as one to a
+			// machine that lost power does once TCP_USER_TIMEOUT ends it,
+			// is tried on the next replica too, for a request that can be
+			// sent twice: a method that is safe to repeat, and no body. This
+			// is nginx's proxy_next_upstream default (error, for
+			// idempotent methods). Other failures are a 502.
+			if !retryable(req, err) || guard != nil {
+				return nil, err
+			}
+			e.downUntil.Store(b.p.now().Add(downFor).UnixNano())
+			b.p.metrics.upstreamError(info.host, "connection")
+			b.p.log.Debug("replica's connection failed before it replied; trying the next", "host", info.host, "endpoint", e.addr, "err", err)
+			continue
 		}
 		e.downUntil.Store(b.p.now().Add(downFor).UnixNano())
 		b.p.metrics.upstreamError(info.host, "dial")
@@ -268,6 +285,24 @@ func (b balancer) RoundTrip(req *http.Request) (*http.Response, error) {
 		lastErr = errors.New("router: no endpoints")
 	}
 	return nil, lastErr
+}
+
+// retryable reports whether a request that failed with err, after its
+// connection was made, may go to another replica: the client is still
+// waiting, the method is safe to repeat (RFC 9110, 9.2.2), and the failure
+// was the connection's (a reset, a timeout of TCP_USER_TIMEOUT, an EOF
+// before the reply), not the response timeout of a replica that is up.
+func retryable(req *http.Request, err error) bool {
+	if req.Context().Err() != nil {
+		return false
+	}
+	switch req.Method {
+	case http.MethodGet, http.MethodHead, http.MethodOptions:
+	default:
+		return false
+	}
+	var op *net.OpError
+	return errors.As(err, &op) || errors.Is(err, io.EOF) || errors.Is(err, io.ErrUnexpectedEOF)
 }
 
 // isDialError reports whether err is a failure to connect, so the request

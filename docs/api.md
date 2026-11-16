@@ -328,7 +328,7 @@ With `follow`, closing the request ends the worker's stream and the log read on 
 | `hivemind_reconcile_errors_total` | counter | none | Passes that returned an error |
 | `hivemind_http_requests_total` | counter | `method`, `route`, `code` | Requests by method, route pattern and status |
 | `hivemind_router_requests_total` | counter | `host`, `code` | Requests to the server's router, with `--route-addr`. A host not in the routing table is `unknown` |
-| `hivemind_router_upstream_errors_total` | counter | `host`, `kind` | Requests from the server's router to a replica that failed: `dial` (it tried the next replica) or `proxy` (after it reached one) |
+| `hivemind_router_upstream_errors_total` | counter | `host`, `kind` | Requests from the server's router to a replica that failed: `dial` (it tried the next replica), `connection` (the connection failed before a reply, and a GET, HEAD or OPTIONS request with no body went to the next replica) or `proxy` (any other failure after it reached one) |
 | `hivemind_router_cert_expiry_timestamp_seconds` | gauge | `host` | Unix time at which the certificate the server's router serves for the host expires. A host without a certificate yet has no sample |
 
 `route` is the route pattern, such as `/v1/apps/{name}`, or `unmatched`. A client cannot make the label set grow. The router's `host` label is a host in the routing table or `unknown`, so a client cannot grow it either. A worker's router is not in these metrics.
