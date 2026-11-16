@@ -42,6 +42,12 @@ A worker refuses to start when a file in its data directory is missing or does n
 
 The server measures leases with its own clock, so a worker's clock does not move them. Certificates are another matter: they start 5 minutes before they are issued. A worker whose clock is behind the server's by more than that takes a certificate the server issued since as not valid yet: a join fails, a renewal is refused and tried again at the next check, and a restarted worker refuses its own certificate. A worker that is ahead works until its clock passes its certificate's expiry. In each case the error gives the clock's reading and says to set it right. A worker also compares its clock with the `Date` of the server's replies, and logs a warning, once an hour, while they are more than a minute apart.
 
+A clock that is set back delays restarts. The agent measures a restart's backoff from the exit time Docker recorded for the container, and does not yet cap the wait, so a container that exited while the node's clock was ahead waits that much longer once the clock is right. On three Amazon Linux 2023 machines that powered off with their clocks 245 days ahead, every replica showed `crash-looping: exited with code 0, next restart in 5879h59m51s` after the next boot, and restarting hivemind did not change it. Starting the containers by hand on each node brought them back, and the agent supervised them from there:
+
+```sh
+docker start $(docker ps -aq --filter label=hivemind.app --filter status=exited)
+```
+
 The edge suite cannot skew one container's clock: libfaketime does not reach a static Go binary, and a time namespace does not shift the real-time clock. These cases are unit tests (`cmd/hivemind/clock_test.go`, `datadir_test.go`, `internal/nodeapi/clock_test.go`).
 
 ## Spec limits
