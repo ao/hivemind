@@ -227,6 +227,11 @@ func (rt *Router) HTTPSPort() int { return rt.tlsLn.Addr().(*net.TCPAddr).Port }
 func (rt *Router) Serve() error {
 	errc := make(chan error, 2)
 	go func() { errc <- rt.httpSrv.Serve(rt.httpLn) }()
+	// The table and the certificates already in storage first: a router
+	// that took TLS connections before it had them failed the first
+	// handshakes after every start. The listener is bound, so connections
+	// that arrive meanwhile wait in its backlog rather than fail.
+	rt.warm()
 	go func() { errc <- rt.tlsSrv.ServeTLS(rt.tlsLn, "", "") }()
 	go rt.poll()
 	rt.log.Info("router listening", "http", rt.HTTPAddr(), "https", rt.HTTPSAddr(), "acme_ca", rt.cfg.CA)
@@ -284,6 +289,34 @@ func (rt *Router) poll() {
 		case <-t.C:
 		}
 	}
+}
+
+// warmTimeout bounds what a starting router waits for before it takes TLS
+// connections: one read of the table, and loading its hosts' certificates
+// from storage.
+const warmTimeout = 5 * time.Second
+
+// warm reads the table once, loads from storage the certificate of each of
+// its hosts that has one, and then sets the table, which starts managing the
+// hosts as usual. A host with no certificate yet is left to that. A table
+// that cannot be read, as when the server is away, leaves the router to its
+// poll, as before.
+func (rt *Router) warm() {
+	ctx, cancel := context.WithTimeout(rt.ctx, warmTimeout)
+	defer cancel()
+	tab, err := rt.cfg.Routes(ctx)
+	if err != nil {
+		rt.log.Info("starting without a routing table; reading it again shortly", "err", err)
+		return
+	}
+	loaded := 0
+	for h := range tab {
+		if _, err := rt.magic.CacheManagedCertificate(ctx, h); err == nil {
+			loaded++
+		}
+	}
+	rt.SetTable(tab)
+	rt.log.Info("router ready", "hosts", len(tab), "certificates_loaded", loaded)
 }
 
 // acmeChallengePath is where an HTTP-01 challenge is fetched (RFC 8555, 8.3).

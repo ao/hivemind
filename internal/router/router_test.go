@@ -9,6 +9,7 @@ import (
 	"crypto/tls"
 	"crypto/x509"
 	"encoding/json"
+	"encoding/pem"
 	"errors"
 	"fmt"
 	"io"
@@ -24,6 +25,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/caddyserver/certmagic"
 	"go.uber.org/zap"
 
 	"github.com/ao/hivemind/internal/metrics"
@@ -489,7 +491,7 @@ func TestChallengeForAHostNotReadYet(t *testing.T) {
 		return tr.reads
 	}
 	deadline := time.Now().Add(5 * time.Second)
-	for reads() == 0 { // the poll's first read, at Serve
+	for reads() < 2 { // the start's read and the poll's first one
 		if time.Now().After(deadline) {
 			t.Fatal("the router never read the table")
 		}
@@ -524,5 +526,69 @@ func TestChallengeForAHostNotReadYet(t *testing.T) {
 	req, _ = http.NewRequest(http.MethodGet, "http://made-up.example.com/", nil)
 	if resp, _, _ := get(t, c, req); resp.StatusCode != http.StatusNotFound || reads() != before {
 		t.Fatalf("a plain request for an unknown host: %d, %d reads", resp.StatusCode, reads()-before)
+	}
+}
+
+// A router that starts loads the certificates the shared storage already has
+// for its hosts before it takes TLS connections. The router soak saw the
+// first handshakes after each start fail, while the table and the
+// certificates were still loading.
+func TestStartLoadsStoredCertificatesBeforeTLS(t *testing.T) {
+	st, err := store.Open(context.Background(), filepath.Join(t.TempDir(), "hivemind.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { st.Close() })
+	log := slog.New(slog.NewTextHandler(io.Discard, nil))
+	ts, err := tlsstore.New(tlsstore.StoreBackend{St: st, NodeID: "node-a"}, tlsstore.Options{Logger: log})
+	if err != nil {
+		t.Fatal(err)
+	}
+	// The table is slow to read, as over the node API right after a start.
+	routes := func(ctx context.Context) (Table, error) {
+		select {
+		case <-time.After(300 * time.Millisecond):
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		}
+		return Table{"www.example.com": {}}, nil
+	}
+	rt, err := New(Config{Addr: "127.0.0.1", Routes: routes, Storage: ts, Email: "ops@example.com",
+		CA: "https://acme.invalid/dir", Logger: log, Metrics: NewMetrics(), Poll: time.Hour})
+	if err != nil {
+		t.Fatal(err)
+	}
+	rt.manage = func(context.Context, []string) error { return nil } // no ACME here
+
+	// Another router obtained the certificate earlier: it is in storage.
+	cert, leaf := selfSigned(t, "www.example.com")
+	keyDER, err := x509.MarshalPKCS8PrivateKey(cert.PrivateKey)
+	if err != nil {
+		t.Fatal(err)
+	}
+	issuer := rt.issuer.IssuerKey()
+	for key, val := range map[string][]byte{
+		certmagic.StorageKeys.SiteCert(issuer, "www.example.com"):       pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: cert.Certificate[0]}),
+		certmagic.StorageKeys.SitePrivateKey(issuer, "www.example.com"): pem.EncodeToMemory(&pem.Block{Type: "PRIVATE KEY", Bytes: keyDER}),
+		certmagic.StorageKeys.SiteMeta(issuer, "www.example.com"):       []byte(`{"sans":["www.example.com"],"issuer_data":null}`),
+	} {
+		if err := ts.Store(context.Background(), key, val); err != nil {
+			t.Fatal(err)
+		}
+	}
+	go func() { _ = rt.Serve() }()
+	t.Cleanup(func() { _ = rt.Shutdown() })
+
+	// The first handshake, made at once, succeeds with the stored certificate.
+	pool := x509.NewCertPool()
+	pool.AddCert(leaf)
+	conn, err := tls.DialWithDialer(&net.Dialer{Timeout: 10 * time.Second}, "tcp", rt.HTTPSAddr(),
+		&tls.Config{RootCAs: pool, ServerName: "www.example.com"})
+	if err != nil {
+		t.Fatalf("the first handshake after the start: %v", err)
+	}
+	defer conn.Close()
+	if got := conn.ConnectionState().PeerCertificates[0]; !got.Equal(leaf) {
+		t.Fatal("the router served another certificate than the stored one")
 	}
 }
