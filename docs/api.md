@@ -319,7 +319,7 @@ With `follow`, closing the request ends the worker's stream and the log read on 
 |---|---|---|---|
 | `hivemind_apps` | gauge | none | Apps in the store |
 | `hivemind_replicas_desired` | gauge | `app` | Replicas the spec asks for |
-| `hivemind_replicas_running` | gauge | `app` | Replicas whose container at the current generation is running |
+| `hivemind_replicas_running` | gauge | `app` | Replicas whose container is running, at the generation each replica is at, as `running` in the [app status](#objects) counts them |
 | `hivemind_replicas_ready` | gauge | `app` | Running replicas that pass their health check, or have none |
 | `hivemind_container_restarts_total` | counter | `app`, `replica` | Restarts of the current container by the agent. Resets after 10 minutes of healthy running |
 | `hivemind_node_lease_age_seconds` | gauge | `node` | Seconds since the node last reported in |
