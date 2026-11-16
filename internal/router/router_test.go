@@ -39,6 +39,7 @@ type testRouter struct {
 	pool  *x509.CertPool
 	logs  *syncBuffer
 	table func() Table
+	reads int // calls of routes, under mu
 	mu    sync.Mutex
 	err   error
 }
@@ -64,6 +65,12 @@ func (s *syncBuffer) String() string {
 // for testHosts in its cache, and no ACME: certificate management is a no-op.
 func newTestRouter(t *testing.T, table Table) *testRouter {
 	t.Helper()
+	return newTestRouterPoll(t, table, 20*time.Millisecond)
+}
+
+// newTestRouterPoll is newTestRouter with the table read every poll.
+func newTestRouterPoll(t *testing.T, table Table, poll time.Duration) *testRouter {
+	t.Helper()
 	st, err := store.Open(context.Background(), filepath.Join(t.TempDir(), "hivemind.db"))
 	if err != nil {
 		t.Fatal(err)
@@ -78,7 +85,7 @@ func newTestRouter(t *testing.T, table Table) *testRouter {
 	tr := &testRouter{st: st, logs: logs}
 	tr.table = func() Table { return table }
 	rt, err := New(Config{Addr: "127.0.0.1", Routes: tr.routes, Storage: ts, Email: "ops@example.com",
-		CA: "https://acme.invalid/dir", Logger: log, Metrics: NewMetrics(), Poll: 20 * time.Millisecond})
+		CA: "https://acme.invalid/dir", Logger: log, Metrics: NewMetrics(), Poll: poll})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -99,6 +106,7 @@ func newTestRouter(t *testing.T, table Table) *testRouter {
 func (tr *testRouter) routes(context.Context) (Table, error) {
 	tr.mu.Lock()
 	defer tr.mu.Unlock()
+	tr.reads++
 	return tr.table(), tr.err
 }
 
@@ -465,5 +473,56 @@ func waitFor(t *testing.T, ok func() bool) {
 			t.Fatal("condition not met in 5s")
 		}
 		time.Sleep(10 * time.Millisecond)
+	}
+}
+
+// A CA can validate through any router, and the router that ordered a
+// certificate may have read the table with the new host before this one did.
+// A challenge for a host the router does not know yet makes it read the table
+// at once, rather than answer 404; challenges for made-up hosts read it at
+// most once a second.
+func TestChallengeForAHostNotReadYet(t *testing.T) {
+	tr := newTestRouterPoll(t, Table{}, time.Hour)
+	reads := func() int {
+		tr.mu.Lock()
+		defer tr.mu.Unlock()
+		return tr.reads
+	}
+	deadline := time.Now().Add(5 * time.Second)
+	for reads() == 0 { // the poll's first read, at Serve
+		if time.Now().After(deadline) {
+			t.Fatal("the router never read the table")
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	// The server's table has the host now; the poll will not read it for an hour.
+	tr.setRoutes(Table{"www.example.com": {}}, nil)
+	chal := `{"type":"http-01","url":"https://acme.invalid/chal/1","status":"pending","token":"tok_9",` +
+		`"keyAuthorization":"tok_9.thumbprint","identifier":{"type":"dns","value":"www.example.com"}}`
+	if err := tr.st.TLSStore(context.Background(), "acme/acme.invalid-dir/challenge_tokens/www.example.com.json", []byte(chal)); err != nil {
+		t.Fatal(err)
+	}
+	c := tr.plain()
+	req, _ := http.NewRequest(http.MethodGet, "http://www.example.com/.well-known/acme-challenge/tok_9", nil)
+	if resp, _, body := get(t, c, req); resp.StatusCode != http.StatusOK || body != "tok_9.thumbprint" {
+		t.Fatalf("challenge for a host the router had not read: %d %q, want 200 and the key authorization", resp.StatusCode, body)
+	}
+
+	// Within the next second, challenges for made-up hosts cause no read.
+	before := reads()
+	for i := range 5 {
+		req, _ := http.NewRequest(http.MethodGet, fmt.Sprintf("http://made-up-%d.example.com/.well-known/acme-challenge/x", i), nil)
+		if resp, _, _ := get(t, c, req); resp.StatusCode != http.StatusNotFound {
+			t.Fatalf("challenge for a made-up host: %d, want 404", resp.StatusCode)
+		}
+	}
+	if n := reads() - before; n > 1 {
+		t.Fatalf("%d table reads for 5 challenges for made-up hosts in a second, want at most 1", n)
+	}
+	// Other paths for an unknown host read nothing.
+	before = reads()
+	req, _ = http.NewRequest(http.MethodGet, "http://made-up.example.com/", nil)
+	if resp, _, _ := get(t, c, req); resp.StatusCode != http.StatusNotFound || reads() != before {
+		t.Fatalf("a plain request for an unknown host: %d, %d reads", resp.StatusCode, reads()-before)
 	}
 }

@@ -31,6 +31,7 @@ import (
 	"net/netip"
 	"slices"
 	"strconv"
+	"strings"
 	"sync"
 	"time"
 
@@ -95,6 +96,11 @@ type Router struct {
 
 	ctx    context.Context
 	cancel context.CancelFunc
+
+	// refreshMu and lastRefresh limit the table reads that challenges for
+	// unknown hosts cause (see refresh).
+	refreshMu   sync.Mutex
+	lastRefresh time.Time
 
 	mu sync.Mutex
 	// manage starts certificate management for hosts: the certmagic
@@ -280,6 +286,30 @@ func (rt *Router) poll() {
 	}
 }
 
+// acmeChallengePath is where an HTTP-01 challenge is fetched (RFC 8555, 8.3).
+const acmeChallengePath = "/.well-known/acme-challenge/"
+
+// refreshEvery limits the table reads that challenges for unknown hosts
+// cause, so that requests for made-up hosts cannot make the router read the
+// table more than once a second.
+const refreshEvery = time.Second
+
+// refresh reads the table now, unless a refresh ran less than refreshEvery
+// ago. Callers that arrive while one runs wait for it and then use its table.
+func (rt *Router) refresh(ctx context.Context) {
+	rt.refreshMu.Lock()
+	defer rt.refreshMu.Unlock()
+	if time.Since(rt.lastRefresh) < refreshEvery {
+		return
+	}
+	rt.lastRefresh = time.Now()
+	ctx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	defer cancel()
+	if tab, err := rt.cfg.Routes(ctx); err == nil {
+		rt.SetTable(tab)
+	}
+}
+
 // SetTable replaces the routing table, starts managing certificates for new
 // hosts, and stops managing hosts that left. Serve calls it after each read;
 // tests call it directly.
@@ -344,6 +374,12 @@ func (rt *Router) getCertificate(hello *tls.ClientHelloInfo) (*tls.Certificate, 
 // host gets 404, and certmagic is not asked about it.
 func (rt *Router) serveHTTP(w http.ResponseWriter, r *http.Request) {
 	host := requestHost(r)
+	if host != "" && !rt.proxy.known(host) && strings.HasPrefix(r.URL.Path, acmeChallengePath) {
+		// The router that ordered the certificate may have read the table
+		// with the new host before this one did, and the CA can validate
+		// through any router. Read it now rather than fail the challenge.
+		rt.refresh(r.Context())
+	}
 	if !rt.proxy.known(host) {
 		http.Error(w, "not found", http.StatusNotFound)
 		return
