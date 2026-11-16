@@ -8,7 +8,7 @@ These steps were run on two clusters of three machines (c7g.large, Amazon Linux 
 2. Upgrade the server: install the new binary over the old one, as in the [README](../README.md#install), and run `sudo systemctl restart hivemind`. The server migrates the store on that start, from schema version 6, and logs one line for each step, such as `msg="store schema migrated" from=6 to=7 adds="node certificate expiry"`; `hivemind backup` prints the schema version.
 3. Upgrade each worker the same way: install, then `sudo systemctl restart hivemind`. Upgrade it in place. Do not drain a 2.0.0 worker first: its agent stops containers one after another without renewing its lease, and with a few containers that each take 10 s to stop, the server marks it lost and places its replicas again.
 
-A newer CLI works with a 2.0.0 server for the commands 2.0.0 has. `hivemind nodes` shows `-` for what 2.0.0 does not report, such as ELIGIBILITY, and a command whose route 2.0.0 lacks says so: `the server is older than 2.2 and has no node drain; upgrade the server`.
+A newer CLI works with a 2.0.0 server for the commands 2.0.0 has. `hivemind nodes` shows `-` for what 2.0.0 does not report, such as ELIGIBILITY. `hivemind status` shows `0` under READY for every app, because 2.0.0 sends no ready count; the apps are not down, and RUNNING is right. A command whose route 2.0.0 lacks says so: `the server is older than 2.2 and has no node drain; upgrade the server`.
 
 `hivemind nodes` has a VERSION column: each node from 2.2 on reports its version with every request to the server, and the server's node shows the server's. A node that still runs 2.0.0 shows `-`. `hivemind version` prints the server's version.
 
