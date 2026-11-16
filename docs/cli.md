@@ -373,6 +373,11 @@ at once. Every other replica left on the node, except one with a volume, is
 stopped there and placed again, as when a node is lost; it waits as pending if
 no node can take it. A replica with a volume keeps running on the node.
 
+If the node is lost during the drain, because its lease went 15 s without a
+renewal, its replicas without a volume are placed again at once, as on any
+node loss. The result counts them apart from those moved and stopped, and
+says when the node was lost.
+
 The command waits, and prints progress, until the drain is done. Ctrl-C stops
 the waiting, not the drain. --no-wait returns at once. drain on a node that is
 already draining waits for that drain, and --deadline sets a new deadline from

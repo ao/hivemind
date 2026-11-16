@@ -82,6 +82,11 @@ type DrainView struct {
 	// that lost the node at the deadline and were placed again.
 	Moved   int `json:"moved"`
 	Stopped int `json:"stopped"`
+	// Lost counts the replicas that were placed again because the node was
+	// lost during the drain, and LostAt is when it was first lost. LostAt is
+	// absent when the node was not lost.
+	Lost   int        `json:"lost"`
+	LostAt *time.Time `json:"lost_at,omitempty"`
 	// Remaining counts the replicas still on the node that should run.
 	Remaining int `json:"remaining"`
 	// OldContainers counts the containers the node still reports that no
@@ -111,11 +116,15 @@ type DrainBlockedView struct {
 
 func drainView(d store.Drain) DrainView {
 	v := DrainView{NodeID: d.NodeID, State: string(d.State), StartedAt: d.StartedAt.UTC(), Deadline: d.Deadline.UTC(),
-		Moved: d.Moved, Stopped: d.Stopped, Remaining: d.Remaining, OldContainers: d.OldContainers,
+		Moved: d.Moved, Stopped: d.Stopped, Lost: d.Lost, Remaining: d.Remaining, OldContainers: d.OldContainers,
 		Moving: []DrainMoveView{}, Blocked: []DrainBlockedView{}}
 	if !d.FinishedAt.IsZero() {
 		t := d.FinishedAt.UTC()
 		v.FinishedAt = &t
+	}
+	if !d.LostAt.IsZero() {
+		t := d.LostAt.UTC()
+		v.LostAt = &t
 	}
 	for _, m := range d.Moving {
 		v.Moving = append(v.Moving, DrainMoveView{App: m.App, Index: m.Index, To: m.To, Since: m.Since.UTC()})

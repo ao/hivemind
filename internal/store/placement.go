@@ -152,13 +152,16 @@ func (s *Store) ReconcileNodes(ctx context.Context, since time.Time) ([]string, 
 // volume loses its node and is placed again. A replica with a volume keeps its
 // node, and its reason says the app is unavailable until the node returns.
 // Surges on the node are dropped: their rollout pauses at its deadline. Replicas
-// marked for removal stay, and are cleaned up when the node reports.
+// marked for removal stay, and are cleaned up when the node reports. A drain
+// in progress on the node counts the replicas that lost it, and records when
+// the node was first lost.
 func (s *Store) releaseNode(ctx context.Context, tx *sql.Tx, id string) error {
 	now := s.now().UnixNano()
 	reps, err := queryAssignments(ctx, tx, `r.node_id = ? AND r.desired = 'running'`, id)
 	if err != nil {
 		return err
 	}
+	released := 0
 	for _, r := range reps {
 		if len(r.Spec.Volumes) > 0 {
 			reason := fmt.Sprintf("volume is on node %s, which is unavailable; the app stays down until the node returns", id)
@@ -172,6 +175,13 @@ func (s *Store) releaseNode(ctx context.Context, tx *sql.Tx, id string) error {
 			now, r.App, r.Index); err != nil {
 			return err
 		}
+		released++
+	}
+	// A drain of the node counts what the loss took, so its result adds up,
+	// and records that the node was lost.
+	if _, err := tx.ExecContext(ctx, `UPDATE drains SET lost = lost + ?, lost_at = CASE WHEN lost_at = 0 THEN ? ELSE lost_at END,
+		updated_at = ? WHERE node_id = ? AND state = 'draining'`, released, now, now, id); err != nil {
+		return err
 	}
 	_, err = tx.ExecContext(ctx, `DELETE FROM surges WHERE node_id = ?`, id)
 	return err

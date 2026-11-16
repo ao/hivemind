@@ -114,13 +114,14 @@ The token is shown once. The server keeps a SHA-256 hash of its secret, and a to
 ```json
 {"node_id": "node-<12 hex digits>", "state": "draining",
  "started_at": "2026-11-14T10:00:00Z", "deadline": "2026-11-14T10:10:00Z",
- "moved": 2, "stopped": 0, "remaining": 2, "old_containers": 1,
+ "moved": 2, "stopped": 0, "lost": 0, "remaining": 2, "old_containers": 1,
  "moving": [{"app": "spread", "index": 1, "to": "node-<12 hex digits>", "since": "2026-11-14T10:00:04Z"}],
  "blocked": [{"app": "web", "index": 3, "reason": "host port 127.0.0.1:8080/tcp is in use on every other eligible node"}]}
 ```
 
 - `state` is `draining` or `done`. A finished drain has `finished_at`.
 - `moved` counts the replicas that moved to another node, and `stopped` those that lost the node at the deadline and were placed again.
+- `lost` counts the replicas that were placed again because the node itself was lost during the drain: its lease went 15 s without a renewal. `lost_at` is when that first happened; it is absent when the node was not lost.
 - `remaining` counts the replicas still on the node that should run.
 - `old_containers` counts the containers the node still reports for replicas that have left it. Its agent removes them on its next pass.
 - `moving` lists the moves in flight: a copy of the replica is starting on `to`.

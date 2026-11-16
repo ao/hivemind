@@ -325,3 +325,30 @@ func TestBytesIEC(t *testing.T) {
 		}
 	}
 }
+
+// A drain whose node was lost says so, once, and counts what the loss took.
+func TestDrainSummarySaysTheNodeWasLost(t *testing.T) {
+	at := time.Date(2026, 11, 16, 1, 28, 7, 0, time.UTC)
+	var b strings.Builder
+	p := &drainPrinter{out: &b, seen: map[string]bool{}}
+	d := server.DrainView{NodeID: "node-w", State: "draining", Moved: 4}
+	p.update(d)
+	d.Lost, d.LostAt = 1, &at
+	p.update(d)
+	d.State = "done"
+	p.finish(d)
+	lost := "  the node was lost at 2026-11-16T01:28:07Z, during the drain: its lease was not renewed for 15 s, " +
+		"so its replicas without a volume were placed again at once, as on any node loss\n"
+	want := "  4 moved, 0 left on the node\n" + lost +
+		"node-w: drained; 4 moved, 0 stopped at the deadline and placed again, 1 placed again after the node was lost, 0 left on the node\n"
+	if b.String() != want {
+		t.Fatalf("drain output:\n%s\nwant:\n%s", b.String(), want)
+	}
+
+	b.Reset()
+	p = &drainPrinter{out: &b, seen: map[string]bool{}}
+	p.finish(server.DrainView{NodeID: "node-w", State: "done", Moved: 1, Stopped: 1})
+	if want := "node-w: drained; 1 moved, 1 stopped at the deadline and placed again, 0 left on the node\n"; b.String() != want {
+		t.Fatalf("drain output without a loss: %q, want %q", b.String(), want)
+	}
+}

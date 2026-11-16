@@ -608,3 +608,77 @@ func TestDrainNodeArguments(t *testing.T) {
 		t.Fatalf("drain again with a deadline: %+v", d)
 	}
 }
+
+// A node lost during its drain gives up its replicas as on any node loss.
+// The drain counts them as lost, not as moved or stopped, records when the
+// node was lost, and counts each replica once, however many sweeps find the
+// node lost. At the deadline nothing is left to stop.
+func TestDrainCountsTheReplicasANodeLossTook(t *testing.T) {
+	e := newDrainEnv(t, nil, nodeA, nodeB)
+	webApp := spec.App{Name: "web", Image: "nginx:alpine", Replicas: 2, Ports: []spec.Port{{Host: 8080, Container: 80}}}
+	mustPut(t, e.s, webApp)
+	mustPut(t, e.s, app("calm", 2))
+	on := func(app string) map[string]int {
+		out := map[string]int{}
+		for _, r := range replicasOf(t, e.s, app) {
+			out[r.NodeID] = r.Index
+		}
+		return out
+	}
+	web, calm := on("web"), on("calm")
+	if len(web) != 2 || len(calm) != 2 {
+		t.Fatalf("web on %v, calm on %v; want one replica of each on each node", web, calm)
+	}
+	e.report(nodeA, container("web", web[nodeA], 1), container("calm", calm[nodeA], 1))
+	e.report(nodeB, container("web", web[nodeB], 1), container("calm", calm[nodeB], 1))
+
+	// calm's replica on node-b starts a copy on node-a; web's cannot move,
+	// as its port is taken there.
+	d := e.drain(nodeB, 2*time.Minute)
+	if len(d.Moving) != 1 || len(d.Blocked) != 1 {
+		t.Fatalf("first step: moving %v, blocked %v", moving(d), blocked(d))
+	}
+
+	// node-b stops renewing its lease. The sweep finds it lost 16 s later.
+	e.clock.Advance(16 * time.Second)
+	e.renew(nodeA)
+	lostAt := e.clock.Now()
+	if lost, err := e.s.ReconcileNodes(e.ctx, time.Time{}); err != nil || len(lost) != 1 || lost[0] != nodeB {
+		t.Fatalf("sweep: lost %v, %v; want node-b", lost, err)
+	}
+	e.step()
+	for range 3 {
+		e.clock.Advance(5 * time.Second)
+		e.renew(nodeA)
+		if _, err := e.s.ReconcileNodes(e.ctx, time.Time{}); err != nil {
+			t.Fatal(err)
+		}
+		e.step()
+	}
+	d = e.getDrain(nodeB)
+	if d.State != DrainDraining || d.Lost != 2 || !d.LostAt.Equal(lostAt) || d.Moved != 0 || d.Stopped != 0 || d.Remaining != 0 {
+		t.Fatalf("drain after the loss: %+v; want 2 lost at %s, none moved or stopped, none left", d, lostAt)
+	}
+
+	// The node never comes back. At the deadline the drain ends with
+	// nothing to stop, and its result still says what the loss took.
+	e.clock.Advance(2 * time.Minute)
+	e.renew(nodeA)
+	if done := e.step(); len(done) != 1 {
+		t.Fatalf("the drain did not finish at its deadline: %+v", e.getDrain(nodeB))
+	}
+	d = e.getDrain(nodeB)
+	if d.State != DrainDone || d.Lost != 2 || !d.LostAt.Equal(lostAt) || d.Moved != 0 || d.Stopped != 0 {
+		t.Fatalf("finished drain: %+v; want 2 lost, none moved or stopped", d)
+	}
+
+	// A drain whose node is not lost records no loss.
+	e2 := newDrainEnv(t, nil, nodeA, nodeB)
+	mustPut(t, e2.s, app("calm", 2))
+	e2.drain(nodeB, time.Minute)
+	e2.tick(2 * time.Minute)
+	e2.step()
+	if d := e2.getDrain(nodeB); d.Lost != 0 || !d.LostAt.IsZero() {
+		t.Fatalf("drain of a node that stayed: %+v; want no loss", d)
+	}
+}

@@ -101,7 +101,13 @@ func advanceDrains(ctx context.Context, st *store.Store, log *slog.Logger, start
 		return
 	}
 	for _, d := range done {
-		log.Info("node drained", "node", d.NodeID, "moved", d.Moved, "stopped", d.Stopped, "left", d.Remaining)
+		if d.LostAt.IsZero() {
+			log.Info("node drained", "node", d.NodeID, "moved", d.Moved, "stopped", d.Stopped, "left", d.Remaining)
+		} else {
+			log.Warn("node drained; it was lost during the drain, and its replicas without a volume were placed again",
+				"node", d.NodeID, "moved", d.Moved, "stopped", d.Stopped, "lost", d.Lost, "left", d.Remaining,
+				"lost_at", d.LostAt.UTC())
+		}
 	}
 }
 

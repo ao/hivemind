@@ -245,6 +245,13 @@ CREATE TABLE registries (
 	updated_at INTEGER NOT NULL
 ) STRICT;
 `,
+	// 11: node loss during a drain. drains.lost counts the replicas that the
+	// node gave up when it was lost while it drained, to be placed again, and
+	// lost_at is when it was first lost then, or 0.
+	`
+ALTER TABLE drains ADD COLUMN lost INTEGER NOT NULL DEFAULT 0 CHECK (lost >= 0);
+ALTER TABLE drains ADD COLUMN lost_at INTEGER NOT NULL DEFAULT 0;
+`,
 }
 
 // SchemaVersion is the schema version this build writes.

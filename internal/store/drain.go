@@ -40,6 +40,11 @@ import (
 // only replicas with a volume are left on the node, and the node no longer
 // reports a container of a replica that has left it.
 //
+// A node that is lost during its drain gives up its replicas as on any node
+// loss (releaseNode): the ones without a volume are placed again at once. The
+// drain counts them as lost, apart from those it moved or stopped, and
+// records when the node was lost.
+//
 // A finished drain's record stays, and the node stays ineligible, until it is
 // made eligible again or removed. The server advances drains with
 // AdvanceDrains, on its sweep and after each pass of its own agent. All of
@@ -74,6 +79,12 @@ type Drain struct {
 	// Stopped counts the replicas that lost the node at the deadline, to be
 	// placed again.
 	Stopped int
+	// Lost counts the replicas that lost the node because the node itself
+	// was lost during the drain (its lease lapsed), to be placed again.
+	// LostAt is when the node was first lost during the drain, and zero if
+	// it was not.
+	Lost   int
+	LostAt time.Time
 	// Remaining counts the replicas still placed on the node that should run.
 	Remaining int
 	// OldContainers counts the containers the node still reports that no
@@ -703,9 +714,9 @@ func drainIDs(ctx context.Context, q querier, where string) ([]string, error) {
 // getDrain reads the node's drain, with its counts and lists.
 func getDrain(ctx context.Context, q dbQuerier, node string) (Drain, error) {
 	d := Drain{NodeID: node}
-	var started, deadline, finished int64
-	err := q.QueryRowContext(ctx, `SELECT state, started_at, deadline, finished_at, moved, stopped FROM drains WHERE node_id = ?`, node).
-		Scan(&d.State, &started, &deadline, &finished, &d.Moved, &d.Stopped)
+	var started, deadline, finished, lostAt int64
+	err := q.QueryRowContext(ctx, `SELECT state, started_at, deadline, finished_at, moved, stopped, lost, lost_at FROM drains WHERE node_id = ?`, node).
+		Scan(&d.State, &started, &deadline, &finished, &d.Moved, &d.Stopped, &d.Lost, &lostAt)
 	if errors.Is(err, sql.ErrNoRows) {
 		if _, nerr := nodeName(ctx, q, node); nerr != nil {
 			return Drain{}, nerr
@@ -718,6 +729,9 @@ func getDrain(ctx context.Context, q dbQuerier, node string) (Drain, error) {
 	d.StartedAt, d.Deadline = time.Unix(0, started), time.Unix(0, deadline)
 	if finished != 0 {
 		d.FinishedAt = time.Unix(0, finished)
+	}
+	if lostAt != 0 {
+		d.LostAt = time.Unix(0, lostAt)
 	}
 	if err := q.QueryRowContext(ctx, `SELECT count(*) FROM replicas WHERE node_id = ? AND desired = 'running'`, node).Scan(&d.Remaining); err != nil {
 		return Drain{}, err

@@ -220,6 +220,11 @@ at once. Every other replica left on the node, except one with a volume, is
 stopped there and placed again, as when a node is lost; it waits as pending if
 no node can take it. A replica with a volume keeps running on the node.
 
+If the node is lost during the drain, because its lease went 15 s without a
+renewal, its replicas without a volume are placed again at once, as on any
+node loss. The result counts them apart from those moved and stopped, and
+says when the node was lost.
+
 The command waits, and prints progress, until the drain is done. Ctrl-C stops
 the waiting, not the drain. --no-wait returns at once. drain on a node that is
 already draining waits for that drain, and --deadline sets a new deadline from
@@ -336,11 +341,29 @@ func (p *drainPrinter) update(d server.DrainView) {
 	for _, b := range d.Blocked {
 		p.line("  %s/%d stays: %s", b.App, b.Index, b.Reason)
 	}
+	if d.LostAt != nil {
+		p.line("  %s", nodeLostLine(d))
+	}
+}
+
+// nodeLostLine says that the drained node was lost during the drain.
+func nodeLostLine(d server.DrainView) string {
+	return fmt.Sprintf("the node was lost at %s, during the drain: its lease was not renewed for 15 s, "+
+		"so its replicas without a volume were placed again at once, as on any node loss",
+		d.LostAt.UTC().Format(time.RFC3339))
 }
 
 func (p *drainPrinter) finish(d server.DrainView) {
-	fmt.Fprintf(p.out, "%s: drained; %d moved, %d stopped at the deadline and placed again, %d left on the node\n",
-		d.NodeID, d.Moved, d.Stopped, d.Remaining)
+	if d.LostAt != nil {
+		fmt.Fprintf(p.out, "%s: drained; %d moved, %d stopped at the deadline and placed again, %d placed again after the node was lost, %d left on the node\n",
+			d.NodeID, d.Moved, d.Stopped, d.Lost, d.Remaining)
+		if l := "  " + nodeLostLine(d); !p.seen[l] {
+			fmt.Fprintln(p.out, l)
+		}
+	} else {
+		fmt.Fprintf(p.out, "%s: drained; %d moved, %d stopped at the deadline and placed again, %d left on the node\n",
+			d.NodeID, d.Moved, d.Stopped, d.Remaining)
+	}
 	if d.Remaining > 0 {
 		for _, b := range d.Blocked {
 			fmt.Fprintf(p.out, "  %s/%d: %s\n", b.App, b.Index, b.Reason)

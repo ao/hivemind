@@ -123,6 +123,7 @@ A worker that is still running when it is removed gets `403` on its next call to
 - A move whose copy crash-loops, or is not ready within the rollout deadline (the health check's timing plus 30 s, or 2 minutes), is undone, and that replica stays on the node until the drain's deadline.
 - At the deadline, `--deadline`, 10 minutes by default, a copy that is still starting takes its replica at once. Every other replica left on the node, except one with a volume, loses the node and is placed again, as on node loss, and the drained node's agent stops its container. A replica that no node can take waits as `pending`.
 - The drain is done at the deadline, or before it once only replicas with a volume are left on the node and its agent has removed the old containers.
+- If the node is lost during the drain, its replicas without a volume are placed again at once, as on any node loss, moves in flight included. The result counts them as placed again after the node was lost, apart from those moved or stopped at the deadline, and the command and the server's log say when the node was lost.
 
 The command waits and prints each move, each replica that stays and why, and the result. `--no-wait` returns at once. The drain is in the server's database, and the server advances it every few seconds, so it carries on across a restart of the server. A move that was in flight while the server was down gets a whole rollout deadline from the restart. A deadline that passed while the server was down ends the drain at its first step.
 
