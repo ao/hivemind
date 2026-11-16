@@ -119,9 +119,18 @@ func (s *Server) remoteLogs(w http.ResponseWriter, r *http.Request, node string,
 	}
 
 	fw := startLog(w)
+	// The trailer says why the stream ended; see LogEndTrailer.
+	why := LogEndError
+	defer func() {
+		if s.streams.Err() != nil {
+			why = LogEndShutdown
+		}
+		endLog(w, why)
+	}()
 	for {
 		typ, _, err := fr.Next()
 		if errors.Is(err, io.EOF) {
+			why = LogEndDone
 			return
 		}
 		if err != nil {
@@ -141,7 +150,8 @@ func (s *Server) remoteLogs(w http.ResponseWriter, r *http.Request, node string,
 			}
 		case nodeapi.FrameFailed, nodeapi.FrameUnavailable:
 			msg, _ := fr.Message()
-			// The status line is sent, so the error can only be logged.
+			// The status line is sent, so the error can only be logged, and
+			// named in the trailer.
 			s.log.Warn("log stream ended with an error", "node", node, "app", q.App, "replica", q.Replica,
 				"err", clean(msg))
 			return

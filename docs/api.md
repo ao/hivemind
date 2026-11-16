@@ -299,6 +299,8 @@ The spec is the JSON form of the YAML file that `deploy -f` reads. Unknown field
 
 The log is `text/plain`. Standard output and standard error are both written to the body, in the order the engine wrote them. The node that runs the replica reads its container's log. It picks the running container, or else the one with the highest generation. A replica on the server's node, or with no node, is read on the server.
 
+The body is chunked, and ends with the trailer `Hivemind-Log-End`: `done` when the log ended, because the container stopped or the lines asked for were sent; `shutdown` when the server is shutting down and closed the stream; `error` when reading the log failed after the status line was sent (the server logs why). A body that stops without the trailer was cut off with its connection. A server before 2.2 sends no trailer. `hivemind logs -f` exits 0 on `done` and 1 otherwise, and does not reconnect.
+
 A replica on a worker is read by that worker, which sends the log to the server as it reads it. Standard output and standard error stay separate frames on the way, and the body is the same as for a replica on the server. The worker has no listener: it takes the request over a poll it keeps open to the server. [Security](security.md#logs-from-workers) describes the routes. The errors that are particular to a worker:
 
 - `404` when the worker has no container for the replica. For a replica that is pending, the message says so and why, as for a replica on the server.

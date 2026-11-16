@@ -39,6 +39,10 @@ const (
 	maxResponse     = 16 << 20
 )
 
+// clientKeepAlive probes an idle connection to the server after 15 s, then
+// every 5 s, and drops it after 3 probes go unanswered.
+var clientKeepAlive = net.KeepAliveConfig{Enable: true, Idle: 15 * time.Second, Interval: 5 * time.Second, Count: 3}
+
 // errUnauthorized is what every client command reports for a 401.
 var errUnauthorized = errors.New("unauthorized")
 
@@ -201,6 +205,10 @@ func (f *clientFlags) client() (*apiClient, error) {
 	tr := http.DefaultTransport.(*http.Transport).Clone()
 	tr.ResponseHeaderTimeout = requestTimeout
 	tr.TLSClientConfig = tlsCfg
+	// A followed log can be quiet for hours, so it has no read timeout.
+	// TCP keepalives find a server machine that went away, which closes
+	// nothing, in about 30 s, where the defaults take some minutes.
+	tr.DialContext = (&net.Dialer{Timeout: 30 * time.Second, KeepAliveConfig: clientKeepAlive}).DialContext
 	return &apiClient{base: strings.TrimRight(srv, "/"), token: token, caPath: caPath, http: &http.Client{Transport: tr}}, nil
 }
 

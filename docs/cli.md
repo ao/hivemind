@@ -348,6 +348,10 @@ The replica can run on any node. The server reads a worker's replica through
 that worker, which must be running and of this version: a worker that does not
 answer in 10 seconds is reported by its node ID.
 
+-f does not reconnect. If the server shuts down or restarts, or the connection
+to it breaks, the command says so and exits with an error; a server machine
+that goes away without closing the connection is found in about 30 seconds.
+
 ```
 hivemind logs <app> [replica] [flags]
 ```

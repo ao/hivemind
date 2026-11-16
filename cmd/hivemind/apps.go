@@ -406,7 +406,11 @@ stream open until Ctrl-C or until the container exits.
 
 The replica can run on any node. The server reads a worker's replica through
 that worker, which must be running and of this version: a worker that does not
-answer in 10 seconds is reported by its node ID.`,
+answer in 10 seconds is reported by its node ID.
+
+-f does not reconnect. If the server shuts down or restarts, or the connection
+to it breaks, the command says so and exits with an error; a server machine
+that goes away without closing the connection is found in about 30 seconds.`,
 		Args: cobra.RangeArgs(1, 2),
 	}
 	// The log is the container's own text, so it has no JSON form.
@@ -448,9 +452,31 @@ answer in 10 seconds is reported by its node ID.`,
 		if follow && cmd.Context().Err() != nil {
 			return nil // stopped with Ctrl-C or SIGTERM
 		}
-		return err
+		return logEnd(err, resp.Trailer.Get(server.LogEndTrailer), follow)
 	}
 	return cmd
+}
+
+// logEnd is the result of a log command whose body ended with err and the
+// server's trailer why (server.LogEndTrailer). A log that ended, because the
+// container stopped, is not an error. A server that shut down, a stream that
+// broke, or a connection that dropped is: the command does not reconnect.
+// A server older than 2.2 sends no trailer, and a body it ended cleanly is
+// taken as the end of the log.
+func logEnd(err error, why string, follow bool) error {
+	again := ""
+	if follow {
+		again = "; run the command again to go on following the log"
+	}
+	switch {
+	case err != nil:
+		return fmt.Errorf("the connection to the server broke during the log (%v): the server may have stopped or restarted%s", err, again)
+	case why == server.LogEndShutdown:
+		return fmt.Errorf("the server is shutting down, so it ended the log stream%s", again)
+	case why == server.LogEndError:
+		return fmt.Errorf("the server could not read the rest of the log; its log says why%s", again)
+	}
+	return nil
 }
 
 func scaleCmd() *cobra.Command {

@@ -418,9 +418,16 @@ func (s *Server) appLogs(w http.ResponseWriter, r *http.Request) {
 	defer done()
 	fw := startLog(w)
 	err = s.cfg.Runtime.Logs(ctx, c.ID, runtime.LogOptions{Follow: follow, Tail: tail}, fw, fw)
-	if err != nil && ctx.Err() == nil {
-		// The status line is sent, so the error can only be logged.
+	switch {
+	case s.streams.Err() != nil:
+		endLog(w, LogEndShutdown)
+	case err != nil && ctx.Err() == nil:
+		// The status line is sent, so the error can only be logged, and
+		// named in the trailer.
 		s.log.Warn("log stream ended with an error", "app", name, "replica", replica, "err", err)
+		endLog(w, LogEndError)
+	case err == nil:
+		endLog(w, LogEndDone)
 	}
 }
 
@@ -454,6 +461,26 @@ func (s *Server) noContainer(r *http.Request, app string, index int, where strin
 	return fmt.Sprintf("app %q replica %d has no container on %s", app, index, where)
 }
 
+// LogEndTrailer is the HTTP trailer that says why a log response ended, so
+// that a client following a log can tell the end of the log from a server
+// that stopped. A response cut off without it, because the connection broke,
+// ends in an error when its chunked body is read.
+const LogEndTrailer = "Hivemind-Log-End"
+
+// The values of LogEndTrailer.
+const (
+	// LogEndDone: the log ended, because the container stopped, or the
+	// lines asked for were sent.
+	LogEndDone = "done"
+	// LogEndShutdown: the server is shutting down.
+	LogEndShutdown = "shutdown"
+	// LogEndError: reading the log failed; the server logged why.
+	LogEndError = "error"
+)
+
+// endLog sets the trailer of a log response.
+func endLog(w http.ResponseWriter, why string) { w.Header().Set(LogEndTrailer, why) }
+
 // logContext is the context of a log response. A followed stream outlives
 // WriteTimeout, so its write deadline is cleared, and CloseStreams ends it at
 // shutdown.
@@ -475,6 +502,7 @@ func startLog(w http.ResponseWriter) *flushWriter {
 	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
 	w.Header().Set("Cache-Control", "no-store")
 	w.Header().Set("X-Content-Type-Options", "nosniff")
+	w.Header().Set("Trailer", LogEndTrailer)
 	w.WriteHeader(http.StatusOK)
 	rc := http.NewResponseController(w)
 	_ = rc.Flush()
