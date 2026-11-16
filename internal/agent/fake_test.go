@@ -36,6 +36,13 @@ type fakeRuntime struct {
 	// pullFn, when set, runs before each pull, without the lock, so it may
 	// block until ctx ends; a non-nil error is the pull's.
 	pullFn func(ctx context.Context, image string) error
+	// stopFn, when set, runs before each stop, without the lock, with the
+	// container's name, so it may block as a container that ignores
+	// SIGTERM does; a non-nil error is the stop's.
+	stopFn func(ctx context.Context, name string) error
+	// ports, when set, makes Start refuse a container whose fixed host port
+	// a running container has published, as the engine does.
+	ports bool
 }
 
 type fakeContainer struct {
@@ -187,6 +194,17 @@ func (f *fakeRuntime) Start(_ context.Context, id string) error {
 	if c == nil {
 		return rtErr("start", runtime.ErrNotFound)
 	}
+	if f.ports {
+		for _, p := range c.cfg.Ports {
+			for _, o := range f.containers {
+				for _, q := range o.Ports {
+					if o != c && o.State == "running" && !p.Ephemeral && p.HostPort == q.HostPort && p.Protocol == q.Protocol {
+						return &runtime.Error{Op: "start", Err: runtime.ErrConflict, Message: "port is already allocated"}
+					}
+				}
+			}
+		}
+	}
 	c.State = "running"
 	c.StartedAt = f.now()
 	c.FinishedAt = time.Time{}
@@ -214,7 +232,18 @@ func (f *fakeRuntime) exit(id string, code int) {
 	}
 }
 
-func (f *fakeRuntime) Stop(_ context.Context, id string, _ time.Duration) error {
+func (f *fakeRuntime) Stop(ctx context.Context, id string, _ time.Duration) error {
+	f.mu.Lock()
+	fn, name := f.stopFn, ""
+	if c := f.find(id); c != nil {
+		name = c.Name
+	}
+	f.mu.Unlock()
+	if fn != nil {
+		if err := fn(ctx, name); err != nil {
+			return err
+		}
+	}
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	if err := f.begin("stop", id); err != nil {
@@ -339,6 +368,12 @@ func (f *fakeRuntime) counts(reset bool) map[string]int {
 		f.calls = map[string]int{}
 	}
 	return out
+}
+
+func (f *fakeRuntime) setStop(fn func(ctx context.Context, name string) error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.stopFn = fn
 }
 
 func (f *fakeRuntime) setFail(fn func(op, arg string) error) {

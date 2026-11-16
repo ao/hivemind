@@ -1,7 +1,7 @@
 // Package agent runs the containers assigned to one node. Each pass it fetches
 // the node's assignments, compares them with the containers that carry
-// hivemind labels, starts what is missing, stops and removes what is extra,
-// and reports what it found.
+// hivemind labels, starts what is missing, hands what is extra to removals
+// that stop and remove it in the background, and reports what it found.
 //
 // The agent keeps no state between passes. The labels on the containers are
 // its record, so a restarted agent picks up where the last one stopped.
@@ -40,10 +40,10 @@ const (
 
 // LeaseRenewer is a Source that can renew the node's lease without a status
 // report. Run renews it every Heartbeat, beside the passes, because a pass
-// renews the lease only when it reports, at its end, and a pass that stops
-// containers (up to StopTimeout each, one after another) or pulls an image
-// can take longer than the 15 s lease. Nomad clients heartbeat the same way,
-// apart from the work they run.
+// renews the lease only when it reports, at its end, and a pass can be slow:
+// an engine or a server under load answers slowly, and a pass waits up to
+// pullWait for a pull and up to removeWait for removals. Nomad clients
+// heartbeat the same way, apart from the work they run.
 type LeaseRenewer interface {
 	RenewLease(ctx context.Context, nodeID string) error
 }
@@ -104,6 +104,8 @@ type Agent struct {
 	unrouted map[string]time.Time     // by container name: when a routed container was first seen unassigned
 	pulls    map[pullKey]*pullState   // failed pulls, for their backoff
 	launches map[string]*launchState  // by container name: failed creates and starts, for their backoff
+	removals map[string]*removal      // by container ID: removals in flight, and ended ones not yet reported
+	slots    chan struct{}            // removeSlots tokens, one per removal running
 }
 
 // New returns an agent. It does nothing until Run or Reconcile is called.
@@ -143,6 +145,8 @@ func New(cfg Config) (*Agent, error) {
 		unrouted: map[string]time.Time{},
 		pulls:    map[pullKey]*pullState{},
 		launches: map[string]*launchState{},
+		removals: map[string]*removal{},
+		slots:    make(chan struct{}, removeSlots),
 	}, nil
 }
 
@@ -294,13 +298,15 @@ func (a *Agent) Reconcile(ctx context.Context) error {
 	slices.SortFunc(containers, func(x, y runtime.Container) int { return cmp.Compare(x.Name, y.Name) })
 
 	// Match containers to replicas. A container matches when its labels name
-	// a wanted replica at the wanted generation; anything else is extra.
+	// a wanted replica at the wanted generation; anything else is extra, and
+	// so is one whose removal is in flight, as after a scale down that was
+	// undone at once: it is gone soon, and its replica starts again then.
 	keep := map[replicaKey]runtime.Container{}
 	var extra []runtime.Container
 	for _, c := range containers {
 		k, ok := parseLabels(c.Labels)
 		as, wanted := want[k]
-		if !ok || !wanted || c.State == "dead" || c.State == "removing" {
+		if _, removing := a.removals[c.ID]; removing || !ok || !wanted || c.State == "dead" || c.State == "removing" {
 			extra = append(extra, c)
 			continue
 		}
@@ -319,14 +325,17 @@ func (a *Agent) Reconcile(ctx context.Context) error {
 	var errs []error
 	var status []store.Status
 
-	// Remove extras first, so their host ports are free for replacements. A
-	// routed container that is still running waits out RouteDrain first,
-	// and is reported, not Ready, meanwhile.
+	// Hand the extras to removals (remove.go). A routed container that is
+	// still running waits out RouteDrain first, and is reported, not Ready,
+	// meanwhile. The removal of an extra that a wanted container waits for
+	// skips the queue.
 	now := a.cfg.Clock()
 	draining := map[string]bool{}
+	var removing []runtime.Container
+	var blocks map[replicaKey][]blocker
 	for _, c := range extra {
 		k, _ := parseLabels(c.Labels)
-		if c.Running() && c.Labels[runtime.LabelRouted] == "true" && a.cfg.RouteDrain > 0 {
+		if c.Running() && c.Labels[runtime.LabelRouted] == "true" && a.cfg.RouteDrain > 0 && a.removals[c.ID] == nil {
 			first, seen := a.unrouted[c.Name]
 			if !seen {
 				first = now
@@ -341,19 +350,84 @@ func (a *Agent) Reconcile(ctx context.Context) error {
 				continue
 			}
 		}
-		if err := a.remove(ctx, c); err != nil {
-			errs = append(errs, err)
-			// The container still exists: report it, so the server keeps a
-			// replica marked for removal until it is really gone.
-			status = append(status, store.Status{Name: c.Name, ContainerID: c.ID, App: c.Labels[runtime.LabelApp],
-				Replica: k.index, Generation: k.gen, State: c.State, Error: err.Error()})
+		removing = append(removing, c)
+	}
+	urgent := map[string]bool{}
+	for _, k := range wantKeys {
+		if c, ok := keep[k]; ok && c.Running() {
+			continue
+		}
+		if bs := blockersOf(want[k], removing); len(bs) > 0 {
+			if blocks == nil {
+				blocks = map[replicaKey][]blocker{}
+			}
+			blocks[k] = bs
+			for _, b := range bs {
+				urgent[b.c.ID] = true
+			}
 		}
 	}
+	var fresh []*removal
+	for _, c := range removing {
+		r := a.removals[c.ID]
+		if r == nil {
+			r = a.startRemoval(ctx, c, urgent[c.ID])
+			fresh = append(fresh, r)
+		} else if urgent[c.ID] {
+			r.makeUrgent()
+		}
+		r.seen = true
+	}
+	waitUntil := time.Now().Add(removeWait)
 
+	// Wanted containers that wait for nothing go first. The others wait for
+	// their removals, up to removeWait, and are left pending if they are not
+	// done by then.
+	gone := func(c runtime.Container) bool {
+		r := a.removals[c.ID]
+		return r != nil && r.ended() && r.err == nil
+	}
+	order := make([]replicaKey, 0, len(wantKeys))
+	var later []*removal
 	for _, k := range wantKeys {
+		if bs := blocks[k]; len(bs) > 0 {
+			for _, b := range bs {
+				later = append(later, a.removals[b.c.ID])
+			}
+			continue
+		}
+		order = append(order, k)
+	}
+	for _, k := range wantKeys {
+		if len(blocks[k]) > 0 {
+			order = append(order, k)
+		}
+	}
+	waited := false
+	for _, k := range order {
 		as := want[k]
 		st := store.Status{Name: ContainerName(as.App, as.Index, as.Generation), App: as.App, Replica: as.Index, Generation: as.Generation}
 		listed, ok := keep[k]
+		if bs := blocks[k]; len(bs) > 0 {
+			if !waited {
+				waitRemovals(ctx, later, waitUntil)
+				waited = true
+			}
+			var left []blocker
+			for _, b := range bs {
+				if !gone(b.c) {
+					left = append(left, b)
+				}
+			}
+			if len(left) > 0 {
+				st.State, st.Error = "pending", waitingFor(left, a.removals).Error()
+				if ok {
+					st.ContainerID, st.State = listed.ID, listed.State
+				}
+				status = append(status, st)
+				continue
+			}
+		}
 		if ok {
 			if err := a.supervise(ctx, as, listed, &st); err != nil {
 				errs = append(errs, err)
@@ -390,6 +464,30 @@ func (a *Agent) Reconcile(ctx context.Context) error {
 		}
 		status = append(status, st)
 	}
+
+	// The removals: those that ended are done with, the others go on, and
+	// their containers are reported until they are gone. The pass waits, up
+	// to removeWait, for the ones it started, which most often stop at once;
+	// one from an earlier pass has shown it is slow, and triggers a pass
+	// when it ends.
+	waitRemovals(ctx, fresh, waitUntil)
+	leftRunning(fresh)
+	named := make(map[string]bool, len(status))
+	for _, st := range status {
+		named[st.Name] = true
+	}
+	for _, c := range removing {
+		st, err := a.collectRemoval(c, a.removals[c.ID])
+		if err != nil {
+			errs = append(errs, err)
+		}
+		// A wanted container that waits for this one's name is reported
+		// already, as pending, with what it waits for.
+		if st != nil && !named[st.Name] {
+			status = append(status, *st)
+		}
+	}
+	a.forgetRemovals()
 
 	kept := make(map[string]bool, len(keep))
 	for _, c := range keep {
@@ -484,6 +582,10 @@ func (a *Agent) remove(ctx context.Context, c runtime.Container) error {
 			// Remove with force below kills it anyway.
 			log.Warn("stopping extra container", "err", err)
 		}
+	}
+	if err := ctx.Err(); err != nil {
+		// The agent is closing: the next one removes the container.
+		return fmt.Errorf("removing %s: %w", c.Name, err)
 	}
 	if err := a.cfg.Runtime.Remove(ctx, c.ID, true); err != nil && !errors.Is(err, runtime.ErrNotFound) {
 		return fmt.Errorf("removing %s: %w", c.Name, err)
