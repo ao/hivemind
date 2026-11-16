@@ -390,7 +390,7 @@ func TestCLIOneNode(t *testing.T) {
 		time.Sleep(time.Second)
 	}
 	c.ok("logs", "web", "1", "--tail", "1")
-	c.fails("no container", "logs", "web", "7")
+	c.fails(`app "web" has replicas 0 to 1; it has no replica 7`, "logs", "web", "7")
 	c.fails("not found", "logs", "nope")
 
 	// An app from a file, with a command that prints a line a second.

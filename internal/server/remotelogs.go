@@ -20,18 +20,27 @@ import (
 var timeNow = time.Now
 
 // replicaNode returns the node the replica is placed on, or "" when it has
-// none or the store has no such replica.
-func (s *Server) replicaNode(r *http.Request, app string, index int) (string, error) {
+// none. found is false when the store has no such replica.
+func (s *Server) replicaNode(r *http.Request, app string, index int) (node string, found bool, err error) {
 	reps, err := s.cfg.Store.Replicas(r.Context(), app)
 	if err != nil {
-		return "", err
+		return "", false, err
 	}
 	for _, rp := range reps {
 		if rp.Index == index {
-			return rp.NodeID, nil
+			return rp.NodeID, true, nil
 		}
 	}
-	return "", nil
+	return "", false, nil
+}
+
+// replicaRange says which replicas app has, for a request that names one
+// it does not have: "app "web" has replicas 0 to 2; it has no replica 7".
+func replicaRange(app string, replicas, index int) string {
+	if replicas == 1 {
+		return fmt.Sprintf("app %q has one replica, 0; it has no replica %d", app, index)
+	}
+	return fmt.Sprintf("app %q has replicas 0 to %d; it has no replica %d", app, replicas-1, index)
 }
 
 // remoteLogs streams the log of a replica on another node, through that

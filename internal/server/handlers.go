@@ -422,13 +422,20 @@ func (s *Server) appLogs(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
-	if _, err := s.cfg.Store.GetApp(r.Context(), name); err != nil {
+	a, err := s.cfg.Store.GetApp(r.Context(), name)
+	if err != nil {
 		s.fail(w, r, err)
 		return
 	}
-	node, err := s.replicaNode(r, name, replica)
+	node, found, err := s.replicaNode(r, name, replica)
 	if err != nil {
 		s.fail(w, r, err)
+		return
+	}
+	// A replica past the count that the store still has is one being
+	// removed after a scale down, and its log can still be read.
+	if !found && replica >= a.Spec.Replicas {
+		writeError(w, http.StatusNotFound, replicaRange(name, a.Spec.Replicas, replica))
 		return
 	}
 	if node != "" && node != s.cfg.NodeID {

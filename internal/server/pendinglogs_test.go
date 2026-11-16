@@ -40,3 +40,32 @@ func TestLogsOfAPendingReplica(t *testing.T) {
 		t.Fatalf("a replica with no node: %q", got)
 	}
 }
+
+// The log of a replica past the app's count names the replicas the app has,
+// rather than "no container on this node". One that a scale down is still
+// removing is not past it: its log may still be read.
+func TestLogsOfAReplicaPastTheCount(t *testing.T) {
+	h := newHarness(t)
+	wantStatus(t, h.do(t, "PUT", "/v1/apps/web", nginx2), http.StatusCreated)
+	rec := h.do(t, "GET", "/v1/apps/web/logs?replica=7", "")
+	wantStatus(t, rec, http.StatusNotFound)
+	if got := errorOf(t, rec); got != `app "web" has replicas 0 to 1; it has no replica 7` {
+		t.Fatalf("replica 7 of 2: %q", got)
+	}
+	wantStatus(t, h.do(t, "PUT", "/v1/apps/one", `{"name":"one","image":"nginx:alpine"}`), http.StatusCreated)
+	rec = h.do(t, "GET", "/v1/apps/one/logs?replica=1", "")
+	wantStatus(t, rec, http.StatusNotFound)
+	if got := errorOf(t, rec); got != `app "one" has one replica, 0; it has no replica 1` {
+		t.Fatalf("replica 1 of 1: %q", got)
+	}
+
+	wantStatus(t, h.do(t, "POST", "/v1/apps/web/scale", `{"replicas":1}`), http.StatusOK)
+	reps, err := h.store.Replicas(context.Background(), "web")
+	if err != nil || len(reps) != 2 || reps[1].Desired == store.Running {
+		t.Fatalf("replicas after the scale down: %+v, %v; want replica 1 being removed", reps, err)
+	}
+	rec = h.do(t, "GET", "/v1/apps/web/logs?replica=1", "")
+	if got := errorOf(t, rec); strings.Contains(got, "has no replica 1") {
+		t.Fatalf("replica 1, being removed: %q", got)
+	}
+}
