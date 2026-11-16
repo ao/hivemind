@@ -156,6 +156,8 @@ An app with routes and no host ports is the exception: its surge may go on the r
 
 An app is a desired state: a container image, the command, environment, ports, volumes, resources, a health check, and a replica count. Replicas are numbered from 0 to the count minus one. The count is 1 by default and may be at most 100.
 
+The agent pulls images without registry credentials, so an image that needs a login fails to pull, and the replica stays `pending` with the registry's answer, such as `denied`, in `status`. `docker login` on the node does not change this: the Docker Engine API takes credentials with each pull request, and hivemind sends none.
+
 `hivemind compose` makes one app of each service in a Docker Compose file. The CLI does the conversion, so the server stores and runs those apps like any other. See [Compose files](compose.md).
 
 The spec limits are checked on every write. Among them: names are up to 32 lowercase letters, digits and dashes, an image is up to 255 characters, there are at most 128 environment variables and 64 KiB of them in total, at most 32 ports and 16 volumes.
