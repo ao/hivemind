@@ -49,7 +49,7 @@ v1 was one command with flags, such as `hivemind --runtime docker`. v2 has subco
 | v1 | v2 |
 |---|---|
 | `hivemind --runtime docker` | `hivemind serve`. Docker is the only runtime |
-| `hivemind --runtime containerd` | Not available. containerd is planned as a second runtime |
+| `hivemind --runtime containerd` | Not available |
 | (no init step) | `hivemind init` once, before `serve` |
 | `--data-dir`, `HIVEMIND_DATA_DIR` | The same names. The directory layout is new |
 | (none) | `hivemind deploy`, `status`, `logs`, `scale`, `delete` |
