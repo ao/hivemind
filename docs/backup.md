@@ -6,13 +6,14 @@ A backup holds the cluster CA's private key. Whoever has the file can sign a cer
 
 ## Taking a backup
 
-On the server, as the user that runs `serve`:
+On the server, as the user that runs `serve` (root, with the [systemd units](systemd.md)):
 
 ```sh
-hivemind backup /var/backups/hivemind-$(date +%Y%m%d).tar
+sudo install -d -m 0700 /var/backups/hivemind
+sudo hivemind backup /var/backups/hivemind/hivemind-$(date +%Y%m%d).tar
 ```
 
-`backup` reads the data directory (`--data-dir`, or the default) and writes the file with mode 0600. It refuses a file that exists. It writes to a temporary file beside the target, reads it back and checks every file's SHA-256, and only then links it to the name you gave, so the target never holds a partial backup.
+The directory must exist: `backup` does not create it, and some distributions, such as Amazon Linux 2023, have no `/var/backups`. `backup` reads the data directory (`--data-dir`, or the default) and writes the file with mode 0600. It refuses a file that exists. It writes to a temporary file beside the target, reads it back and checks every file's SHA-256, and only then links it to the name you gave, so the target never holds a partial backup.
 
 It works whether `serve` is running or not. The store is copied with SQLite's `VACUUM INTO`, which reads the database in one read transaction and writes a consistent snapshot ([sqlite.org/lang_vacuum.html](https://sqlite.org/lang_vacuum.html#vacuuminto)). The store runs in WAL mode, where a reader does not block the writer ([sqlite.org/wal.html](https://sqlite.org/wal.html)), so the server keeps working during the copy. `VACUUM INTO` has been in SQLite since 3.27.0; the `modernc.org/sqlite` v1.62.0 that hivemind builds with bundles SQLite 3.54.1. SQLite does not sync the copy to disk, so hivemind does. The copy does not migrate or otherwise change the live store, so a `backup` from a newer hivemind binary is safe beside an older `serve`.
 
@@ -20,11 +21,11 @@ It works whether `serve` is running or not. The store is copied with SQLite's `V
 
 The default reads the data directory rather than calling the API so that the CA key does not cross a network at all, and so that a backup works while `serve` is stopped.
 
-A cron job that keeps a week of daily backups:
+A cron job that keeps a week of daily backups, in the directory made above. cron's `PATH` does not include `/usr/local/bin`, so the job names the binary in full:
 
 ```sh
 # /etc/cron.d/hivemind-backup
-15 3 * * * root umask 077; hivemind backup /var/backups/hivemind/$(date +\%a).tar.new && mv /var/backups/hivemind/$(date +\%a).tar.new /var/backups/hivemind/$(date +\%a).tar
+15 3 * * * root umask 077; /usr/local/bin/hivemind backup /var/backups/hivemind/$(date +\%a).tar.new && mv /var/backups/hivemind/$(date +\%a).tar.new /var/backups/hivemind/$(date +\%a).tar
 ```
 
 ## Restoring
