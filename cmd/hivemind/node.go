@@ -141,20 +141,32 @@ func runInit(cmd *cobra.Command, flags *pflag.FlagSet, clientConfigFlag string) 
 		return err
 	}
 	dir := cfg.DataDir
-	if err := upgrade.CheckDataDir(dir); err != nil {
+	// Everything that makes init refuse is checked before it creates
+	// anything, the store included.
+	if err := workerHereError(dir, "init would make a second cluster"); err != nil {
 		return err
 	}
-	if err := os.MkdirAll(dir, 0o700); err != nil {
-		return fmt.Errorf("create data directory: %w", err)
-	}
-	if err := os.Chmod(dir, 0o700); err != nil {
-		return fmt.Errorf("data directory %s: %w", dir, err)
+	if err := upgrade.CheckDataDir(dir); err != nil {
+		return err
 	}
 	tokenPath := filepath.Join(dir, auth.TokenFileName)
 	if _, err := os.Lstat(tokenPath); err == nil {
 		return fmt.Errorf("a cluster already exists in %s (%s is present); refusing to overwrite it", dir, tokenPath)
 	} else if !errors.Is(err, fs.ErrNotExist) {
 		return err
+	}
+	for _, name := range []string{pki.CAKeyFile, pki.CACertFile} {
+		if _, err := os.Lstat(filepath.Join(dir, name)); err == nil {
+			return fmt.Errorf("a cluster CA already exists in %s (%s is present); refusing to overwrite it", dir, name)
+		} else if !errors.Is(err, fs.ErrNotExist) {
+			return err
+		}
+	}
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		return fmt.Errorf("create data directory: %w", err)
+	}
+	if err := os.Chmod(dir, 0o700); err != nil {
+		return fmt.Errorf("data directory %s: %w", dir, err)
 	}
 
 	st, err := store.Open(ctx, filepath.Join(dir, storeFileName))
@@ -378,6 +390,9 @@ func runServe(ctx context.Context, cfg *config.Config, log *slog.Logger, rt runt
 		return err
 	}
 	defer release()
+	if w, err := readWorkerState(cfg.DataDir); err == nil {
+		return fmt.Errorf("%s holds worker %s of the cluster at %s: run hivemind serve --role worker", cfg.DataDir, w.NodeID, w.Server)
+	}
 	st, err := store.Open(ctx, filepath.Join(cfg.DataDir, storeFileName), store.WithMinReady(cfg.MinReady))
 	if err != nil {
 		return err

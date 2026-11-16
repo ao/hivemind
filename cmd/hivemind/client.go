@@ -21,6 +21,7 @@ import (
 	"gopkg.in/yaml.v3"
 
 	"github.com/ao/hivemind/internal/auth"
+	"github.com/ao/hivemind/internal/config"
 	"github.com/ao/hivemind/internal/nodeapi"
 	"github.com/ao/hivemind/internal/server"
 )
@@ -179,6 +180,9 @@ func (f *clientFlags) client() (*apiClient, error) {
 		}
 	}
 	if token == "" {
+		if err := workerHereError(config.DataDir(), "it has no API token"); err != nil {
+			return nil, err
+		}
 		return nil, fmt.Errorf("no API token: pass --token, set %s, or run `hivemind init` on this machine", envToken)
 	}
 

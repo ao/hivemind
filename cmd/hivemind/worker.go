@@ -248,30 +248,54 @@ func saveWorkerState(dir string, st workerState, key *ecdsa.PrivateKey, certPEM,
 	return write(workerStateFile, append(stateJSON, '\n'), 0o600)
 }
 
+// readWorkerState reads node.json in dir, and checks the node ID and the
+// server address in it. A missing node.json is errNotJoined.
+func readWorkerState(dir string) (workerState, error) {
+	var st workerState
+	raw, err := os.ReadFile(filepath.Join(dir, workerStateFile))
+	if errors.Is(err, fs.ErrNotExist) {
+		return st, fmt.Errorf("%w in %s: run hivemind join <server> --token <token> first", errNotJoined, dir)
+	}
+	if err != nil {
+		return st, err
+	}
+	dec := json.NewDecoder(strings.NewReader(string(raw)))
+	dec.DisallowUnknownFields()
+	if err := dec.Decode(&st); err != nil {
+		return st, fmt.Errorf("%s: %w", workerStateFile, err)
+	}
+	if err := pki.ValidateNodeID(st.NodeID); err != nil {
+		return st, err
+	}
+	if _, _, err := net.SplitHostPort(st.Server); err != nil {
+		return st, fmt.Errorf("%s: server %q: %w", workerStateFile, st.Server, err)
+	}
+	return st, nil
+}
+
+// workerHereError is what a command that needs a server says on a machine
+// whose data directory dir holds a joined worker, or nil when it holds
+// none. A worker has no API and no admin token: the commands that use them
+// run on the server, or against its API from anywhere.
+func workerHereError(dir, doing string) error {
+	st, err := readWorkerState(dir)
+	if err != nil {
+		return nil
+	}
+	host, _, _ := net.SplitHostPort(st.Server)
+	return fmt.Errorf("this machine is worker %s of the cluster at %s (%s), so %s here: run hivemind commands on the server, %s, or point this CLI at its API with --server and --token",
+		st.NodeID, st.Server, filepath.Join(dir, workerStateFile), doing, host)
+}
+
 // loadWorkerState reads and checks a joined worker's files: the key must be
 // private, the certificate must chain to the CA and name the node in
 // node.json. A missing node.json is errNotJoined.
 func loadWorkerState(dir string) (*joinedWorker, error) {
-	raw, err := os.ReadFile(filepath.Join(dir, workerStateFile))
-	if errors.Is(err, fs.ErrNotExist) {
-		return nil, fmt.Errorf("%w in %s: run hivemind join <server> --token <token> first", errNotJoined, dir)
-	}
+	st, err := readWorkerState(dir)
 	if err != nil {
 		return nil, err
 	}
-	var st workerState
-	dec := json.NewDecoder(strings.NewReader(string(raw)))
-	dec.DisallowUnknownFields()
-	if err := dec.Decode(&st); err != nil {
-		return nil, fmt.Errorf("%s: %w", workerStateFile, err)
-	}
-	if err := pki.ValidateNodeID(st.NodeID); err != nil {
-		return nil, err
-	}
-	host, _, err := net.SplitHostPort(st.Server)
-	if err != nil {
-		return nil, fmt.Errorf("%s: server %q: %w", workerStateFile, st.Server, err)
-	}
+	host, _, _ := net.SplitHostPort(st.Server)
 	if err := recoverRenewal(dir); err != nil {
 		return nil, fmt.Errorf("finishing an interrupted certificate renewal: %w", err)
 	}

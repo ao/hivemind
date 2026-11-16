@@ -230,6 +230,16 @@ func byName(ss []setting, name string) setting {
 	panic("config: no setting named " + name)
 }
 
+// DataDir is the data directory of a command that takes no --data-dir, such
+// as the client commands: HIVEMIND_DATA_DIR, or the default for this user.
+func DataDir() string {
+	opts := Options{}.withDefaults()
+	if v, ok := opts.Lookup(EnvName("data-dir")); ok && v != "" {
+		return v
+	}
+	return defaultDataDir(opts)
+}
+
 // defaultDataDir is /var/lib/hivemind for root, and $XDG_STATE_HOME/hivemind
 // or ~/.local/state/hivemind for everyone else.
 func defaultDataDir(opts Options) string {

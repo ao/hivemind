@@ -271,6 +271,8 @@ The server's data directory holds the database (`hivemind.db`, with the SQLite W
 
 A worker's data directory holds its key (`node.key`), its certificate (`node.crt`), the cluster CA certificate (`ca.crt`), and `node.json`, which records the node ID and the server it joined. `node.json` is written last, so its presence means the join finished. A renewal replaces `node.key` and `node.crt`. There is nothing on a worker to back up. [Security](security.md#files) lists the file modes.
 
+`init` refuses a worker's data directory before it creates anything, and a client command on a worker, which has no admin token, says to run it on the server.
+
 `serve` and `join` hold an exclusive lock (flock) on `hivemind.lock` in the data directory while they run, and write their pid in it. A second `serve` or `join` on the same directory is refused with `another hivemind (pid N) runs on the data directory ...`, before it changes anything. The kernel drops the lock when the process exits, after a crash too; the file stays, and the next `serve` or `join` takes it.
 
 The database uses SQLite in WAL mode, with `synchronous=FULL`. Every change is one transaction. The schema has a version number, and a newer schema is refused. A v1 data directory is refused with a message, so use a new directory for v2. See [upgrading](upgrading.md).
