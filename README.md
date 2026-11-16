@@ -120,7 +120,7 @@ In the unreleased 2.2.0, an app can name `routes: [{host: www.example.com, port:
 - `deploy` does not reject a host port that another app already publishes. The second app's replicas go where the port is free. Any that cannot go stay `pending`, with the reason. See [concepts](docs/concepts.md#placement).
 - In 2.0.0, `hivemind logs` cannot read replicas that run on a worker; use `docker logs` on that machine. The unreleased 2.1.0 reads them, when the server and the worker both run it.
 - hivemind never deletes a volume, including when its app is deleted. Remove unused volumes with `docker volume rm` on the node.
-- In a rolling update on one node, each replica of an app with host ports is down while its new container starts. With a second eligible node, the new copy starts there first. A routed app's new copy always starts beside the old one. See [concepts](docs/concepts.md#rolling-updates).
+- In a rolling update on one node, each replica of an app without routes is down while its new container starts, whether or not it has host ports. With a second eligible node, the new copy starts there first. A routed app's new copy always starts beside the old one. See [concepts](docs/concepts.md#rolling-updates).
 - There is no web UI. The CLI and the HTTP API are the interfaces. The API has login and logout routes for a browser session, with a CSRF token.
 
 ## Documentation
