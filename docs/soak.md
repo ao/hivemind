@@ -230,6 +230,7 @@ On a control machine with ssh access to every node (passwordless sudo, Docker, j
 
 ```sh
 export SOAK_DIR=$PWD/.scratch/run
+mkdir -p "$SOAK_DIR"
 printf 'node-1 10.0.0.5\nnode-2 10.0.0.6\nnode-3 10.0.0.7\nnode-4 10.0.0.8\n' >"$SOAK_DIR/nodes"   # the first is the server
 BIN=path/to/hivemind scripts/soak/setup.sh
 scripts/soak/scenario.sh probe-start

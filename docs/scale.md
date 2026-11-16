@@ -284,6 +284,7 @@ On a control machine with ssh access to ten nodes (passwordless sudo, Docker, jq
 
 ```sh
 export SOAK_DIR=$PWD/.scratch/run
+mkdir -p "$SOAK_DIR"
 # "name private-ip" lines, the server first
 printf 'node-1 10.0.0.5\nnode-2 10.0.0.6\n...' >"$SOAK_DIR/nodes"
 SETUP_APPS=0 BIN=path/to/hivemind scripts/soak/setup.sh
