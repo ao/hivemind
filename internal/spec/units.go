@@ -244,7 +244,9 @@ func RegistryHost(ref string) (string, error) {
 // registry-1.docker.io as docker.io. The host is a registry as an image
 // reference names one: a DNS name or IPv4 address with an optional port, or
 // localhost. A name Docker would read as a Docker Hub namespace, such as
-// "myregistry" in "myregistry/app", is refused, since no image could use it.
+// "myregistry" in "myregistry/app", is refused, since no image could use it,
+// and so is one that names a registry only by its upper-case letters, such
+// as "MyRegistry": its lower-case form would not.
 func ParseRegistryHost(h string) (string, error) {
 	switch {
 	case h == "":
@@ -257,7 +259,7 @@ func ParseRegistryHost(h string) (string, error) {
 		return "", fmt.Errorf("registry host %q: give the host without a path, such as ghcr.io or registry.example.com:5000", h)
 	case !domainRE.MatchString(h):
 		return "", fmt.Errorf("registry host %q: want a host name or IPv4 address with an optional port, such as ghcr.io or registry.example.com:5000", h)
-	case !isRegistryName(h):
+	case !isRegistryName(strings.ToLower(h)):
 		return "", fmt.Errorf("registry host %q: Docker reads %s/<name> as a repository on Docker Hub, so no image can use it; give a host with a dot or a port, or localhost", h, h)
 	}
 	if i := strings.LastIndex(h, ":"); i >= 0 {

@@ -60,3 +60,27 @@ func FuzzParseImage(f *testing.F) {
 		}
 	})
 }
+
+// FuzzParseRegistryHost checks that an accepted host is canonical, and that
+// an image on it has it as its registry, so a stored credential is the one
+// its images look up.
+func FuzzParseRegistryHost(f *testing.F) {
+	for _, s := range []string{"ghcr.io", "GHCR.io", "index.docker.io", "localhost:5000", "10.0.0.5:5000", "myregistry", "https://x.io", "a.io:0", "MyRegistry"} {
+		f.Add(s)
+	}
+	f.Fuzz(func(t *testing.T, s string) {
+		h, err := ParseRegistryHost(s)
+		if err != nil {
+			return
+		}
+		if again, err := ParseRegistryHost(h); err != nil || again != h {
+			t.Fatalf("%q gave %q, which gives %q, %v", s, h, again, err)
+		}
+		if len(h) > 240 {
+			return // no room for a repository in a 255-character reference
+		}
+		if reg, err := RegistryHost(h + "/app"); err != nil || reg != h {
+			t.Fatalf("%q gave %q, but an image on it has registry %q, %v", s, h, reg, err)
+		}
+	})
+}

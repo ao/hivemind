@@ -209,7 +209,6 @@ func TestParseRegistryHost(t *testing.T) {
 		"localhost:5000":           "localhost:5000",
 		"registry.example.com:443": "registry.example.com:443",
 		"10.0.0.5:5000":            "10.0.0.5:5000",
-		"MyRegistry":               "myregistry",
 	}
 	for in, want := range ok {
 		got, err := ParseRegistryHost(in)
@@ -236,6 +235,7 @@ func TestParseRegistryHost(t *testing.T) {
 		"ghcr.io:5000:1":  "want a host name",
 		"ghcr.io\n":       "want a host name",
 		"user@ghcr.io":    "want a host name",
+		"MyRegistry":      "repository on Docker Hub",
 	}
 	bad[strings.Repeat("a", 253)+".io"] = "longer than"
 	for in, want := range bad {

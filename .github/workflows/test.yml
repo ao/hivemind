@@ -146,6 +146,7 @@ jobs:
           - { pkg: ./internal/runtime/docker, target: FuzzStdCopy }
           - { pkg: ./internal/spec, target: FuzzAppJSON }
           - { pkg: ./internal/spec, target: FuzzParseImage }
+          - { pkg: ./internal/spec, target: FuzzParseRegistryHost }
           - { pkg: ./internal/scheduler, target: FuzzPlace }
           - { pkg: ./internal/server, target: FuzzDecodeApp }
           - { pkg: ./internal/pki, target: FuzzParseJoinToken }
