@@ -65,7 +65,7 @@ Every error is a JSON object with one field:
 | 403 | A cookie request to an unsafe method without the session's CSRF token: `{"error":"csrf_token_invalid"}` |
 | 404 | No such app or node, no drain of the node, or no container for the replica on its node. Unknown routes give `{"error":"not found"}` |
 | 405 | Wrong method for a known path: `{"error":"method not allowed"}` |
-| 409 | Removing the server's own node, or a node that still renews its lease without `force=true`. An ineligible node that runs nothing needs no `force`. A put whose `routes` name a host that another app routes: `{"error":"conflict: host www.example.com is routed by app web; remove it there first"}` |
+| 409 | Removing the server's own node, or a node that still renews its lease without `force=true`. An ineligible node that runs nothing needs no `force`. A put whose `routes` name a host that another app routes: `{"error":"conflict: host www.example.com is routed by app web; remove it there first"}`, or a host and path: `conflict: host www.example.com with path /api is routed by app api; ...` |
 | 413 | Request body over 1 MiB |
 | 429 | Too many failed logins from this address, or too many log streams open to one node |
 | 500 | Unexpected failure. The message is `internal error`, and the details go to the server log |
@@ -148,14 +148,24 @@ The archive holds the CA private key, so the server sends it only over TLS, or t
 
 ## Routing table
 
-`GET /v1/routes` returns the routing table that every router serves, sorted by host:
+`GET /v1/routes` returns the routing table that every router serves, one entry per route, sorted by host and then path:
 
 ```json
-{"routes": [{"host": "www.example.com", "app": "web", "port": 80,
-  "endpoints": ["10.0.0.5:32768", "10.0.0.6:32771"]}]}
+{"routes": [{"host": "www.example.com", "path": "/", "app": "web", "port": 80,
+  "endpoints": ["10.0.0.5:32768", "10.0.0.6:32771"]},
+ {"host": "www.example.com", "path": "/api", "app": "api", "port": 8080,
+  "endpoints": ["10.0.0.6:32775"]}]}
 ```
 
-`port` is the container port the route names. `endpoints` are the `address:port` of each replica that takes the host's traffic now: its container is Ready, it is the copy the replica (or its rollout surge) is assigned, and its node's lease is current. A host whose app has no such replica has `"endpoints": []`, and a router answers it with `503`. See [routing](routing.md).
+`path` is the route's path prefix, or `/` for a route of the whole host (which the app spec writes with no `path`). `port` is the container port the route names. `endpoints` are the `address:port` of each replica that takes the route's traffic now: its container is Ready, it is the copy the replica (or its rollout surge) is assigned, and its node's lease is current. A route whose app has no such replica has `"endpoints": []`, and a router answers it with `503`. See [routing](routing.md); `hivemind routes` prints this table.
+
+When a worker's router of a build before path routes has read the table in the last minute, the reply also has `old_routers`:
+
+```json
+"old_routers": [{"node": "node-3f2a...", "version": "v2.2.0-12-gabc", "hosts": ["www.example.com"]}]
+```
+
+Such a router cannot tell paths apart, so the server gives it each host that has a path route with no endpoints, and `hosts` lists those it answers `503` for; it is `[]` while no host has a path route. `version` is what the node sent, or `""`. The field is absent when there is no such router. See [mixed versions](routing.md#mixed-versions).
 
 ## Registries
 
@@ -270,6 +280,8 @@ While a rollout is in progress, or after it has paused, the app status has a `ro
 
 A paused rollout stays paused until a spec with another template is deployed. Rolling back is deploying the old spec.
 
+`warnings`, a list of sentences, is present when something keeps the app from being served as its spec says. Today that is one case: a router of a build before path routes read the table in the last minute and answers `503` for a host the app routes, because the host has a path route. `hivemind status` prints each as `<app>: warning: ...`.
+
 ### App spec
 
 The spec is the JSON form of the YAML file that `deploy -f` reads. Unknown fields are errors.
@@ -285,7 +297,7 @@ The spec is the JSON form of the YAML file that `deploy -f` reads. Unknown field
 | `volumes` | list | Up to 16. Each has `name` and an absolute `path` other than `/`. An app with volumes has one replica. The Docker volume is named `hivemind-<app>_<name>` |
 | `resources` | object | `cpu` (0, or 0.01 to 1024) and `memory` (0, or 6Mi to 1Ti). Counted by placement and applied as container limits. 0 means no limit |
 | `health` | object | Exactly one of `http` (`path`, default `/`; `port`), `tcp` (`port`) or `exec` (a list of arguments). Also `interval` (default `10s`), `timeout` (default `2s`), `retries` (1 to 10, default 3) and `start_period` (default 0). Durations are strings such as `5s` |
-| `routes` | list | Up to 16. Each has `host`, an exact DNS name of at least two labels (lowercased, a trailing dot dropped; no wildcard, IP address or underscore), and `port`, the container port (1 to 65535). A host appears once, and belongs to one app: a put that claims another app's host gets `409`. A change to `routes` is a rolling update. See [routing](routing.md) |
+| `routes` | list | Up to 16. Each has `host`, an exact DNS name of at least two labels (lowercased, a trailing dot dropped; no wildcard, IP address or underscore), `port`, the container port (1 to 65535), and an optional `path`, a path prefix such as `/api` (see [paths](routing.md#paths) for what it may hold). No `path`, or `/`, is the whole host. A host and path appear once in an app, and belong to one app: a put that claims a host and path another app routes gets `409`, while apps may share a host under different paths. A change to `routes` is a rolling update. See [routing](routing.md) |
 
 `memory` takes a whole number of bytes, or a string such as `512Mi` or `2G`. The suffixes `k`, `M`, `G` and `T` are powers of 1000, and `Ki`, `Mi`, `Gi` and `Ti` are powers of 1024.
 
