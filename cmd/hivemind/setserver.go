@@ -156,21 +156,11 @@ func serverCheckError(err error, w *joinedWorker, host, server string) error {
 	var opErr *net.OpError
 	switch {
 	case errors.As(err, &unknownCA):
-		// Every cluster CA has the same name, so the fingerprints tell
-		// them apart; a join token carries its cluster's in hex.
-		theirs := "a CA it did not send"
-		var cve *tls.CertificateVerificationError
-		if errors.As(err, &cve) && len(cve.UnverifiedCertificates) > 1 {
-			for _, c := range cve.UnverifiedCertificates[1:] {
-				if c.IsCA {
-					theirs = fmt.Sprintf("the CA with fingerprint %x", pki.Fingerprint(c))
-					break
-				}
-			}
-		}
-		return fmt.Errorf("the server at %s presents a certificate from %s, not from this worker's cluster CA, fingerprint %x: "+
-			"it is another cluster's server, or something between this machine and %s holds another CA",
-			server, theirs, w.ca.Fingerprint(), host)
+		return otherCAError(err, w, host, server)
+	case errors.As(err, &badName) && (badName.Certificate == nil || !signedBy(badName.Certificate, w.ca)):
+		// The name is checked before the chain, so a certificate from
+		// another CA for another name fails on the name first.
+		return otherCAError(err, w, host, server)
 	case errors.As(err, &badName):
 		names := "no address"
 		if badName.Certificate != nil {
@@ -201,6 +191,35 @@ func serverCheckError(err error, w *joinedWorker, host, server string) error {
 		return fmt.Errorf("the server at %s did not answer as a hivemind server: %w", server, unreachable.Err)
 	}
 	return fmt.Errorf("the server at %s: %w", server, err)
+}
+
+// otherCAError is the refusal of a server whose certificate is not from w's
+// cluster CA. Every cluster CA has the same name, so the message gives the
+// fingerprints, which tell them apart; a join token carries its cluster's in
+// hex.
+func otherCAError(err error, w *joinedWorker, host, server string) error {
+	theirs := "a CA it did not send"
+	var cve *tls.CertificateVerificationError
+	if errors.As(err, &cve) && len(cve.UnverifiedCertificates) > 1 {
+		for _, c := range cve.UnverifiedCertificates[1:] {
+			if c.IsCA {
+				theirs = fmt.Sprintf("the CA with fingerprint %x", pki.Fingerprint(c))
+				break
+			}
+		}
+	}
+	return fmt.Errorf("the server at %s presents a certificate from %s, not from this worker's cluster CA, fingerprint %x: "+
+		"it is another cluster's server, or something between this machine and %s holds another CA",
+		server, theirs, w.ca.Fingerprint(), host)
+}
+
+// signedBy reports whether leaf chains to ca for server authentication,
+// whatever names it carries.
+func signedBy(leaf *x509.Certificate, ca *pki.CA) bool {
+	pool := x509.NewCertPool()
+	pool.AddCert(ca.Cert)
+	_, err := leaf.Verify(x509.VerifyOptions{Roots: pool, KeyUsages: []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth}})
+	return err == nil
 }
 
 // remoteAlert is the TLS alert the server sent, such as "remote error: tls:

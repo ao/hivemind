@@ -129,7 +129,12 @@ func TestSetServerChecksTheServer(t *testing.T) {
 
 	// The right server, under a name its certificate does not carry.
 	_, port, _ := net.SplitHostPort(right.cl.NodeAddr())
-	refused("a name the certificate lacks", net.JoinHostPort("localhost", port), "it names 127.0.0.1, not localhost")
+	refused("a name the certificate lacks", net.JoinHostPort("localhost", port), "has a certificate from this cluster's CA, but it names 127.0.0.1, not localhost")
+	// Another cluster's server under a name its certificate lacks fails
+	// the name check first; it is still another CA's.
+	_, otherPort, _ := net.SplitHostPort(other.cl.NodeAddr())
+	refused("another cluster's server under another name", net.JoinHostPort("localhost", otherPort),
+		fmt.Sprintf("not from this worker's cluster CA, fingerprint %x: it is another cluster's server", right.ca.Fingerprint()))
 
 	// A server with a certificate from this cluster's CA, for the address,
 	// that does not take this cluster's node certificates.
