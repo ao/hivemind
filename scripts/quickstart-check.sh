@@ -12,7 +12,9 @@
 #                    answers, that the token is not in the log, and that no
 #                    listener is wildcard;
 #   deploy, scale    with --wait, checks that every replica is running and
-#                    ready when the command returns;
+#                    ready when the command returns; after web's deploy,
+#                    that a second app on its host port gets a warning,
+#                    and that --wait fails at once for it;
 #   logs             checks that the log shows the quick start's request;
 #   delete           waits until the app is gone and no container carries its
 #                    label.
@@ -111,6 +113,29 @@ inside() {
 		echo "quickstart-check: right after --wait, $app has $ready of $desired replicas running and ready"
 	}
 
+	# check_port_warning: while web publishes 127.0.0.1:8080 on the only
+	# node, a second app on that port is deployed with a warning on standard
+	# error that names web, and exit status 0; with --wait it exits 1 at once
+	# with the reason, not at its timeout. The app is deleted again.
+	check_port_warning() {
+		local rc=0 start took
+		local reason="host port 127.0.0.1:8080/tcp is in use on every eligible node; held by app web"
+		hivemind deploy --name qs-port --image nginx:alpine --port 127.0.0.1:8080:80 >/dev/null 2>"$work/port.err" ||
+			fail "a deploy on web's host port exited with $?: $(cat "$work/port.err")"
+		[ "$(cat "$work/port.err")" = "qs-port: warning: replica 0 has no node: $reason" ] ||
+			fail "a deploy on web's host port printed on standard error: $(cat "$work/port.err")"
+		start=$(date +%s)
+		hivemind deploy --name qs-port --image nginx:alpine --port 127.0.0.1:8080:80 --wait --timeout 5m >/dev/null 2>"$work/port.err" || rc=$?
+		took=$(($(date +%s) - start))
+		[ "$rc" = 1 ] || fail "deploy --wait on web's host port exited with $rc, want 1"
+		grep -qF "error: qs-port: replica 0 has no node, and will not get one by itself: $reason; the spec stays deployed" "$work/port.err" ||
+			fail "deploy --wait on web's host port printed: $(cat "$work/port.err")"
+		[ "$took" -lt 60 ] || fail "deploy --wait on web's host port took ${took}s to fail"
+		echo "quickstart-check: a second app on web's host port is deployed with a warning, and --wait fails in ${took}s"
+		hivemind delete qs-port >/dev/null
+		wait_gone qs-port
+	}
+
 	# containers_with_label counts every container, running or not, that
 	# carries the hivemind.app label of the app, as the daemon reports them.
 	containers_with_label() {
@@ -177,6 +202,9 @@ inside() {
 			eval "$cmd" || fail "$cmd exited with $?"
 			app=$(printf '%s\n' "$cmd" | sed -n 's/.*--name \([a-z0-9-]*\).*/\1/p')
 			check_waited "$app" "$cmd"
+			case "$app $cmd" in
+			"web "*"--port 127.0.0.1:8080:80"*) check_port_warning ;;
+			esac
 			;;
 		"hivemind scale "*)
 			read -r _ _ app count _ <<<"$cmd"
