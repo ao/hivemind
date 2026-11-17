@@ -321,7 +321,7 @@ func TestCreateRequestBody(t *testing.T) {
 		{"image normalised", body.Image == "docker.io/library/nginx:latest"},
 		{"command", strings.Join(body.Cmd, "|") == "nginx|-g|daemon off;"},
 		{"env sorted", strings.Join(body.Env, ",") == "ALPHA=first,ZED=last"},
-		{"labels", body.Labels[runtime.LabelApp] == "web" && body.Labels[runtime.LabelReplica] == "1" && body.Labels[runtime.LabelGeneration] == "2"},
+		{"labels", body.Labels[runtime.LabelApp] == "web" && body.Labels[runtime.LabelReplica] == "1" && body.Labels[runtime.LabelGeneration] == "2" && body.Labels[runtime.LabelRouted] == "false"},
 		{"no tty", !body.Tty},
 		{"exposed port", len(body.ExposedPorts) == 2 && hasKey(body.ExposedPorts, "80/tcp") && hasKey(body.ExposedPorts, "53/udp")},
 		{"loopback default bind", len(body.HostConfig.PortBindings["80/tcp"]) == 1 &&

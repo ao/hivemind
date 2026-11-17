@@ -9,6 +9,7 @@ import (
 	"io"
 	"regexp"
 	"slices"
+	"strconv"
 	"time"
 
 	"github.com/ao/hivemind/internal/spec"
@@ -20,9 +21,12 @@ const (
 	LabelApp        = "hivemind.app"
 	LabelReplica    = "hivemind.replica"
 	LabelGeneration = "hivemind.generation"
-	// LabelRouted is "true" on the container of a routed app. The agent
-	// keeps such a container running for a short drain after it leaves the
-	// routing table, before it stops it.
+	// LabelRouted is "true" on the container of a routed app, and "false"
+	// on every other. The agent keeps a routed container running for a
+	// short drain after it leaves the routing table, before it stops it. It
+	// is set either way because Docker merges the image's labels into the
+	// container's, and a label the container sets wins: an image with
+	// LABEL hivemind.routed=true would otherwise give its app the drain.
 	LabelRouted = "hivemind.routed"
 )
 
@@ -164,17 +168,15 @@ type ContainerConfig struct {
 	Routed bool
 }
 
-// Labels returns the hivemind labels for the replica.
+// Labels returns the hivemind labels for the replica. Each one is set,
+// so that none comes from the image.
 func (c ContainerConfig) Labels() map[string]string {
-	l := map[string]string{
+	return map[string]string{
 		LabelApp:        c.App,
 		LabelReplica:    fmt.Sprint(c.Replica),
 		LabelGeneration: fmt.Sprint(c.Generation),
+		LabelRouted:     strconv.FormatBool(c.Routed),
 	}
-	if c.Routed {
-		l[LabelRouted] = "true"
-	}
-	return l
 }
 
 // Container is the engine's view of one container. List fills only the

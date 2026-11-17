@@ -224,7 +224,7 @@ Scaling does not change the generation. Scaling up starts the new replicas at th
 
 ## Labels
 
-Every container hivemind starts carries three labels: `hivemind.app`, `hivemind.replica` and `hivemind.generation`. The agent finds its containers by the `hivemind.app` label, and matches them to replicas by the other two.
+Every container hivemind starts carries four labels: `hivemind.app`, `hivemind.replica`, `hivemind.generation`, and `hivemind.routed`, which is `true` for a routed app and `false` for any other. The agent finds its containers by the `hivemind.app` label, and matches them to replicas by the next two. It gives a container with `hivemind.routed=true` the drain after it leaves the routing table. Each is set on every container, because a label the container sets wins over one of the same name in its image.
 
 ## Reconcile
 

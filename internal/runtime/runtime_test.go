@@ -2,6 +2,8 @@ package runtime
 
 import (
 	"errors"
+	"fmt"
+	"maps"
 	"regexp"
 	"strings"
 	"testing"
@@ -65,15 +67,14 @@ func TestPrepareRejects(t *testing.T) {
 	}
 }
 
+// Every hivemind label is set, routed included, so that an image's label
+// of the same name has no effect.
 func TestLabels(t *testing.T) {
-	got := ContainerConfig{App: "web", Replica: 3, Generation: 7}.Labels()
-	want := map[string]string{LabelApp: "web", LabelReplica: "3", LabelGeneration: "7"}
-	if len(got) != len(want) {
-		t.Fatalf("labels = %v", got)
-	}
-	for k, v := range want {
-		if got[k] != v {
-			t.Errorf("label %s = %q, want %q", k, got[k], v)
+	for _, routed := range []bool{false, true} {
+		got := ContainerConfig{App: "web", Replica: 3, Generation: 7, Routed: routed}.Labels()
+		want := map[string]string{LabelApp: "web", LabelReplica: "3", LabelGeneration: "7", LabelRouted: fmt.Sprint(routed)}
+		if !maps.Equal(got, want) {
+			t.Errorf("routed %v: labels = %v, want %v", routed, got, want)
 		}
 	}
 }

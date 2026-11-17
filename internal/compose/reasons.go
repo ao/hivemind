@@ -36,7 +36,7 @@ var serviceReasons = map[string]string{
 	"container_name":  "hivemind names each container hivemind-<app>-<replica>-g<generation>",
 	"hostname":        "hivemind does not set a container's hostname",
 	"domainname":      "hivemind does not set a container's domain name",
-	"labels":          "hivemind labels each container with hivemind.app, hivemind.replica and hivemind.generation, and nothing else",
+	"labels":          "hivemind labels each container with hivemind.app, hivemind.replica, hivemind.generation and hivemind.routed, and nothing else",
 	"entrypoint":      "the app spec has no entrypoint: put the whole command in command, or build an image with the entrypoint you need",
 	"scale":           "use deploy.replicas",
 	"extends":         oneFile,

@@ -23,6 +23,9 @@ type fakeRuntime struct {
 	containers map[string]*fakeContainer // by ID
 	images     map[string]bool
 	calls      map[string]int
+	// imageLabels are the labels an image carries. Create merges them under
+	// the container's own, as the engine does.
+	imageLabels map[string]map[string]string
 	// fail, when set, is asked before each operation; a non-nil error is
 	// returned instead of doing it.
 	fail func(op string, arg string) error
@@ -165,8 +168,13 @@ func (f *fakeRuntime) Create(_ context.Context, cfg runtime.ContainerConfig) (st
 	}
 	f.next++
 	id := fmt.Sprintf("%064x", f.next)
+	labels := maps.Clone(f.imageLabels[cfg.Image])
+	if labels == nil {
+		labels = map[string]string{}
+	}
+	maps.Copy(labels, cfg.Labels())
 	f.containers[id] = &fakeContainer{
-		Container: runtime.Container{ID: id, Name: cfg.Name, Image: cfg.Image, Labels: cfg.Labels(), State: "created"},
+		Container: runtime.Container{ID: id, Name: cfg.Name, Image: cfg.Image, Labels: labels, State: "created"},
 		cfg:       cfg,
 	}
 	return id, nil

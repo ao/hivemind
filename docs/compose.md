@@ -210,7 +210,7 @@ Each refused key gets one of these reasons. A key not listed here gets the gener
 | `env_file` | list the variables under `environment`; a value can come from `.env` beside the file, as `${VAR}` |
 | `container_name` | hivemind names each container `hivemind-<app>-<replica>-g<generation>` |
 | `hostname`, `domainname` | hivemind does not set them |
-| `labels` | hivemind labels each container with `hivemind.app`, `hivemind.replica` and `hivemind.generation`, and nothing else |
+| `labels` | hivemind labels each container with `hivemind.app`, `hivemind.replica`, `hivemind.generation` and `hivemind.routed`, and nothing else |
 | `entrypoint` | the app spec has no entrypoint: put the whole command in `command`, or build an image with the entrypoint you need |
 | `scale` | use `deploy.replicas` |
 | `extends` | hivemind reads one file and does not merge services; use YAML anchors and merge keys |

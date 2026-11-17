@@ -195,3 +195,23 @@ func keysOf(m map[string]fakeContainer) []string {
 	slices.Sort(out)
 	return out
 }
+
+// An image's own hivemind.routed=true label does not give the container of
+// an app without routes the drain: hivemind sets the label on every
+// container, and the container's label wins over the image's.
+func TestImageLabelDoesNotMakeAContainerRouted(t *testing.T) {
+	e := newRoutedEnv(t, routeAddr)
+	e.rt.imageLabels = map[string]map[string]string{"docker.io/library/nginx:alpine": {runtime.LabelRouted: "true"}}
+	e.put(spec.App{Name: "web", Image: "nginx:alpine", Replicas: 2})
+	e.reconcile()
+	for name, c := range e.running() {
+		if c.Labels[runtime.LabelRouted] != "false" {
+			t.Errorf("%s: label %s = %q, want false", name, runtime.LabelRouted, c.Labels[runtime.LabelRouted])
+		}
+	}
+	e.put(spec.App{Name: "web", Image: "nginx:alpine", Replicas: 1})
+	e.reconcile()
+	if run := e.running(); len(run) != 1 {
+		t.Fatalf("running after scale down: %v; the image's label gave the extra container the drain", keysOf(run))
+	}
+}
