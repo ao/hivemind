@@ -429,7 +429,8 @@ func TestRestoreRefusesNewerSchema(t *testing.T) {
 	expectNothingLeft(t, dir)
 }
 
-// A store at an older schema restores, migrated forward, at epoch 1.
+// A store at an older schema restores as it is, so its release can serve
+// it, and gets epoch 1 once this build has opened, and so migrated, it.
 func TestRestoreMigratesOlderSchema(t *testing.T) {
 	s := newServer(t)
 	var b bytes.Buffer
@@ -447,14 +448,42 @@ func TestRestoreMigratesOlderSchema(t *testing.T) {
 	}
 	dir := filepath.Join(t.TempDir(), "r")
 	m, err := Restore(context.Background(), &b, dir)
-	if err != nil || m.SchemaVersion != 6 || m.Epoch != 1 {
+	if err != nil || m.SchemaVersion != 6 || m.Epoch != 1 || !m.Pending {
 		t.Fatalf("restore of a version 6 store: %+v, %v", m, err)
+	}
+	// The store is left at version 6, for the release that wrote it, and
+	// the epoch waits in EpochFile for this build's first open.
+	ctx := context.Background()
+	if info, err := store.InspectFile(ctx, filepath.Join(dir, StoreName)); err != nil || info.SchemaVersion != 6 {
+		t.Fatalf("the restored version 6 store: %+v, %v", info, err)
+	}
+	if b, err := os.ReadFile(filepath.Join(dir, EpochFile)); err != nil || string(b) != "1\n" {
+		t.Fatalf("%s: %q, %v", EpochFile, b, err)
 	}
 	r, err := store.Open(context.Background(), filepath.Join(dir, StoreName))
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer r.Close()
+	if epoch, ok, err := ApplyEpochFile(ctx, dir, r); err != nil || !ok || epoch != 1 {
+		t.Fatalf("ApplyEpochFile: %d, %v, %v", epoch, ok, err)
+	}
+	if cl, err := r.GetCluster(ctx); err != nil || cl.Epoch != 1 {
+		t.Fatalf("the migrated store's cluster: %+v, %v", cl, err)
+	}
+	if _, err := os.Stat(filepath.Join(dir, EpochFile)); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("%s is still there: %v", EpochFile, err)
+	}
+	if _, ok, err := ApplyEpochFile(ctx, dir, r); err != nil || ok {
+		t.Fatalf("ApplyEpochFile without the file: %v, %v", ok, err)
+	}
+	// A damaged file is refused, and kept.
+	if err := os.WriteFile(filepath.Join(dir, EpochFile), []byte("one\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := ApplyEpochFile(ctx, dir, r); err == nil || !strings.Contains(err.Error(), "does not hold an epoch") {
+		t.Fatalf("ApplyEpochFile with a damaged file: %v", err)
+	}
 	if err := r.RecordNodeCert(context.Background(), workerNode, time.Now()); err != nil {
 		t.Fatalf("the migrated store has no version 7 table: %v", err)
 	}

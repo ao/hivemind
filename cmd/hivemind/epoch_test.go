@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"context"
+	"database/sql"
 	"errors"
 	"io"
 	"log/slog"
@@ -19,6 +20,7 @@ import (
 	"github.com/ao/hivemind/internal/config"
 	"github.com/ao/hivemind/internal/runtime"
 	"github.com/ao/hivemind/internal/server"
+	"github.com/ao/hivemind/internal/store"
 )
 
 // The worker's epoch file: none is 0, a write replaces it whole, and a
@@ -266,5 +268,58 @@ func TestAWorkerRefusesTheServerFromBeforeARestore(t *testing.T) {
 	}
 	if e, _ := readWorkerEpoch(wdir); e != 1 {
 		t.Errorf("the worker's epoch is %d, want 1", e)
+	}
+}
+
+// A backup of a store from before epochs, schema version 15, restores as it
+// is, so that release can still serve it, and the epoch waits in
+// restored-epoch. serve migrates the store, gives the cluster that epoch,
+// and removes the file.
+func TestServeGivesAStoreRestoredFromBeforeEpochsItsEpoch(t *testing.T) {
+	home := isolate(t)
+	data := filepath.Join(home, "old")
+	if _, _, err := run(t, "", "init", "--data-dir", data); err != nil {
+		t.Fatal(err)
+	}
+	db, err := sql.Open("sqlite", filepath.Join(data, storeFileName))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, q := range []string{`ALTER TABLE cluster DROP COLUMN epoch`, `ALTER TABLE nodes DROP COLUMN dials`, `UPDATE schema_version SET version = 15`} {
+		if _, err := db.Exec(q); err != nil {
+			t.Fatal(err)
+		}
+	}
+	db.Close()
+	file := filepath.Join(home, "hm.tar")
+	if _, _, err := run(t, "", "backup", file, "--data-dir", data); err != nil {
+		t.Fatal(err)
+	}
+	restored := filepath.Join(home, "new")
+	out, _, err := run(t, "", "restore", file, "--data-dir", restored)
+	if err != nil || !strings.Contains(out, "The store stays at schema version 15, from before epochs") || !strings.Contains(out, "puts the cluster at epoch 1") {
+		t.Fatalf("restore: %v\n%s", err, out)
+	}
+	if b, err := os.ReadFile(filepath.Join(restored, "restored-epoch")); err != nil || string(b) != "1\n" {
+		t.Fatalf("restored-epoch: %q, %v", b, err)
+	}
+	s := testServe(t, restored, map[string]string{"HIVEMIND_ADVERTISE": "127.0.0.1", "HIVEMIND_CLUSTER_PORT": strconv.Itoa(unusedPort(t))})
+	if l := s.logs.String(); !strings.Contains(l, "the restored store has its epoch now") || !strings.Contains(l, "cluster listening") ||
+		!strings.Contains(l, "epoch=1") {
+		t.Errorf("serve on the restored store:\n%s", l)
+	}
+	if _, err := os.Stat(filepath.Join(restored, "restored-epoch")); !errors.Is(err, os.ErrNotExist) {
+		t.Errorf("restored-epoch after serve: %v", err)
+	}
+	if err := s.stop(); err != nil {
+		t.Fatal(err)
+	}
+	st, err := store.Open(context.Background(), filepath.Join(restored, storeFileName))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+	if cl, err := st.GetCluster(context.Background()); err != nil || cl.Epoch != 1 {
+		t.Fatalf("the restored cluster: %+v, %v", cl, err)
 	}
 }

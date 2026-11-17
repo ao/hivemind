@@ -517,6 +517,13 @@ func runServe(ctx context.Context, cfg *config.Config, log *slog.Logger, rt runt
 		return err
 	}
 	defer st.Close()
+	// A store restored from before epochs got its epoch in a file, for
+	// this start, which has just migrated it.
+	if epoch, ok, err := backup.ApplyEpochFile(ctx, cfg.DataDir, st); err != nil {
+		return err
+	} else if ok {
+		log.Info("the restored store has its epoch now, as restore left it to the first start after the migration", "epoch", epoch)
+	}
 	cl, err := st.GetCluster(ctx)
 	if errors.Is(err, store.ErrNotFound) {
 		return fmt.Errorf("no cluster in %s: run `hivemind init` first", cfg.DataDir)

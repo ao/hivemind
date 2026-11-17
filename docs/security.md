@@ -43,6 +43,7 @@ The server's data directory is created with mode 0700.
 | `ca.crt` | 0644 | The cluster CA certificate. Public |
 | `hivemind.yaml` | 0600 when `init` writes it; as you create it otherwise | Optional settings for `serve`. `init` writes the serve flags it was given here; nothing else writes it. A `token` key in it is refused |
 | `hivemind.lock` | 0600 | The pid of the `serve` that holds it locked |
+| `restored-epoch` | 0600 | Only after `restore` of a store from before epochs, until `serve` first opens it: the epoch to give the restored cluster ([backup](backup.md#restoring)) |
 
 The CLI config that `init` writes is `~/.config/hivemind/config.yaml`, with mode 0600, in a directory that is 0700 when it is created. It names the server and the token file, and with `--api-tls-cert`, the API certificate as `ca-cert`. It does not hold the token.
 

@@ -40,10 +40,10 @@ As a user other than root, `restore` cannot create `/var/lib/hivemind` (`error: 
 
 - the format and its version. A backup from a newer format is refused;
 - the size and SHA-256 of every file, so a truncated or altered file is refused;
-- SQLite's integrity check on the store, and its schema version. A store at an older version is migrated forward. A store from a newer hivemind is refused;
+- SQLite's integrity check on the store, and its schema version. A store at an older version is migrated forward when `serve` opens it, as any data directory is. A store from a newer hivemind is refused;
 - the CA key matches the CA certificate.
 
-Then it raises the cluster's epoch in the restored store to one more than the backup's, and says so (`The cluster is at epoch 1 now, ...`). The workers that reach the restored server refuse a server at a lower epoch, such as the one the backup came from; see [if the old server comes back](#if-the-old-server-comes-back).
+Then it raises the cluster's epoch in the restored store to one more than the backup's, and says so (`The cluster is at epoch 1 now, ...`). The workers that reach the restored server refuse a server at a lower epoch, such as the one the backup came from; see [if the old server comes back](#if-the-old-server-comes-back). The store is not migrated for that. A store from before epochs (schema version 16) has none yet: `restore` leaves it as it is, so that the release that wrote it can still serve it, as [going back to 2.0.0](upgrading.md#from-200) needs, and writes the epoch, 1, to `restored-epoch` beside it. This build's `serve` migrates the store, gives the cluster that epoch, and removes the file.
 
 The directory gets mode 0700 and every file mode 0600. On any failure, `restore` removes the files it wrote, and the directory if it created it. Like `init`, it writes a client config for the CLI on this machine, unless one exists.
 

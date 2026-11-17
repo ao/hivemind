@@ -27,6 +27,8 @@ import (
 	"os"
 	"path/filepath"
 	"slices"
+	"strconv"
+	"strings"
 	"time"
 
 	"github.com/ao/hivemind/internal/auth"
@@ -400,14 +402,28 @@ func Verify(r io.Reader) (Manifest, error) {
 var ErrNotEmpty = errors.New("the data directory is not empty")
 
 // Restored is what Restore did: the archive's manifest, and the epoch of
-// the restored store, one higher than the backup's.
+// the restored cluster, one higher than the backup's.
 type Restored struct {
 	Manifest
-	// Epoch is the restored store's epoch. The server sends it to the
+	// Epoch is the restored cluster's epoch. The server sends it to the
 	// workers, and a worker that has seen it refuses a server at a lower
 	// one, such as the server the backup was taken from.
 	Epoch int64
+	// Pending is true for a store from before store.EpochSchemaVersion,
+	// which has no epoch yet: Restore wrote Epoch to EpochFile, and serve
+	// gives it to the store once it has migrated it (ApplyEpochFile).
+	Pending bool
 }
+
+// EpochFile is what Restore writes beside a store from before
+// store.EpochSchemaVersion, which has no epoch: the epoch the restored
+// cluster is to have, a decimal number. Restore leaves such a store at the
+// schema version it has, so that the release it came from can still serve
+// it, as going back to an older release needs (docs/upgrading.md). This
+// build's serve migrates the store when it opens it, then raises its epoch
+// to the file's and removes the file (ApplyEpochFile). A backup does not
+// hold the file.
+const EpochFile = "restored-epoch"
 
 // sqliteSideFiles are the suffixes of the files SQLite may keep beside a
 // database.
@@ -416,11 +432,13 @@ var sqliteSideFiles = []string{"-wal", "-shm", "-journal"}
 // Restore writes the files of the archive into dir, which must be missing or
 // empty. dir gets mode 0700 and each file mode 0600. The store must pass
 // SQLite's integrity check and have a schema version this build knows; an
-// older one is migrated forward here. The CA key must match the CA
-// certificate. Then the store's epoch is raised by one (store.BumpEpoch),
-// so the workers that reach the restored server refuse the one the backup
-// came from, should it come back. On any error, the files written so far
-// are removed, and so is dir if Restore created it.
+// older one is migrated forward when serve opens it, as with any data
+// directory. The CA key must match the CA certificate. Then the cluster's
+// epoch is raised to one more than the backup's, in the store
+// (store.BumpEpochFile), or, for a store from before epochs, in EpochFile,
+// so that the workers that reach the restored server refuse the one the
+// backup came from, should it come back. On any error, the files written so
+// far are removed, and so is dir if Restore created it.
 func Restore(ctx context.Context, r io.Reader, dir string) (res Restored, err error) {
 	if dir == "" {
 		return Restored{}, errors.New("restore: no data directory")
@@ -457,8 +475,8 @@ func Restore(ctx context.Context, r io.Reader, dir string) (res Restored, err er
 		}
 	}()
 
-	m, err := read(r, func(f File, src io.Reader) error {
-		p := filepath.Join(dir, f.Name)
+	write := func(name string, src io.Reader) error {
+		p := filepath.Join(dir, name)
 		out, err := os.OpenFile(p, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
 		if err != nil {
 			return err
@@ -475,12 +493,14 @@ func Restore(ctx context.Context, r io.Reader, dir string) (res Restored, err er
 			werr = cerr
 		}
 		return werr
-	})
+	}
+	m, err := read(r, func(f File, src io.Reader) error { return write(f.Name, src) })
 	if err != nil {
 		return Restored{}, err
 	}
 
-	info, err := store.InspectFile(ctx, filepath.Join(dir, StoreName))
+	dbPath := filepath.Join(dir, StoreName)
+	info, err := store.InspectFile(ctx, dbPath)
 	if err != nil {
 		return Restored{}, err
 	}
@@ -494,31 +514,50 @@ func Restore(ctx context.Context, r io.Reader, dir string) (res Restored, err er
 	if _, err := pki.LoadCA(dir); err != nil {
 		return Restored{}, fmt.Errorf("%w: cluster CA: %v", ErrInvalid, err)
 	}
-	epoch, err := bumpEpoch(ctx, filepath.Join(dir, StoreName))
-	if err != nil {
-		return Restored{}, err
+	res = Restored{Manifest: m}
+	if info.SchemaVersion >= store.EpochSchemaVersion {
+		if res.Epoch, err = store.BumpEpochFile(ctx, dbPath); err != nil {
+			return Restored{}, fmt.Errorf("raising the epoch of the restored store: %w", err)
+		}
+	} else {
+		// A store from before epochs is at epoch 0.
+		res.Epoch, res.Pending = 1, true
+		if err := write(EpochFile, strings.NewReader(strconv.FormatInt(res.Epoch, 10)+"\n")); err != nil {
+			return Restored{}, err
+		}
 	}
 	if err := syncDir(dir); err != nil {
 		return Restored{}, err
 	}
-	return Restored{Manifest: m, Epoch: epoch}, nil
+	return res, nil
 }
 
-// bumpEpoch opens the restored store at path, which migrates it to this
-// build's schema, and raises its epoch by one.
-func bumpEpoch(ctx context.Context, path string) (int64, error) {
-	st, err := store.Open(ctx, path)
+// ApplyEpochFile gives st, the store in dir that serve has just opened and
+// so migrated, the epoch that Restore left in EpochFile, and then removes
+// the file. It returns the store's epoch then, and false when there is no
+// file. A file that does not hold an epoch is an error, so that serve does
+// not start a restored cluster at the backup's epoch.
+func ApplyEpochFile(ctx context.Context, dir string, st *store.Store) (int64, bool, error) {
+	p := filepath.Join(dir, EpochFile)
+	b, err := os.ReadFile(p)
+	if errors.Is(err, fs.ErrNotExist) {
+		return 0, false, nil
+	}
 	if err != nil {
-		return 0, fmt.Errorf("opening the restored store: %w", err)
+		return 0, false, err
 	}
-	epoch, err := st.BumpEpoch(ctx)
-	if cerr := st.Close(); err == nil {
-		err = cerr
+	want, err := strconv.ParseInt(strings.TrimSpace(string(b)), 10, 64)
+	if err != nil || want < 0 {
+		return 0, false, fmt.Errorf("%s, which restore writes, does not hold an epoch (%q): restore the backup again into an empty directory", p, strings.TrimSpace(string(b)))
 	}
+	epoch, err := st.RaiseEpoch(ctx, want)
 	if err != nil {
-		return 0, fmt.Errorf("raising the epoch of the restored store: %w", err)
+		return 0, false, fmt.Errorf("giving the restored store its epoch from %s: %w", p, err)
 	}
-	return epoch, nil
+	if err := os.Remove(p); err != nil {
+		return 0, false, err
+	}
+	return epoch, true, syncDir(dir)
 }
 
 func syncDir(dir string) error {

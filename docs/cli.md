@@ -728,13 +728,16 @@ missing or empty. The directory gets mode 0700 and each file mode 0600.
 restore checks the archive before it keeps anything: the format version, the
 size and SHA-256 of every file, SQLite's integrity check on the store, and
 that the CA key matches the CA certificate. A store at an older schema version
-is migrated forward; a store from a newer hivemind is refused. On any
-failure, the files it wrote are removed.
+is migrated forward when serve opens it; a store from a newer hivemind is
+refused. On any failure, the files it wrote are removed.
 
-restore raises the cluster's epoch by one in the restored store. The server
-sends its epoch to the workers, and a worker refuses a server whose epoch is
-lower than one it has seen: the server the backup came from, should it come
-back, is not taken for this one.
+restore raises the cluster's epoch to one more than in the backup. The
+server sends its epoch to the workers, and a worker refuses a server whose
+epoch is lower than one it has seen: the server the backup came from, should
+it come back, is not taken for this one. A store from before epochs (schema
+version 16) is left as it is, so the release that wrote it can still serve
+it, and gets its epoch from <data-dir>/restored-epoch when this build's
+serve first opens it.
 
 The backup holds the cluster CA's private key and the admin token. Delete
 copies you no longer need.
