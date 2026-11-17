@@ -43,6 +43,9 @@ type testRouter struct {
 	reads int // calls of routes, under mu
 	mu    sync.Mutex
 	err   error
+	// gate, if set, holds each read of routes until it is closed or the
+	// read's context ends.
+	gate chan struct{}
 }
 
 type syncBuffer struct {
@@ -104,11 +107,28 @@ func newTestRouterPoll(t *testing.T, table Table, poll time.Duration) *testRoute
 	return tr
 }
 
-func (tr *testRouter) routes(context.Context) (Table, error) {
+func (tr *testRouter) routes(ctx context.Context) (Table, error) {
+	tr.mu.Lock()
+	tr.reads++
+	gate := tr.gate
+	tr.mu.Unlock()
+	if gate != nil {
+		select {
+		case <-gate:
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		}
+	}
 	tr.mu.Lock()
 	defer tr.mu.Unlock()
-	tr.reads++
 	return tr.table(), tr.err
+}
+
+// readCount is the number of reads of routes so far.
+func (tr *testRouter) readCount() int {
+	tr.mu.Lock()
+	defer tr.mu.Unlock()
+	return tr.reads
 }
 
 func (tr *testRouter) setRoutes(t Table, err error) {
@@ -672,6 +692,46 @@ func TestChallengeForAHostNotReadYet(t *testing.T) {
 	req, _ = http.NewRequest(http.MethodGet, "http://made-up.example.com/", nil)
 	if resp, _, _ := get(t, c, req); resp.StatusCode != http.StatusNotFound || reads() != before {
 		t.Fatalf("a plain request for an unknown host: %d, %d reads", resp.StatusCode, reads()-before)
+	}
+}
+
+// The table read a challenge causes runs under the router's context: a client
+// that goes away while it runs does not cancel it, so the router has the new
+// host for the next challenge. Before, the read was the request's, and a
+// client that gave up cancelled it and held off the next read for a second.
+func TestChallengeRefreshOutlivesItsClient(t *testing.T) {
+	tr := newTestRouterPoll(t, Table{}, time.Hour)
+	waitFor(t, func() bool { return tr.readCount() >= 2 }) // the start's read and the poll's first one
+	gate := make(chan struct{})
+	tr.mu.Lock()
+	tr.gate = gate
+	tr.mu.Unlock()
+	tr.setRoutes(Table{"www.example.com": {}}, nil)
+	chal := `{"type":"http-01","url":"https://acme.invalid/chal/1","status":"pending","token":"tok_5",` +
+		`"keyAuthorization":"tok_5.thumbprint","identifier":{"type":"dns","value":"www.example.com"}}`
+	if err := tr.st.TLSStore(context.Background(), "acme/acme.invalid-dir/challenge_tokens/www.example.com.json", []byte(chal)); err != nil {
+		t.Fatal(err)
+	}
+
+	// The first client gives up while the read is held.
+	quitter := tr.plain()
+	quitter.Timeout = 200 * time.Millisecond
+	req, _ := http.NewRequest(http.MethodGet, "http://www.example.com/.well-known/acme-challenge/tok_5", nil)
+	if resp, err := quitter.Do(req); err == nil {
+		resp.Body.Close()
+		t.Fatalf("the read was held, yet the challenge was answered: %d", resp.StatusCode)
+	}
+	close(gate)
+	end := time.Now().Add(5 * time.Second)
+	for !tr.rt.proxy.known("www.example.com") {
+		if time.Now().After(end) {
+			t.Fatal("the read ended with the client that caused it: the router does not have the host")
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	req, _ = http.NewRequest(http.MethodGet, "http://www.example.com/.well-known/acme-challenge/tok_5", nil)
+	if resp, _, body := get(t, tr.plain(), req); resp.StatusCode != http.StatusOK || body != "tok_5.thumbprint" {
+		t.Fatalf("the next challenge: %d %q, want 200 and the key authorization", resp.StatusCode, body)
 	}
 }
 

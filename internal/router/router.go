@@ -97,10 +97,12 @@ type Router struct {
 	ctx    context.Context
 	cancel context.CancelFunc
 
-	// refreshMu and lastRefresh limit the table reads that challenges for
-	// unknown hosts cause (see refresh).
+	// refreshMu, lastRefresh and refreshing limit the table reads that
+	// challenges for unknown hosts cause (see refresh). refreshing is closed
+	// when the read in flight ends; it is nil when none runs.
 	refreshMu   sync.Mutex
 	lastRefresh time.Time
+	refreshing  chan struct{}
 
 	mu sync.Mutex
 	// manage starts certificate management for hosts: the certmagic
@@ -325,19 +327,48 @@ const acmeChallengePath = "/.well-known/acme-challenge/"
 
 // refreshEvery limits the table reads that challenges for unknown hosts
 // cause, so that requests for made-up hosts cannot make the router read the
-// table more than once a second.
-const refreshEvery = time.Second
+// table more than once a second. refreshTimeout bounds one such read.
+const (
+	refreshEvery   = time.Second
+	refreshTimeout = 5 * time.Second
+)
 
-// refresh reads the table now, unless a refresh ran less than refreshEvery
-// ago. Callers that arrive while one runs wait for it and then use its table.
+// refresh reads the table now, unless a read started less than refreshEvery
+// ago. The read runs under the router's context, not the caller's, so a
+// client that goes away does not cancel it: if it did, the router would go
+// without the new table until the next read refreshEvery later, and a CA's
+// validation in between would fail. Callers that arrive while a read runs
+// wait for it and then use its table; each stops waiting when its own ctx
+// ends.
 func (rt *Router) refresh(ctx context.Context) {
 	rt.refreshMu.Lock()
-	defer rt.refreshMu.Unlock()
-	if time.Since(rt.lastRefresh) < refreshEvery {
-		return
+	done := rt.refreshing
+	if done == nil {
+		if time.Since(rt.lastRefresh) < refreshEvery {
+			rt.refreshMu.Unlock()
+			return
+		}
+		rt.lastRefresh = time.Now()
+		done = make(chan struct{})
+		rt.refreshing = done
+		go rt.readTable(done)
 	}
-	rt.lastRefresh = time.Now()
-	ctx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	rt.refreshMu.Unlock()
+	select {
+	case <-done:
+	case <-ctx.Done():
+	}
+}
+
+// readTable is refresh's read. It closes done when it ends.
+func (rt *Router) readTable(done chan struct{}) {
+	defer func() {
+		rt.refreshMu.Lock()
+		rt.refreshing = nil
+		rt.refreshMu.Unlock()
+		close(done)
+	}()
+	ctx, cancel := context.WithTimeout(rt.ctx, refreshTimeout)
 	defer cancel()
 	if tab, err := rt.cfg.Routes(ctx); err == nil {
 		rt.SetTable(tab)
