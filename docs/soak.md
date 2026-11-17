@@ -1,6 +1,6 @@
 # Soak test on four machines
 
-One server and three workers, each a separate machine, run three small apps. Then the soak test powers off a worker, reboots one, cuts one off from the server, replaces the server with an empty machine, and leaves the cluster alone for four hours. Every number below comes from the harness's log; nothing is estimated. The harness is in [scripts/soak](../scripts/soak), and [Running it](#running-it) says how to run it. A [second soak](#second-soak-routing-a-private-registry-and-clients-outside-the-cluster), on five machines, measures the same faults and more through the HTTPS routers, from clients outside the cluster.
+One server and three workers, each a separate machine, run three small apps. Then the soak test powers off a worker, reboots one, cuts one off from the server, replaces the server with an empty machine, and leaves the cluster alone for four hours. Every number below comes from the harness's log; nothing is estimated. The harness is in [scripts/soak](../scripts/soak), and [Running it](#running-it) says how to run it. A [second soak](#second-soak-routing-a-private-registry-and-clients-outside-the-cluster), on five machines, measures the same faults and more through the HTTPS routers, from clients outside the cluster. A [third soak](#third-soak-the-server-restored-at-a-new-address) restores the server on new machines at new addresses, for workers that dial its DNS name and for workers moved with `hivemind node set-server`, and checks the routers' counters in `/metrics`.
 
 ## Kill a machine, watch it recover
 
@@ -490,3 +490,285 @@ scripts/soak/client-report.sh "$SOAK_DIR/soak.log" "$SOAK_DIR/client"
 ```
 
 `client-report.sh` prints, for each scenario window, each stream's requests, failures and their codes, longest gap and latency; for the steady window, the success rate and the latency over every stream; and each certificate Pebble issued, with when each router first served it.
+
+# Third soak: the server restored at a new address
+
+The second soak's set-up on five new machines, on 2026-11-17, with one change: the server advertised a DNS name, `hivemind-server.soak.test`, and the workers joined that name. The server's machine was then lost and its backup restored on a new machine at another private address, three times: for workers that dial the name, whose record was changed to the new address; for workers that dial an IP address, which were moved with `hivemind node set-server`; and for the name again, with the record changed 30 s late. Between them the routers' counters in the server's `/metrics` were checked against the clients, a worker was powered off, one was drained, every node was upgraded to the final build, and the cluster ran for an hour with the clients running. Times are UTC.
+
+## Restoring the server at a new address
+
+| | Workers dial the name | Workers dial an IP address | The name, record changed 30 s late |
+|---|---|---|---|
+| API down to API up | 98.1 s | 94.6 s | 94.1 s |
+| of that, the new machine's launch and boot (launch request to its user data done) | 85.1 s | 88.9 s | 88.1 s |
+| New machine ready to API up (binary, hosts file, CAs, `restore`, unit started) | 2.1 s | 3.1 s | 3.1 s |
+| The operator's step once the API was up | the name's line in `/etc/hosts` changed on all six machines, done 1.3 s after the API was up | on each worker in turn `systemctl stop`, `set-server <new address>`, `systemctl start`; the three done 1.8 s after the API was up | the name's line changed 31.0 s after the API was up |
+| Workers `ready` | 0.9, 1.8 and 5.9 s after the record changed | 1.3, 2.0 and 2.0 s after the API was up | 1.2, 1.2 and 2.1 s after the record changed |
+| Converged, every replica running | 30.5 s after the record changed | 5.4 s after the API was up | 20.0 s after the record changed |
+| Workers that joined again | none: the same node IDs, certificates and containers | none | none |
+| Nodes marked lost | none | none | all three, 15.0 s after `serve` started |
+| Replicas on two machines | none | none | up to nine at once, for 35.0 s |
+| Where the replicas ended | where they were | where they were | 13 of 14 on the new server |
+| Requests through the workers' routers while the server was gone | none failed; one request per `www` stream took 7.5 s, then about every 5 s one took 2.0 s | the same | the same |
+| Requests in the seconds after the restore | `503` for 0.7 to 1.7 s on the streams through three of the four routers, 7 to 17 per stream | `503` on two `www` streams, 10 and 11; each worker's router refused requests while its service restarted for `set-server` | through the new server's router, 131 `503`s for `api.soak.test` (no endpoint for 10.1 s at a time) and 32 for `www.soak.test`; none through the workers' routers |
+
+In each case the restored server warned, in its journal, that its address had changed since its last start and what the workers needed: for the name, that they reach it once the name leads to the new address (and, until then, that the name resolved to the old machine); for the IP address, that each worker must be moved with `hivemind node set-server`, with the count of workers. Its certificate named the name and the new address, or the new address alone.
+
+## The machines and the builds
+
+| | |
+|---|---|
+| Machines | 8 EC2 c7g.large in one subnet, the type, OS and Docker of the earlier soaks: 2 vCPU (Graviton3), 3.7 GiB (MemTotal 3897240 kB), Amazon Linux 2023.12.20261112, kernel 6.18.62-127.179.amzn2023.aarch64, Docker 25.0.18 |
+| Roles | hivemind-soakd-1 the first server, 2 to 4 workers, 5 the outside machine. hivemind-soakd-6, 7 and 8 were launched during the run as the new server machines, each at a new private address |
+| hivemind | `CGO_ENABLED=0 go build -trimpath ./cmd/hivemind`, Go 1.27.4, linux/arm64. Commit 9983bd5 (sha256 0359f496...145bc42) for the set-up and every scenario up to the drain. Commit f4d8799, the final build (the router hardening; sha256 27c3d55b...80eef7b), from 09:16:55: the upgrade, the steady state and the late-record restore. The cluster went from one to the other with the harness's upgrade step, the server first |
+| Service | systemd, the units of [systemd.md](systemd.md) with `--advertise hivemind-server.soak.test --cluster-addr <its address>` on the server and the router's flags on every node |
+| Outside machine | Pebble (revision 5caaab3), pebble-challtestsrv, registry:2, curl 8.21.0, as in the second soak |
+| Network | The soak security group allowed, between the soak machines only, TCP 80, 443, 4484 to 4485, 5000, 14000 and 32768 to 60999 (checked from one machine to another before the set-up: open; 8000: closed). Nothing from the internet |
+
+## Set-up
+
+As in the second soak, with the server's name: one line in `/etc/hosts` on every machine, the outside one included, `<server address> hivemind-server.soak.test`, stood in for its DNS record. The server ran `serve --advertise hivemind-server.soak.test --cluster-addr <its address>`, and each worker joined `hivemind-server.soak.test`; its `node.json` held `hivemind-server.soak.test:4484`. Every node ran a router; the apps were the second soak's (`www`, private image, 3 replicas, routed; `api`, 2, routed; `spread`, 6; `kv`, a volume, its value checked by every probe; the compose project `shop`). The set-up took 61 s from the binaries' install to every router serving both hosts; the routers served them 3.3 s after the harness began to wait for that.
+
+The agent created every container with the `json-file` log driver, `max-size` `10m` and `max-file` `5` (`docker inspect`); Docker's default driver on the nodes is `json-file`. `hivemind compose convert` refused a file whose `environment` read `${HIVEMIND_TOKEN:-x}`: `variable HIVEMIND_TOKEN: a compose file cannot use the variables that start with HIVEMIND_ ...`.
+
+## Method
+
+The second soak's harness and clients: eight streams on the outside machine, one per router and host, each a new TCP connection and TLS handshake every 100 ms; the 10 s probe loop; the 1 s watcher during the faults; each scenario's own 1 s loop. New in [scripts/soak](../scripts/soak) for this run:
+
+- `scenario.sh server-move NEW NEWIP name|ip` measures a server restored on a new machine at another address. It waits for the old machine to stop answering and for the new one (whose address it reads from a file once the machine is launched), installs the binary, prepares the machine, restores the backup, starts the unit (`--advertise <name> --cluster-addr <new address>`, or `--advertise <new address>`), and, once the API answers, does the operator's step: the name's line on every machine (`scenario.sh dns`), or `set-server` on each worker. For the clients it adds streams to the new router and points the routed hosts' DNS answers (challtestsrv) at the nodes there are now.
+- For its first 40 s, the restored server's routing table (`GET /v1/routes`) every 200 ms, logged at each change.
+- `scenario.sh set-server-checks` runs `set-server` on a worker beside its running service, then, with the service stopped, to each address it is given, and checks that `node.json` keeps its digest. `outside.sh scratch-start` runs another cluster's server (a `hivemind init` in its own data directory) on the outside machine for it to refuse.
+- `scenario.sh metrics-snap` saves the router series of the server's `/metrics`, and `metrics-report.sh` compares two of them with the clients' own logs. `metrics-watch` logs, every 5 s, which nodes have router series.
+- The probe loop's resource line also has the number of dangling Docker volumes on each node, and the largest json-file log of a hivemind container and the most such files one container has.
+- The upgrade step restarts one node at a time and waits until its routed replicas are ready in `hivemind status`, as [upgrading.md](upgrading.md#routed-apps) says.
+
+## Results
+
+### Lose the server; the workers dial its name
+
+The server, hivemind-soakd-1 at 10.0.0.1, ran `www` 1, `front` and `spread` 0 and 4. It was backed up (a 200192-byte tar), powered off with `sysrq o`, and a new machine, hivemind-soakd-6, was launched; it came up at 10.0.0.6.
+
+| | UTC | Seconds |
+|---|---|---|
+| Power-off request | 08:35:41.0 | |
+| API down (1 s watcher) | 08:35:51.2 | +10.2 |
+| Launch request for the new machine | 08:36:02.2 | |
+| New machine ready | 08:37:27.3 | launch + 85.1 |
+| API up, restored, serving with `--cluster-addr 10.0.0.6` while the name still named 10.0.0.1 | 08:37:29.3 | outage 98.1 |
+| The name's line changed on every machine | 08:37:30.6 | API up + 1.3 |
+| hivemind-soakd-2, 4 and 3 `ready` | 08:37:31.5, 32.5, 36.5 | record + 0.9, 1.8, 5.9 |
+| The server's four replicas running on the new machine | 08:37:34.5 | |
+| hivemind-soakd-2's replicas reported | 08:37:31.5 | |
+| hivemind-soakd-4's and hivemind-soakd-3's replicas reported | 08:37:58.6, 08:38:00.6 | record + 27.9, 29.9 |
+| Converged, every replica running | 08:38:01.1 | record + 30.5 |
+
+Each worker kept its node ID, its certificate and every container, and its `node.json` still named `hivemind-server.soak.test:4484`. The new server's journal had no "node lost" line, and the cluster never had a replica on two machines.
+
+Two workers were `ready` within 2 s of the record's change but reported their containers 26 and 24 s after that, and until then `hivemind status` showed their ten replicas as `unknown`. While a worker cannot reach the server its passes back off, up to one every 30 s ("cannot reach the server; passes back off, up to one every 30s" in its journal); its lease is renewed on its own 5 s timer, which reached the new server at once, but the next pass came only when the backoff ran out. hivemind-soakd-4's last failed pass was at 08:37:28.1 and its next at 08:37:58.1, 30.0 s later; hivemind-soakd-2's backoff happened to end at 08:37:31.5, just after the record changed.
+
+Through the routers: the server's machine stopped at about 08:35:46. On each of the three `www` streams through the workers' routers, one request, at 08:35:53, took 7.5 s: it had gone out on a connection the router kept open to the server's `www` replica; it failed after the 5 s TCP_USER_TIMEOUT and went to another replica. In soak 2 that request failed at the client's 10 s limit. After that, about every 5 s one request on each `www` stream waited the 2.0 s dial timeout for the dead replica before going to another (20 to 22 such requests per stream in the 98 s): a replica whose dial failed is skipped for 3 s, then tried again with the next request. No request through the workers' routers failed while the server was gone. The `api` streams had none of this, as no `api` replica ran on the server. Then, in the seconds after the restore:
+
+| Router | `api` | `www` |
+|---|---|---|
+| hivemind-soakd-2 | 0 failed | 10 `503`s, 08:37:31.5 to 32.5 |
+| hivemind-soakd-3 | 0 | 0 |
+| hivemind-soakd-4 | 7 `503`s, 08:37:31.2 to 31.9 | 7 `503`s, the same second |
+| hivemind-soakd-6 (the new server; its streams started at 08:37:30.4) | 17 `503`s, 08:37:30.6 to 32.3 | 17 `503`s |
+
+A `503` means that the router's table had no endpoint for the host. Each worker's endpoints came back into the new server's routing table only when that worker reached the new server, although the server means to keep, for 15 s after it starts, the endpoints of the workers that were up before the start. The second restore logged the table and shows it directly (below), and the store explains it: `serve` renews its own node's lease (`UpsertNode`) before it records its start time, so the latest lease "before the start", from which the 15 s are counted, is the server's own, and every worker whose last lease is more than 15 s old is left out. On a plain restart of the server the workers' leases are a few seconds old and the table keeps them: after a restart of the server's service at 08:46:29, the first answer of `GET /v1/routes`, 0.1 s later, had every endpoint. The harness's query of the restored store, before and after that lease, is in the report of this run.
+
+### Move the workers from the name to the IP address
+
+To have an IP-joined cluster for the second restore, each worker was moved to the server's address with `set-server`, the reverse of the move [backup.md](backup.md#at-a-new-ip-address) describes: on each worker, `systemctl stop`, `hivemind node set-server 10.0.0.6`, `systemctl start`, one after another. Each `set-server` checked the server and changed `node.json` from `hivemind-server.soak.test:4484` to `10.0.0.6:4484`; the three took 0.4 s together. The server was then restarted with `--advertise 10.0.0.6`, and its certificate named only that address. Through the routers, each worker's router refused one to five requests (0.1 to 0.5 s) while its service restarted, and the server's router one; no `503`: although every worker's agent restarted within 0.4 s, their routed replicas stayed in the table (in soak 2 they left it for 4 s; the agent now keeps a container its last report called healthy).
+
+### set-server refuses
+
+On hivemind-soakd-3, `hivemind node set-server` beside its running service, then, with the service stopped, to four other addresses. Each was refused, and `node.json` kept its SHA-256 every time. The service was stopped for 0.49 s.
+
+| Address given | What `set-server` said |
+|---|---|
+| `10.0.0.6`, the right server, with the worker running | `another hivemind (pid 36440) runs on the data directory /var/lib/hivemind; stop it first ...` |
+| `10.0.0.2`, another worker, where nothing listens on 4484 | `cannot reach a server at 10.0.0.2:4484: connect: connection refused. /var/lib/hivemind/node.json is unchanged` |
+| `10.0.0.5`, another cluster's server (a scratch `init` on the outside machine) | `the server at 10.0.0.5:4484 presents a certificate from the CA with fingerprint 411effb2..., not from this worker's cluster CA, fingerprint d25d4a49...: it is another cluster's server, ... node.json is unchanged` |
+| `10.0.0.6:4485`, the right server's join port | `10.0.0.6:4485 is the default join port, but set-server takes the server's cluster port, 10.0.0.6:4484, or no port` |
+| `hivemind-server.soak.test`, a name that leads to the right server, which now advertised only its address | `the server at hivemind-server.soak.test:4484 has a certificate from this cluster's CA, but it names 10.0.0.6, not hivemind-server.soak.test: ... node.json is unchanged` |
+
+### Lose the server; the workers dial its IP address
+
+The server, now hivemind-soakd-6 at 10.0.0.6 with `www` 1, `front` and `spread` 0 and 4, was backed up, powered off, and a new machine, hivemind-soakd-7, came up at 10.0.0.7.
+
+| | UTC | Seconds |
+|---|---|---|
+| Power-off request | 08:49:42.4 | |
+| API down (1 s watcher) | 08:49:52.4 | +10.0 |
+| New machine ready | 08:51:23.9 | launch + 88.9 |
+| API up, serving `--advertise 10.0.0.7` | 08:51:27.0 | outage 94.6 |
+| Its routing table: no endpoint for either host | 08:51:27.05 | |
+| `set-server 10.0.0.7` and a restart on hivemind-soakd-2, 3 and 4, one after another | 08:51:27.8 to 28.8 | |
+| Table: `api` has hivemind-soakd-2's replica | 08:51:28.19 | |
+| Table: both workers' `api` and `www` replicas | 08:51:28.85 | |
+| Workers `ready` | 08:51:28.3, 29.0, 29.0 | API up + 1.3, 2.0, 2.0 |
+| Converged, every replica running | 08:51:32.4 | API up + 5.4 |
+| Table: the new server's own `www` replica too | 08:51:34.2 | |
+
+Here the workers reported within 2 s, because `set-server` restarts each agent, which passes at once. The table at 08:51:27.05 shows what caused the `503`s in both restores: no endpoint for any host until a worker reported. Through the routers: the same 7.5 s request and the 2.0 s requests while the server was gone, none failed; then 11 `503`s on the `www` stream through hivemind-soakd-2's router and 10 through the new server's, in the second after the start; and each worker's router refused 1 to 7 requests during its own restart for `set-server`.
+
+### The routers' counters in /metrics
+
+The server's `/metrics` had `hivemind_router_requests_total` and `hivemind_router_cert_expiry_timestamp_seconds` for all four nodes. Two reads 300 s apart (08:54:21 and 08:59:21), with no fault between them, against the clients' own logs of the requests that ended between the two reads:
+
+| Router | Host | Counter increase, code 200 | 200s in the clients' logs | Difference |
+|---|---|---|---|---|
+| hivemind-soakd-2 | api.soak.test | 2980 | 2982 | -2 |
+| hivemind-soakd-2 | www.soak.test | 2978 | 2979 | -1 |
+| hivemind-soakd-3 | api.soak.test | 2979 | 2980 | -1 |
+| hivemind-soakd-3 | www.soak.test | 2978 | 2979 | -1 |
+| hivemind-soakd-4 | api.soak.test | 2980 | 2982 | -2 |
+| hivemind-soakd-4 | www.soak.test | 2980 | 2982 | -2 |
+| hivemind-soakd-7 (the server, read directly) | api.soak.test | 2980 | 2981 | -1 |
+| hivemind-soakd-7 | www.soak.test | 2979 | 2979 | 0 |
+
+The workers' counters reach the server up to 15 s late, but at a steady 10 requests a second the lag moves both ends of the window alike, so it does not show here; the counts agree within 2 requests. The `503`s of the restores were counted too (`code="503"`, 10 and 11 on the two routers where the clients saw 10 and 11). A worker's counters start again at zero when its service restarts.
+
+### Power off a worker
+
+hivemind-soakd-4, with `www` 2 and `spread` 1 and 5, powered off with `sysrq o`.
+
+| Measure | Seconds |
+|---|---|
+| Power-off request to port 22 closed | 6.5 |
+| Port 22 closed to `lost` | 13.8 |
+| `lost` to its three replicas running elsewhere, converged | 4.2 |
+| Port 22 closed to its router's series gone from the server's `/metrics` (5 s polls) | 119.3 |
+| Start request to port 22 open | 13.0 |
+| Start request to its old containers removed | 14.7 |
+| Start request to `ready` | 15.1 |
+| `ready` to its router's series back in `/metrics` | 16.3 |
+| Replicas on two machines | none |
+
+Through the other routers no request failed; the one request per `www` stream on a kept connection to the dead machine took 7.5 s, as above.
+
+### Drain a worker; anonymous volumes
+
+`hivemind node drain` of hivemind-soakd-3 moved its five replicas, `cache` among them, in 22.3 s, then `eligibility --enable`; no request failed on any stream. `cache` is redis without a volume in its spec, so Docker gives each of its containers an anonymous volume for the image's `VOLUME /data`. Before the drain hivemind-soakd-3 had that volume; after it, none: the agent removed it with the container. The new `cache` container on hivemind-soakd-4 had its own. No node had a dangling volume in any probe of the run (`docker volume ls -f dangling=true`, every 60 s). The probe loop counted the drain's surge copies, each started before the old copy stopped, as replicas on two machines for two probes; that is how a drain moves a replica, not a fault.
+
+### Upgrade
+
+The upgrade step installed f4d8799 on every node and restarted the server's service, then each worker's once the last one's routed replicas were ready in `hivemind status`. Each was ready at once, so the four restarts took 6.6 s. The API answered 0.1 s after the server's restart. Through the routers: one refused request on each stream through hivemind-soakd-2's and hivemind-soakd-3's routers during their own restart, nothing else; no `503`.
+
+### Certificates, and the one expiry
+
+The first certificates were issued at 08:33:27 and 08:33:28, valid for one hour. They were not renewed in time, and expired at 09:33:26: for about 3 min 35 s, until 09:37:01.5, every request on every stream failed certificate verification (`curl` exit 60, 2116 to 2139 per stream). This was not the cluster's network or a router crash:
+
+- From the first restore on, the routed hosts' DNS answers on the outside machine (pebble-challtestsrv) still listed the dead first server at 10.0.0.1, because the harness's step that updates them failed (a `pkill` in it matched its own shell). The routers tried to renew from 08:42, with 50 minutes left, and again at their checks at 09:01, 09:11 and 09:27; every attempt failed: Pebble's HTTP-01 validation dialled 10.0.0.1 (`no route to host`). The answers were corrected at 09:20:24; Pebble still dialled the old address at 09:27 (not traced), and they were cleared and set again at 09:29:55.
+- certmagic checks every 10 minutes from the router's start. After the upgrade at 09:17 the checks came at 09:27, before the second correction, and at 09:36:55, after the expiry. That one renewed both hosts, and the clients' requests through every router succeeded again 5 to 7 s after the issuance.
+- No router tried to renew when it started at 09:17, although each had a certificate it had been trying to renew: a router that starts loads its hosts' certificates from the shared storage before it serves TLS (new since soak 2), and certmagic then treats them as managed already and does not check them until its first 10-minute check. In soak 2 every router that started renewed such a certificate at once. Here a renewal at the start would have failed too.
+
+With a one-hour lifetime a few failed checks are enough; with Let's Encrypt's 90-day or 6-day certificates there are hundreds of checks in the renewal window. The certificates of 09:36:55 were renewed again at 09:46:55, with 50 minutes left, as the first ones were first tried at 08:42; in soak 2 hosts were renewed every 10 to 20 minutes. The steady state below began after the expiry, at 09:41:59.
+
+### Lose the server; the name's record changes 30 s late
+
+[concepts.md](concepts.md#the-servers-address) suggests a TTL of a minute or so for the server's name, and a restored server gives each worker 15 s from its start to report. After the steady state the cluster was moved back to the name, as [backup.md](backup.md#at-a-new-ip-address) describes (the server restarted with `--advertise hivemind-server.soak.test --cluster-addr <its address>`, then `set-server hivemind-server.soak.test` on each worker, 0.13 s each), and the server was lost once more. This time the harness changed the name's line 30 s after the restored server's API answered, as a record whose old value is still cached would reach the workers late.
+
+| | UTC | Seconds |
+|---|---|---|
+| Power-off request (hivemind-soakd-7) | 10:43:05.1 | |
+| API down (1 s watcher) | 10:43:15.6 | |
+| New machine (hivemind-soakd-8) ready | 10:44:46.6 | launch + 88.1 |
+| `serve` started (its journal) | 10:44:48.9 | |
+| API up | 10:44:49.7 | outage 94.1 |
+| Routing table: no endpoint for either host | 10:44:49.8 | |
+| Table: the workers' `api` and `www` endpoints, from the store | 10:44:53.7 | |
+| Table: `api` has none; `www` only the new server's own | 10:45:03.9 | start + 15.0 |
+| All three workers `lost` ("node lost: its replicas are placed again" in the server's journal) | 10:45:03.9 | start + 15.0 |
+| The workers' nine replicas without a volume running on the new server too: nine (app, replica) pairs on two machines | 10:45:09.2 | |
+| The name's line changed | 10:45:20.7 | API up + 31.0 |
+| Workers `ready` | 10:45:21.9, 21.9, 22.8 | record + 1.2, 1.2, 2.1 |
+| No replica on two machines; converged | 10:45:40.7 | record + 20.0 |
+
+The workers did not join again and their `node.json` was unchanged, but every replica they ran, except `kv`, which has a volume and waited for its node, was placed on the new server, started there while the workers' copies kept running, and stayed there: when the workers reached the server they removed their copies, one `spread` container after another in 10 s stops; there were replicas on two machines for 35.0 s in all. The cluster ended with 13 of its 14 replicas on one machine. Through the workers' routers no request failed: they could not reach the server and served their last table. Through the new server's router, `api.soak.test` answered `503` 131 times, from 10:44:50.7 to 10:45:13.9 (no endpoint for 3 s after the start, then from the 15 s mark until its own new copies passed their health checks), and `www.soak.test` 32 times in its first 3 s.
+
+The table's first 15 s also show how the start grace fails: it was empty until about 10:44:53, when the server's own agent renewed its node's lease; from then until the 15 s mark it held the workers' endpoints from the store, as meant; in the two earlier restores the workers reported within those first 4 s.
+
+## Steady state
+
+On f4d8799, 1 h 0 min 12 s, from 09:41:59.3 to 10:42:11.5, with no fault and no change to the apps: the eight client streams, the probe loop, no watcher. Placement in the window: the server, hivemind-soakd-7, ran `www` 1, `front` and `spread` 1 and 5; hivemind-soakd-2 `kv`, `api` 0, `www` 2 and `spread` 3; hivemind-soakd-3 `spread` 0 and 4 only, so its router reached every replica over the network; hivemind-soakd-4 `api` 1, `cache`, `www` 0 and `spread` 2.
+
+| Through the routers | |
+|---|---|
+| Requests, all eight streams | 286854 |
+| Succeeded | 286854 (100 %) |
+| Longest gap between two successful requests on a stream | 0.12 s |
+| Total time per request (TCP connect, TLS handshake, request and reply), p50 / p90 / p99 / p99.9 / max | 2.5 / 3.0 / 3.7 / 5.8 / 21.5 ms |
+| TLS handshake, p50 / p99 / max | 1.5 / 2.5 / 10.6 ms |
+| TLS done to first byte of the reply, p50 / p99 / max | 0.6 / 1.2 / 19.6 ms |
+| Certificates issued in the window | 13, at each 10-minute check of the server's router; twice a second router renewed a host 8 s after the first |
+| Certificate checks (a fresh handshake with every router for both hosts every 30 s) | 960, none failed |
+
+| Probe | Result |
+|---|---|
+| Status answered, converged, all 14 replicas running, no replica on two machines | 360 of 360 |
+| `kv` value read back, and the same as written | 360 of 360 |
+| `GET /v1/status` on the server, 300 requests | all 200; p50 2.2 ms, p99 8.1 ms, max 8.9 ms |
+| Dangling Docker volumes, every node, every 60 s | 0 (and 0 in every sample of the whole run) |
+| Container log files | at most 3 files for one container, the largest 10000188 bytes (`api`'s nginx logs every request, about 18 MB an hour); `max-size` `10m` is 10000000 bytes, and Docker rotates after the write that passes it |
+| Events: lost nodes, restarts, failed probes | none |
+
+The hivemind process on each node, 60 samples a minute apart:
+
+| Node | RSS first / last / max (MiB) | Threads first / last | Open fds first / last / max | CPU, % of one CPU | Restarts |
+|---|---|---|---|---|---|
+| hivemind-soakd-7 (server) | 27.5 / 27.5 / 27.8 | 9 / 10 | 35 / 38 / 39 | 2.50 | 0 |
+| hivemind-soakd-2 | 22.7 / 23.2 / 23.3 | 8 / 9 | 20 / 20 / 22 | 1.91 | 0 |
+| hivemind-soakd-3 | 22.8 / 23.1 / 23.1 | 8 / 8 | 18 / 19 / 19 | 1.58 | 0 |
+| hivemind-soakd-4 | 23.1 / 22.7 / 23.3 | 9 / 9 | 19 / 20 / 21 | 1.87 | 0 |
+
+An hour is too short to see a slow leak; the RSS of each process stayed within 0.6 MiB. The store was 208 KiB (`hivemind.db`), with a 4027 to 4040 KiB WAL. The routers' counters over the window, against the clients: the server's router counted 22 and 19 more `200`s than its two streams had, which are Pebble's HTTP-01 validations of the 13 renewals (21 and 18 in its log; Pebble validated through the server's router, the first address in the hosts' DNS answers); the workers' counters differed by -121 (hivemind-soakd-2) and +28 (3 and 4) per stream, 12 s and 3 s of a stream's traffic: each read sees a worker's counters as it last posted them, up to 15 s before, and that lag was not the same at the two reads.
+
+## What did not work, and what was not measured
+
+- Three harness bugs cost measurements. The first restore's 1 s scenario loop started 75 s after the power-off (a tmux command line expanded the log path empty), so that restore's API-down time is the watcher's, not the scenario loop's, and its loop then waited on the background loops it had restarted until it was ended by hand; its post-checks ran separately. The step that adds a new router to the clients killed its own shell, so the certificate watcher stopped from 08:37 to 09:19 and the routed hosts' DNS answers were not updated, which led to the expiry above. All three are fixed in the harness.
+- The first steady window, from 09:18:20, was ended at 09:37:25 by the expiry; the steady state above is the second window, after it.
+- The name's record was a line in `/etc/hosts` changed on every machine at once; a real DNS record reaches each resolver after its TTL, at different times. The late-record restore stands in for that with one delay for all workers.
+- Each new server machine was launched after the old one was powered off, so the outages include 85 to 89 s of EC2 launch and boot; an operator with a machine ready saves that.
+- The routers' counters were checked against the clients in a window with a steady rate, where the workers' 15 s posting lag does not show.
+- The steady state was one hour, as the brief asked: too short for leak figures like those of the first soak.
+- The machines' private addresses are shown renumbered: 10.0.0.N is hivemind-soakd-N.
+
+## Running it, at a new address
+
+As [with routing](#running-it-with-routing), with the server's name set:
+
+```sh
+export SOAK_DIR=$PWD/.scratch/run SOAK_ROUTES=1 SERVER_NAME=hivemind-server.soak.test
+scripts/soak/outside.sh setup
+BIN=path/to/hivemind scripts/soak/setup.sh      # the server advertises the name; workers join it
+scripts/soak/outside.sh client-start
+scripts/soak/scenario.sh probe-start
+scripts/soak/scenario.sh watch-start
+
+# lose the server; restore at a new address and change the name's record
+scripts/soak/scenario.sh begin lose-server-name node-1
+scripts/soak/scenario.sh server-backup
+scripts/soak/scenario.sh server-move - - name &      # ...power node-1 off, launch a new machine, then:
+echo "node-6 10.0.0.9" >"$SOAK_DIR/new-server"
+
+# workers that dial an IP address: move them, then serve the address alone
+scripts/soak/scenario.sh set-server-all <server address>
+echo ip >"$SOAK_DIR/advertise"                       # and install the server unit again, and restart it
+scripts/soak/outside.sh scratch-start
+scripts/soak/scenario.sh set-server-checks node-3 <another worker> <outside machine> <server>:4485 "$SERVER_NAME"
+scripts/soak/scenario.sh begin lose-server-ip node-6
+scripts/soak/scenario.sh server-backup
+scripts/soak/scenario.sh server-move - - ip &        # ...as above
+
+# the routers' counters against the clients
+scripts/soak/scenario.sh metrics-snap m1             # ...minutes later:
+scripts/soak/scenario.sh metrics-snap m2
+scripts/soak/outside.sh fetch
+scripts/soak/metrics-report.sh "$SOAK_DIR/metrics-m1.txt" "$SOAK_DIR/metrics-m2.txt" "$SOAK_DIR/client"
+
+SOAK_DURATIONS=scripts/soak/durations-newaddr.txt scripts/soak/report.sh "$SOAK_DIR/soak.log"
+```
+
+`DNS_DELAY=30 scripts/soak/scenario.sh server-move - - name lose-server-late` changes the record 30 s after the restored API answers. Fetch the client logs a minute after the last read for `metrics-report.sh`: curl writes its lines in 4 KiB blocks, and the last seconds are not in the file yet.
