@@ -271,12 +271,15 @@ func (s *Server) scaleApp(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, view(a))
 }
 
+// deleteApp deletes the app. The query may name an origin, as the put's
+// does: an app that exists with another origin, or with none, is refused
+// with 409. See store.DeleteAppWith.
 func (s *Server) deleteApp(w http.ResponseWriter, r *http.Request) {
 	name, ok := pathName(w, r)
 	if !ok {
 		return
 	}
-	if err := s.cfg.Store.DeleteApp(r.Context(), name); err != nil {
+	if err := s.cfg.Store.DeleteAppWith(r.Context(), name, r.URL.Query().Get("origin")); err != nil {
 		s.fail(w, r, err)
 		return
 	}

@@ -26,7 +26,9 @@ The server checks the project again at each write, so an app that another deploy
 
 `--replace` updates such an app, and the project then owns it. `hivemind deploy` can still update an app a project deployed, and the app stays the project's. Apps deployed with `compose deploy` before this check have no project, so the first `deploy` after an upgrade needs `--replace`.
 
-`delete` deletes the app for each service, in name order. It reads only the service names, so the file's variables need not be set, and keys that `convert` would refuse do not matter. An app that does not exist is reported as `not found` and skipped. Volumes are kept, as with `hivemind delete`.
+`delete` deletes the app for each service, in name order. It reads only the service names and the top-level `name`, so the file's variables need not be set unless the name uses one, and keys that `convert` would refuse do not matter. An app that does not exist is reported as `not found` and skipped. Volumes are kept, as with `hivemind delete`.
+
+`delete` checks the project as `deploy` does: before the first delete it reads every app of the file, and if one was deployed by `hivemind deploy`, the API or another project, it refuses the whole file, naming each such app, and deletes nothing (`conflict: app web was deployed with hivemind deploy or the API, not from compose project shop; hivemind compose delete --force deletes it anyway; nothing was deleted`). The server checks again at each delete. `--force` deletes such an app anyway. Apps that `compose deploy` made before the project was recorded have none, so deleting them from a compose file needs `--force`, or `hivemind delete` for each.
 
 All three take `--prefix NAME`, which names each app `NAME-<service>` instead of `<service>`. Every app name must follow the app spec's rules, 1 to 32 lowercase letters, digits and dashes, starting and ending with a letter or digit, or the command fails and names the service. Compose allows service names that hivemind does not, such as `my_db`.
 

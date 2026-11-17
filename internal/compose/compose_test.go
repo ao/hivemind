@@ -219,8 +219,8 @@ func TestConvertSortsServicesAndPrefixes(t *testing.T) {
 	if want := []string{"api=shop-api", "db=shop-db", "web=shop-web"}; !reflect.DeepEqual(got, want) {
 		t.Fatalf("apps %v, want %v", got, want)
 	}
-	names, err := AppNames([]byte(file), "shop")
-	if err != nil || !reflect.DeepEqual(names, []string{"shop-api", "shop-db", "shop-web"}) {
+	names, err := AppNames([]byte(file), Options{Prefix: "shop"})
+	if err != nil || !reflect.DeepEqual(names.Apps, []string{"shop-api", "shop-db", "shop-web"}) {
 		t.Fatalf("AppNames: %v %v", names, err)
 	}
 }
@@ -228,9 +228,9 @@ func TestConvertSortsServicesAndPrefixes(t *testing.T) {
 // AppNames needs no variables and ignores what Convert would refuse.
 func TestAppNamesReadsOnlyNames(t *testing.T) {
 	file := "networks: {}\nservices:\n  web:\n    image: ${UNSET}\n    depends_on: [db]\n  db: {build: .}\n"
-	names, err := AppNames([]byte(file), "")
-	if err != nil || !reflect.DeepEqual(names, []string{"db", "web"}) {
-		t.Fatalf("AppNames: %v %v", names, err)
+	names, err := AppNames([]byte(file), Options{})
+	if err != nil || !reflect.DeepEqual(names.Apps, []string{"db", "web"}) || names.Name != "" {
+		t.Fatalf("AppNames: %+v %v", names, err)
 	}
 	for file, want := range map[string]string{
 		"services: {}\n":                                     "services: define at least one service",
@@ -240,12 +240,37 @@ func TestAppNamesReadsOnlyNames(t *testing.T) {
 		"services:\n  a: {}\n  a: {}\n":                      `line 3: mapping key "a" already defined at line 2`,
 		"services:\n  " + strings.Repeat("a", 33) + ": {}\n": "is not valid",
 	} {
-		if _, err := AppNames([]byte(file), ""); err == nil || !strings.Contains(err.Error(), want) {
+		if _, err := AppNames([]byte(file), Options{}); err == nil || !strings.Contains(err.Error(), want) {
 			t.Errorf("%q: %v, want %q", file, err, want)
 		}
 	}
-	if _, err := AppNames([]byte("services:\n  web: {}\n"), strings.Repeat("p", 30)); err == nil || !strings.Contains(err.Error(), "services.web: the app name") {
+	if _, err := AppNames([]byte("services:\n  web: {}\n"), Options{Prefix: strings.Repeat("p", 30)}); err == nil || !strings.Contains(err.Error(), "services.web: the app name") {
 		t.Errorf("long prefix: %v", err)
+	}
+
+	// The top-level name is read, from the environment or the .env when it
+	// uses a variable; only then are they read, and a bad .env matters.
+	bad := []byte("'unclosed\n")
+	for _, tc := range []struct {
+		file   string
+		opts   Options
+		want   string
+		errsay string
+	}{
+		{"name: shop\nservices: {web: {image: '${UNSET}'}}\n", Options{DotEnv: bad}, "shop", ""},
+		{"name: ${P}\nservices: {web: {}}\n", Options{Lookup: env(map[string]string{"P": "from-env"})}, "from-env", ""},
+		{"name: ${P}\nservices: {web: {}}\n", Options{DotEnv: []byte("P=from-dotenv\n")}, "from-dotenv", ""},
+		{"name: ${P}\nservices: {web: {}}\n", Options{}, "", "name: variable P is not set"},
+		{"name: ${HIVEMIND_PROJECT:-x}\nservices: {web: {}}\n", Options{}, "", "variable HIVEMIND_PROJECT: a compose file cannot use"},
+		{"name: Shop\nservices: {web: {}}\n", Options{}, "", "name: a project name is"},
+	} {
+		names, err := AppNames([]byte(tc.file), tc.opts)
+		switch {
+		case tc.errsay != "" && (err == nil || !strings.Contains(err.Error(), tc.errsay)):
+			t.Errorf("%q: %v, want %q", tc.file, err, tc.errsay)
+		case tc.errsay == "" && (err != nil || names.Name != tc.want):
+			t.Errorf("%q: %+v, %v; want the name %q", tc.file, names, err, tc.want)
+		}
 	}
 }
 

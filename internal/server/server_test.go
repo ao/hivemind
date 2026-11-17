@@ -676,3 +676,36 @@ func TestPutUnchanged(t *testing.T) {
 		t.Fatalf("create reply: %s", rec.Body)
 	}
 }
+
+// A delete with origin= refuses an app another origin deployed, or none,
+// with 409, and leaves it; without origin, or from its own origin, it
+// deletes it.
+func TestDeleteWithOrigin(t *testing.T) {
+	h := newHarness(t)
+	if rec := h.do(t, "PUT", "/v1/apps/web", nginx2); rec.Code != 201 {
+		t.Fatalf("create: %d %s", rec.Code, rec.Body)
+	}
+	rec := h.do(t, "DELETE", "/v1/apps/web?origin=compose:shop", "")
+	if rec.Code != 409 || !strings.Contains(rec.Body.String(), "app web was deployed with hivemind deploy or the API, not from compose project shop") {
+		t.Fatalf("delete from a project that did not deploy it: %d %s", rec.Code, rec.Body)
+	}
+	if rec := h.do(t, "GET", "/v1/apps/web", ""); rec.Code != 200 {
+		t.Fatalf("web after the refused delete: %d", rec.Code)
+	}
+	if rec := h.do(t, "DELETE", "/v1/apps/web?origin=%1B", ""); rec.Code != 400 {
+		t.Fatalf("delete with a control character in the origin: %d %s", rec.Code, rec.Body)
+	}
+	if rec := h.do(t, "PUT", "/v1/apps/web?origin=compose:shop&replace=true", nginx2); rec.Code != 200 {
+		t.Fatalf("take over: %d %s", rec.Code, rec.Body)
+	}
+	if rec := h.do(t, "DELETE", "/v1/apps/web?origin=compose:shop", ""); rec.Code != 202 {
+		t.Fatalf("delete from its own project: %d %s", rec.Code, rec.Body)
+	}
+	if rec := h.do(t, "DELETE", "/v1/apps/web?origin=compose:shop", ""); rec.Code != 404 {
+		t.Fatalf("delete again: %d %s", rec.Code, rec.Body)
+	}
+	h.do(t, "PUT", "/v1/apps/web?origin=compose:shop", nginx2)
+	if rec := h.do(t, "DELETE", "/v1/apps/web", ""); rec.Code != 202 {
+		t.Fatalf("delete without an origin: %d %s", rec.Code, rec.Body)
+	}
+}

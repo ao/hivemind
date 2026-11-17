@@ -118,9 +118,9 @@ func FuzzConvert(f *testing.F) {
 		if len(res.Apps) == 0 {
 			t.Fatal("no apps and no error")
 		}
-		names, err := AppNames(data, "")
-		if err != nil || len(names) != len(res.Apps) {
-			t.Fatalf("Convert gave %d apps, AppNames %v, %v", len(res.Apps), names, err)
+		names, err := AppNames(data, opts)
+		if err != nil || len(names.Apps) != len(res.Apps) || names.Name != res.Name {
+			t.Fatalf("Convert gave %d apps and the name %q, AppNames %+v, %v", len(res.Apps), res.Name, names, err)
 		}
 		for i, a := range res.Apps {
 			s := a.Spec
@@ -131,8 +131,8 @@ func FuzzConvert(f *testing.F) {
 			if s.Template() != a.Spec.Template() || s.Replicas != a.Spec.Replicas {
 				t.Fatalf("app %s was not normalised", a.Service)
 			}
-			if names[i] != a.Spec.Name {
-				t.Fatalf("app %d: AppNames %q, Convert %q", i, names[i], a.Spec.Name)
+			if names.Apps[i] != a.Spec.Name {
+				t.Fatalf("app %d: AppNames %q, Convert %q", i, names.Apps[i], a.Spec.Name)
 			}
 			if i > 0 && res.Apps[i-1].Service >= a.Service {
 				t.Fatalf("apps out of order: %q then %q", res.Apps[i-1].Service, a.Service)

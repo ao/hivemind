@@ -120,7 +120,7 @@ so an app that another deploy took in the meantime is still refused.`,
 			return err
 		}
 		if !*replace {
-			if err := composeOwnerCheck(cmd.Context(), c, res.Apps, origin); err != nil {
+			if err := composeOwnerCheck(cmd.Context(), c, appNamesOf(res.Apps), origin, deployOverride); err != nil {
 				return err
 			}
 		}
@@ -145,33 +145,46 @@ so an app that another deploy took in the meantime is still refused.`,
 	return cmd
 }
 
+// ownerVerb holds the words of composeOwnerCheck's messages for deploy and
+// for delete.
+type ownerVerb struct {
+	doing    string // "deploying"
+	override string // the flag that skips the check, and what it does
+	done     string // "deployed"
+}
+
+var (
+	deployOverride = ownerVerb{"deploying", "hivemind compose deploy --replace (replace=true in the API) updates", "deployed"}
+	deleteOverride = ownerVerb{"deleting", "hivemind compose delete --force deletes", "deleted"}
+)
+
 // composeOwnerCheck reads each app before the first write, and refuses the
-// whole file, so that nothing is deployed, when any of them exists with
-// another origin than origin: another project's, or none, from hivemind
-// deploy or the API. The store checks again at each write, which refuses an
-// app that changed hands after this check.
-func composeOwnerCheck(ctx context.Context, c *apiClient, apps []compose.App, origin string) error {
+// whole file, so that nothing is deployed or deleted, when any of them
+// exists with another origin than origin: another project's, or none, from
+// hivemind deploy or the API. The store checks again at each write, which
+// refuses an app that changed hands after this check.
+func composeOwnerCheck(ctx context.Context, c *apiClient, apps []string, origin string, verb ownerVerb) error {
 	var conflicts []string
 	project := strings.TrimPrefix(store.OriginText(origin), "from ")
-	for _, a := range apps {
+	for _, name := range apps {
 		var v server.AppView
-		err := c.call(ctx, "GET", appPath(a.Spec.Name), nil, &v)
+		err := c.call(ctx, "GET", appPath(name), nil, &v)
 		var ae *apiError
 		switch {
 		case err == nil:
 			if v.Origin != origin {
-				conflicts = append(conflicts, fmt.Sprintf("app %s was deployed %s, not from %s", a.Spec.Name, store.OriginText(v.Origin), project))
+				conflicts = append(conflicts, fmt.Sprintf("app %s was deployed %s, not from %s", name, store.OriginText(v.Origin), project))
 			}
 		case errors.As(err, &ae) && ae.status == http.StatusNotFound:
 		default:
-			return fmt.Errorf("reading app %s before deploying: %w; nothing was deployed", a.Spec.Name, err)
+			return fmt.Errorf("reading app %s before %s: %w; nothing was %s", name, verb.doing, err, verb.done)
 		}
 	}
 	if len(conflicts) == 0 {
 		return nil
 	}
-	return fmt.Errorf("conflict: %s; hivemind compose deploy --replace (replace=true in the API) updates %s anyway; nothing was deployed",
-		strings.Join(conflicts, "; "), plural(len(conflicts), "it", "them"))
+	return fmt.Errorf("conflict: %s; %s %s anyway; nothing was %s",
+		strings.Join(conflicts, "; "), verb.override, plural(len(conflicts), "it", "them"), verb.done)
 }
 
 // composeProject is the compose project of the file at path: the file's
@@ -206,32 +219,63 @@ func composeDeleteCmd() *cobra.Command {
 		Use:   "delete <file>",
 		Short: "Delete the apps in a compose file",
 		Long: `Delete the app for each service in a compose file, in name order, printing a
-line for each. Only the service names are read, so the file's variables need
-not be set, and keys that convert would refuse are ignored. An app that does
-not exist is reported as not found and skipped. Volumes are kept, as
-hivemind delete keeps them.`,
+line for each. Only the service names and the top-level name are read, so
+the file's variables need not be set unless the name uses one, and keys
+that convert would refuse are ignored. An app that does not exist is
+reported as not found and skipped. Volumes are kept, as hivemind delete
+keeps them.
+
+delete deletes only the apps the file's compose project deployed, as
+deploy updates only those: it reads each app before the first delete, and
+if any of them was deployed by hivemind deploy, the API or another project,
+it refuses the whole file, naming every such app, and deletes nothing. The
+server checks the project again at each delete. --force deletes such an app
+anyway.`,
 		Args: cobra.ExactArgs(1),
 	}
 	cf := addClientFlags(cmd)
 	prefix := addPrefixFlag(cmd)
+	force := cmd.Flags().Bool("force", false, "delete an app of the same name that another project, hivemind deploy or the API deployed")
 	cmd.RunE = func(cmd *cobra.Command, args []string) error {
 		data, err := readComposeData(cmd.InOrStdin(), args[0])
 		if err != nil {
 			return err
 		}
-		names, err := compose.AppNames(data, *prefix)
+		dotenv, err := readDotEnv(args[0])
+		if err != nil {
+			return err
+		}
+		names, err := compose.AppNames(data, compose.Options{Prefix: *prefix, Lookup: os.LookupEnv, DotEnv: dotenv})
 		if err != nil {
 			return fmt.Errorf("%s: %w", fileName(args[0]), err)
+		}
+		project, err := composeProject(args[0], names.Name)
+		if err != nil {
+			return err
+		}
+		origin := "compose:" + project
+		var q url.Values
+		if !*force {
+			q = url.Values{"origin": {origin}}
 		}
 		c, err := cf.client()
 		if err != nil {
 			return err
 		}
+		if !*force {
+			if err := composeOwnerCheck(cmd.Context(), c, names.Apps, origin, deleteOverride); err != nil {
+				return err
+			}
+		}
 		results := []composeDeleted{}
 		var done []string
-		for _, name := range names {
+		for _, name := range names.Apps {
 			var res map[string]string
-			err := c.call(cmd.Context(), "DELETE", appPath(name), nil, &res)
+			path := appPath(name)
+			if len(q) > 0 {
+				path += "?" + q.Encode()
+			}
+			err := c.call(cmd.Context(), "DELETE", path, nil, &res)
 			var ae *apiError
 			switch {
 			case err == nil:
@@ -340,4 +384,12 @@ func fileName(path string) string {
 		return "standard input"
 	}
 	return path
+}
+
+func appNamesOf(apps []compose.App) []string {
+	out := make([]string, 0, len(apps))
+	for _, a := range apps {
+		out = append(out, a.Spec.Name)
+	}
+	return out
 }

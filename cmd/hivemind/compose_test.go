@@ -283,9 +283,10 @@ func TestComposeDeployAndDelete(t *testing.T) {
 		t.Fatalf("wrong token: %v", err)
 	}
 
-	// delete reads only the names, so unset variables and refused keys do
-	// not matter.
-	names := writeCompose(t, "services:\n  web: {image: '${UNSET}', depends_on: [db]}\n  db: {build: .}\n", "")
+	// delete reads only the names and the project, so unset variables and
+	// refused keys do not matter. The file is in another directory, so it
+	// names the project of the one deployed.
+	names := writeCompose(t, "name: '"+compose.ProjectName(filepath.Dir(path))+"'\nservices:\n  web: {image: '${UNSET}', depends_on: [db]}\n  db: {build: .}\n", "")
 	out, _, err = run(t, "", "compose", "delete", names)
 	if want := "db: deleting; its containers stop on the next reconcile pass\nweb: deleting; its containers stop on the next reconcile pass\n"; err != nil || out != want {
 		t.Fatalf("delete: %v\n%s", err, out)
@@ -468,6 +469,82 @@ func TestComposeDeployRefusesAnAppTakenAfterTheCheck(t *testing.T) {
 		t.Fatalf("compose deploy racing hivemind deploy: %q, %v\nwant the error %q", out, err, want)
 	}
 	if web, err := st.GetApp(context.Background(), "web"); err != nil || web.Spec.Image != "httpd:2" || web.Origin != "" {
+		t.Fatalf("web after the race: %+v, %v", web, err)
+	}
+}
+
+// compose delete deletes only the apps its project deployed, as deploy
+// updates only those. It refuses the whole file when any app belongs to
+// something else, naming each one, and deletes nothing; --force deletes
+// them. The server checks again at each delete.
+func TestComposeDeleteRefusesAnAppItDidNotDeploy(t *testing.T) {
+	st := composeAPI(t)
+	ctx := context.Background()
+	if out, _, err := run(t, "", "deploy", "--name", "web", "--image", "httpd:2"); err != nil || !strings.HasPrefix(out, "web: created") {
+		t.Fatalf("deploy web: %q, %v", out, err)
+	}
+	shop := writeComposeIn(t, "shop", "services:\n  api: {image: nginx:alpine}\n")
+	if _, _, err := run(t, "", "compose", "deploy", shop); err != nil {
+		t.Fatal(err)
+	}
+	// A file of the same project that also names web.
+	both := writeComposeIn(t, "x", "name: shop\nservices:\n  api: {image: nginx:alpine}\n  web: {image: nginx:alpine}\n")
+	out, _, err := run(t, "", "compose", "delete", both)
+	want := "conflict: app web was deployed with hivemind deploy or the API, not from compose project shop; " +
+		"hivemind compose delete --force deletes it anyway; nothing was deleted"
+	if err == nil || err.Error() != want || out != "" {
+		t.Fatalf("compose delete over an app it did not deploy: %q, %v\nwant the error %q", out, err, want)
+	}
+	for _, name := range []string{"api", "web"} {
+		if _, err := st.GetApp(ctx, name); err != nil {
+			t.Fatalf("%s after the refused delete: %v", name, err)
+		}
+	}
+	// Another project's file deletes nothing of shop's.
+	blog := writeComposeIn(t, "blog", "services:\n  api: {image: caddy:2}\n")
+	if _, _, err := run(t, "", "compose", "delete", blog); err == nil ||
+		!strings.Contains(err.Error(), "app api was deployed from compose project shop, not from compose project blog; hivemind compose delete --force deletes it anyway") {
+		t.Fatalf("compose delete of another project: %v", err)
+	}
+
+	out, _, err = run(t, "", "compose", "delete", both, "--force")
+	if err != nil || out != "api: deleting; its containers stop on the next reconcile pass\nweb: deleting; its containers stop on the next reconcile pass\n" {
+		t.Fatalf("compose delete --force: %q, %v", out, err)
+	}
+	for _, name := range []string{"api", "web"} {
+		if _, err := st.GetApp(ctx, name); !errors.Is(err, store.ErrNotFound) {
+			t.Fatalf("%s after --force: %v", name, err)
+		}
+	}
+}
+
+// An app that another project takes between the check and the delete is
+// still refused, by the server, and the error names the apps deleted before
+// it.
+func TestComposeDeleteRefusesAnAppTakenAfterTheCheck(t *testing.T) {
+	var took atomic.Bool
+	st := composeAPIWith(t, func(st *store.Store, h http.Handler) http.Handler {
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if r.Method == http.MethodDelete && r.URL.Path == "/v1/apps/web" && took.CompareAndSwap(false, true) {
+				if _, err := st.PutAppWith(r.Context(), spec.App{Name: "web", Image: "caddy:2", Replicas: 1},
+					store.PutOptions{Origin: "compose:blog", Replace: true}); err != nil {
+					t.Error(err)
+				}
+			}
+			h.ServeHTTP(w, r)
+		})
+	})
+	shop := writeComposeIn(t, "shop", "services:\n  web: {image: nginx:alpine}\n  api: {image: nginx:alpine}\n")
+	if _, _, err := run(t, "", "compose", "deploy", shop); err != nil {
+		t.Fatal(err)
+	}
+	out, _, err := run(t, "", "compose", "delete", shop)
+	want := "deleting app web: conflict: app web was deployed from compose project blog, not from compose project shop; " +
+		"hivemind compose delete --force deletes it anyway; already deleted: api"
+	if err == nil || err.Error() != want || out != "api: deleting; its containers stop on the next reconcile pass\n" {
+		t.Fatalf("compose delete racing another project: %q, %v\nwant the error %q", out, err, want)
+	}
+	if web, err := st.GetApp(context.Background(), "web"); err != nil || web.Origin != "compose:blog" {
 		t.Fatalf("web after the race: %+v, %v", web, err)
 	}
 }

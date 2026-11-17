@@ -407,8 +407,8 @@ func (s *Store) PutApp(ctx context.Context, a spec.App) (App, error) {
 // Without one, the app keeps the origin it has, and a new app has none. An
 // app that was deleted counts as new.
 func (s *Store) PutAppWith(ctx context.Context, a spec.App, o PutOptions) (App, error) {
-	if len(o.Origin) > MaxOriginLen || strings.ContainsFunc(o.Origin, func(r rune) bool { return r < 0x20 || r == 0x7f }) {
-		return App{}, fmt.Errorf("%w: an origin is at most %d printable characters", ErrInvalid, MaxOriginLen)
+	if err := checkOrigin(o.Origin); err != nil {
+		return App{}, err
 	}
 	c, err := cleanSpec(a)
 	if err != nil {
@@ -493,6 +493,15 @@ func (s *Store) PutAppWith(ctx context.Context, a spec.App, o PutOptions) (App, 
 		return nil
 	})
 	return out, err
+}
+
+// checkOrigin refuses an origin that is too long or has control
+// characters.
+func checkOrigin(o string) error {
+	if len(o) > MaxOriginLen || strings.ContainsFunc(o, func(r rune) bool { return r < 0x20 || r == 0x7f }) {
+		return fmt.Errorf("%w: an origin is at most %d printable characters", ErrInvalid, MaxOriginLen)
+	}
+	return nil
 }
 
 // OriginText says where an app with origin o came from, for messages: "from
@@ -729,7 +738,30 @@ func (s *Store) listApps(ctx context.Context, where string, args ...any) ([]App,
 // DeleteApp marks the app deleted and its replicas for removal. The app's
 // rows are deleted once its nodes report that no container is left.
 func (s *Store) DeleteApp(ctx context.Context, name string) error {
+	return s.DeleteAppWith(ctx, name, "")
+}
+
+// DeleteAppWith is DeleteApp with an origin. With origin set, an app that
+// exists with another origin, or with none, is refused with ErrConflict,
+// and nothing is changed, as PutAppWith refuses it without Replace.
+func (s *Store) DeleteAppWith(ctx context.Context, name, origin string) error {
+	if err := checkOrigin(origin); err != nil {
+		return err
+	}
 	return s.tx(ctx, func(tx *sql.Tx) error {
+		if origin != "" {
+			var have string
+			err := tx.QueryRowContext(ctx, `SELECT origin FROM apps WHERE name = ? AND deleted = 0`, name).Scan(&have)
+			switch {
+			case errors.Is(err, sql.ErrNoRows):
+				return fmt.Errorf("app %q: %w", name, ErrNotFound)
+			case err != nil:
+				return err
+			case have != origin:
+				return fmt.Errorf("%w: app %s was deployed %s, not from %s; hivemind compose delete --force deletes it anyway",
+					ErrConflict, name, OriginText(have), strings.TrimPrefix(OriginText(origin), "from "))
+			}
+		}
 		res, err := tx.ExecContext(ctx, `UPDATE apps SET deleted = 1, updated_at = ? WHERE name = ? AND deleted = 0`, s.now().UnixNano(), name)
 		if err != nil {
 			return err

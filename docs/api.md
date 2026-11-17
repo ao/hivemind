@@ -190,7 +190,7 @@ Workers talk to the server over a second API, on the cluster port that `serve --
 | `POST /v1/apps` | app spec | 201 when created, 200 when updated, with `PutResult` | Create or update the app named in the body |
 | `GET /v1/apps/{name}` | none | 200, `AppView` | Read one app |
 | `PUT /v1/apps/{name}` | app spec | 201 or 200, with `PutResult` | Create or update the app at `{name}`. A `name` in the body must match. The query may name an origin, as `origin=compose:shop` (at most 128 printable characters): an app that exists with another origin, or with none, is refused with `409` unless the query also has `replace=true`, and the app then takes the origin. Without `origin`, the app keeps the one it has |
-| `DELETE /v1/apps/{name}` | none | 202 `{"name":"...","status":"deleting"}` | Delete the app |
+| `DELETE /v1/apps/{name}` | none | 202 `{"name":"...","status":"deleting"}` | Delete the app. The query may name an origin, as the put's does: an app that exists with another origin, or with none, is refused with `409` and kept. `hivemind compose delete` sends `origin=compose:<project>`, and leaves it out with `--force` |
 | `POST /v1/apps/{name}/scale` | `{"replicas": N}` | 200, `AppView` | Set the replica count, 1 to 100 |
 | `GET /v1/apps/{name}/status` | none | 200, `AppStatus` | Replicas of one app |
 | `GET /v1/apps/{name}/logs` | none | 200, `text/plain` | Log of one replica's container |

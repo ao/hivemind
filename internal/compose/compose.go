@@ -142,31 +142,11 @@ func Convert(data []byte, opts Options) (*Result, error) {
 	if err != nil {
 		return nil, err
 	}
-	// interpolate refuses hivemind's own variables before it looks them
-	// up; the lookup does not return them either.
-	if look := opts.Lookup; look != nil {
-		opts.Lookup = func(k string) (string, bool) {
-			if isOwnVariable(k) {
-				return "", false
-			}
-			return look(k)
-		}
+	ip, err := variables(opts)
+	if err != nil {
+		return nil, err
 	}
-	// One budget for the .env and the file (MaxInterpolatedBytes).
-	ip := newInterpolator(opts.Lookup)
-	env := map[string]string{}
-	if opts.DotEnv != nil {
-		if env, err = parseDotEnv(opts.DotEnv, ip); err != nil {
-			return nil, err
-		}
-	}
-	c := &converter{prefix: opts.Prefix, ip: ip.with(func(k string) (string, bool) {
-		if v, ok := ip.lookup(k); ok {
-			return v, true
-		}
-		v, ok := env[k]
-		return v, ok
-	}), volumeUser: map[string]string{}}
+	c := &converter{prefix: opts.Prefix, ip: ip, volumeUser: map[string]string{}}
 	apps := c.file(root)
 	name := c.projectName(root)
 	if len(c.problems) > 0 {
@@ -176,30 +156,77 @@ func Convert(data []byte, opts Options) (*Result, error) {
 	return &Result{Apps: apps, Notes: c.notes, Name: name}, nil
 }
 
+// variables returns the interpolator for a file: the caller's environment
+// first, without hivemind's own variables, which interpolate refuses before
+// it asks, then the .env. The .env and the file share one budget
+// (MaxInterpolatedBytes).
+func variables(opts Options) (interpolator, error) {
+	look := func(string) (string, bool) { return "", false }
+	if opts.Lookup != nil {
+		look = func(k string) (string, bool) {
+			if isOwnVariable(k) {
+				return "", false
+			}
+			return opts.Lookup(k)
+		}
+	}
+	ip := newInterpolator(look)
+	env := map[string]string{}
+	if opts.DotEnv != nil {
+		var err error
+		if env, err = parseDotEnv(opts.DotEnv, ip); err != nil {
+			return interpolator{}, err
+		}
+	}
+	return ip.with(func(k string) (string, bool) {
+		if v, ok := look(k); ok {
+			return v, true
+		}
+		v, ok := env[k]
+		return v, ok
+	}), nil
+}
+
+// Names is what compose delete reads from a file.
+type Names struct {
+	// Apps are the app names, sorted by service name.
+	Apps []string
+	// Name is the file's top-level name, the Compose project name, or ""
+	// when the file has none.
+	Name string
+}
+
 // AppNames returns the app name for each service in the file, sorted by
-// service name. It reads only the service names, so it needs none of the
-// file's variables, and it ignores the keys Convert would refuse. delete
-// uses it.
-func AppNames(data []byte, prefix string) ([]string, error) {
+// service name, and the file's top-level name. It reads only the service
+// names and the top-level name, and ignores the keys Convert would refuse.
+// It needs the file's variables, and reads the .env, only when the
+// top-level name uses one. delete uses it.
+func AppNames(data []byte, opts Options) (*Names, error) {
 	root, err := parse(data)
 	if err != nil {
 		return nil, err
 	}
-	c := &converter{prefix: prefix}
+	c := &converter{prefix: opts.Prefix, ip: newInterpolator(nil)}
 	services := c.services(root)
 	if len(c.problems) > 0 {
 		return nil, newError(c.problems)
 	}
-	var names []string
+	out := &Names{}
 	for _, s := range services {
 		if name, ok := c.appName(s.name); ok {
-			names = append(names, name)
+			out.Apps = append(out.Apps, name)
 		}
 	}
+	if n := root.vals["name"]; n != nil && n.kind == scalarKind && strings.Contains(n.text, "$") {
+		if c.ip, err = variables(opts); err != nil {
+			return nil, err
+		}
+	}
+	out.Name = c.projectName(root)
 	if len(c.problems) > 0 {
 		return nil, newError(c.problems)
 	}
-	return names, nil
+	return out, nil
 }
 
 // Marshal writes apps as YAML, one document per app, in the form that

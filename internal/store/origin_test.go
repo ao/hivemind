@@ -55,3 +55,43 @@ func TestPutAppWithOrigin(t *testing.T) {
 	}
 	checkInvariants(t, s)
 }
+
+// A delete with an origin refuses an app that exists with another origin or
+// with none, and changes nothing; without one it deletes any app. A missing
+// app is ErrNotFound either way.
+func TestDeleteAppWithOrigin(t *testing.T) {
+	s := newT(t)
+	ctx := ctxT(t)
+	mustPut(t, s, web(1))
+	err := s.DeleteAppWith(ctx, "web", "compose:shop")
+	if !errors.Is(err, ErrConflict) || !strings.Contains(err.Error(),
+		"app web was deployed with hivemind deploy or the API, not from compose project shop; hivemind compose delete --force deletes it anyway") {
+		t.Fatalf("delete with an origin of an app without one: %v", err)
+	}
+	if a, err := s.GetApp(ctx, "web"); err != nil || a.Generation != 1 {
+		t.Fatalf("web after the refused delete: %+v, %v", a, err)
+	}
+	if _, err := s.PutAppWith(ctx, web(1), PutOptions{Origin: "compose:shop", Replace: true}); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.DeleteAppWith(ctx, "web", "compose:blog"); !errors.Is(err, ErrConflict) ||
+		!strings.Contains(err.Error(), "deployed from compose project shop, not from compose project blog") {
+		t.Fatalf("delete from another project: %v", err)
+	}
+	if err := s.DeleteAppWith(ctx, "web", "compose:shop"); err != nil {
+		t.Fatalf("delete from its own project: %v", err)
+	}
+	if _, err := s.GetApp(ctx, "web"); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("web after its project deleted it: %v", err)
+	}
+	if err := s.DeleteAppWith(ctx, "web", "compose:shop"); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("delete of a deleted app: %v", err)
+	}
+	mustPut(t, s, web(1))
+	if err := s.DeleteAppWith(ctx, "web", ""); err != nil {
+		t.Fatalf("delete without an origin: %v", err)
+	}
+	if err := s.DeleteAppWith(ctx, "web", "compose:\x1b[2J"); !errors.Is(err, ErrInvalid) {
+		t.Fatalf("delete with a control character in the origin: %v", err)
+	}
+}

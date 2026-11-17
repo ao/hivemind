@@ -124,10 +124,18 @@ hivemind compose convert <file> [flags]
 #### hivemind compose delete
 
 Delete the app for each service in a compose file, in name order, printing a
-line for each. Only the service names are read, so the file's variables need
-not be set, and keys that convert would refuse are ignored. An app that does
-not exist is reported as not found and skipped. Volumes are kept, as
-hivemind delete keeps them.
+line for each. Only the service names and the top-level name are read, so
+the file's variables need not be set unless the name uses one, and keys
+that convert would refuse are ignored. An app that does not exist is
+reported as not found and skipped. Volumes are kept, as hivemind delete
+keeps them.
+
+delete deletes only the apps the file's compose project deployed, as
+deploy updates only those: it reads each app before the first delete, and
+if any of them was deployed by hivemind deploy, the API or another project,
+it refuses the whole file, naming every such app, and deletes nothing. The
+server checks the project again at each delete. --force deletes such an app
+anyway.
 
 ```
 hivemind compose delete <file> [flags]
@@ -137,6 +145,7 @@ hivemind compose delete <file> [flags]
 |---|---|---|---|---|
 | `--ca-cert` | string | - | - | PEM file of the CA certificates to trust for an https server, instead of the system's (env HIVEMIND_CA_CERT; default from the client config) |
 | `--client-config` | string | - | `HIVEMIND_CLIENT_CONFIG` | client config file (env HIVEMIND_CLIENT_CONFIG; default $XDG_CONFIG_HOME/hivemind/config.yaml or ~/.config/hivemind/config.yaml) |
+| `--force` | bool | - | - | delete an app of the same name that another project, hivemind deploy or the API deployed |
 | `--json` | bool | - | - | print JSON instead of a table |
 | `--prefix` | string | - | - | name each app PREFIX-<service> instead of <service> |
 | `--server` | string | - | `HIVEMIND_SERVER` | server URL (env HIVEMIND_SERVER; default from the client config, then http://127.0.0.1:4483) |
