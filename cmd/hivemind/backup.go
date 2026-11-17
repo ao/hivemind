@@ -174,8 +174,13 @@ missing or empty. The directory gets mode 0700 and each file mode 0600.
 restore checks the archive before it keeps anything: the format version, the
 size and SHA-256 of every file, SQLite's integrity check on the store, and
 that the CA key matches the CA certificate. A store at an older schema version
-is migrated forward when serve opens it; a store from a newer hivemind is
-refused. On any failure, the files it wrote are removed.
+is migrated forward; a store from a newer hivemind is refused. On any
+failure, the files it wrote are removed.
+
+restore raises the cluster's epoch by one in the restored store. The server
+sends its epoch to the workers, and a worker refuses a server whose epoch is
+lower than one it has seen: the server the backup came from, should it come
+back, is not taken for this one.
 
 The backup holds the cluster CA's private key and the admin token. Delete
 copies you no longer need.
@@ -209,6 +214,8 @@ each worker. See docs/backup.md.`,
 			out := cmd.OutOrStdout()
 			fmt.Fprintf(out, "Restored the backup of node %s, made %s, into %s (schema version %d).\n",
 				m.NodeID, m.Created.Format("2006-01-02 15:04:05 MST"), cfg.DataDir, m.SchemaVersion)
+			fmt.Fprintf(out, "The cluster is at epoch %d now, one more than in the backup: workers that reach this server refuse a server at a lower epoch, such as the one the backup came from.\n",
+				m.Epoch)
 			hasToken := slices.ContainsFunc(m.Files, func(f backup.File) bool { return f.Name == auth.TokenFileName })
 			if hasToken {
 				ccPath, err := clientConfigPath(clientConfigFlag)

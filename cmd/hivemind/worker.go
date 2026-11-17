@@ -194,6 +194,11 @@ func enroll(ctx context.Context, log *slog.Logger, dir, host string, port int, t
 	} else if !errors.Is(err, fs.ErrNotExist) {
 		return err
 	}
+	// An epoch file without node.json is a node's that is gone, possibly
+	// of another cluster; this node starts from epoch 0.
+	if err := os.Remove(filepath.Join(dir, workerEpochFile)); err != nil && !errors.Is(err, fs.ErrNotExist) {
+		return err
+	}
 	key, err := pki.NewNodeKey()
 	if err != nil {
 		return err
@@ -476,13 +481,16 @@ func certNodeID(dir string) string {
 
 // runWorker runs the agent for the joined node in dir until ctx ends. It
 // registers the node first, and again whenever the server says it has no
-// record of the node.
+// record of the node. Its client refuses a server from before a restore
+// (workerEpochGuard): the worker then sends it nothing, keeps its
+// containers, and asks again now and then.
 func runWorker(ctx context.Context, cfg *config.Config, log *slog.Logger, rt runtime.Runtime) error {
 	w, err := loadWorkerState(cfg.DataDir)
 	if err != nil {
 		return err
 	}
-	client, err := nodeapi.NewClient("https://"+w.state.Server, w.tlsCfg, nodeapi.WithVersion(version))
+	client, err := nodeapi.NewClient("https://"+w.state.Server, w.tlsCfg, nodeapi.WithVersion(version),
+		nodeapi.WithEpochGuard(workerEpochGuard(cfg.DataDir, log)))
 	if err != nil {
 		return err
 	}
@@ -537,7 +545,10 @@ func runWorker(ctx context.Context, cfg *config.Config, log *slog.Logger, rt run
 		if ctx.Err() != nil {
 			return nil
 		}
-		log.Warn("registering with the server; retrying", "server", w.state.Server, "err", err)
+		// A server from before a restore is logged once, by the client.
+		if stale := (*nodeapi.StaleServerError)(nil); !errors.As(err, &stale) {
+			log.Warn("registering with the server; retrying", "server", w.state.Server, "err", err)
+		}
 		select {
 		case <-ctx.Done():
 			return nil

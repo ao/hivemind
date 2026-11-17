@@ -48,6 +48,11 @@ func seedSchema(t *testing.T, db *sql.DB, k int) {
 		// version 15 moves it to app_routes.
 		exec(`INSERT INTO app_hosts (host, app, port) VALUES ('www.example.com', 'web', 80)`)
 	}
+	if k >= 15 {
+		// From version 15 on, the route is a whole host route in
+		// app_routes.
+		exec(`INSERT INTO app_routes (host, path, app, port) VALUES ('www.example.com', '', 'web', 80)`)
+	}
 }
 
 // TestOpenMigratesStoresFromEarlierSchemas builds a store at schema version
@@ -119,13 +124,14 @@ func TestOpenMigratesStoresFromEarlierSchemas(t *testing.T) {
 			}
 
 			// Migration 3 adds the cluster record; a store from version 1 or 2
-			// has none, and init has not run.
+			// has none, and init has not run. Migration 16 puts a record
+			// from before it at epoch 0.
 			cl, err := s.GetCluster(ctx)
 			if k < 3 {
 				if !errors.Is(err, ErrNotFound) {
 					t.Fatalf("GetCluster before the cluster table had rows: %v, %v", cl, err)
 				}
-			} else if err != nil || cl.NodeID != "node-1" {
+			} else if err != nil || cl.NodeID != "node-1" || cl.Epoch != 0 {
 				t.Fatalf("GetCluster: %+v, %v", cl, err)
 			}
 

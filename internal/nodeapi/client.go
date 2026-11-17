@@ -80,6 +80,13 @@ func WithVersion(v string) ClientOption {
 	return func(c *Client) { c.tr.version = CleanVersion(v) }
 }
 
+// WithEpochGuard makes the client send g's highest epoch on every request,
+// and refuse a reply from a server at a lower epoch (EpochGuard). A worker
+// passes one; without it, the client takes any server of its CA.
+func WithEpochGuard(g *EpochGuard) ClientOption {
+	return func(c *Client) { c.tr.epoch = g }
+}
+
 // NewClient returns a client for the server at base, such as
 // https://10.0.0.5:4484. tlsCfg presents the node's certificate and trusts the
 // cluster CA (see pki.ClientTLSConfig).
@@ -100,26 +107,52 @@ func NewClient(base string, tlsCfg *tls.Config, opts ...ClientOption) (*Client, 
 // swapTransport sends each request on the transport it holds.
 // ResetConnections replaces that transport, so no request made after a reset
 // reuses a connection opened before it. Each request carries the worker's
-// version, and each reply's server version and clock are recorded.
+// version, and each reply's server version and clock are recorded. With an
+// EpochGuard, each request carries the highest epoch seen, and a reply from
+// a server at a lower epoch is refused before anything else reads it.
 type swapTransport struct {
 	cur     atomic.Pointer[http.Transport]
 	version string
 	server  *serverState
 	clock   *clock
+	epoch   *EpochGuard
 	// answered, if set, is called after each reply (OnAnswer).
 	answered atomic.Pointer[func()]
 }
 
 func (s *swapTransport) RoundTrip(r *http.Request) (*http.Response, error) {
-	if s.version != "" {
+	if s.epoch != nil {
+		if err := s.epoch.hold(); err != nil {
+			// A RoundTripper closes the request's body, also on an error.
+			if r.Body != nil {
+				_ = r.Body.Close()
+			}
+			return nil, err
+		}
+	}
+	if s.version != "" || s.epoch != nil {
 		// A RoundTripper must not change the request it is given.
 		r = r.Clone(r.Context())
-		r.Header.Set(VersionHeader, s.version)
+		if s.version != "" {
+			r.Header.Set(VersionHeader, s.version)
+		}
+		if s.epoch != nil {
+			r.Header.Set(EpochHeader, FormatEpoch(s.epoch.Highest()))
+		}
 	}
 	sent := time.Now()
 	resp, err := s.cur.Load().RoundTrip(r)
 	if err != nil {
 		return nil, clockHint(err)
+	}
+	if s.epoch != nil {
+		// Nothing of a stale server's reply is taken: not its version,
+		// its clock, nor that it answered.
+		if err := s.epoch.check(r.URL.Host, resp.Header.Get(EpochHeader)); err != nil {
+			_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, 4<<10))
+			resp.Body.Close()
+			return nil, err
+		}
 	}
 	s.server.see(resp.Header.Get(VersionHeader))
 	s.clock.observe(sent, time.Now(), resp)

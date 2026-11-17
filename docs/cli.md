@@ -556,20 +556,23 @@ new address, host or host:port, where the port is its cluster port (4484 by
 default), as for hivemind join. For a server that advertises a DNS name,
 update the name's record instead: the workers follow it by themselves.
 
-set-server changes the server address in node.json, and nothing else, and
-only after it has checked from this machine that <address> is the server of
-this worker's own cluster:
+set-server changes the server address in node.json, and only after it has
+checked from this machine that <address> is the server of this worker's own
+cluster:
 
   - the server presents a certificate signed by the cluster CA in this data
     directory, that names <address> and a node;
   - the server accepts this node's certificate, and answers a request of the
-    node API for this node, as it does not for a removed node.
+    node API for this node, as it does not for a removed node;
+  - the server is not from before a restore: its cluster epoch is not lower
+    than the highest this worker has seen (cluster-epoch in the data
+    directory). A higher one is written there.
 
 Another cluster's server, a server whose certificate does not name
-<address>, an address where nothing answers, and anything between this
-machine and the server that holds another CA are refused with what was
-found, and node.json is left as it was. The node keeps its ID, key and
-certificate, and its containers.
+<address>, a server from before a restore, an address where nothing
+answers, and anything between this machine and the server that holds
+another CA are refused with what was found, and node.json is left as it
+was. The node keeps its ID, key and certificate, and its containers.
 
 The worker reads node.json when it starts, so stop it first: set-server
 refuses to run beside it. Its containers keep running meanwhile. Then start
@@ -724,8 +727,13 @@ missing or empty. The directory gets mode 0700 and each file mode 0600.
 restore checks the archive before it keeps anything: the format version, the
 size and SHA-256 of every file, SQLite's integrity check on the store, and
 that the CA key matches the CA certificate. A store at an older schema version
-is migrated forward when serve opens it; a store from a newer hivemind is
-refused. On any failure, the files it wrote are removed.
+is migrated forward; a store from a newer hivemind is refused. On any
+failure, the files it wrote are removed.
+
+restore raises the cluster's epoch by one in the restored store. The server
+sends its epoch to the workers, and a worker refuses a server whose epoch is
+lower than one it has seen: the server the backup came from, should it come
+back, is not taken for this one.
 
 The backup holds the cluster CA's private key and the admin token. Delete
 copies you no longer need.

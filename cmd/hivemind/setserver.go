@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"io"
 	"io/fs"
+	"log/slog"
 	"net"
 	"os"
 	"path/filepath"
@@ -40,20 +41,23 @@ new address, host or host:port, where the port is its cluster port (4484 by
 default), as for hivemind join. For a server that advertises a DNS name,
 update the name's record instead: the workers follow it by themselves.
 
-set-server changes the server address in node.json, and nothing else, and
-only after it has checked from this machine that <address> is the server of
-this worker's own cluster:
+set-server changes the server address in node.json, and only after it has
+checked from this machine that <address> is the server of this worker's own
+cluster:
 
   - the server presents a certificate signed by the cluster CA in this data
     directory, that names <address> and a node;
   - the server accepts this node's certificate, and answers a request of the
-    node API for this node, as it does not for a removed node.
+    node API for this node, as it does not for a removed node;
+  - the server is not from before a restore: its cluster epoch is not lower
+    than the highest this worker has seen (cluster-epoch in the data
+    directory). A higher one is written there.
 
 Another cluster's server, a server whose certificate does not name
-<address>, an address where nothing answers, and anything between this
-machine and the server that holds another CA are refused with what was
-found, and node.json is left as it was. The node keeps its ID, key and
-certificate, and its containers.
+<address>, a server from before a restore, an address where nothing
+answers, and anything between this machine and the server that holds
+another CA are refused with what was found, and node.json is left as it
+was. The node keeps its ID, key and certificate, and its containers.
 
 The worker reads node.json when it starts, so stop it first: set-server
 refuses to run beside it. Its containers keep running meanwhile. Then start
@@ -100,9 +104,22 @@ func runSetServer(ctx context.Context, out io.Writer, dir, arg string) error {
 	if err != nil {
 		return err
 	}
+	seen, err := readWorkerEpoch(dir)
+	if err != nil {
+		return fmt.Errorf("%w; remove the file if it is damaged: the worker learns the epoch again from its server. %s is unchanged", err, statePath)
+	}
 	server := net.JoinHostPort(host, strconv.Itoa(port))
-	if err := checkNewServer(ctx, w, host, server); err != nil {
+	guard := nodeapi.NewEpochGuard(seen)
+	guard.Log = slog.New(slog.DiscardHandler) // the refusal is set-server's error
+	if err := checkNewServer(ctx, w, host, server, guard); err != nil {
 		return fmt.Errorf("%w. %s is unchanged", err, statePath)
+	}
+	// A server at a higher epoch than this worker has seen is a restored
+	// one; the worker refuses lower ones from now on.
+	if e := guard.Highest(); e > seen {
+		if err := saveWorkerEpoch(dir, e); err != nil {
+			return fmt.Errorf("writing %s: %w. %s is unchanged", filepath.Join(dir, workerEpochFile), err, statePath)
+		}
 	}
 	old := w.state.Server
 	if server == old {
@@ -123,14 +140,16 @@ func runSetServer(ctx context.Context, out io.Writer, dir, arg string) error {
 
 // checkNewServer checks, before set-server trusts it, that the server at
 // server, dialled as host, is the server of w's cluster: its certificate
-// chains to w's CA and names host, and it answers a node API request with
-// w's certificate. The error says which part failed, and what that means.
-func checkNewServer(ctx context.Context, w *joinedWorker, host, server string) error {
+// chains to w's CA and names host, it answers a node API request with w's
+// certificate, and it is not from before a restore (guard holds the epoch
+// the worker has seen). The error says which part failed, and what that
+// means.
+func checkNewServer(ctx context.Context, w *joinedWorker, host, server string, guard *nodeapi.EpochGuard) error {
 	tlsCfg, err := pki.ClientTLSConfigFrom(w.ca, w.holder, host)
 	if err != nil {
 		return err
 	}
-	c, err := nodeapi.NewClient("https://"+server, tlsCfg, nodeapi.WithVersion(version))
+	c, err := nodeapi.NewClient("https://"+server, tlsCfg, nodeapi.WithVersion(version), nodeapi.WithEpochGuard(guard))
 	if err != nil {
 		return err
 	}
@@ -154,7 +173,10 @@ func serverCheckError(err error, w *joinedWorker, host, server string) error {
 	var invalid x509.CertificateInvalidError
 	var dnsErr *net.DNSError
 	var opErr *net.OpError
+	var stale *nodeapi.StaleServerError
 	switch {
+	case errors.As(err, &stale):
+		return staleServerError(stale, server)
 	case errors.As(err, &unknownCA):
 		return otherCAError(err, w, host, server)
 	case errors.As(err, &badName) && (badName.Certificate == nil || !signedBy(badName.Certificate, w.ca)):

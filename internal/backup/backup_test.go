@@ -130,7 +130,7 @@ func TestRoundTrip(t *testing.T) {
 	}
 	defer r.Close()
 	cl, err := r.GetCluster(ctx)
-	if err != nil || cl.NodeID != serverNode || cl.AdminTokenHash != [32]byte(auth.HashToken(s.token)) {
+	if err != nil || cl.NodeID != serverNode || cl.AdminTokenHash != [32]byte(auth.HashToken(s.token)) || cl.Epoch != 1 {
 		t.Fatalf("cluster record %+v, %v", cl, err)
 	}
 	reps, err := r.Replicas(ctx, "web")
@@ -429,14 +429,15 @@ func TestRestoreRefusesNewerSchema(t *testing.T) {
 	expectNothingLeft(t, dir)
 }
 
-// A store at an older schema restores, and is migrated forward on open.
+// A store at an older schema restores, migrated forward, at epoch 1.
 func TestRestoreMigratesOlderSchema(t *testing.T) {
 	s := newServer(t)
 	var b bytes.Buffer
-	// Undo migrations 15 to 7. Migration 11 changed only drains, which
+	// Undo migrations 16 to 7. Migration 11 changed only drains, which
 	// migration 8 made, and migration 15 replaced app_hosts, which
 	// migration 9 made, with app_routes.
-	snap := editSnapshot(s.st, `ALTER TABLE rollouts DROP COLUMN step_seen`, `ALTER TABLE nodes DROP COLUMN version`, `ALTER TABLE apps DROP COLUMN origin`,
+	snap := editSnapshot(s.st, `ALTER TABLE cluster DROP COLUMN epoch`,
+		`ALTER TABLE rollouts DROP COLUMN step_seen`, `ALTER TABLE nodes DROP COLUMN version`, `ALTER TABLE apps DROP COLUMN origin`,
 		`DROP TABLE registries`, `DROP TABLE tls_locks`, `DROP TABLE tls_storage`, `DROP TABLE app_routes`,
 		`ALTER TABLE container_status DROP COLUMN route_ports`, `ALTER TABLE nodes DROP COLUMN address`,
 		`DROP TABLE drain_blocked`, `DROP TABLE drain_moves`, `DROP TABLE drains`,
@@ -446,7 +447,7 @@ func TestRestoreMigratesOlderSchema(t *testing.T) {
 	}
 	dir := filepath.Join(t.TempDir(), "r")
 	m, err := Restore(context.Background(), &b, dir)
-	if err != nil || m.SchemaVersion != 6 {
+	if err != nil || m.SchemaVersion != 6 || m.Epoch != 1 {
 		t.Fatalf("restore of a version 6 store: %+v, %v", m, err)
 	}
 	r, err := store.Open(context.Background(), filepath.Join(dir, StoreName))
@@ -602,5 +603,55 @@ func TestRestoreRefusesMismatchedCA(t *testing.T) {
 	var b bytes.Buffer
 	if _, err := Write(context.Background(), &b, Options{DataDir: s.dir, Snapshot: s.st.SnapshotTo}); err == nil {
 		t.Fatal("Write backed up a CA whose key and certificate differ")
+	}
+}
+
+// Restore puts the restored store one epoch above the backup's: 1 for a
+// backup of a store that was never restored, and 2 for a backup of that
+// restored store. Restoring the same backup twice gives the same epoch.
+func TestRestoreRaisesTheEpoch(t *testing.T) {
+	ctx := context.Background()
+	s := newServer(t)
+	epochIn := func(dir string) int64 {
+		t.Helper()
+		r, err := store.Open(ctx, filepath.Join(dir, StoreName))
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer r.Close()
+		cl, err := r.GetCluster(ctx)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return cl.Epoch
+	}
+	first := filepath.Join(t.TempDir(), "first")
+	res, err := Restore(ctx, bytes.NewReader(s.backup(t)), first)
+	if err != nil || res.Epoch != 1 || epochIn(first) != 1 || res.NodeID != serverNode {
+		t.Fatalf("restore of a backup at epoch 0: %+v, %v", res, err)
+	}
+	if got := epochIn(s.dir); got != 0 {
+		t.Fatalf("the server the backup came from is at epoch %d, want 0", got)
+	}
+
+	r, err := store.Open(ctx, filepath.Join(first, StoreName))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var b bytes.Buffer
+	_, err = Write(ctx, &b, Options{DataDir: first, Snapshot: r.SnapshotTo})
+	r.Close()
+	if err != nil {
+		t.Fatal(err)
+	}
+	second := filepath.Join(t.TempDir(), "second")
+	if res, err := Restore(ctx, bytes.NewReader(b.Bytes()), second); err != nil || res.Epoch != 2 || epochIn(second) != 2 {
+		t.Fatalf("restore of a backup at epoch 1: %+v, %v", res, err)
+	}
+	// The epoch comes from the backup alone: restoring the first backup
+	// again gives epoch 1 again.
+	again := filepath.Join(t.TempDir(), "again")
+	if res, err := Restore(ctx, bytes.NewReader(s.backup(t)), again); err != nil || res.Epoch != 1 {
+		t.Fatalf("a second restore of a backup at epoch 0: %+v, %v", res, err)
 	}
 }

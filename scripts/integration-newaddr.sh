@@ -15,11 +15,12 @@
 #   - the server's container has the network alias hm-server, and serve runs
 #     with --advertise hm-server. Its cluster listeners bind the address the
 #     name resolves to, and nothing else. The workers join hm-server.
-#   - the server is backed up, and its container, data directory and Docker
-#     volume are destroyed. A new container at another IP, without the
-#     alias, restores the backup and serves with --advertise hm-server
-#     --cluster-addr <its IP>, as before a DNS record is updated: its
-#     listeners bind that IP, and it warns that the name does not resolve.
+#   - the server is backed up, and its container is killed; the container,
+#     its data directory and its Docker volume are kept for later. A new
+#     container at another IP, without the alias, restores the backup (at
+#     epoch 1) and serves with --advertise hm-server --cluster-addr <its
+#     IP>, as before a DNS record is updated: its listeners bind that IP,
+#     and it warns that the name does not resolve.
 #   - every node runs a router, against Pebble (a test ACME CA) and its DNS,
 #     pebble-challtestsrv, on the same network, as in
 #     integration-routing.sh; a curl container plays the client. A third
@@ -39,6 +40,15 @@
 #     workers are back, all get 200. Requests through the new server's
 #     router, from before it starts until the alias moves, get no 503: its
 #     routing table has the waiting workers' replicas from the start.
+#   - both workers have seen epoch 1. Then the restored server stops, the
+#     old container starts again at its old IP with the alias, as a
+#     recovered machine and a stale record would, and serve runs there on
+#     the old store. Both workers refuse it and log that once, the old
+#     server logs that a newer copy of the cluster exists, and for 20 s
+#     nothing moves: the workers' containers are the same, and the old
+#     server has no report from them. The old server stops, the restored
+#     one starts again under the alias, and the workers, never restarted,
+#     report to it. A worker's router serves every request throughout.
 #
 # By IP address:
 #   - serve runs with --advertise <its IP>, and the workers join that IP.
@@ -54,10 +64,14 @@
 #     with their node IDs and certificates, no node was lost, the apps are
 #     back at their counts, no replica runs twice, and the workers'
 #     containers are the ones that ran before.
+#   - the old container starts again at its old IP, and serve runs there
+#     on the old store. set-server to it, on a stopped worker that has seen
+#     epoch 1, is refused as from before a restore, and node.json is
+#     unchanged; the worker starts again on the restored server.
 #
 # It publishes no ports. On exit it removes the containers, the networks and
-# the volumes it created, also after a failure or Ctrl-C. The Go build cache
-# volume (hivemind-cache) is kept.
+# the volumes it created, the old server's included, also after a failure or
+# Ctrl-C. The Go build cache volume (hivemind-cache) is kept.
 #
 # Needs Docker on the host, and the docker:dind, golang, Pebble,
 # pebble-challtestsrv, curl and traefik/whoami images. Run it from anywhere
@@ -86,13 +100,20 @@ route_flags() {
 	echo "--route-addr $1 --route-http-port $HTTP_PORT --route-https-port $HTTPS_PORT --acme-email ops@newaddr.test --acme-ca $ACME_CA"
 }
 
-# na_cleanup removes the ACME containers, then what cl_cleanup removes.
+# na_cleanup removes the ACME containers and the old server's container and
+# volume, then what cl_cleanup removes. After a failure it prints the end of
+# the old server's log first.
 na_cleanup() {
 	local rc=$? c
 	set +e
+	if [ "$rc" -ne 0 ] && [ -n "${OLD_S:-}" ]; then
+		echo "cluster: --- last lines of $OLD_S:/var/log/hivemind.log (the old server)" >&2
+		docker exec "$OLD_S" sh -c 'tail -n 40 /var/log/hivemind.log' >&2 2>/dev/null
+	fi
 	for c in ${EXTRA[@]+"${EXTRA[@]}"}; do
 		docker rm -fv "$c" >/dev/null 2>&1
 	done
+	[ -z "${OLD_S:-}" ] || docker volume rm "$OLD_S-docker" >/dev/null 2>&1
 	(exit "$rc")
 	cl_cleanup
 }
@@ -299,19 +320,25 @@ start_cluster() {
 	cl_note "spread and web run on three nodes"
 }
 
-# lose_server: back the server up, then destroy its container, data
-# directory and Docker volume, and start an empty node at NEW_IP with the
-# docker-run options given.
+# lose_server: back the server up, then kill its container, as a machine
+# that loses power, and start an empty node at NEW_IP, in a container of
+# its own, with the docker-run options given. The old container is kept,
+# stopped, with its data directory and Docker volume, as OLD_S at OLD_IP:
+# old_server_returns starts it again.
 lose_server() {
 	docker exec "$S" hivemind backup /root/hm.tar >/dev/null || cl_fail "hivemind backup"
 	docker cp "$S:/root/hm.tar" "$CL_WORK/hm.tar"
-	docker rm -fv "$S" >/dev/null
-	docker volume rm "$S-docker" >/dev/null
+	docker kill "$S" >/dev/null
 	LOST_AT=$(date +%s)
+	OLD_S=$S
+	EXTRA=(${EXTRA[@]+"${EXTRA[@]}"} "$OLD_S")
+	trap na_cleanup EXIT
 	OLD_IP=$CL_S_IP
 	NEW_IP=${OLD_IP%.*}.200
 	[ "$NEW_IP" != "$OLD_IP" ] || NEW_IP=${OLD_IP%.*}.201
-	cl_note "backed up and destroyed $S at $OLD_IP"
+	cl_note "backed up $S at $OLD_IP, and killed its container"
+	S=$CL_RUN-n0r
+	CL_NAMES[0]=$S
 	cl_run_node "$S" --ip "$NEW_IP" "$@"
 	cl_ready_node "$S"
 	[ "$(cl_ip_of "$S")" = "$NEW_IP" ] || cl_fail "the new server node has address $(cl_ip_of "$S"), not $NEW_IP"
@@ -319,6 +346,66 @@ lose_server() {
 	[ -z "${ROUTED:-}" ] || docker cp "$CL_WORK/minica.pem" "$S:$MINICA"
 	CL_S_IP=$NEW_IP
 }
+
+# old_server_returns SERVE-ARGS...: the old server's machine comes back, as
+# a recovered machine does: its container starts again at OLD_IP, with the
+# network options in OLD_NET_ARGS (such as the alias), its data directory
+# and its Docker volume, and serve runs there with SERVE-ARGS and its old
+# store.
+old_server_returns() {
+	docker start "$OLD_S" >/dev/null
+	# docker start may give it another address, and its old alias; it gets
+	# OLD_IP and only what OLD_NET_ARGS gives.
+	docker network disconnect "$CL_NET" "$OLD_S"
+	# shellcheck disable=SC2086
+	docker network connect --ip "$OLD_IP" ${OLD_NET_ARGS:-} "$CL_NET" "$OLD_S"
+	[ "$(cl_ip_of "$OLD_S")" = "$OLD_IP" ] || cl_fail "the old server has address $(cl_ip_of "$OLD_S"), not $OLD_IP"
+	wait_for 90 docker exec "$OLD_S" docker info || cl_fail "the Docker daemon in $OLD_S did not start again"
+	docker exec -d "$OLD_S" sh -c "exec hivemind serve $* >>/var/log/hivemind.log 2>&1"
+	old_listens() { cl_listeners "$OLD_S" | grep -qx "$(cl_hexip "$OLD_IP"):1184"; }
+	wait_for 30 old_listens || cl_fail "the old server did not listen on $OLD_IP:4484"
+	OLD_AT=$(date +%s)
+	cl_note "the old server is back at $OLD_IP, with its old store: serve $*"
+}
+
+# refusals NODE: how many times the worker on NODE has logged that the
+# server it dials, at SERVER_ADDR, is from before a restore.
+refusals() { docker exec "$1" grep -c "level=ERROR msg=\"the server at $SERVER_ADDR is from before a restore of this cluster" /var/log/hivemind.log || true; }
+refused_old() { [ "$(refusals "$1")" -ge 1 ]; }
+
+# workers_refuse_old: both workers refuse the old server, and log it once;
+# the old server says a newer copy of the cluster exists; for 20 s nothing
+# moves: the workers' processes and containers are the ones that ran, and
+# the old server has had no report from them, so they are waiting there.
+workers_refuse_old() {
+	local c i
+	for c in "$W1" "$W2"; do
+		wait_for 60 refused_old "$c" || cl_fail "$c did not refuse the old server: $(docker exec "$c" tail -n 5 /var/log/hivemind.log)"
+	done
+	docker exec "$OLD_S" grep -q 'a newer copy of this cluster exists: this server was replaced by a restore' /var/log/hivemind.log ||
+		cl_fail "the old server did not say that a newer copy of the cluster exists: $(docker exec "$OLD_S" tail -n 5 /var/log/hivemind.log)"
+	cl_note "both workers refuse the old server: $(docker exec "$W1" grep -o 'server_epoch=[0-9]* seen_epoch=[0-9]*' /var/log/hivemind.log | head -n 1)"
+	sleep 20
+	for i in 1 2; do
+		c=${CL_NAMES[$i]}
+		[ "$(refusals "$c")" = 1 ] || cl_fail "$c logged the refusal $(refusals "$c") times, not once"
+		[ "$(worker_containers "$c")" = "${CONTAINERS[$i]}" ] ||
+			cl_fail "the containers on $c changed beside the old server: ${CONTAINERS[$i]}before, $(worker_containers "$c")now"
+	done
+	[ "$(docker exec "$OLD_S" hivemind nodes | awk -v a="$W1_ID" -v b="$W2_ID" '($1 == a || $1 == b) && / waiting /' | wc -l)" -eq 2 ] ||
+		cl_fail "the old server had reports from the workers: $(docker exec "$OLD_S" hivemind nodes | tr '\n' ';')"
+	cl_note "$(($(date +%s) - OLD_AT)) s with the old server up: each worker logged the refusal once, kept its containers, and sent it no report"
+}
+
+# old_server_goes: the old server stops, and its container with it.
+old_server_goes() {
+	docker exec "$OLD_S" pkill -TERM -x hivemind || true
+	wait_for 30 worker_stopped "$OLD_S" || cl_fail "the old server did not stop"
+	docker stop "$OLD_S" >/dev/null
+}
+
+# epoch_is NODE N: the worker on NODE has seen epoch N.
+epoch_is() { [ "$(docker exec "$1" cat /var/lib/hivemind/cluster-epoch 2>/dev/null)" = "$2" ]; }
 
 # restore_and_serve: restore the backup on the new node and start serve. The
 # outage lasts at least 40 s, as a real restore does: longer than the
@@ -330,6 +417,7 @@ restore_and_serve() {
 	left=$((LOST_AT + 40 - $(date +%s)))
 	[ "$left" -le 0 ] || sleep "$left"
 	out=$(docker exec "$S" hivemind restore /root/hm.tar --data-dir /var/lib/hivemind 2>&1) || cl_fail "hivemind restore: $out"
+	grep -q 'The cluster is at epoch 1 now' <<<"$out" || cl_fail "restore did not put the cluster at epoch 1: $out"
 	[ -z "${BEFORE_SERVE:-}" ] || "$BEFORE_SERVE"
 	cl_serve_server
 	wait_for 30 docker exec "$S" hivemind status || cl_fail "the restored server's API did not answer"
@@ -431,8 +519,44 @@ by_name() {
 	[ "$(docker exec "$W1" pgrep -x hivemind) $(docker exec "$W2" pgrep -x hivemind)" = "$pids" ] || cl_fail "a worker process was restarted"
 	for i in 1 2; do
 		[ "$(file_sum "${CL_NAMES[$i]}" /var/lib/hivemind/node.json)" = "${SUM_STATE[$i]}" ] || cl_fail "node.json on ${CL_NAMES[$i]} changed"
+		epoch_is "${CL_NAMES[$i]}" 1 || cl_fail "${CL_NAMES[$i]} has not seen the restored server's epoch 1: $(docker exec "${CL_NAMES[$i]}" cat /var/lib/hivemind/cluster-epoch 2>&1)"
 	done
-	cl_note "by name: the workers were never restarted, and node.json is unchanged on both"
+	cl_note "by name: the workers were never restarted, node.json is unchanged on both, and both have seen epoch 1"
+
+	# The old server's machine comes back while the restored server is
+	# down, and the name leads to the old one again, as a stale record or
+	# hosts file would. The workers refuse it and keep their containers,
+	# and the first worker's router serves every request.
+	loop_start /tmp/w1b "$W1_IP"
+	docker exec "$S" pkill -TERM -x hivemind || true
+	wait_for 30 worker_stopped "$S" || cl_fail "the restored server did not stop"
+	docker network disconnect "$CL_NET" "$S"
+	docker network connect --ip "$NEW_IP" "$CL_NET" "$S"
+	OLD_NET_ARGS="--alias $ALIAS"
+	SERVER_ADDR=$ALIAS:4484
+	old_server_returns --advertise "$ALIAS" --cluster-addr "$OLD_IP" --min-ready 5s
+	workers_refuse_old
+
+	# The old server goes, and the restored one comes back under the name:
+	# the workers, never restarted, report to it again.
+	old_server_goes
+	docker network disconnect "$CL_NET" "$S"
+	docker network connect --ip "$NEW_IP" --alias "$ALIAS" "$CL_NET" "$S"
+	cl_serve_server
+	wait_for 30 docker exec "$S" hivemind status || cl_fail "the restored server's API did not answer after its restart"
+	SERVED_AT=$(date +%s)
+	talks_again() { docker exec "$1" grep -q "the server at $SERVER_ADDR answers at this cluster.s epoch now; this worker talks to it again" /var/log/hivemind.log; }
+	for c in "$W1" "$W2"; do
+		wait_for 90 talks_again "$c" || cl_fail "$c did not take the restored server again: $(docker exec "$c" tail -n 5 /var/log/hivemind.log)"
+	done
+	check_back
+	codes=$(loop_stop /tmp/w1b)
+	total=$(wc -l <<<"$codes")
+	bad=$(grep -cvx 200 <<<"$codes" || true)
+	[ "$total" -ge 100 ] && [ "$bad" -eq 0 ] ||
+		cl_fail "requests through $W1's router while the old server ran: $(codes_summary <<<"$codes")"
+	[ "$(docker exec "$W1" pgrep -x hivemind) $(docker exec "$W2" pgrep -x hivemind)" = "$pids" ] || cl_fail "a worker process was restarted"
+	cl_note "by name, the old server back: $W1's router served $total requests, $bad not 200; the workers took the restored server again, never restarted"
 }
 
 # set_server NODE ADDRESS: run node set-server on NODE, and print its output.
@@ -497,6 +621,31 @@ by_ip() {
 	move_worker 2
 	cl_note "both workers moved, $(($(date +%s) - SERVED_AT)) s after serve started"
 	check_back
+	for i in 1 2; do
+		epoch_is "${CL_NAMES[$i]}" 1 || cl_fail "${CL_NAMES[$i]} has not seen the restored server's epoch 1: $(docker exec "${CL_NAMES[$i]}" cat /var/lib/hivemind/cluster-epoch 2>&1)"
+		SUM_STATE[$i]=$(file_sum "${CL_NAMES[$i]}" /var/lib/hivemind/node.json)
+	done
+
+	# The old server's machine comes back at the old address. The workers
+	# dial the new one; set-server back to the old one is refused, as it is
+	# from before the restore.
+	OLD_NET_ARGS=
+	old_server_returns --advertise "$OLD_IP" --min-ready 5s
+	docker exec "$W1" pkill -TERM -x hivemind || true
+	wait_for 30 worker_stopped "$W1" || cl_fail "the worker on $W1 did not stop"
+	refused 1 "$OLD_IP" "the server at $OLD_IP:4484 is from before a restore of this cluster: it is at epoch 0, and this worker has seen epoch 1"
+	docker exec "$OLD_S" grep -q 'a newer copy of this cluster exists: this server was replaced by a restore' /var/log/hivemind.log ||
+		cl_fail "the old server did not say that a newer copy of the cluster exists: $(docker exec "$OLD_S" tail -n 5 /var/log/hivemind.log)"
+	docker exec -d "$W1" sh -c "exec hivemind serve --role worker >>/var/log/hivemind.log 2>&1"
+	wait_for 60 docker exec "$W1" pgrep -x hivemind || cl_fail "the worker on $W1 did not start again"
+	wait_for 60 workers_ready || cl_fail "the workers are not ready after the refused set-server: $(docker exec "$S" hivemind nodes | tr '\n' ';')"
+	for i in 1 2; do
+		c=${CL_NAMES[$i]}
+		[ "$(worker_containers "$c")" = "${CONTAINERS[$i]}" ] ||
+			cl_fail "the containers on $c changed beside the old server: ${CONTAINERS[$i]}before, $(worker_containers "$c")now"
+	done
+	old_server_goes
+	cl_note "by IP, the old server back: set-server to it refused, the workers on the restored server with their containers"
 }
 
 (by_name)

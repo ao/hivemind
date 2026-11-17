@@ -36,6 +36,12 @@ type testCluster struct {
 // one when nil), advertising advertise.
 func newTestCluster(t *testing.T, ca *pki.CA, advertise string) *testCluster {
 	t.Helper()
+	return newTestClusterAt(t, ca, advertise, 0)
+}
+
+// newTestClusterAt is newTestCluster for a server whose store is at epoch.
+func newTestClusterAt(t *testing.T, ca *pki.CA, advertise string, epoch int64) *testCluster {
+	t.Helper()
 	dir := t.TempDir()
 	if ca == nil {
 		var err error
@@ -48,7 +54,8 @@ func newTestCluster(t *testing.T, ca *pki.CA, advertise string) *testCluster {
 		t.Fatal(err)
 	}
 	cl, err := cluster.Listen(cluster.Config{Store: st, CA: ca, Tokens: pki.NewTokens(st.JoinTokens()),
-		Advertise: advertise, Bind: "127.0.0.1", Port: 0, LocalNodeID: "node-server", Logger: slog.New(slog.NewTextHandler(io.Discard, nil))})
+		Advertise: advertise, Bind: "127.0.0.1", Port: 0, LocalNodeID: "node-server", Logger: slog.New(slog.NewTextHandler(io.Discard, nil)),
+		Epoch: epoch})
 	if err != nil {
 		st.Close()
 		t.Fatal(err)

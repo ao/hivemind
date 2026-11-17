@@ -104,6 +104,11 @@ type Config struct {
 	// Version is the server's hivemind version, sent in
 	// nodeapi.VersionHeader on every node API reply. Empty sends none.
 	Version string
+	// Epoch is the epoch of the server's store (store.Cluster.Epoch), sent
+	// in nodeapi.EpochHeader on every node API reply. A request from a
+	// node that has seen a higher epoch is refused, and logged once: this
+	// server is from before a restore.
+	Epoch int64
 }
 
 func (cfg Config) now() func() time.Time {

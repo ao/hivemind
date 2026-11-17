@@ -7,6 +7,7 @@ import (
 	"log/slog"
 	"net/http"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/ao/hivemind/internal/logrelay"
@@ -40,7 +41,8 @@ type nodeAPI struct {
 
 // nodeRoutes returns the handler of the mTLS listener. It has no join route.
 // Every request passes the denylist check first, then the check that the
-// client certificate is valid now. Every reply carries the server's version.
+// client certificate is valid now. Every reply carries the server's version
+// and epoch, and a node that has seen a higher epoch is refused first.
 func nodeRoutes(cfg Config, log *slog.Logger) http.Handler {
 	a := &nodeAPI{st: cfg.Store, log: log, logs: cfg.Logs, routers: cfg.RouterReports, readers: cfg.RouteReaders,
 		ca: cfg.CA, lifetime: cfg.NodeCertLifetime, now: cfg.now(), certs: &certNotes{}, versions: map[string]string{}}
@@ -56,7 +58,7 @@ func nodeRoutes(cfg Config, log *slog.Logger) http.Handler {
 	mux.HandleFunc("GET "+nodeapi.Prefix+"/nodes/{id}/routes", a.routes)
 	mux.HandleFunc("POST "+nodeapi.Prefix+"/nodes/{id}/router-metrics", a.routerMetrics)
 	mux.HandleFunc("POST "+nodeapi.Prefix+"/nodes/{id}/tls/{op}", a.tls)
-	return withVersion(nodeapi.CleanVersion(cfg.Version), a.denyRemoved(a.requireCurrentCert(mux)))
+	return withVersion(nodeapi.CleanVersion(cfg.Version), withEpoch(cfg.Epoch, log, a.denyRemoved(a.requireCurrentCert(mux))))
 }
 
 // withVersion sets the server's version on every reply. A worker learns from
@@ -69,6 +71,40 @@ func withVersion(v string, next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set(nodeapi.VersionHeader, v)
 		next.ServeHTTP(w, r)
+	})
+}
+
+// staleMessage is the error a server from before a restore answers a node
+// with, when the node has seen a higher epoch.
+const staleMessage = "this server is from before a restore of the cluster: this node has seen a higher epoch, from the restored server"
+
+// withEpoch sets the server's epoch on every reply, and refuses, with 409
+// and before anything reads the store, every request from a node that says
+// it has seen a higher epoch. Such a node has been in touch with a server
+// restored from a backup of this one, or of a later copy: this server is
+// from before that restore, and a newer copy of the cluster runs elsewhere.
+// That is logged once, at error, with what to do. A node older than epochs
+// sends none, and is served as before.
+func withEpoch(epoch int64, log *slog.Logger, next http.Handler) http.Handler {
+	v := nodeapi.FormatEpoch(epoch)
+	var logged atomic.Bool
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set(nodeapi.EpochHeader, v)
+		seen, ok := nodeapi.ParseEpoch(r.Header.Get(nodeapi.EpochHeader))
+		if !ok || seen <= epoch {
+			next.ServeHTTP(w, r)
+			return
+		}
+		id, _ := pki.RequestNodeID(r)
+		if logged.CompareAndSwap(false, true) {
+			log.Error("a newer copy of this cluster exists: this server was replaced by a restore, and its store is from before it. "+
+				"It refuses every node that has seen the newer copy, and its own replicas and router run on a stale view of the cluster. "+
+				"Stop this server and disable its service (docs/backup.md)",
+				"node", id, "node_epoch", seen, "epoch", epoch, "remote", r.RemoteAddr)
+		} else {
+			log.Debug("request from a node that has seen a newer copy of this cluster refused", "node", id, "node_epoch", seen, "epoch", epoch)
+		}
+		writeError(w, http.StatusConflict, staleMessage)
 	})
 }
 

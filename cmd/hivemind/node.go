@@ -676,7 +676,7 @@ func runServe(ctx context.Context, cfg *config.Config, log *slog.Logger, rt runt
 		c, err := cluster.Listen(cluster.Config{Store: st, CA: ca, Tokens: pki.NewTokens(st.JoinTokens()),
 			Advertise: cfg.Advertise, Bind: nodeAddr, Port: cfg.ClusterPort, LocalNodeID: cl.NodeID,
 			Logger: log.With("component", "cluster"), NodeCertLifetime: lifetime, Logs: logs,
-			RouterReports: routerReports, RouteReaders: routeReaders, Version: version})
+			RouterReports: routerReports, RouteReaders: routeReaders, Version: version, Epoch: cl.Epoch})
 		if err != nil {
 			ln.Close()
 			if mln != nil {
@@ -709,7 +709,7 @@ func runServe(ctx context.Context, cfg *config.Config, log *slog.Logger, rt runt
 		}()
 	}
 	if nodes != nil {
-		log.Info("cluster listening", "advertise", cfg.Advertise, "node_addr", nodes.NodeAddr(), "join_addr", nodes.JoinAddr())
+		log.Info("cluster listening", "advertise", cfg.Advertise, "node_addr", nodes.NodeAddr(), "join_addr", nodes.JoinAddr(), "epoch", cl.Epoch)
 		go func() {
 			if err := nodes.Serve(); err != nil {
 				serveErr <- fmt.Errorf("cluster listener: %w", err)

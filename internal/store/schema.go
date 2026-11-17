@@ -287,6 +287,14 @@ CREATE INDEX app_routes_app ON app_routes(app);
 INSERT INTO app_routes (host, path, app, port) SELECT host, '', app, port FROM app_hosts;
 DROP TABLE app_hosts;
 `,
+	// 16: the cluster's epoch. cluster.epoch is 0 when init writes the
+	// record, and a store from before this version has 0 too; restore
+	// makes it one higher than the backup's. The server sends it on every
+	// node API reply, and a worker refuses a server whose epoch is lower
+	// than one it has seen: a copy of the cluster from before a restore.
+	`
+ALTER TABLE cluster ADD COLUMN epoch INTEGER NOT NULL DEFAULT 0 CHECK (epoch >= 0);
+`,
 }
 
 // migrationNotes says in a few words what each migration adds, for the log:
@@ -307,6 +315,7 @@ var migrationNotes = []string{
 	"node versions",
 	"rollout copy times",
 	"path routes",
+	"the cluster epoch",
 }
 
 // SchemaVersion is the schema version this build writes.

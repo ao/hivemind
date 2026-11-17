@@ -399,30 +399,46 @@ func Verify(r io.Reader) (Manifest, error) {
 // ErrNotEmpty means the restore target already holds files.
 var ErrNotEmpty = errors.New("the data directory is not empty")
 
+// Restored is what Restore did: the archive's manifest, and the epoch of
+// the restored store, one higher than the backup's.
+type Restored struct {
+	Manifest
+	// Epoch is the restored store's epoch. The server sends it to the
+	// workers, and a worker that has seen it refuses a server at a lower
+	// one, such as the server the backup was taken from.
+	Epoch int64
+}
+
+// sqliteSideFiles are the suffixes of the files SQLite may keep beside a
+// database.
+var sqliteSideFiles = []string{"-wal", "-shm", "-journal"}
+
 // Restore writes the files of the archive into dir, which must be missing or
 // empty. dir gets mode 0700 and each file mode 0600. The store must pass
 // SQLite's integrity check and have a schema version this build knows; an
-// older one is migrated forward when serve opens it, as with any data
-// directory. The CA key must match the CA certificate. On any error, the
-// files written so far are removed, and so is dir if Restore created it.
-func Restore(ctx context.Context, r io.Reader, dir string) (m Manifest, err error) {
+// older one is migrated forward here. The CA key must match the CA
+// certificate. Then the store's epoch is raised by one (store.BumpEpoch),
+// so the workers that reach the restored server refuse the one the backup
+// came from, should it come back. On any error, the files written so far
+// are removed, and so is dir if Restore created it.
+func Restore(ctx context.Context, r io.Reader, dir string) (res Restored, err error) {
 	if dir == "" {
-		return Manifest{}, errors.New("restore: no data directory")
+		return Restored{}, errors.New("restore: no data directory")
 	}
 	created := false
 	switch ents, rerr := os.ReadDir(dir); {
 	case errors.Is(rerr, fs.ErrNotExist):
 		if err := os.MkdirAll(dir, 0o700); err != nil {
-			return Manifest{}, err
+			return Restored{}, err
 		}
 		created = true
 	case rerr != nil:
-		return Manifest{}, rerr
+		return Restored{}, rerr
 	case len(ents) > 0:
-		return Manifest{}, fmt.Errorf("%w: %s holds %d entries; restore needs a new or empty directory", ErrNotEmpty, dir, len(ents))
+		return Restored{}, fmt.Errorf("%w: %s holds %d entries; restore needs a new or empty directory", ErrNotEmpty, dir, len(ents))
 	}
 	if err := os.Chmod(dir, 0o700); err != nil {
-		return Manifest{}, err
+		return Restored{}, err
 	}
 	var written []string
 	defer func() {
@@ -432,12 +448,16 @@ func Restore(ctx context.Context, r io.Reader, dir string) (m Manifest, err erro
 		for _, p := range written {
 			_ = os.Remove(p)
 		}
+		// Opening the store may have left SQLite's side files.
+		for _, side := range sqliteSideFiles {
+			_ = os.Remove(filepath.Join(dir, StoreName+side))
+		}
 		if created {
 			_ = os.Remove(dir)
 		}
 	}()
 
-	m, err = read(r, func(f File, src io.Reader) error {
+	m, err := read(r, func(f File, src io.Reader) error {
 		p := filepath.Join(dir, f.Name)
 		out, err := os.OpenFile(p, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
 		if err != nil {
@@ -457,35 +477,48 @@ func Restore(ctx context.Context, r io.Reader, dir string) (m Manifest, err erro
 		return werr
 	})
 	if err != nil {
-		return Manifest{}, err
+		return Restored{}, err
 	}
 
 	info, err := store.InspectFile(ctx, filepath.Join(dir, StoreName))
 	if err != nil {
-		return Manifest{}, err
-	}
-	// Opening the store may have left SQLite's side files; they are part
-	// of what is cleaned up on failure.
-	for _, side := range []string{"-wal", "-shm", "-journal"} {
-		p := filepath.Join(dir, StoreName+side)
-		if _, err := os.Lstat(p); err == nil {
-			written = append(written, p)
-		}
+		return Restored{}, err
 	}
 	switch {
 	case info.SchemaVersion > store.SchemaVersion:
-		return Manifest{}, fmt.Errorf("%w: the store in the backup has schema version %d and this build knows up to %d; restore it with a newer hivemind",
+		return Restored{}, fmt.Errorf("%w: the store in the backup has schema version %d and this build knows up to %d; restore it with a newer hivemind",
 			store.ErrNewerSchema, info.SchemaVersion, store.SchemaVersion)
 	case info.SchemaVersion != m.SchemaVersion || info.NodeID != m.NodeID:
-		return Manifest{}, fmt.Errorf("%w: the store does not match the manifest (schema %d, node %q)", ErrInvalid, info.SchemaVersion, info.NodeID)
+		return Restored{}, fmt.Errorf("%w: the store does not match the manifest (schema %d, node %q)", ErrInvalid, info.SchemaVersion, info.NodeID)
 	}
 	if _, err := pki.LoadCA(dir); err != nil {
-		return Manifest{}, fmt.Errorf("%w: cluster CA: %v", ErrInvalid, err)
+		return Restored{}, fmt.Errorf("%w: cluster CA: %v", ErrInvalid, err)
+	}
+	epoch, err := bumpEpoch(ctx, filepath.Join(dir, StoreName))
+	if err != nil {
+		return Restored{}, err
 	}
 	if err := syncDir(dir); err != nil {
-		return Manifest{}, err
+		return Restored{}, err
 	}
-	return m, nil
+	return Restored{Manifest: m, Epoch: epoch}, nil
+}
+
+// bumpEpoch opens the restored store at path, which migrates it to this
+// build's schema, and raises its epoch by one.
+func bumpEpoch(ctx context.Context, path string) (int64, error) {
+	st, err := store.Open(ctx, path)
+	if err != nil {
+		return 0, fmt.Errorf("opening the restored store: %w", err)
+	}
+	epoch, err := st.BumpEpoch(ctx)
+	if cerr := st.Close(); err == nil {
+		err = cerr
+	}
+	if err != nil {
+		return 0, fmt.Errorf("raising the epoch of the restored store: %w", err)
+	}
+	return epoch, nil
 }
 
 func syncDir(dir string) error {

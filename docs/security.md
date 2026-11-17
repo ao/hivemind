@@ -54,6 +54,7 @@ A worker's data directory is created with mode 0700.
 | `node.crt` | 0644 at join, 0600 after a renewal | The worker's certificate. Public |
 | `ca.crt` | 0644 | The cluster CA certificate. Public |
 | `node.json` | 0600 | The node ID, the server's address and the join time |
+| `cluster-epoch` | 0600 | The highest cluster epoch the worker has seen from a server of its cluster, once one has sent more than 0. `cluster-epoch.next` is there only while it is replaced |
 | `node.key.next`, `node.crt.next` | 0600 | Only during a renewal: the new pair, before it is renamed into place |
 | `hivemind.lock` | 0600 | The pid of the `join` or `serve --role worker` that holds it locked |
 
@@ -78,6 +79,7 @@ Assume an attacker has the worker's data directory, or root on the worker. The c
 - Register any private address that is an IP address and is not loopback, a wildcard or multicast, and report any ports for its own containers. The routers then send the traffic of the routed replicas placed on that worker to that address and those ports, which can be another machine on the routers' network.
 - Read the whole routing table: every routed host, and the address and port of each of its replicas.
 - Post any counts and certificate expiries for its own router's series in the server's `/metrics`. They carry its own node ID, and the server keeps only the hosts in the routing table and `unknown`, so it cannot add hosts or touch another node's series; the figures are what the worker says they are, like its logs.
+- Send any epoch with its requests. One above the server's makes the server refuse that worker's own requests with `409`, and log once that a newer copy of the cluster exists, naming the node. It cannot change another node's epoch, or the server's. See [a server from before a restore](#a-server-from-before-a-restore).
 
 A worker's router needs nothing more than this: the routes above are what it uses.
 
@@ -119,6 +121,16 @@ hivemind keeps apps on one node apart no further than Docker does by default. Tr
 - The worker sends a credential only for the registry its host names, the image's own, and checks that in the assignment before it pulls.
 
 The integration test pulls with a random password from a registry with htpasswd and TLS, and then checks serve's log, the Docker daemon's log, `status` and the API's replies for the password. Use a token that can only read, and treat it as exposed to every machine that runs an image from its registry.
+
+## A server from before a restore
+
+Trust between the server and the workers comes from the cluster CA alone, both ways. A restored server has the same CA, so to a worker the old server, back on its machine after a restore elsewhere, is as much a server of the cluster as the restored one; nothing in their certificates tells them apart. The cluster's epoch does ([backup](backup.md#if-the-old-server-comes-back)):
+
+- The server sends its store's epoch in `Hivemind-Epoch` on every node API reply. `init` starts at 0, and `restore` makes the restored store's one more than the backup's.
+- A worker refuses a reply whose epoch is lower than the highest it has seen, before it reads anything in it. It keeps the highest in `cluster-epoch` ([files](#files)), and sends it with every request. A server older than epochs sends none, and is taken as before.
+- A server refuses, with `409` and before it reads its store, a request from a node that says it has seen a higher epoch than its own, and logs once that a newer copy of the cluster exists.
+
+The header comes over the node listener's TLS, from a server whose certificate the worker has checked against the cluster CA, so only a server of the cluster, or someone with the CA key, can raise a worker's epoch. With the CA key, one could also raise every worker's epoch so far that it refuses the real server; that key already grants everything ([files](#files)). A worker can claim any epoch to the server: a claim above the server's makes the server refuse that worker's own requests and log the warning above, naming the node, and it changes nothing for any other node. When no restore happened, that line means a node that misbehaves. The epoch is not secret and not a credential: it keeps an old copy of the cluster that comes back by mistake from taking the workers, and does nothing against an attacker who has the CA key.
 
 ## Revocation by removal
 

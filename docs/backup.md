@@ -40,8 +40,10 @@ As a user other than root, `restore` cannot create `/var/lib/hivemind` (`error: 
 
 - the format and its version. A backup from a newer format is refused;
 - the size and SHA-256 of every file, so a truncated or altered file is refused;
-- SQLite's integrity check on the store, and its schema version. A store at an older version is migrated forward when `serve` opens it, as any data directory is. A store from a newer hivemind is refused;
+- SQLite's integrity check on the store, and its schema version. A store at an older version is migrated forward. A store from a newer hivemind is refused;
 - the CA key matches the CA certificate.
+
+Then it raises the cluster's epoch in the restored store to one more than the backup's, and says so (`The cluster is at epoch 1 now, ...`). The workers that reach the restored server refuse a server at a lower epoch, such as the one the backup came from; see [if the old server comes back](#if-the-old-server-comes-back).
 
 The directory gets mode 0700 and every file mode 0600. On any failure, `restore` removes the files it wrote, and the directory if it created it. Like `init`, it writes a client config for the CLI on this machine, unless one exists.
 
@@ -49,7 +51,7 @@ The directory gets mode 0700 and every file mode 0600. On any failure, `restore`
 
 The workers keep running their containers while the server is gone (see [concepts](concepts.md#server-and-workers)). Each worker dials the address in its `node.json`, the one it joined, and checks that the server's certificate names it. When the server advertises a DNS name, which is the recommended set-up ([concepts](concepts.md#the-servers-address)), the new machine can have any IP address: update the name's record, and the workers follow it. When it advertises an IP address, give the new machine that address, or move each worker to the new one with `hivemind node set-server` ([below](#at-a-new-ip-address)). A new address, by name or with `set-server`, needs the unreleased 2.2.0; with 2.1.0 the new machine needs the old address.
 
-Make sure the old server cannot come back first: disable its unit (`systemctl disable hivemind`), or terminate the machine. If it does come back with its data directory, its `serve` starts as a second server of the same cluster, with the same CA, unless it refuses its `--advertise` address: one that names a DNS name, without `--cluster-addr`, whose record now names the new machine. That copy marks the workers that do not reach it lost when its start grace ends, starts every replica it can on its own node, and its router serves those copies; a worker that still dials the old address reaches it and takes its assignments. Stop it, and disable its unit, as soon as you see it.
+Make sure the old server cannot come back first: disable its unit (`systemctl disable hivemind`), or terminate the machine. What happens if it does is under [if the old server comes back](#if-the-old-server-comes-back).
 
 To bring the cluster back on a new machine:
 
@@ -73,6 +75,32 @@ What the restored server does not have is everything that changed after the back
 - Volumes of replicas that ran on the old server are gone with its disk. Those replicas start with empty volumes. hivemind does not back up volumes.
 - Certificate expiries recorded after the backup are refreshed as each node calls in.
 
+### If the old server comes back
+
+The old machine, back with its data directory, runs its `serve` as a second server of the same cluster, with the same CA, unless `serve` refuses its `--advertise` address: a DNS name, without `--cluster-addr`, whose record now names the new machine. A server with `--cluster-addr`, or one that advertises its IP address, starts.
+
+What keeps the workers off it is the cluster's epoch. `init` starts a cluster at epoch 0, and a store from before epochs is at 0 too. `restore` makes the restored store's epoch one more than the backup's. The server sends its epoch on every node API reply, in a `Hivemind-Epoch` header, and logs it at its start (`cluster listening ... epoch=1`). Each worker keeps the highest epoch it has seen in `cluster-epoch`, in its data directory, and sends it with every request. A worker that has had a reply from the restored server refuses a server at a lower epoch. It sends that server nothing more, leaves its containers as they are, and logs once, at error:
+
+```
+level=ERROR msg="the server at hivemind.example.internal:4484 is from before a restore of this cluster: a restored copy of the cluster has been seen at a higher epoch. This worker sends the old server nothing, keeps its containers running, and asks again every 10s, as the restored server may come back at this address. Stop the old server; if this worker should dial another address, stop the worker and move it with hivemind node set-server <address> (docs/backup.md)" server=hivemind.example.internal:4484 server_epoch=0 seen_epoch=1
+```
+
+It asks again every 10 s, since the restored server may come back at that address, and logs `... answers at this cluster's epoch now; this worker talks to it again` when it does. The old server, for its part, refuses with `409` every request from a node that has seen a higher epoch, before it reads its store, and logs once:
+
+```
+level=ERROR msg="a newer copy of this cluster exists: this server was replaced by a restore, and its store is from before it. It refuses every node that has seen the newer copy, and its own replicas and router run on a stale view of the cluster. Stop this server and disable its service (docs/backup.md)" node=node-95fe5bc3b6e3 node_epoch=1 epoch=0 remote=10.0.0.7:41822
+```
+
+[`set-server`](#at-a-new-ip-address) refuses it as well. Stop it and disable its unit when you see either line. What the epoch does not cover:
+
+- A worker that has had no reply from the restored server has not seen its epoch, and takes the old server: one that dials the old IP address and has not been moved yet, or one whose resolver still has the old record when both servers run.
+- A server older than this build sends no epoch, and is taken as before.
+- The old server itself: it marks the workers it does not hear from lost when its start grace ends, starts their replicas on its own node, and its router serves those copies to any client that DNS sends to it.
+- Two restores of the same backup are at the same epoch, and the workers take either. Stop the first before you restore the backup again elsewhere.
+- Restoring, on purpose, a backup taken before an earlier restore can give a lower epoch than the workers have seen, as each restore adds one to its backup's. They then refuse the server you mean to use. Stop each worker, delete `cluster-epoch` from its data directory, and start it again.
+
+`scripts/integration-newaddr.sh` starts the old server's container again after each restore, with its data directory and its old store. By name, with the restored server stopped and the alias moved back to the old one, both workers refuse it and log that once, for 20 s their containers stay as they were and the old server has no report from them, a worker's router serves every request, and once the restored server is back under the alias, the workers, never restarted, report to it. By IP, `set-server` to the old server is refused.
+
 ### At a new IP address
 
 A worker that joined an IP address keeps dialing it, and the new server's certificate does not name it. Start the server at its own address, `sudo hivemind serve --advertise 10.0.0.9`. It logs a warning that the workers which joined the old address need `hivemind node set-server 10.0.0.9`, with the count of workers in the store. Then, on each worker:
@@ -83,18 +111,20 @@ sudo hivemind node set-server 10.0.0.9
 sudo systemctl start hivemind
 ```
 
-The worker's containers keep running while it is stopped, and it picks them up again when it starts. `set-server` changes the server address in `node.json` and nothing else: the node keeps its ID, key and certificate, and does not join again. It refuses to run beside the worker, which reads `node.json` only when it starts.
+The worker's containers keep running while it is stopped, and it picks them up again when it starts. `set-server` changes the server address in `node.json`, and `cluster-epoch` when the server is at a higher epoch than the worker has seen: the node keeps its ID, key and certificate, and does not join again. It refuses to run beside the worker, which reads `node.json` only when it starts.
 
 Before it writes `node.json`, `set-server` checks from the worker that the address is its own cluster's server, by the same trust that every connection uses:
 
 - the server's certificate must chain to the cluster CA in the worker's data directory, and name the address given, and a node;
-- the server must accept the worker's certificate, and answer a node API request for the worker's node ID. A server that says the node was removed is refused.
+- the server must accept the worker's certificate, and answer a node API request for the worker's node ID. A server that says the node was removed is refused;
+- the server must not be from before a restore: its epoch must not be lower than the highest the worker has seen ([above](#if-the-old-server-comes-back)).
 
 Anything else is refused with what was found, and `node.json` is left as it was:
 
 ```
 error: the server at 10.0.0.9:4484 presents a certificate from the CA with fingerprint 5d1e..., not from this worker's cluster CA, fingerprint 3f9c...: it is another cluster's server, or something between this machine and 10.0.0.9 holds another CA. /var/lib/hivemind/node.json is unchanged
 error: the server at 10.0.0.7:4484 has a certificate from this cluster's CA, but it names 10.0.0.9, not 10.0.0.7: give set-server the address the server advertises, or start the server with --advertise 10.0.0.7. /var/lib/hivemind/node.json is unchanged
+error: the server at 10.0.0.5:4484 is from before a restore of this cluster: it is at epoch 0, and this worker has seen epoch 1 from the restored server. Stop the old server, and give set-server the address of the restored one. /var/lib/hivemind/node.json is unchanged
 error: cannot reach a server at 10.0.0.8:4484: connect: connection refused. /var/lib/hivemind/node.json is unchanged
 error: 10.0.0.9:4485 is the default join port, but set-server takes the server's cluster port, 10.0.0.9:4484, or no port. /var/lib/hivemind/node.json is unchanged
 ```
