@@ -22,6 +22,9 @@
 #     for it at the same time (the storage lock), and every router serves it
 #   - through each node's router, with SNI, replies come from both replicas;
 #     http redirects to https with 308, and an unknown host gets a 404
+#   - a replica gets the router's forwarding headers and the table's host,
+#     none of the client's; an h2c upgrade reaches it as plain HTTP/1.1;
+#     each router logs its connection caps
 #   - the server's /metrics has every router's counters and certificate
 #     expiry, by node (the workers post theirs through the node API)
 #   - a rolling update: every response during it, through all three routers,
@@ -256,6 +259,37 @@ unknown=$(docker exec "$CLIENT" curl -s -o /dev/null -w '%{http_code}' --resolve
 body=$(docker exec "$CLIENT" curl -s --resolve "nope.routing.test:$HTTP_PORT:$W2_IP" "http://nope.routing.test:$HTTP_PORT/")
 [ "$unknown" = 404 ] && [ "$body" = "not found" ] || cl_fail "an unknown host got: $unknown $body"
 cl_note "http redirects to https with 308; an unknown host gets a plain 404"
+
+# What a replica receives. whoami echoes the request: the forwarding headers
+# are the router's, none of the client's, and Host is the table's host
+# whatever the client wrote.
+CLIENT_IP=$(cl_ip_of "$CLIENT")
+seen=$(docker exec "$CLIENT" curl -s --max-time 10 --http1.1 --cacert /tmp/root.pem --resolve "$HOST:$HTTPS_PORT:$W1_IP" \
+	-H "Host: ${HOST^^}.:1234" -H "X-Forwarded-For: 6.6.6.6" -H "X-Forwarded-Port: 80" -H "X-Forwarded-Prefix: /admin" \
+	-H "True-Client-IP: 6.6.6.6" -H "X-Real-IP: 6.6.6.6" -H "Forwarded: for=6.6.6.6" "https://$HOST:$HTTPS_PORT/" | tr -d '\r')
+want_lines=("Host: $HOST:$HTTPS_PORT" "X-Forwarded-For: $CLIENT_IP" "X-Forwarded-Host: $HOST:$HTTPS_PORT"
+	"X-Forwarded-Port: $HTTPS_PORT" "X-Forwarded-Proto: https")
+for l in "${want_lines[@]}"; do
+	grep -qxF "$l" <<<"$seen" || cl_fail "the replica did not get \"$l\": $(tr '\n' ';' <<<"$seen")"
+done
+if grep -qiE '6\.6\.6\.6|^(X-Forwarded-Prefix|True-Client-Ip|X-Real-Ip|Forwarded):' <<<"$seen"; then
+	cl_fail "a forwarding header from the client reached the replica: $(tr '\n' ';' <<<"$seen")"
+fi
+# An h2c upgrade reaches the replica as plain HTTP/1.1.
+seen=$(docker exec "$CLIENT" curl -s --max-time 10 --http1.1 --cacert /tmp/root.pem --resolve "$HOST:$HTTPS_PORT:$W2_IP" \
+	-H "Connection: Upgrade, HTTP2-Settings" -H "Upgrade: h2c" -H "HTTP2-Settings: AAMAAABkAARAAAAAAAIAAAAA" \
+	-w '%{http_code}\n' "https://$HOST:$HTTPS_PORT/" | tr -d '\r')
+[ "$(tail -n 1 <<<"$seen")" = 200 ] && grep -q '^Hostname: ' <<<"$seen" ||
+	cl_fail "an h2c upgrade request was not answered as HTTP/1.1: $(tr '\n' ';' <<<"$seen")"
+if grep -qiE '^(Upgrade|Http2-Settings):' <<<"$seen"; then
+	cl_fail "the h2c upgrade reached the replica: $(tr '\n' ';' <<<"$seen")"
+fi
+# Each router logs its connection caps; the per-address one is the flag's default.
+for c in "${CL_NAMES[@]}"; do
+	docker exec "$c" grep -q 'router listening.*max_conns=[1-9][0-9]* max_conns_per_ip=256' /var/log/hivemind.log ||
+		cl_fail "$c's router did not log its connection caps: $(docker exec "$c" grep 'router listening' /var/log/hivemind.log)"
+done
+cl_note "replicas get the router's forwarding headers and the table's host, never the client's; h2c is not passed; caps logged"
 
 # Every router's counters reach the server's /metrics, each under its node's
 # ID: the server's own at once, the workers' through the node API every 15 s.
