@@ -183,10 +183,14 @@ copies you no longer need.
 Like init, restore writes a client config that points the CLI at this server
 and at the restored token file, unless one exists.
 
-To replace a lost server, restore on a machine with the same address and run
-"hivemind serve --advertise <that address>". The workers reconnect without
-joining again, because the CA and their certificates are unchanged. See
-docs/backup.md.`,
+To replace a lost server, restore and run "hivemind serve --advertise
+<address>" with the address the workers dial. The workers reconnect without
+joining again, because the CA and their certificates are unchanged. For a
+DNS name, the new machine may have any address: add --cluster-addr <its IP>
+while the name's record still names the old machine, and update the record.
+For an IP address the workers dial, give the new machine that address, or
+serve at the new one and run "hivemind node set-server <new address>" on
+each worker. See docs/backup.md.`,
 		Args: cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			cfg, err := config.Load(cmd.Flags(), config.Options{})
@@ -225,7 +229,8 @@ docs/backup.md.`,
 			} else {
 				fmt.Fprintln(out, "The backup has no admin token file; use the admin token you kept from init.")
 			}
-			fmt.Fprintln(out, "Start the server with `hivemind serve`, with --advertise set to the address the workers use.")
+			fmt.Fprintln(out, "Start the server with `hivemind serve`, with --advertise set to the address the workers use. "+
+				"At a new IP address, workers that dial the old one need `hivemind node set-server <new address>` on each; see docs/backup.md.")
 			return nil
 		},
 	}

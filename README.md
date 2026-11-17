@@ -93,6 +93,8 @@ hivemind join 10.0.0.5 --token hivemind-join-v1.<fingerprint>.<secret>
 
 A token works once, and it expires after 24 hours. `hivemind join-token --ttl 1h` sets a shorter lifetime, up to 168 hours. Deploy as before. The NODE column of `hivemind status` shows where each replica runs.
 
+`--advertise` can be a DNS name instead of an IP address, and the workers join that name. Then a server restored on a machine with another IP address needs only the name's record changed. See [the server's address](docs/concepts.md#the-servers-address).
+
 `hivemind nodes` lists the nodes. To take a machine out of the cluster, run `hivemind node drain <id>` on the server (unreleased 2.2.0), which moves its replicas to other nodes, each new copy starting before the old one stops, then `hivemind node remove <id>`. The server refuses the node's certificate from then on. In 2.0.0, which has no `node drain`, stop hivemind on the machine before `node remove`. See [concepts](docs/concepts.md#draining-a-node).
 
 ## Compose files
@@ -114,7 +116,7 @@ In the unreleased 2.2.0, an app can name `routes: [{host: www.example.com, port:
 
 ## Limits
 
-- The server is one machine. If it goes down, running containers keep running, but nothing new is placed and lost nodes are not rescheduled. In the unreleased 2.1.0, `hivemind backup` and `hivemind restore` bring it back on a new machine at the same address. See [backup](docs/backup.md).
+- The server is one machine. If it goes down, running containers keep running, but nothing new is placed and lost nodes are not rescheduled. In the unreleased 2.1.0, `hivemind backup` and `hivemind restore` bring it back on a new machine: at the same address, at any address when it advertises a DNS name, or at a new IP address with `hivemind node set-server` run on each worker. See [backup](docs/backup.md).
 - A node certificate lasts 365 days. In the unreleased 2.1.0, nodes renew theirs on day 243; a 2.0.0 node cannot renew, so upgrade it within a year of joining (see [upgrading](docs/upgrading.md#from-200)). The only way to revoke one is to remove the node. The cluster CA lasts ten years and cannot be rotated. See [security](docs/security.md#certificate-renewal).
 - A replica with a volume stays on its node. If that node is lost, the app is down until the node returns.
 - `deploy` does not reject a host port that another app already publishes. The second app's replicas go where the port is free. Any that cannot go stay `pending`, with the reason. See [concepts](docs/concepts.md#placement).

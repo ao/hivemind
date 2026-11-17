@@ -395,6 +395,7 @@ hivemind node
 | `drain` | Move a node's replicas to other nodes |
 | `eligibility` | Let a node take new replicas, or stop it taking them |
 | `remove` | Remove a node from the cluster for good |
+| `set-server` | Move this worker to its server's new address, without joining again |
 
 #### hivemind node drain
 
@@ -518,6 +519,41 @@ hivemind node remove <id> [flags]
 | `--json` | bool | - | - | print JSON instead of a table |
 | `--server` | string | - | `HIVEMIND_SERVER` | server URL (env HIVEMIND_SERVER; default from the client config, then http://127.0.0.1:4483) |
 | `--token` | string | - | `HIVEMIND_TOKEN` | API token (env HIVEMIND_TOKEN; default from the client config's token file) |
+
+#### hivemind node set-server
+
+Run on a worker, while the worker is stopped, after its server was restored on
+a machine with another address (docs/backup.md). <address> is the server's
+new address, host or host:port, where the port is its cluster port (4484 by
+default), as for hivemind join. For a server that advertises a DNS name,
+update the name's record instead: the workers follow it by themselves.
+
+set-server changes the server address in node.json, and nothing else, and
+only after it has checked from this machine that <address> is the server of
+this worker's own cluster:
+
+  - the server presents a certificate signed by the cluster CA in this data
+    directory, that names <address> and a node;
+  - the server accepts this node's certificate, and answers a request of the
+    node API for this node, as it does not for a removed node.
+
+Another cluster's server, a server whose certificate does not name
+<address>, an address where nothing answers, and anything between this
+machine and the server that holds another CA are refused with what was
+found, and node.json is left as it was. The node keeps its ID, key and
+certificate, and its containers.
+
+The worker reads node.json when it starts, so stop it first: set-server
+refuses to run beside it. Its containers keep running meanwhile. Then start
+it again, with hivemind serve --role worker or its service.
+
+```
+hivemind node set-server <address> [flags]
+```
+
+| Flag | Type | Default | Environment | Description |
+|---|---|---|---|---|
+| `--data-dir` | string | see description | `HIVEMIND_DATA_DIR` | the worker's data directory (env HIVEMIND_DATA_DIR; default /var/lib/hivemind for root, else ~/.local/state/hivemind). The default is /var/lib/hivemind for root, and $XDG_STATE_HOME/hivemind or ~/.local/state/hivemind for other users. |
 
 ### hivemind nodes
 
@@ -666,10 +702,14 @@ copies you no longer need.
 Like init, restore writes a client config that points the CLI at this server
 and at the restored token file, unless one exists.
 
-To replace a lost server, restore on a machine with the same address and run
-"hivemind serve --advertise <that address>". The workers reconnect without
-joining again, because the CA and their certificates are unchanged. See
-docs/backup.md.
+To replace a lost server, restore and run "hivemind serve --advertise
+<address>" with the address the workers dial. The workers reconnect without
+joining again, because the CA and their certificates are unchanged. For a
+DNS name, the new machine may have any address: add --cluster-addr <its IP>
+while the name's record still names the old machine, and update the record.
+For an IP address the workers dial, give the new machine that address, or
+serve at the new one and run "hivemind node set-server <new address>" on
+each worker. See docs/backup.md.
 
 ```
 hivemind restore <file> [flags]

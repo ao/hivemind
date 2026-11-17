@@ -47,14 +47,14 @@ The directory gets mode 0700 and every file mode 0600. On any failure, `restore`
 
 ## Replacing a lost server
 
-The workers keep running their containers while the server is gone (see [concepts](concepts.md#server-and-workers)). Each worker dials the address in its `node.json`, the one it joined, and checks that the server's certificate names it. When the server advertises a DNS name, which is the recommended set-up ([concepts](concepts.md#the-servers-address)), the new machine can have any IP address: update the name's record, and the workers follow it. When it advertises an IP address, the new machine needs that address. To bring the cluster back on a new machine:
+The workers keep running their containers while the server is gone (see [concepts](concepts.md#server-and-workers)). Each worker dials the address in its `node.json`, the one it joined, and checks that the server's certificate names it. When the server advertises a DNS name, which is the recommended set-up ([concepts](concepts.md#the-servers-address)), the new machine can have any IP address: update the name's record, and the workers follow it. When it advertises an IP address, give the new machine that address, or move each worker to the new one with `hivemind node set-server` ([below](#at-a-new-ip-address)). To bring the cluster back on a new machine:
 
 1. Install the same or a newer hivemind, and Docker Engine.
 2. Copy the latest backup to the machine, and run `sudo hivemind restore <file> --data-dir /var/lib/hivemind`.
 3. Start the server with the address the workers dial, and with the same `--cluster-port` as before if you changed it: `sudo hivemind serve --advertise <address>`, or the [server unit](systemd.md#server).
    - A DNS name whose record still names the old machine resolves to none of this machine's addresses, and `serve` refuses it, and says so. Add this machine's address to bind: `sudo hivemind serve --advertise hivemind.example.internal --cluster-addr 10.0.0.9`. The certificate names both. `serve` logs a warning until the name resolves to that address.
-   - An IP address must be on this machine already: give it to the new machine first.
-4. For a DNS name, update its record to the new machine's address.
+   - An IP address must be on this machine: the old one, given to the new machine first, or its own, with the workers moved after.
+4. For a DNS name, update its record to the new machine's address. For a new IP address, move each worker ([below](#at-a-new-ip-address)).
 
 The workers reconnect on their next pass, without joining again: the CA is the same, so the new server's certificate chains to the CA each worker trusts, and each worker's certificate chains to the CA the server trusts. A worker that dials a name looks it up again for each new connection, so it reaches the new machine once its resolver has the new record; a short TTL on the record shortens that wait. The server's certificate and its node's address follow the new `serve` flags: the certificate is issued at each start for `--advertise` and the address the listeners bind, and the node's address, which `hivemind nodes` shows, is that address. Nothing in the restored store keeps the old one. The server's own replicas start again on the new machine. Replicas that ran on workers keep running there. `scripts/integration-cluster.sh` tests this with three nodes in Docker: it backs up a running server, destroys its container, data directory and Docker volume, restores the backup on a new container at the same IP, and checks that both workers, which were not restarted, reconnect, and that the apps return to their replica counts with no replica running twice.
 
@@ -67,7 +67,34 @@ What the restored server does not have is everything that changed after the back
 - Volumes of replicas that ran on the old server are gone with its disk. Those replicas start with empty volumes. hivemind does not back up volumes.
 - Certificate expiries recorded after the backup are refreshed as each node calls in.
 
-A new IP address, for workers that joined an IP address, is not supported: each worker's `node.json` carries the old one. Join each worker again with an empty data directory and a new join token instead.
+### At a new IP address
+
+A worker that joined an IP address keeps dialing it, and the new server's certificate does not name it. Start the server at its own address, `sudo hivemind serve --advertise 10.0.0.9`, and then, on each worker:
+
+```sh
+sudo systemctl stop hivemind
+sudo hivemind node set-server 10.0.0.9
+sudo systemctl start hivemind
+```
+
+The worker's containers keep running while it is stopped, and it picks them up again when it starts. `set-server` changes the server address in `node.json` and nothing else: the node keeps its ID, key and certificate, and does not join again. It refuses to run beside the worker, which reads `node.json` only when it starts.
+
+Before it writes `node.json`, `set-server` checks from the worker that the address is its own cluster's server, by the same trust that every connection uses:
+
+- the server's certificate must chain to the cluster CA in the worker's data directory, and name the address given, and a node;
+- the server must accept the worker's certificate, and answer a node API request for the worker's node ID. A server that says the node was removed is refused.
+
+Anything else is refused with what was found, and `node.json` is left as it was:
+
+```
+error: the server at 10.0.0.9:4484 presents a certificate from the CA with fingerprint 5d1e..., not from this worker's cluster CA, fingerprint 3f9c...: it is another cluster's server, or something between this machine and 10.0.0.9 holds another CA. /var/lib/hivemind/node.json is unchanged
+error: the server at 10.0.0.7:4484 has a certificate from this cluster's CA, but it names 10.0.0.9, not 10.0.0.7: give set-server the address the server advertises, or start the server with --advertise 10.0.0.7. /var/lib/hivemind/node.json is unchanged
+error: cannot reach a server at 10.0.0.8:4484: connect: connection refused. /var/lib/hivemind/node.json is unchanged
+```
+
+The fingerprints are the SHA-256 of each CA's public key, the hex that a join token carries. A server whose certificate the worker accepts, but which refuses the worker's certificate in the TLS handshake, as a machine with a copy of a server certificate and another CA would, is refused too. A man in the middle without the cluster CA's key cannot pass the first check: the worker takes only a certificate signed by the CA in its own data directory.
+
+To move a cluster that advertises an IP address to a DNS name, without a restore: start the server with `--advertise <name> --cluster-addr <its IP>`. Its certificate then names both, so the workers that dial the IP keep working. Then run `hivemind node set-server <name>` on each worker, as above, at any time.
 
 ## The file
 

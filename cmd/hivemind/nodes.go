@@ -169,7 +169,7 @@ func nodeCmd() *cobra.Command {
 		Short: "Manage one node",
 		Args:  cobra.NoArgs,
 	}
-	cmd.AddCommand(nodeRemoveCmd(), nodeEligibilityCmd(), nodeDrainCmd())
+	cmd.AddCommand(nodeRemoveCmd(), nodeEligibilityCmd(), nodeDrainCmd(), nodeSetServerCmd())
 	return cmd
 }
 

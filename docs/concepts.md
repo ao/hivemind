@@ -33,7 +33,7 @@ The trust rests on the token:
 
 The address in `serve --advertise <address>` is the one workers dial. `hivemind join <address>` stores it in the worker's `node.json`, and the worker checks, at every connection, that the server's certificate names it. It can be an IP address or a DNS name.
 
-A DNS name is the recommended set-up. A server replaced by a machine with another IP address, as a replaced cloud instance usually is, then needs only the name's record updated: the workers reconnect without joining again, with their certificates ([backup](backup.md#replacing-a-lost-server)). A worker looks the name up at each new connection, so it follows the record as soon as its resolver does; a TTL of a minute or so keeps that short.
+A DNS name is the recommended set-up. A server replaced by a machine with another IP address, as a replaced cloud instance usually is, then needs only the name's record updated: the workers reconnect without joining again, with their certificates ([backup](backup.md#replacing-a-lost-server)). A worker looks the name up at each new connection, so it follows the record as soon as its resolver does; a TTL of a minute or so keeps that short. With an IP address, the new machine needs the old address, or each worker is moved to the new one with `hivemind node set-server`, which first checks that the new address serves this cluster ([backup](backup.md#at-a-new-ip-address)).
 
 ```sh
 hivemind serve --advertise hivemind.example.internal
