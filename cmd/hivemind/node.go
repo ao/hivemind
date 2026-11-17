@@ -518,6 +518,7 @@ func runServe(ctx context.Context, cfg *config.Config, log *slog.Logger, rt runt
 	if err != nil {
 		return err
 	}
+	noteAddressChange(ctx, st, cfg, cl.NodeID, nodeAddr, log)
 	hostname, _ := os.Hostname()
 	if err := st.UpsertNode(ctx, store.Node{ID: cl.NodeID, Name: hostname, CPU: info.NCPU, Memory: info.MemTotal, Address: nodeAddr,
 		Version: nodeapi.CleanVersion(version)}); err != nil {

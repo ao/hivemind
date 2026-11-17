@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/ao/hivemind/internal/config"
+	"github.com/ao/hivemind/internal/store"
 )
 
 // resolveTimeout bounds serve's lookup of an --advertise name.
@@ -123,6 +124,44 @@ func clusterAddress(ctx context.Context, cfg *config.Config, local addrSource, l
 			"advertise", cfg.Advertise, "cluster_addr", bind.String())
 	}
 	return bind.String(), nil
+}
+
+// noteAddressChange logs what the workers need when the server's node had
+// another address before this start, as after a restore on a new machine,
+// and the store has workers. A worker dials the address it joined. One that
+// joined a DNS name follows its record, which is logged at info. One that
+// joined the old IP address cannot reach this server until it is moved with
+// node set-server, which is a warning; that is when --advertise is the
+// address the listeners bind, so that the workers dialled the old one.
+func noteAddressChange(ctx context.Context, st *store.Store, cfg *config.Config, serverID, addr string, log *slog.Logger) {
+	if cfg.Advertise == "" {
+		return
+	}
+	prev, err := st.GetNode(ctx, serverID)
+	if err != nil || prev.Address == "" || prev.Address == addr {
+		return
+	}
+	nodes, err := st.ListNodes(ctx)
+	if err != nil {
+		return
+	}
+	workers := 0
+	for _, n := range nodes {
+		if n.ID != serverID {
+			workers++
+		}
+	}
+	if workers == 0 {
+		return
+	}
+	if ip, err := netip.ParseAddr(cfg.Advertise); err == nil && ip.Unmap().String() == addr {
+		log.Warn("this server's address changed since its last start: workers that joined the old address still dial it, and reach this server "+
+			"only once each is moved, with the worker stopped, by hivemind node set-server "+cfg.Advertise+" (docs/backup.md)",
+			"old_address", prev.Address, "address", addr, "workers", workers)
+		return
+	}
+	log.Info("this server's address changed since its last start: workers that dial --advertise reach it once that leads to the new address",
+		"advertise", cfg.Advertise, "old_address", prev.Address, "address", addr, "workers", workers)
 }
 
 // preferred picks a non-loopback IPv4 address, then a non-loopback IPv6 one,
