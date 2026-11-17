@@ -57,7 +57,13 @@ func New(host string) (*Client, error) {
 	}
 	dialer := &net.Dialer{Timeout: 5 * time.Second}
 	tr := &http.Transport{Proxy: nil} // never send the daemon's traffic through an HTTP proxy
-	c := &Client{http: &http.Client{Transport: tr}}
+	// A redirect is not followed: the daemon sends none, and following one
+	// would send the request's headers, X-Registry-Auth among them, to
+	// wherever it pointed. The 3xx comes back as the response, and call
+	// reports it as an error.
+	c := &Client{http: &http.Client{Transport: tr, CheckRedirect: func(*http.Request, []*http.Request) error {
+		return http.ErrUseLastResponse
+	}}}
 
 	switch u.Scheme {
 	case "unix":
