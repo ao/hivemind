@@ -312,7 +312,8 @@ Join a cluster as a worker node and run its agent in the foreground.
   hivemind join 10.0.0.5 --token <token>
 
 <server> is the server's address, host or host:port, where the port is its
-cluster port (4484 by default). Port 4485, the default join port, is refused
+cluster port (4484 by default), without a scheme or a path: a URL such as
+https://10.0.0.5 is refused. Port 4485, the default join port, is refused
 before anything is dialled, since join dials the port above the one it is
 given. The worker generates a key and a certificate
 request, presents the join token to the server's join port (the cluster port
@@ -553,8 +554,9 @@ hivemind node remove <id> [flags]
 Run on a worker, while the worker is stopped, after its server was restored on
 a machine with another address (docs/backup.md). <address> is the server's
 new address, host or host:port, where the port is its cluster port (4484 by
-default), as for hivemind join. For a server that advertises a DNS name,
-update the name's record instead: the workers follow it by themselves.
+default), without a scheme or a path, as for hivemind join. For a server that
+advertises a DNS name, update the name's record instead: the workers follow
+it by themselves.
 
 set-server changes the server address in node.json, and only after it has
 checked from this machine that <address> is the server of this worker's own

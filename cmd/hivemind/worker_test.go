@@ -41,6 +41,8 @@ func TestSplitServer(t *testing.T) {
 		{"10.0.0.5:65535", "", 0, true}, // the join port would be 65536
 		{":4484", "", 0, true},
 		{"10.0.0.5:abc", "", 0, true},
+		{"https://10.0.0.5", "", 0, true},
+		{"10.0.0.5/x", "", 0, true},
 	}
 	for _, c := range cases {
 		host, port, err := splitServer(c.in)
@@ -435,6 +437,32 @@ func TestJoinOnTheJoinPortSaysToUseTheClusterPort(t *testing.T) {
 	err = enroll(context.Background(), log, dir, "127.0.0.1", 1, pki.JoinToken{}.String())
 	if err == nil || strings.Contains(err.Error(), "join port") {
 		t.Fatalf("join on port 1: %v", err)
+	}
+}
+
+// join given a URL, as https://10.0.0.5, or an address with a path, is
+// refused before anything is dialled or written, with the address to give.
+func TestJoinRefusesAURL(t *testing.T) {
+	isolate(t)
+	dir := filepath.Join(t.TempDir(), "worker")
+	for in, want := range map[string]string{
+		"https://10.255.255.1":         "https://10.255.255.1 is a URL: give the address without https://: 10.255.255.1",
+		"http://10.255.255.1:4484/":    "http://10.255.255.1:4484/ is a URL: give the address without http://: 10.255.255.1:4484",
+		"https://":                     "https:// is a URL: give the address without https://: <host[:port]>",
+		"10.255.255.1/node":            "10.255.255.1/node has a path: give the address without it: 10.255.255.1",
+		"hm.example.internal:4484?x=1": "hm.example.internal:4484?x=1 has a path: give the address without it: hm.example.internal:4484",
+	} {
+		start := time.Now()
+		_, _, err := run(t, "", "join", in, "--token", pki.JoinToken{}.String(), "--data-dir", dir)
+		if err == nil || err.Error() != want {
+			t.Errorf("join %s: %v, want %q", in, err, want)
+		}
+		if d := time.Since(start); d > 5*time.Second {
+			t.Errorf("join %s took %s: it dialled", in, d)
+		}
+	}
+	if _, err := os.Stat(dir); !errors.Is(err, fs.ErrNotExist) {
+		t.Fatalf("a refused join made its data directory: %v", err)
 	}
 }
 

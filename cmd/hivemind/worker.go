@@ -72,7 +72,8 @@ func joinCmd() *cobra.Command {
   hivemind join 10.0.0.5 --token <token>
 
 <server> is the server's address, host or host:port, where the port is its
-cluster port (4484 by default). Port 4485, the default join port, is refused
+cluster port (4484 by default), without a scheme or a path: a URL such as
+https://10.0.0.5 is refused. Port 4485, the default join port, is refused
 before anything is dialled, since join dials the port above the one it is
 given. The worker generates a key and a certificate
 request, presents the join token to the server's join port (the cluster port
@@ -165,8 +166,20 @@ func runWorkerServe(ctx context.Context, cfg *config.Config, log *slog.Logger) e
 }
 
 // splitServer returns the host and cluster port of a server address. An
-// address without a port uses defaultClusterPort.
+// address without a port uses defaultClusterPort. A URL, with a scheme such
+// as https://, or an address with a path is refused with the address to
+// give instead.
 func splitServer(arg string) (string, int, error) {
+	if i := strings.Index(arg, "://"); i >= 0 {
+		rest := arg[i+3:]
+		if j := strings.IndexAny(rest, "/?#"); j >= 0 {
+			rest = rest[:j]
+		}
+		return "", 0, fmt.Errorf("%s is a URL: give the address without %s://: %s", arg, arg[:i], firstNonEmpty(rest, "<host[:port]>"))
+	}
+	if i := strings.IndexAny(arg, "/?#"); i >= 0 {
+		return "", 0, fmt.Errorf("%s has a path: give the address without it: %s", arg, firstNonEmpty(arg[:i], "<host[:port]>"))
+	}
 	host, port, err := net.SplitHostPort(arg)
 	if err != nil {
 		host, port = strings.TrimSuffix(strings.TrimPrefix(arg, "["), "]"), strconv.Itoa(defaultClusterPort)

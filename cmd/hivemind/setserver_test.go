@@ -159,6 +159,11 @@ func TestSetServerChecksTheServer(t *testing.T) {
 	// but no node API, and the default join port, refused before dialling.
 	refused("the join port", right.cl.JoinAddr(), "it is the join port")
 	refused("the default join port", "10.255.255.1:4485", "is the default join port, but set-server takes the server's cluster port, 10.255.255.1:4484")
+	// A URL, or an address with a path, is refused before anything is
+	// dialled, with the address to give.
+	refused("a URL", "https://10.255.255.1", "https://10.255.255.1 is a URL: give the address without https://: 10.255.255.1")
+	refused("a URL with a port and a path", "https://10.255.255.1:4484/node/v1", "give the address without https://: 10.255.255.1:4484")
+	refused("an address with a path", "10.255.255.1/x", "10.255.255.1/x has a path: give the address without it: 10.255.255.1")
 
 	// The right server, while the worker runs.
 	release, err := lockDataDir(wdir)

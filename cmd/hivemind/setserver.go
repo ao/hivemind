@@ -38,8 +38,9 @@ func nodeSetServerCmd() *cobra.Command {
 		Long: `Run on a worker, while the worker is stopped, after its server was restored on
 a machine with another address (docs/backup.md). <address> is the server's
 new address, host or host:port, where the port is its cluster port (4484 by
-default), as for hivemind join. For a server that advertises a DNS name,
-update the name's record instead: the workers follow it by themselves.
+default), without a scheme or a path, as for hivemind join. For a server that
+advertises a DNS name, update the name's record instead: the workers follow
+it by themselves.
 
 set-server changes the server address in node.json, and only after it has
 checked from this machine that <address> is the server of this worker's own
@@ -78,11 +79,11 @@ it again, with hivemind serve --role worker or its service.`,
 // runSetServer is node set-server: it checks the server at arg for the
 // worker in dir, and then points node.json at it.
 func runSetServer(ctx context.Context, out io.Writer, dir, arg string) error {
+	statePath := filepath.Join(dir, workerStateFile)
 	host, port, err := splitServer(arg)
 	if err != nil {
-		return err
+		return fmt.Errorf("%w. %s is unchanged", err, statePath)
 	}
-	statePath := filepath.Join(dir, workerStateFile)
 	if port == defaultClusterPort+1 {
 		return fmt.Errorf("%s is the default join port, but set-server takes the server's cluster port, %s, or no port. %s is unchanged",
 			net.JoinHostPort(host, strconv.Itoa(port)), net.JoinHostPort(host, strconv.Itoa(defaultClusterPort)), statePath)

@@ -127,6 +127,7 @@ error: the server at 10.0.0.7:4484 has a certificate from this cluster's CA, but
 error: the server at 10.0.0.5:4484 is from before a restore of this cluster: it is at epoch 0, and this worker has seen epoch 1 from the restored server. Stop the old server, and give set-server the address of the restored one. /var/lib/hivemind/node.json is unchanged
 error: cannot reach a server at 10.0.0.8:4484: connect: connection refused. /var/lib/hivemind/node.json is unchanged
 error: 10.0.0.9:4485 is the default join port, but set-server takes the server's cluster port, 10.0.0.9:4484, or no port. /var/lib/hivemind/node.json is unchanged
+error: https://10.0.0.9 is a URL: give the address without https://: 10.0.0.9. /var/lib/hivemind/node.json is unchanged
 ```
 
 The fingerprints are the SHA-256 of each CA's public key, the hex that a join token carries. A server whose certificate the worker accepts, but which refuses the worker's certificate in the TLS handshake, as a machine with a copy of a server certificate and another CA would, is refused too. A man in the middle without the cluster CA's key cannot pass the first check: the worker takes only a certificate signed by the CA in its own data directory.
