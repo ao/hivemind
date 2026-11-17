@@ -5,8 +5,6 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
-	"net"
-	"net/netip"
 	"time"
 
 	"github.com/ao/hivemind/internal/config"
@@ -67,50 +65,6 @@ func nodeRoutes(c *nodeapi.Client, nodeID string, missing *nodeapi.MissingRoute)
 		}
 		return t, nil
 	}
-}
-
-// serverNodeAddress is the private address of the server's own node, where
-// its routed replicas publish their ports: the address the cluster listener
-// binds, from --advertise. A host name is resolved as net.Listen resolves
-// it, to its first IPv4 address if it has one. Without --advertise there are
-// no workers, and routed replicas publish on loopback.
-func serverNodeAddress(ctx context.Context, advertise string) (string, error) {
-	if advertise == "" {
-		return "127.0.0.1", nil
-	}
-	if ip, err := netip.ParseAddr(advertise); err == nil {
-		return ip.Unmap().String(), nil
-	}
-	ips, err := net.DefaultResolver.LookupNetIP(ctx, "ip", advertise)
-	if err != nil {
-		return "", fmt.Errorf("--advertise %s: %w", advertise, err)
-	}
-	if len(ips) == 0 {
-		return "", fmt.Errorf("--advertise %s resolves to no address", advertise)
-	}
-	for _, ip := range ips {
-		if ip.Unmap().Is4() {
-			return ip.Unmap().String(), nil
-		}
-	}
-	return ips[0].String(), nil
-}
-
-// checkBoundAddress checks that the cluster listener bound the address the
-// server's node registered, since its routed replicas publish there.
-func checkBoundAddress(bound, want string) error {
-	host, _, err := net.SplitHostPort(bound)
-	if err != nil {
-		return err
-	}
-	ip, err := netip.ParseAddr(host)
-	if err != nil {
-		return err
-	}
-	if ip.Unmap().String() != want {
-		return fmt.Errorf("the cluster listener bound %s, but --advertise resolved to %s for routed replicas; give --advertise as an IP address", host, want)
-	}
-	return nil
 }
 
 // workerAddress is a worker's private address: the local address of its

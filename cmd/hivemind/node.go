@@ -376,9 +376,14 @@ func serveCmd() *cobra.Command {
 127.0.0.1:4483 by default. A non-loopback address needs --api-tls-cert and
 --api-tls-key. SIGINT or SIGTERM stops the server; containers keep running.
 
---advertise <addr> also opens the cluster listeners, on that address only: the
+--advertise <addr> also opens the cluster listeners, on one address only: the
 node listener on --cluster-port (4484) and the join listener on the port above
-it. Other machines join with hivemind join.
+it. Other machines join with hivemind join <addr>, and check that the
+server's certificate names <addr>. <addr> may be a DNS name: the listeners
+then bind the address of this machine that it resolves to, and the
+certificate names both. --cluster-addr <ip> binds that address of this
+machine instead, for a name whose record does not lead here yet, as after a
+restore on a new machine (docs/backup.md).
 
 --role worker runs only the agent, for a machine that joined with hivemind
 join. It has no API listener. --role server is the default.
@@ -412,6 +417,9 @@ private keys and env values are not logged.`,
 			case "worker":
 				if cfg.Advertise != "" {
 					return errors.New("--advertise does not apply to a worker, which runs no listener")
+				}
+				if cfg.ClusterAddr != "" {
+					return errors.New("--cluster-addr does not apply to a worker, which runs no cluster listener")
 				}
 				return runWorkerServe(cmd.Context(), cfg, log)
 			default:
@@ -506,7 +514,7 @@ func runServe(ctx context.Context, cfg *config.Config, log *slog.Logger, rt runt
 	}
 	// The node's private address, where its routed replicas publish their
 	// ports: the cluster listener's address, or loopback without one.
-	nodeAddr, err := serverNodeAddress(ctx, cfg.Advertise)
+	nodeAddr, err := clusterAddress(ctx, cfg, interfaceAddrs, lookupName, log)
 	if err != nil {
 		return err
 	}
@@ -632,14 +640,9 @@ func runServe(ctx context.Context, cfg *config.Config, log *slog.Logger, rt runt
 			log.Warn("test build: node certificates are issued with a short lifetime", "lifetime", lifetime)
 		}
 		c, err := cluster.Listen(cluster.Config{Store: st, CA: ca, Tokens: pki.NewTokens(st.JoinTokens()),
-			Advertise: cfg.Advertise, Port: cfg.ClusterPort, LocalNodeID: cl.NodeID,
+			Advertise: cfg.Advertise, Bind: nodeAddr, Port: cfg.ClusterPort, LocalNodeID: cl.NodeID,
 			Logger: log.With("component", "cluster"), NodeCertLifetime: lifetime, Logs: logs,
 			RouterReports: routerReports, Version: version})
-		if err == nil {
-			if err = checkBoundAddress(c.NodeAddr(), nodeAddr); err != nil {
-				_ = c.Shutdown()
-			}
-		}
 		if err != nil {
 			ln.Close()
 			if mln != nil {
@@ -672,7 +675,7 @@ func runServe(ctx context.Context, cfg *config.Config, log *slog.Logger, rt runt
 		}()
 	}
 	if nodes != nil {
-		log.Info("cluster listening", "node_addr", nodes.NodeAddr(), "join_addr", nodes.JoinAddr())
+		log.Info("cluster listening", "advertise", cfg.Advertise, "node_addr", nodes.NodeAddr(), "join_addr", nodes.JoinAddr())
 		go func() {
 			if err := nodes.Serve(); err != nil {
 				serveErr <- fmt.Errorf("cluster listener: %w", err)

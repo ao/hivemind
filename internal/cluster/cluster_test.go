@@ -585,6 +585,67 @@ func TestListenBindsOnlyTheAdvertiseAddressAndRefusesWildcards(t *testing.T) {
 	}
 }
 
+// A server that advertises a DNS name binds Bind, which the name need not
+// resolve to (it does not resolve at all here), and its certificate names
+// both, so a joining node that dials either one verifies it. A bind address
+// that is not an IP is refused.
+func TestListenAdvertisesANameAndBindsTheBindAddress(t *testing.T) {
+	dir := t.TempDir()
+	ca, err := pki.CreateCA(filepath.Join(dir, "ca"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	st, err := store.Open(context.Background(), filepath.Join(dir, "hivemind.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+	cfg := Config{Store: st, CA: ca, Tokens: pki.NewTokens(st.JoinTokens()), LocalNodeID: "node-server",
+		Advertise: "hivemind.invalid", Bind: "127.0.0.1", Logger: slog.New(slog.NewTextHandler(io.Discard, nil))}
+	c, err := Listen(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	go func() { _ = c.Serve() }()
+	defer c.Shutdown()
+	for _, a := range []string{c.NodeAddr(), c.JoinAddr()} {
+		if host, _, err := net.SplitHostPort(a); err != nil || host != "127.0.0.1" {
+			t.Errorf("listener bound %s, want the bind address 127.0.0.1", a)
+		}
+	}
+	leaf := c.ServerCert().Leaf
+	for _, name := range []string{"hivemind.invalid", "127.0.0.1"} {
+		if err := leaf.VerifyHostname(name); err != nil {
+			t.Errorf("the server certificate does not name %s: %v", name, err)
+		}
+	}
+	// A join pinned to the CA verifies the server under the name.
+	tok, _, err := cfg.Tokens.Issue(ca.Fingerprint(), time.Hour)
+	if err != nil {
+		t.Fatal(err)
+	}
+	p, err := pki.ParseJoinToken(tok)
+	if err != nil {
+		t.Fatal(err)
+	}
+	tlsCfg, err := pki.JoinClientTLSConfig(p.Fingerprint, "hivemind.invalid")
+	if err != nil {
+		t.Fatal(err)
+	}
+	conn, err := tls.Dial("tcp", c.JoinAddr(), tlsCfg)
+	if err != nil {
+		t.Fatalf("a join that dials the bind address and checks the name: %v", err)
+	}
+	conn.Close()
+
+	bad := cfg
+	bad.Bind = "hivemind.invalid"
+	if c, err := Listen(bad); err == nil {
+		c.Shutdown()
+		t.Error("a bind address that is a name was accepted")
+	}
+}
+
 func TestListenRefusesPortsWithNoRoomForTheJoinPort(t *testing.T) {
 	dir := t.TempDir()
 	ca, err := pki.CreateCA(filepath.Join(dir, "ca"))

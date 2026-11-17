@@ -11,6 +11,7 @@ import (
 	"net"
 	"net/url"
 	"regexp"
+	"slices"
 	"strings"
 	"time"
 )
@@ -111,6 +112,11 @@ type NodeCertOptions struct {
 	// Advertise is the address peers dial, an IP literal or a DNS name. Set it
 	// for the server certificate. Leave it empty for an agent-only node.
 	Advertise string
+	// Bind is the IP address the server's listeners bind, when it is not
+	// Advertise, as for a server that advertises a DNS name. The
+	// certificate names it too, so a worker that dials the address itself
+	// can check the name. Empty adds nothing.
+	Bind string
 	// Lifetime is the certificate's validity. Zero means NodeCertLifetime.
 	// Values above NodeCertLifetime are refused.
 	Lifetime time.Duration
@@ -188,6 +194,15 @@ func (ca *CA) IssueNodeCert(csrDER []byte, o NodeCertOptions) ([]byte, error) {
 			tmpl.DNSNames = []string{o.Advertise}
 		} else {
 			return nil, fmt.Errorf("%w: %q", ErrInvalidAdvertise, o.Advertise)
+		}
+	}
+	if o.Bind != "" {
+		ip := net.ParseIP(o.Bind)
+		if ip == nil {
+			return nil, fmt.Errorf("%w: bind address %q is not an IP address", ErrInvalidAdvertise, o.Bind)
+		}
+		if !slices.ContainsFunc(tmpl.IPAddresses, ip.Equal) {
+			tmpl.IPAddresses = append(tmpl.IPAddresses, ip)
 		}
 	}
 	der, err := x509.CreateCertificate(rand.Reader, tmpl, ca.Cert, pub, ca.Key)

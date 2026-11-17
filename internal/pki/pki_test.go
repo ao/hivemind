@@ -232,6 +232,47 @@ func TestIssueNodeCertDNSAdvertise(t *testing.T) {
 	}
 }
 
+// A server that advertises a name and binds an address of its own gets a
+// certificate that names both, so a worker verifies either one. A bind
+// address equal to an advertised IP is not named twice.
+func TestIssueNodeCertNamesTheBindAddress(t *testing.T) {
+	ca := newCA(t)
+	key, err := NewNodeKey()
+	if err != nil {
+		t.Fatal(err)
+	}
+	csr, err := NewCSR(key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	der, err := ca.IssueNodeCert(csr, NodeCertOptions{NodeID: "srv", Advertise: "hm.example.internal", Bind: "10.0.0.9"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	leaf, err := x509.ParseCertificate(der)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, name := range []string{"hm.example.internal", "10.0.0.9"} {
+		if err := leaf.VerifyHostname(name); err != nil {
+			t.Errorf("the certificate does not name %s: %v", name, err)
+		}
+	}
+	if err := leaf.VerifyHostname("10.0.0.5"); err == nil {
+		t.Error("the certificate names an address it was not given")
+	}
+	der, err = ca.IssueNodeCert(csr, NodeCertOptions{NodeID: "srv", Advertise: "10.0.0.9", Bind: "10.0.0.9"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if leaf, err = x509.ParseCertificate(der); err != nil || len(leaf.IPAddresses) != 1 || len(leaf.DNSNames) != 0 {
+		t.Fatalf("an advertised IP that is also the bind address: IPs %v, names %v, %v", leaf.IPAddresses, leaf.DNSNames, err)
+	}
+	if _, err := ca.IssueNodeCert(csr, NodeCertOptions{NodeID: "srv", Advertise: "hm.example.internal", Bind: "hm.example.internal"}); !errors.Is(err, ErrInvalidAdvertise) {
+		t.Fatalf("a bind address that is a name: %v", err)
+	}
+}
+
 func TestIssueNodeCertRejectsBadInput(t *testing.T) {
 	ca := newCA(t)
 	key, err := NewNodeKey()

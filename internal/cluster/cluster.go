@@ -1,5 +1,6 @@
 // Package cluster is the server's side of node-to-node traffic. It opens two
-// listeners on the advertise address, and only there:
+// listeners on one address of the server, and only there (Config.Bind, or
+// the advertise address):
 //
 //   - the node listener, on the cluster port, TLS 1.3 with a required client
 //     certificate. Every node route is served here, so a request reaches a
@@ -25,6 +26,7 @@ import (
 	"log/slog"
 	"net"
 	"net/http"
+	"net/netip"
 	"strconv"
 	"time"
 
@@ -60,9 +62,16 @@ type Config struct {
 	CA *pki.CA
 	// Tokens redeems join tokens. It must be backed by the same store.
 	Tokens *pki.Tokens
-	// Advertise is the address the listeners bind to and that nodes dial. It
-	// must not be a wildcard; config.Validate refuses one.
+	// Advertise is the address that nodes dial, an IP address or a DNS name,
+	// and that the server's certificate names. It must not be a wildcard;
+	// config.Validate refuses one.
 	Advertise string
+	// Bind is the IP address the listeners bind, which the server's
+	// certificate names as well. Empty means Advertise, as net.Listen
+	// resolves it. serve sets it to the address it chose for the server's
+	// node (--cluster-addr, or what --advertise names or resolves to), so a
+	// server can advertise a name whose record does not lead here yet.
+	Bind string
 	// Port is the node listener's port. The join listener uses Port+1. Zero
 	// picks a free port for each listener (tests only).
 	Port int
@@ -139,6 +148,13 @@ func Listen(cfg Config) (*Cluster, error) {
 	if cfg.Port < 0 || cfg.Port > 65534 {
 		return nil, fmt.Errorf("cluster: port %d leaves no room for the join port", cfg.Port)
 	}
+	bind := cfg.Advertise
+	if cfg.Bind != "" {
+		if _, err := netip.ParseAddr(cfg.Bind); err != nil {
+			return nil, fmt.Errorf("cluster: bind address %q is not an IP address", cfg.Bind)
+		}
+		bind = cfg.Bind
+	}
 	log := cfg.Logger
 	if log == nil {
 		log = slog.Default()
@@ -155,18 +171,18 @@ func Listen(cfg Config) (*Cluster, error) {
 	}
 	certs.holder = pki.NewCertHolder(tlsCert)
 
-	mln, err := listenAdvertise(cfg.Advertise, cfg.Port)
+	mln, err := listenAdvertise(bind, cfg.Port)
 	if err != nil {
-		return nil, fmt.Errorf("cluster listener on %s: %w", cfg.Advertise, err)
+		return nil, fmt.Errorf("cluster listener on %s: %w", bind, err)
 	}
 	joinPort := 0
 	if cfg.Port != 0 {
 		joinPort = cfg.Port + 1
 	}
-	jln, err := listenAdvertise(cfg.Advertise, joinPort)
+	jln, err := listenAdvertise(bind, joinPort)
 	if err != nil {
 		mln.Close()
-		return nil, fmt.Errorf("join listener on %s: %w", cfg.Advertise, err)
+		return nil, fmt.Errorf("join listener on %s: %w", bind, err)
 	}
 
 	if cfg.Logs == nil {
@@ -187,8 +203,9 @@ func Listen(cfg Config) (*Cluster, error) {
 // ServerCert returns the server certificate new handshakes use.
 func (c *Cluster) ServerCert() *tls.Certificate { return c.certs.holder.Load() }
 
-// listenAdvertise binds host:port on the advertise address. Port 0 picks a
-// free port. A listener that ends up on a wildcard address is refused.
+// listenAdvertise binds host:port, the bind or advertise address. Port 0
+// picks a free port. A listener that ends up on a wildcard address is
+// refused.
 func listenAdvertise(host string, port int) (net.Listener, error) {
 	ln, err := net.Listen("tcp", net.JoinHostPort(host, strconv.Itoa(port)))
 	if err != nil {

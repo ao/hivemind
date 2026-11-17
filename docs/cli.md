@@ -265,6 +265,7 @@ hivemind init [flags]
 | `--api-tls-cert` | string | - | `HIVEMIND_API_TLS_CERT` | TLS certificate for the API (PEM) |
 | `--api-tls-key` | string | - | `HIVEMIND_API_TLS_KEY` | TLS private key for the API (PEM) |
 | `--client-config` | string | - | `HIVEMIND_CLIENT_CONFIG` | client config file to write (default $XDG_CONFIG_HOME/hivemind/config.yaml or ~/.config/hivemind/config.yaml; env HIVEMIND_CLIENT_CONFIG) |
+| `--cluster-addr` | string | - | `HIVEMIND_CLUSTER_ADDR` | IP address of this machine the cluster listeners bind; default: the address --advertise names or resolves to |
 | `--cluster-port` | string | `4484` | `HIVEMIND_CLUSTER_PORT` | port of the node-to-node listener; the join listener uses the port above it |
 | `--config` | string | - | `HIVEMIND_CONFIG` | YAML config file (default <data-dir>/hivemind.yaml) |
 | `--data-dir` | string | see description | `HIVEMIND_DATA_DIR` | directory for node state. The default is /var/lib/hivemind for root, and $XDG_STATE_HOME/hivemind or ~/.local/state/hivemind for other users. |
@@ -708,9 +709,14 @@ Run the API server and the agent on this node. The API listens on --api-addr,
 127.0.0.1:4483 by default. A non-loopback address needs --api-tls-cert and
 --api-tls-key. SIGINT or SIGTERM stops the server; containers keep running.
 
---advertise <addr> also opens the cluster listeners, on that address only: the
+--advertise <addr> also opens the cluster listeners, on one address only: the
 node listener on --cluster-port (4484) and the join listener on the port above
-it. Other machines join with hivemind join.
+it. Other machines join with hivemind join <addr>, and check that the
+server's certificate names <addr>. <addr> may be a DNS name: the listeners
+then bind the address of this machine that it resolves to, and the
+certificate names both. --cluster-addr <ip> binds that address of this
+machine instead, for a name whose record does not lead here yet, as after a
+restore on a new machine (docs/backup.md).
 
 --role worker runs only the agent, for a machine that joined with hivemind
 join. It has no API listener. --role server is the default.
@@ -741,6 +747,7 @@ hivemind serve [flags]
 | `--api-addr` | string | `127.0.0.1:4483` | `HIVEMIND_API_ADDR` | address of the API, host:port |
 | `--api-tls-cert` | string | - | `HIVEMIND_API_TLS_CERT` | TLS certificate for the API (PEM) |
 | `--api-tls-key` | string | - | `HIVEMIND_API_TLS_KEY` | TLS private key for the API (PEM) |
+| `--cluster-addr` | string | - | `HIVEMIND_CLUSTER_ADDR` | IP address of this machine the cluster listeners bind; default: the address --advertise names or resolves to |
 | `--cluster-port` | string | `4484` | `HIVEMIND_CLUSTER_PORT` | port of the node-to-node listener; the join listener uses the port above it |
 | `--config` | string | - | `HIVEMIND_CONFIG` | YAML config file (default <data-dir>/hivemind.yaml) |
 | `--data-dir` | string | see description | `HIVEMIND_DATA_DIR` | directory for node state. The default is /var/lib/hivemind for root, and $XDG_STATE_HOME/hivemind or ~/.local/state/hivemind for other users. |

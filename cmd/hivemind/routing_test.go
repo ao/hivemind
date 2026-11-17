@@ -3,10 +3,13 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
+	"net"
 	"net/http"
+	"net/netip"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -20,23 +23,80 @@ import (
 	"github.com/ao/hivemind/internal/nodeapi"
 )
 
-func TestServerNodeAddress(t *testing.T) {
+// clusterAddress picks the address the cluster listeners bind, which is the
+// server node's address too. This machine has 10.0.0.9 and fd00::9, and the
+// names resolve as the table says.
+func TestClusterAddress(t *testing.T) {
 	ctx := context.Background()
-	for in, want := range map[string]string{"": "127.0.0.1", "10.0.0.5": "10.0.0.5", "::ffff:10.0.0.5": "10.0.0.5",
-		"fd00::5": "fd00::5", "localhost": "127.0.0.1"} {
-		got, err := serverNodeAddress(ctx, in)
-		if err != nil || got != want {
-			t.Errorf("serverNodeAddress(%q) = %q, %v; want %q", in, got, err, want)
+	names := map[string][]netip.Addr{
+		"hm.example.internal":  {netip.MustParseAddr("10.0.0.9")},
+		"old.example.internal": {netip.MustParseAddr("10.0.0.5")},
+		"both.example.internal": {netip.MustParseAddr("10.0.0.5"), netip.MustParseAddr("fd00::9"),
+			netip.MustParseAddr("::ffff:10.0.0.9")},
+		"v6.example.internal":    {netip.MustParseAddr("fd00::9")},
+		"hosts.example.internal": {netip.MustParseAddr("127.0.1.1")},
+	}
+	lookup := func(_ context.Context, name string) ([]netip.Addr, error) {
+		if ips, ok := names[name]; ok {
+			return ips, nil
+		}
+		return nil, &net.DNSError{Err: "no such host", Name: name, IsNotFound: true}
+	}
+	local := func() ([]netip.Addr, error) {
+		return []netip.Addr{netip.MustParseAddr("127.0.0.1"), netip.MustParseAddr("10.0.0.9"), netip.MustParseAddr("fd00::9")}, nil
+	}
+	cases := []struct {
+		advertise, clusterAddr string
+		want, warn, err        string
+	}{
+		{"", "", "127.0.0.1", "", ""},
+		{"10.0.0.5", "", "10.0.0.5", "", ""},
+		{"::ffff:10.0.0.5", "", "10.0.0.5", "", ""},
+		{"fd00::5", "", "fd00::5", "", ""},
+		{"hm.example.internal", "", "10.0.0.9", "", ""},
+		// The address of this machine among several, and IPv4 first.
+		{"both.example.internal", "", "10.0.0.9", "", ""},
+		{"v6.example.internal", "", "fd00::9", "", ""},
+		{"hosts.example.internal", "", "127.0.1.1", "resolves to a loopback address here", ""},
+		// The record still names the old server: refused, with the way out.
+		{"old.example.internal", "", "", "", "--advertise old.example.internal resolves to 10.0.0.5, and this machine has none of those addresses, " +
+			"so the cluster listeners cannot bind it. If the name's DNS record still names another machine, as after a restore until the " +
+			"record is updated, give this machine's address with --cluster-addr (see docs/backup.md)"},
+		{"none.example.internal", "", "", "", "give this machine's address with --cluster-addr to start before the name resolves"},
+		// --cluster-addr binds that address whatever the name resolves to,
+		// and says so when it is not the name's.
+		{"old.example.internal", "10.0.0.9", "10.0.0.9", "resolves to other addresses than --cluster-addr", ""},
+		{"none.example.internal", "10.0.0.9", "10.0.0.9", "--advertise does not resolve", ""},
+		{"hm.example.internal", "10.0.0.9", "10.0.0.9", "", ""},
+		{"203.0.113.5", "10.0.0.9", "10.0.0.9", "", ""},
+		{"", "10.0.0.9", "", "", "--cluster-addr 10.0.0.9 needs --advertise"},
+	}
+	for _, c := range cases {
+		logs := &syncLog{}
+		log := slog.New(slog.NewTextHandler(logs, nil))
+		cfg := &config.Config{Advertise: c.advertise, ClusterAddr: c.clusterAddr}
+		got, err := clusterAddress(ctx, cfg, local, lookup, log)
+		switch {
+		case c.err != "":
+			if err == nil || !strings.Contains(err.Error(), c.err) {
+				t.Errorf("advertise %q, cluster-addr %q: %q, %v; want an error with %q", c.advertise, c.clusterAddr, got, err, c.err)
+			}
+		case err != nil || got != c.want:
+			t.Errorf("advertise %q, cluster-addr %q: %q, %v; want %q", c.advertise, c.clusterAddr, got, err, c.want)
+		}
+		if l := logs.String(); (c.warn == "") != (l == "") || !strings.Contains(l, c.warn) {
+			t.Errorf("advertise %q, cluster-addr %q logged %q, want %q", c.advertise, c.clusterAddr, l, c.warn)
 		}
 	}
-	if _, err := serverNodeAddress(ctx, "no-such-host.invalid"); err == nil {
-		t.Error("a name that does not resolve was accepted")
+	// Without the machine's addresses, the name's address is bound, as
+	// net.Listen would bind it.
+	noList := func() ([]netip.Addr, error) { return nil, errors.New("no interfaces") }
+	if got, err := clusterAddress(ctx, &config.Config{Advertise: "old.example.internal"}, noList, lookup, slog.New(slog.NewTextHandler(io.Discard, nil))); err != nil || got != "10.0.0.5" {
+		t.Errorf("without the machine's addresses: %q, %v", got, err)
 	}
-	if err := checkBoundAddress("10.0.0.5:4484", "10.0.0.5"); err != nil {
-		t.Error(err)
-	}
-	if err := checkBoundAddress("[::1]:4484", "127.0.0.1"); err == nil || !strings.Contains(err.Error(), "give --advertise as an IP address") {
-		t.Errorf("a bound address unlike the node's: %v", err)
+	// The real lookup and interfaces: localhost is on every machine.
+	if got, err := clusterAddress(ctx, &config.Config{Advertise: "localhost"}, interfaceAddrs, lookupName, slog.New(slog.NewTextHandler(io.Discard, nil))); err != nil || got != "127.0.0.1" {
+		t.Errorf("localhost: %q, %v", got, err)
 	}
 }
 

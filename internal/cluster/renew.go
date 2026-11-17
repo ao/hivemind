@@ -154,7 +154,7 @@ func (s *serverCertSource) issue() (tls.Certificate, error) {
 	if err != nil {
 		return tls.Certificate{}, err
 	}
-	der, err := s.cfg.CA.IssueNodeCert(csr, pki.NodeCertOptions{NodeID: s.cfg.LocalNodeID, Advertise: s.cfg.Advertise,
+	der, err := s.cfg.CA.IssueNodeCert(csr, pki.NodeCertOptions{NodeID: s.cfg.LocalNodeID, Advertise: s.cfg.Advertise, Bind: s.cfg.Bind,
 		Lifetime: s.cfg.NodeCertLifetime, Now: s.now()})
 	if err != nil {
 		return tls.Certificate{}, err

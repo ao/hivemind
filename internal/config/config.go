@@ -56,6 +56,7 @@ type Config struct {
 	DataDir           string        `json:"data_dir"`
 	APIAddr           string        `json:"api_addr"`
 	Advertise         string        `json:"advertise"`
+	ClusterAddr       string        `json:"cluster_addr"`
 	ClusterPort       int           `json:"cluster_port"`
 	APITLSCert        string        `json:"api_tls_cert"`
 	APITLSKey         string        `json:"api_tls_key"`
@@ -269,6 +270,9 @@ func settings(opts Options) []setting {
 		str("advertise", "IP or host name other nodes use to reach this server; serve opens the cluster listeners on it", "",
 			func(c *Config) *string { return &c.Advertise },
 			func(f *fileConfig) *string { return f.Advertise }),
+		str("cluster-addr", "IP address of this machine the cluster listeners bind; default: the address --advertise names or resolves to", "",
+			func(c *Config) *string { return &c.ClusterAddr },
+			func(f *fileConfig) *string { return f.ClusterAddr }),
 		num("cluster-port", "port of the node-to-node listener; the join listener uses the port above it", "4484",
 			func(c *Config) *int { return &c.ClusterPort },
 			func(f *fileConfig) *string { return f.ClusterPort }),

@@ -29,9 +29,22 @@ The trust rests on the token:
 - The server picks the node ID (`node-` and 12 hex digits). A joining machine cannot choose its own.
 - The join listener asks for no client certificate, so it cannot tell one machine from another. It counts failed joins per source address. After five failures in a 10-minute window, that address gets `429 Too Many Requests` until the window ends. Machines behind one NAT share the count.
 
+## The server's address
+
+The address in `serve --advertise <address>` is the one workers dial. `hivemind join <address>` stores it in the worker's `node.json`, and the worker checks, at every connection, that the server's certificate names it. It can be an IP address or a DNS name.
+
+A DNS name is the recommended set-up. A server replaced by a machine with another IP address, as a replaced cloud instance usually is, then needs only the name's record updated: the workers reconnect without joining again, with their certificates ([backup](backup.md#replacing-a-lost-server)). A worker looks the name up at each new connection, so it follows the record as soon as its resolver does; a TTL of a minute or so keeps that short.
+
+```sh
+hivemind serve --advertise hivemind.example.internal
+hivemind join hivemind.example.internal --token <token>    # on each worker
+```
+
+With a name, `serve` binds the cluster listeners on the address of this machine that the name resolves to, and the server's certificate names both the name and that address. It refuses a name that resolves to none of this machine's addresses. `--cluster-addr <ip>` binds that address of this machine instead, whatever the name resolves to, and the certificate names it with the name. That is for a name whose record does not lead here yet, as after a restore, and for one that resolves to an address in front of the machine, such as a NAT's. `serve` logs a warning when the name resolves elsewhere. The listeners never bind a wildcard address.
+
 ## Node certificates and the node API
 
-A node certificate is ECDSA P-256, signed by the cluster CA, and valid for 365 days. Its URI name is `hivemind://node/<id>`, and its common name is the same ID. The server's own certificate also carries the address it advertises, so a worker can check the name it dialed.
+A node certificate is ECDSA P-256, signed by the cluster CA, and valid for 365 days. Its URI name is `hivemind://node/<id>`, and its common name is the same ID. The server's own certificate also carries the address it advertises, and the address its listeners bind when that is another, so a worker can check the name it dialed.
 
 A worker renews its certificate once two thirds of its lifetime have passed, on day 243, with a new key, over the node API. The server renews its own certificate on the same schedule. Neither restarts: new connections use the new certificate. A worker that cannot reach the server for the last four months of its certificate's life, such as a machine that was switched off, cannot renew after it expires, and must be removed and join again. `hivemind nodes` shows each node's certificate expiry, and marks it `not renewing` a day after the renewal time has passed, as in `2027-11-16 (in 120d, not renewing)`; the server logs a warning for that node once a day. The details, and what the server checks, are in [security](security.md#certificate-renewal).
 

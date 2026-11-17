@@ -47,14 +47,16 @@ The directory gets mode 0700 and every file mode 0600. On any failure, `restore`
 
 ## Replacing a lost server
 
-The workers keep running their containers while the server is gone (see [concepts](concepts.md#server-and-workers)). To bring the cluster back on a new machine:
+The workers keep running their containers while the server is gone (see [concepts](concepts.md#server-and-workers)). Each worker dials the address in its `node.json`, the one it joined, and checks that the server's certificate names it. When the server advertises a DNS name, which is the recommended set-up ([concepts](concepts.md#the-servers-address)), the new machine can have any IP address: update the name's record, and the workers follow it. When it advertises an IP address, the new machine needs that address. To bring the cluster back on a new machine:
 
-1. Give the new machine the address the old server advertised. Each worker dials the address in its `node.json`, and checks that the server's certificate names it.
-2. Install the same or a newer hivemind, and Docker Engine.
-3. Copy the latest backup to the machine, and run `sudo hivemind restore <file> --data-dir /var/lib/hivemind`.
-4. Start the server with the same address: `sudo hivemind serve --advertise <address>`, or the [server unit](systemd.md#server), with the same `--cluster-port` as before if you changed it.
+1. Install the same or a newer hivemind, and Docker Engine.
+2. Copy the latest backup to the machine, and run `sudo hivemind restore <file> --data-dir /var/lib/hivemind`.
+3. Start the server with the address the workers dial, and with the same `--cluster-port` as before if you changed it: `sudo hivemind serve --advertise <address>`, or the [server unit](systemd.md#server).
+   - A DNS name whose record still names the old machine resolves to none of this machine's addresses, and `serve` refuses it, and says so. Add this machine's address to bind: `sudo hivemind serve --advertise hivemind.example.internal --cluster-addr 10.0.0.9`. The certificate names both. `serve` logs a warning until the name resolves to that address.
+   - An IP address must be on this machine already: give it to the new machine first.
+4. For a DNS name, update its record to the new machine's address.
 
-The workers reconnect on their next pass, without joining again: the CA is the same, so the new server's certificate chains to the CA each worker trusts, and each worker's certificate chains to the CA the server trusts. The server's own replicas start again on the new machine. Replicas that ran on workers keep running there. `scripts/integration-cluster.sh` tests this with three nodes in Docker: it backs up a running server, destroys its container, data directory and Docker volume, restores the backup on a new container at the same IP, and checks that both workers, which were not restarted, reconnect, and that the apps return to their replica counts with no replica running twice.
+The workers reconnect on their next pass, without joining again: the CA is the same, so the new server's certificate chains to the CA each worker trusts, and each worker's certificate chains to the CA the server trusts. A worker that dials a name looks it up again for each new connection, so it reaches the new machine once its resolver has the new record; a short TTL on the record shortens that wait. The server's certificate and its node's address follow the new `serve` flags: the certificate is issued at each start for `--advertise` and the address the listeners bind, and the node's address, which `hivemind nodes` shows, is that address. Nothing in the restored store keeps the old one. The server's own replicas start again on the new machine. Replicas that ran on workers keep running there. `scripts/integration-cluster.sh` tests this with three nodes in Docker: it backs up a running server, destroys its container, data directory and Docker volume, restores the backup on a new container at the same IP, and checks that both workers, which were not restarted, reconnect, and that the apps return to their replica counts with no replica running twice.
 
 What the restored server does not have is everything that changed after the backup:
 
@@ -65,7 +67,7 @@ What the restored server does not have is everything that changed after the back
 - Volumes of replicas that ran on the old server are gone with its disk. Those replicas start with empty volumes. hivemind does not back up volumes.
 - Certificate expiries recorded after the backup are refreshed as each node calls in.
 
-A new address is not supported: the workers' `node.json` and the server's certificate both carry the old one. Join each worker again with an empty data directory and a new join token instead.
+A new IP address, for workers that joined an IP address, is not supported: each worker's `node.json` carries the old one. Join each worker again with an empty data directory and a new join token instead.
 
 ## The file
 

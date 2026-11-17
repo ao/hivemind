@@ -19,6 +19,7 @@ type fileConfig struct {
 	DataDir           *string `yaml:"data-dir"`
 	APIAddr           *string `yaml:"api-addr"`
 	Advertise         *string `yaml:"advertise"`
+	ClusterAddr       *string `yaml:"cluster-addr"`
 	ClusterPort       *string `yaml:"cluster-port"`
 	APITLSCert        *string `yaml:"api-tls-cert"`
 	APITLSKey         *string `yaml:"api-tls-key"`

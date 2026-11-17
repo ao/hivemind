@@ -102,6 +102,9 @@ certificates through the server.`,
 			if cfg.Advertise != "" {
 				return errors.New("--advertise does not apply to join: a worker runs no listener")
 			}
+			if cfg.ClusterAddr != "" {
+				return errors.New("--cluster-addr does not apply to join: a worker runs no cluster listener")
+			}
 			token, _ := cmd.Flags().GetString("token")
 			if token == "" {
 				return errors.New("--token is required: run hivemind join-token on the server to get one")
@@ -142,6 +145,7 @@ certificates through the server.`,
 	cmd.Flags().String("token", "", "join token from hivemind join-token on the server")
 	_ = cmd.Flags().SetAnnotation("token", noEnvAnnotation, []string{"true"})
 	cmd.Flags().Lookup("advertise").Hidden = true
+	cmd.Flags().Lookup("cluster-addr").Hidden = true
 	return cmd
 }
 

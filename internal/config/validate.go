@@ -43,6 +43,17 @@ func (c *Config) Validate() error {
 			fail("--advertise %q must be an IP address or a host name, without a port", c.Advertise)
 		}
 	}
+	// The cluster listeners bind one address, never a wildcard. serve checks
+	// that --advertise goes with it; join refuses it.
+	if c.ClusterAddr != "" {
+		ip, err := netip.ParseAddr(c.ClusterAddr)
+		switch {
+		case err != nil || ip.Zone() != "":
+			fail("--cluster-addr %q must be an IP address of this machine, without a port", c.ClusterAddr)
+		case ip.IsUnspecified():
+			fail("--cluster-addr %s is a wildcard address: give the address of this machine that workers reach", c.ClusterAddr)
+		}
+	}
 
 	if c.MetricsAddr != "" {
 		mh, _, err := splitListen(c.MetricsAddr)

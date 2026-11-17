@@ -97,6 +97,15 @@ func TestValidate(t *testing.T) {
 		{"metrics hostname rejected", func(c *Config) { c.MetricsAddr = "example.test:9100" }, "must be a loopback address"},
 		{"metrics missing port", func(c *Config) { c.MetricsAddr = "127.0.0.1" }, "must be host:port"},
 
+		// cluster address
+		{"cluster addr ok", func(c *Config) { c.Advertise = "hm.example.internal"; c.ClusterAddr = "10.0.0.9" }, ""},
+		{"cluster addr ipv6 ok", func(c *Config) { c.Advertise = "hm.example.internal"; c.ClusterAddr = "fd00::9" }, ""},
+		{"cluster addr name rejected", func(c *Config) { c.ClusterAddr = "hm.example.internal" }, "must be an IP address of this machine"},
+		{"cluster addr with port rejected", func(c *Config) { c.ClusterAddr = "10.0.0.9:4484" }, "must be an IP address of this machine"},
+		{"cluster addr zone rejected", func(c *Config) { c.ClusterAddr = "fe80::1%eth0" }, "must be an IP address of this machine"},
+		{"cluster addr wildcard rejected", func(c *Config) { c.ClusterAddr = "0.0.0.0" }, "is a wildcard address"},
+		{"cluster addr v6 wildcard rejected", func(c *Config) { c.ClusterAddr = "::" }, "is a wildcard address"},
+
 		// cluster port
 		{"cluster port 0", func(c *Config) { c.ClusterPort = 0 }, "not in 1-65534"},
 		{"cluster port too big", func(c *Config) { c.ClusterPort = 65536 }, "not in 1-65534"},

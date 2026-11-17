@@ -29,7 +29,7 @@ standard error with an ` + "`error:`" + ` prefix.
 // envFlags are the flags that can also be set from the environment, as
 // HIVEMIND_ followed by the flag name in upper case with underscores.
 var envFlags = map[string]bool{
-	"config": true, "data-dir": true, "api-addr": true, "advertise": true, "cluster-port": true,
+	"config": true, "data-dir": true, "api-addr": true, "advertise": true, "cluster-addr": true, "cluster-port": true,
 	"api-tls-cert": true, "api-tls-key": true, "docker-host": true, "log-level": true, "log-format": true,
 	"metrics-addr": true, "reconcile-interval": true, "server": true, "token": true, "client-config": true,
 	"min-ready": true, "route-addr": true, "route-http-port": true, "route-https-port": true, "acme-email": true,
