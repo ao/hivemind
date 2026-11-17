@@ -40,7 +40,8 @@ type Options struct {
 	// name is the service name.
 	Prefix string
 	// Lookup returns a variable from the caller's environment. A nil Lookup
-	// finds nothing.
+	// finds nothing. It is never asked for a variable that starts with
+	// HIVEMIND_: a file that refers to one is refused.
 	Lookup func(name string) (string, bool)
 	// DotEnv is the content of the .env file beside the compose file, or nil
 	// when there is none. Lookup takes precedence over it.
@@ -140,6 +141,16 @@ func Convert(data []byte, opts Options) (*Result, error) {
 	root, err := parse(data)
 	if err != nil {
 		return nil, err
+	}
+	// interpolate refuses hivemind's own variables before it looks them
+	// up; the lookup does not return them either.
+	if look := opts.Lookup; look != nil {
+		opts.Lookup = func(k string) (string, bool) {
+			if isOwnVariable(k) {
+				return "", false
+			}
+			return look(k)
+		}
 	}
 	env := map[string]string{}
 	if opts.DotEnv != nil {

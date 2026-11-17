@@ -18,6 +18,9 @@ import (
 //   - unquoted and double-quoted values are interpolated, from lookup first
 //     and then from the lines above.
 //
+// A line that sets one of hivemind's own variables (HIVEMIND_*) is refused,
+// as a reference to one is.
+//
 // Errors give line numbers, never values.
 func parseDotEnv(data []byte, lookup func(string) (string, bool)) (map[string]string, error) {
 	if len(data) > MaxFileBytes {
@@ -47,6 +50,10 @@ func parseDotEnv(data []byte, lookup func(string) (string, bool)) (map[string]st
 		key = strings.TrimRight(key, " \t")
 		if !validVarName(key) {
 			problems = append(problems, Problem{path, "want VAR=VALUE, where VAR is letters, digits and underscores, not starting with a digit"})
+			continue
+		}
+		if isOwnVariable(key) {
+			problems = append(problems, Problem{path, fmt.Sprintf("%s: .env cannot set the variables that start with %s: the compose file cannot use them, and the hivemind CLI reads its settings from its own environment, not from .env", key, ownPrefix)})
 			continue
 		}
 		if !hasEq {

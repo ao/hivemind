@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"log/slog"
 	"net/http"
@@ -148,6 +149,32 @@ func TestComposeConvertErrors(t *testing.T) {
 		if err != nil && strings.Contains(err.Error(), "s3cr3t") {
 			t.Errorf("%v: the error holds an environment value: %v", c.args, err)
 		}
+	}
+}
+
+// The security review's file: ${HIVEMIND_TOKEN} in environment copied the
+// admin token into the container and into what convert printed. It is
+// refused, by convert and by deploy before anything is sent, and the token
+// is in no output.
+func TestComposeRefusesHivemindVariables(t *testing.T) {
+	isolate(t)
+	const token = "hm_admin-token-from-the-environment"
+	t.Setenv(envToken, token)
+	t.Setenv("HARMLESS", "x")
+	path := writeCompose(t, "services:\n  web:\n    image: nginx\n    environment:\n      HARMLESS_LOOKING: ${HIVEMIND_TOKEN}\n", "")
+	want := "services.web.environment.HARMLESS_LOOKING: variable HIVEMIND_TOKEN: a compose file cannot use the variables that start with HIVEMIND_"
+	for _, args := range [][]string{{"compose", "convert", path}, {"compose", "deploy", path, "--server", "http://127.0.0.1:1"}} {
+		out, errOut, err := run(t, "", args...)
+		if err == nil || !strings.Contains(err.Error(), want) {
+			t.Errorf("%v: %v, want %q", args, err, want)
+		}
+		if strings.Contains(out+errOut+fmt.Sprint(err), token) {
+			t.Errorf("%v: the output holds the token:\n%s%s%v", args, out, errOut, err)
+		}
+	}
+	dotenv := writeCompose(t, "services:\n  web: {image: nginx, environment: {A: $A}}\n", "HIVEMIND_SERVER=https://other:4483\nA=1\n")
+	if _, _, err := run(t, "", "compose", "convert", dotenv); err == nil || !strings.Contains(err.Error(), ".env line 1: HIVEMIND_SERVER: .env cannot set") {
+		t.Errorf(".env with HIVEMIND_SERVER: %v", err)
 	}
 }
 

@@ -765,3 +765,70 @@ func TestProjectName(t *testing.T) {
 		}
 	}
 }
+
+// A file that refers to one of hivemind's own variables, such as
+// HIVEMIND_TOKEN, is refused, with or without a default and in any case,
+// and the error names the variable, not its value. The lookup is never
+// asked for one. A .env file may not set one, nor refer to one; it may set
+// other variables.
+func TestOwnVariablesRefused(t *testing.T) {
+	const token = "hm_admin-token-value"
+	var asked []string
+	look := func(k string) (string, bool) {
+		asked = append(asked, k)
+		v, ok := map[string]string{"HIVEMIND_TOKEN": token, "HIVEMIND_SERVER": "https://h:4483", "hivemind_token": token, "OK": "fine"}[k]
+		return v, ok
+	}
+	for _, tc := range []struct{ file, name string }{
+		{web("environment: {T: '${HIVEMIND_TOKEN}'}"), "HIVEMIND_TOKEN"},
+		{web("environment: {T: $HIVEMIND_TOKEN}"), "HIVEMIND_TOKEN"},
+		{web("environment: ['T=${HIVEMIND_TOKEN:-none}']"), "HIVEMIND_TOKEN"},
+		{web("environment: {T: '${HIVEMIND_TOKEN?}'}"), "HIVEMIND_TOKEN"},
+		{web("environment: {T: '${hivemind_token}'}"), "hivemind_token"},
+		{web("environment: {T: '${UNSET:-${HIVEMIND_SERVER}}'}"), "HIVEMIND_SERVER"},
+		{web("command: 'echo $HIVEMIND_TOKEN'"), "HIVEMIND_TOKEN"},
+		{"name: ${HIVEMIND_PROJECT:-shop}\n" + web(""), "HIVEMIND_PROJECT"},
+		{"services:\n  web:\n    image: 'nginx:${HIVEMIND_TAG:-1}'\n", "HIVEMIND_TAG"},
+	} {
+		file, name := tc.file, tc.name
+		asked = nil
+		_, err := Convert([]byte(file), Options{Lookup: look})
+		want := "variable " + name + ": a compose file cannot use the variables that start with HIVEMIND_"
+		if err == nil || !strings.Contains(err.Error(), want) {
+			t.Errorf("%q: %v, want %q", file, err, want)
+			continue
+		}
+		if strings.Contains(err.Error(), token) {
+			t.Errorf("%q: the error holds the token: %v", file, err)
+		}
+		for _, k := range asked {
+			if strings.HasPrefix(strings.ToUpper(k), "HIVEMIND_") {
+				t.Errorf("%q: the lookup was asked for %s", file, k)
+			}
+		}
+	}
+
+	// Names that only contain the word are other variables.
+	res, err := Convert([]byte(web("environment: {A: '${MY_HIVEMIND_TOKEN:-a}', B: '${HIVEMINDX:-b}', C: $OK}")), Options{Lookup: look})
+	if err != nil || res.Apps[0].Spec.Env["A"] != "a" || res.Apps[0].Spec.Env["B"] != "b" || res.Apps[0].Spec.Env["C"] != "fine" {
+		t.Fatalf("other variables: %v %+v", err, res)
+	}
+
+	file := web("environment: {T: $T}")
+	for _, tc := range []struct{ dotenv, want string }{
+		{"HIVEMIND_SERVER=https://elsewhere\nT=x\n", ".env line 1: HIVEMIND_SERVER: .env cannot set the variables that start with HIVEMIND_"},
+		{"export hivemind_token=x\nT=x\n", ".env line 1: hivemind_token: .env cannot set the variables"},
+		{"T=${HIVEMIND_TOKEN}\n", ".env line 1: variable HIVEMIND_TOKEN: a compose file cannot use"},
+		{"T=\"$HIVEMIND_TOKEN\"\n", ".env line 1: variable HIVEMIND_TOKEN: a compose file cannot use"},
+	} {
+		dotenv, want := tc.dotenv, tc.want
+		_, err := Convert([]byte(file), Options{Lookup: look, DotEnv: []byte(dotenv)})
+		if err == nil || !strings.Contains(err.Error(), want) || strings.Contains(err.Error(), token) {
+			t.Errorf(".env %q: %v, want %q", dotenv, err, want)
+		}
+	}
+	res, err = Convert([]byte(file), Options{Lookup: look, DotEnv: []byte("T=from-dotenv\n")})
+	if err != nil || res.Apps[0].Spec.Env["T"] != "from-dotenv" {
+		t.Fatalf(".env with another variable: %v %+v", err, res)
+	}
+}

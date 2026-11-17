@@ -32,9 +32,11 @@ func composeCmd() *cobra.Command {
 Only part of Compose is read. Any other key is refused, with its path and a
 reason, and every refusal is listed in one error. Variables come from the
 environment, then from a .env file beside the compose file, and a variable
-that is not set and has no default is an error. A port with no address is
-published on 127.0.0.1, where Compose would publish it on every interface.
-Apps do not find each other by service name. See docs/compose.md.`,
+that is not set and has no default is an error. A file that uses a variable
+that starts with HIVEMIND_, such as HIVEMIND_TOKEN, is refused, and so is a
+.env that sets one. A port with no address is published on 127.0.0.1, where
+Compose would publish it on every interface. Apps do not find each other by
+service name. See docs/compose.md.`,
 	}
 	cmd.AddCommand(composeConvertCmd(), composeDeployCmd(), composeDeleteCmd())
 	return cmd

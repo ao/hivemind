@@ -16,6 +16,9 @@ import (
 // One rule is stricter than Compose: a variable that is not set, with no
 // default, is an error. Compose substitutes an empty string and warns.
 //
+// A variable whose name starts with HIVEMIND_, in any case, is refused
+// (ownVariable), default or not.
+//
 // Errors name variables and never hold their values.
 func interpolate(s string, lookup func(string) (string, bool)) (string, error) {
 	return interpolateDepth(s, lookup, 0)
@@ -57,6 +60,9 @@ func interpolateDepth(s string, lookup func(string) (string, bool), depth int) (
 			j := i + 2
 			for j < len(s) && isNameChar(s[j]) {
 				j++
+			}
+			if err := ownVariable(s[i+1 : j]); err != nil {
+				return "", err
 			}
 			v, err := lookupSet(s[i+1:j], lookup)
 			if err != nil {
@@ -103,6 +109,9 @@ func braced(body string, lookup func(string) (string, bool), depth int) (string,
 		return "", errors.New("a ${...} must start with a variable name: letters, digits and underscores, not starting with a digit")
 	}
 	name, rest := body[:n], body[n:]
+	if err := ownVariable(name); err != nil {
+		return "", err
+	}
 	if rest == "" {
 		return lookupSet(name, lookup)
 	}
@@ -129,6 +138,28 @@ func braced(body string, lookup func(string) (string, bool), depth int) (string,
 		return "", fmt.Errorf("variable %s is not set", name)
 	}
 	return "", fmt.Errorf("variable %s is empty", name)
+}
+
+// ownPrefix starts the names of the variables the hivemind CLI reads, such
+// as HIVEMIND_TOKEN, the admin token, and HIVEMIND_SERVER.
+const ownPrefix = "HIVEMIND_"
+
+// isOwnVariable reports whether name is one of hivemind's own variables:
+// it starts with ownPrefix, in any case, since Windows reads variable names
+// without regard to case.
+func isOwnVariable(name string) bool {
+	return len(name) >= len(ownPrefix) && strings.EqualFold(name[:len(ownPrefix)], ownPrefix)
+}
+
+// ownVariable refuses a reference to one of hivemind's own variables. A
+// compose file, which may come from anyone, must not be able to copy the
+// admin token into a container's environment, where its author's image
+// can read it, or into what convert prints.
+func ownVariable(name string) error {
+	if isOwnVariable(name) {
+		return fmt.Errorf("variable %s: a compose file cannot use the variables that start with %s, which hold the hivemind CLI's own settings, the admin token among them", name, ownPrefix)
+	}
+	return nil
 }
 
 func lookupSet(name string, lookup func(string) (string, bool)) (string, error) {
