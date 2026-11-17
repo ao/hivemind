@@ -232,8 +232,11 @@ client_drop() {
 	ev client "drop router=$ip"
 }
 
+# Two calls: a shell whose command line names certwatch.sh would match the
+# pkill pattern, and kill itself before it starts the new one.
 certwatch_restart() {
-	out "sudo pkill -f '/var/lib/soak-client/[c]ertwatch.sh'; sudo setsid nohup $CDIR/certwatch.sh '$HOSTS' '${IPS[*]}' >/dev/null 2>&1 </dev/null &"
+	out "sudo pkill -f '/var/lib/soak-client/[c]ertwatch.sh'; true"
+	out "sudo setsid nohup $CDIR/certwatch.sh '$HOSTS' '${IPS[*]}' >/dev/null 2>&1 </dev/null &"
 }
 
 # chall_update: challtestsrv answers each routed host with the nodes of the

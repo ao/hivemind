@@ -479,10 +479,12 @@ routes_watch() {
 #         then change the name's record (dns_set NEWIP);
 #   ip    the server advertises its address: restore, serve --advertise NEWIP,
 #         then move each worker with set-server (set_server_all NEWIP).
-# Until every worker is ready, the cluster has converged and every replica runs.
+# Until every worker is ready, the cluster has converged and every replica
+# runs. NAME (default lose-server-MODE) names the scenario; DNS_DELAY
+# delays the record's change, in seconds.
 server_move() {
-	local new=$1 newip=$2 mode=$3 name=lose-server-$3
-	local pre=$SOAK_DIR/pre-lose-server-$3.tsv cur=$SOAK_DIR/measure-lose-server-$3.tsv
+	local new=$1 newip=$2 mode=$3 name=${4:-lose-server-$3}
+	local pre=$SOAK_DIR/pre-$name.tsv cur=$SOAK_DIR/measure-$name.tsv
 	local old=$SERVER oldip=$SERVER_IP end t d v api=up p22=up np22=down phase=wait-down kept="" k=0 rpid="" mpid=""
 	local n s ready="" conv="" allrun="" dupl="" i t0 sid
 	[ -s "$SOAK_DIR/backup.tar" ] || die "no backup; run server-backup first"
@@ -547,8 +549,10 @@ server_move() {
 			if [ "$api" = up ]; then
 				# the operator's steps: the server's address for the workers;
 				# the routed hosts' records name the new machine instead of the old
+				# DNS_DELAY: seconds between the API up and the record's change,
+				# as a record with a TTL would take to reach the workers
 				case "$mode" in
-				name) dns_set "$newip" >>"$SOAK_DIR/restore.out" 2>&1 & ;;
+				name) (sleep "${DNS_DELAY:-0}" && dns_set "$newip") >>"$SOAK_DIR/restore.out" 2>&1 & ;;
 				ip) set_server_all "$newip" >>"$SOAK_DIR/restore.out" 2>&1 & ;;
 				esac
 				mpid=$!
