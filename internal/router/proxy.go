@@ -29,8 +29,11 @@ const (
 	upstreamMaxIdlePerHost  = 64
 	maxResponseHeaderBytes  = 64 << 10
 	// downFor is how long an endpoint whose dial failed is skipped. After it,
-	// the endpoint is tried again in its turn.
-	downFor = 3 * time.Second
+	// the endpoint is tried again in its turn. Each failure in a row after
+	// that doubles the time, up to downForMost; a request that gets through
+	// ends the run, and so does the endpoint leaving the table.
+	downFor     = 3 * time.Second
+	downForMost = 30 * time.Second
 
 	// upstreamUserTimeout is TCP_USER_TIMEOUT on Linux: how long data the
 	// replica's machine has not acknowledged may wait before the connection
@@ -60,6 +63,45 @@ type endpoint struct {
 	addr      string
 	tr        *http.Transport
 	downUntil atomic.Int64 // unix nanoseconds
+	// fails is the failures in a row, each counted once per down mark.
+	// mu orders its changes with downUntil's.
+	fails atomic.Int32
+	mu    sync.Mutex
+}
+
+// failed marks the endpoint down after a failure at now, and returns for
+// how long: downFor after the first failure in a row, doubling with each
+// that follows, up to downForMost. While the server's machine was gone in
+// the third soak, the workers' routers dialled its dead replicas every 3 s,
+// and each dial held a live request for the 2 s dial timeout. A failure
+// while the endpoint is already marked down, as of a request that tried it
+// last because every other endpoint failed too, or of one that raced
+// another to it, does not lengthen the mark and returns 0.
+func (e *endpoint) failed(now time.Time) time.Duration {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	if e.downUntil.Load() > now.UnixNano() {
+		return 0
+	}
+	n := e.fails.Add(1)
+	d := downFor
+	for i := int32(1); i < n && d < downForMost; i++ {
+		d *= 2
+	}
+	d = min(d, downForMost)
+	e.downUntil.Store(now.Add(d).UnixNano())
+	return d
+}
+
+// ok ends a run of failures: the endpoint answered.
+func (e *endpoint) ok() {
+	if e.fails.Load() == 0 && e.downUntil.Load() == 0 {
+		return
+	}
+	e.mu.Lock()
+	e.fails.Store(0)
+	e.downUntil.Store(0)
+	e.mu.Unlock()
 }
 
 func newEndpoint(addr string) *endpoint {
@@ -343,8 +385,9 @@ func dropH2C(h http.Header) {
 }
 
 // setTable replaces the routing table. Endpoints that stay keep their
-// connections and their down marks, and a route that stays keeps its place
-// in the round-robin; endpoints that leave close their idle connections. A
+// connections, their down marks and their failures in a row, and a route
+// that stays keeps its place in the round-robin; endpoints that leave close
+// their idle connections, and come back with no failures. A
 // request in flight to one finishes. A path listed twice for one host keeps
 // its first entry; the table's validation refuses that before it gets here.
 func (p *proxy) setTable(t Table) {
@@ -471,7 +514,8 @@ func (p *proxy) upstreamFailed(w http.ResponseWriter, r *http.Request, err error
 
 // balancer is the proxy's RoundTripper. It sends the request to the host's
 // endpoints in round-robin order. An endpoint whose dial fails is marked down
-// for downFor and the next one is tried, as long as nothing of the request
+// (endpoint.failed: downFor, doubling while its dials keep failing, up to
+// downForMost) and the next one is tried, as long as nothing of the request
 // body has been read: a request whose body has gone to one replica is not
 // sent to another.
 type balancer struct{ p *proxy }
@@ -494,7 +538,7 @@ func (b balancer) RoundTrip(req *http.Request) (*http.Response, error) {
 		}
 		resp, err := e.tr.RoundTrip(out)
 		if err == nil {
-			e.downUntil.Store(0)
+			e.ok()
 			return resp, nil
 		}
 		lastErr = err
@@ -508,14 +552,14 @@ func (b balancer) RoundTrip(req *http.Request) (*http.Response, error) {
 			if !retryable(req, err) || guard != nil {
 				return nil, err
 			}
-			e.downUntil.Store(b.p.now().Add(downFor).UnixNano())
+			e.failed(b.p.now())
 			b.p.metrics.upstreamError(info.host, "connection")
 			b.p.log.Debug("replica's connection failed before it replied; trying the next", "host", info.host, "endpoint", e.addr, "err", err)
 			continue
 		}
-		e.downUntil.Store(b.p.now().Add(downFor).UnixNano())
+		skip := e.failed(b.p.now())
 		b.p.metrics.upstreamError(info.host, "dial")
-		b.p.log.Debug("replica unreachable; trying the next", "host", info.host, "endpoint", e.addr, "err", err)
+		b.p.log.Debug("replica unreachable; trying the next", "host", info.host, "endpoint", e.addr, "skipped_for", skip, "err", err)
 		if guard != nil && guard.read.Load() {
 			return nil, err
 		}
