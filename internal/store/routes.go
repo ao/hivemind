@@ -133,27 +133,30 @@ func (s *Store) RouteTable(ctx context.Context) ([]Route, error) {
 		return out, nil
 	}
 
-	// In the lease timeout after serve starts (SetStarted), a node that was
-	// up when the last lease before the start was renewed keeps its
-	// endpoints until it reports, as ReconcileNodes keeps it: its containers
-	// ran on while the server was away, and its router served them. A node
-	// that was already lost then is not brought back. The server's own
-	// node's reports from before the start are left out: after a restore on
-	// a new machine those containers are gone, and its agent reports again
-	// within a pass. The soak through the routers saw 502s for a second
-	// after a restore, from the restored machine's stale endpoints.
-	timeout := int64(scheduler.DefaultLeaseTimeout)
-	cutoff := s.now().UnixNano() - timeout
+	// A node that is waiting for its first report after serve started (see
+	// Waiting) keeps the endpoints it last reported for the whole start
+	// grace, as ReconcileNodes keeps its replicas: its containers ran on
+	// while the server was away, and its router served them. A stale
+	// endpoint costs a router a dial before it tries the next replica; none
+	// costs a 503. A node that was already lost before the start is not
+	// brought back. The server's own node's reports from before the start
+	// are left out: after a restore on a new machine those containers are
+	// gone, and its agent reports again within a pass. The soak through the
+	// routers saw 502s for a second after a restore, from the restored
+	// machine's stale endpoints.
+	now := s.now()
+	cutoff := now.UnixNano() - int64(scheduler.DefaultLeaseTimeout)
+	waitFrom, waitBefore := s.waitWindow(now)
 	started := s.startedAt()
 	rows, err = s.rdb.QueryContext(ctx, `SELECT c.app, c.route_ports, n.address FROM container_status c JOIN nodes n ON n.id = c.node_id
 		WHERE c.ready = 1 AND c.route_ports != '' AND n.address != ''
-		AND (n.last_lease >= ? OR (? >= ? AND n.last_lease >= (SELECT max(last_lease) FROM nodes WHERE last_lease < ?) - ?))
+		AND (n.last_lease >= ? OR (n.last_lease >= ? AND n.last_lease < ?))
 		AND NOT (c.node_id = (SELECT node_id FROM cluster WHERE id = 1) AND c.updated_at < ?)
 		AND (EXISTS (SELECT 1 FROM replicas r WHERE r.app = c.app AND r.idx = c.idx AND r.node_id = c.node_id
 				AND r.generation = c.generation AND r.desired = 'running')
 			OR EXISTS (SELECT 1 FROM surges g WHERE g.app = c.app AND g.idx = c.idx AND g.node_id = c.node_id
 				AND g.generation = c.generation AND g.desired = 'running'))
-		ORDER BY c.app, c.node_id, c.name`, cutoff, started, cutoff, started, timeout, started)
+		ORDER BY c.app, c.node_id, c.name`, cutoff, waitFrom, waitBefore, started)
 	if err != nil {
 		return nil, err
 	}

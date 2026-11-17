@@ -307,7 +307,7 @@ func settings(opts Options) []setting {
 			func(c *Config) *time.Duration { return &c.MinReady },
 			func(f *fileConfig) *string { return f.MinReady }),
 		// The default is store.DefaultStartGrace.
-		dur("start-grace", "how long after serve starts a worker that was up before it waits for its first report, keeping its replicas, before it is lost; at least 15s", "2m",
+		dur("start-grace", "how long after serve starts a worker that was up before it waits for its first report, keeping its replicas and its routes, before it is lost; at least 15s", "2m",
 			func(c *Config) *time.Duration { return &c.StartGrace },
 			func(f *fileConfig) *string { return f.StartGrace }),
 		str("route-addr", "IP address the HTTPS router listens on, such as 0.0.0.0 for every interface; empty means no router on this node", "",

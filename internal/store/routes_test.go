@@ -386,9 +386,66 @@ func TestRouteTableAfterAStart(t *testing.T) {
 		t.Fatalf("after the server's report: %v", got)
 	}
 
-	// The worker never reports: it leaves the table when the grace ends.
-	e.clock.Advance(15 * time.Second)
+	// The worker never reports. It stays in the table past the lease
+	// timeout, for the whole start grace, and leaves when the grace ends.
+	e.clock.Advance(89 * time.Second)
+	if got := e.table()["b.example.com"]; !slices.Equal(got, []string{"10.0.0.2:33000"}) {
+		t.Fatalf("90 s after the start, the worker silent: %v; want it kept in the grace", got)
+	}
+	e.clock.Advance(DefaultStartGrace - 90*time.Second)
 	if got := e.table()["b.example.com"]; len(got) != 0 {
-		t.Fatalf("16 s after the start, the worker silent: %v", got)
+		t.Fatalf("when the grace ended, the worker silent: %v", got)
+	}
+}
+
+// A server restored from a backup, whose workers have not reported for two
+// minutes, renews its own node's lease as it starts, before it records the
+// start, as serve did. The routing table must still list every worker's
+// endpoints, through the whole start grace. In the third soak it had none
+// for the first seconds after each restore, until the server's own node
+// renewed its lease again: the reference for the grace was the server's
+// fresh lease, and every worker was more than 15 s older than that. The
+// routers answered 503 for hosts whose replicas all ran on workers.
+func TestRouteTableAfterARestore(t *testing.T) {
+	e := newRolloutEnv(t)
+	if err := e.s.InitCluster(e.ctx, Cluster{AdminTokenHash: [32]byte{1}, NodeID: node1}); err != nil {
+		t.Fatal(err)
+	}
+	e.renewAt(node1, "10.0.0.1")
+	e.renewAt(nodeB, "10.0.0.2")
+	e.put(routed("blocker", 2, "b.example.com")) // both on nodeB
+	e.report(nodeB, routedContainer("blocker", 0, 1, 33000), routedContainer("blocker", 1, 1, 33001))
+	want := []string{"10.0.0.2:33000", "10.0.0.2:33001"}
+	if got := e.table()["b.example.com"]; !slices.Equal(got, want) {
+		t.Fatalf("before the outage: %v", got)
+	}
+
+	// The backup is restored on a new machine two minutes later.
+	e.clock.Advance(2 * time.Minute)
+	e.renewAt(node1, "10.0.0.9")
+	e.clock.Advance(time.Millisecond)
+	started := e.clock.Now()
+	if err := e.s.SetStarted(e.ctx, started, DefaultStartGrace); err != nil {
+		t.Fatal(err)
+	}
+	// Read before the server's agent first renews its lease, and after.
+	for _, d := range []time.Duration{0, time.Second, 16 * time.Second, 119 * time.Second} {
+		e.clock.t = started.Add(d)
+		if got := e.table()["b.example.com"]; !slices.Equal(got, want) {
+			t.Fatalf("%s after the start, the worker not yet back: %v; want %v", d, got, want)
+		}
+		e.renewAt(node1, "10.0.0.9") // the server's agent
+	}
+	e.clock.t = started.Add(DefaultStartGrace)
+	e.renewAt(node1, "10.0.0.9")
+	if got := e.table()["b.example.com"]; len(got) != 0 {
+		t.Fatalf("when the grace ended: %v, want none", got)
+	}
+	// The worker comes back and reports: its replicas are in the table
+	// again.
+	e.renewAt(nodeB, "10.0.0.2")
+	e.report(nodeB, routedContainer("blocker", 0, 1, 33000), routedContainer("blocker", 1, 1, 33001))
+	if got := e.table()["b.example.com"]; !slices.Equal(got, want) {
+		t.Fatalf("after the worker's report: %v", got)
 	}
 }

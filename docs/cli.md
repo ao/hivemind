@@ -303,7 +303,7 @@ hivemind init [flags]
 | `--route-http-port` | string | `80` | `HIVEMIND_ROUTE_HTTP_PORT` | port of the router's HTTP listener, for ACME HTTP-01 challenges and redirects to https |
 | `--route-https-port` | string | `443` | `HIVEMIND_ROUTE_HTTPS_PORT` | port of the router's HTTPS listener |
 | `--route-max-conns-per-ip` | string | `256` | `HIVEMIND_ROUTE_MAX_CONNS_PER_IP` | most connections the router keeps open from one client IP address (an IPv6 /64), over both its ports; 0 means no limit, for a router behind a proxy that does not pass client addresses |
-| `--start-grace` | string | `2m` | `HIVEMIND_START_GRACE` | how long after serve starts a worker that was up before it waits for its first report, keeping its replicas, before it is lost; at least 15s |
+| `--start-grace` | string | `2m` | `HIVEMIND_START_GRACE` | how long after serve starts a worker that was up before it waits for its first report, keeping its replicas and its routes, before it is lost; at least 15s |
 
 ### hivemind join
 
@@ -358,7 +358,7 @@ hivemind join <server> [flags]
 | `--route-http-port` | string | `80` | `HIVEMIND_ROUTE_HTTP_PORT` | port of the router's HTTP listener, for ACME HTTP-01 challenges and redirects to https |
 | `--route-https-port` | string | `443` | `HIVEMIND_ROUTE_HTTPS_PORT` | port of the router's HTTPS listener |
 | `--route-max-conns-per-ip` | string | `256` | `HIVEMIND_ROUTE_MAX_CONNS_PER_IP` | most connections the router keeps open from one client IP address (an IPv6 /64), over both its ports; 0 means no limit, for a router behind a proxy that does not pass client addresses |
-| `--start-grace` | string | `2m` | `HIVEMIND_START_GRACE` | how long after serve starts a worker that was up before it waits for its first report, keeping its replicas, before it is lost; at least 15s |
+| `--start-grace` | string | `2m` | `HIVEMIND_START_GRACE` | how long after serve starts a worker that was up before it waits for its first report, keeping its replicas and its routes, before it is lost; at least 15s |
 | `--token` | string | - | - | join token from hivemind join-token on the server |
 
 ### hivemind join-token
@@ -866,7 +866,7 @@ hivemind serve [flags]
 | `--route-http-port` | string | `80` | `HIVEMIND_ROUTE_HTTP_PORT` | port of the router's HTTP listener, for ACME HTTP-01 challenges and redirects to https |
 | `--route-https-port` | string | `443` | `HIVEMIND_ROUTE_HTTPS_PORT` | port of the router's HTTPS listener |
 | `--route-max-conns-per-ip` | string | `256` | `HIVEMIND_ROUTE_MAX_CONNS_PER_IP` | most connections the router keeps open from one client IP address (an IPv6 /64), over both its ports; 0 means no limit, for a router behind a proxy that does not pass client addresses |
-| `--start-grace` | string | `2m` | `HIVEMIND_START_GRACE` | how long after serve starts a worker that was up before it waits for its first report, keeping its replicas, before it is lost; at least 15s |
+| `--start-grace` | string | `2m` | `HIVEMIND_START_GRACE` | how long after serve starts a worker that was up before it waits for its first report, keeping its replicas and its routes, before it is lost; at least 15s |
 
 ### hivemind status
 
