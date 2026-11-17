@@ -579,8 +579,12 @@ func runServe(ctx context.Context, cfg *config.Config, log *slog.Logger, rt runt
 	// Workers post their routers' counters through the cluster listener, and
 	// /metrics shows them.
 	var routerReports *nodeapi.RouterReports
+	// The cluster listener records how each worker's router reads the
+	// routing table, and the API warns about routers that cannot read paths.
+	var routeReaders *nodeapi.RouteReaders
 	if cfg.Advertise != "" {
 		routerReports = nodeapi.NewRouterReports()
+		routeReaders = nodeapi.NewRouteReaders()
 	}
 	// The router opens only with --route-addr. It is the one listener that
 	// may bind every address: it serves the apps' public traffic.
@@ -645,7 +649,7 @@ func runServe(ctx context.Context, cfg *config.Config, log *slog.Logger, rt runt
 		c, err := cluster.Listen(cluster.Config{Store: st, CA: ca, Tokens: pki.NewTokens(st.JoinTokens()),
 			Advertise: cfg.Advertise, Bind: nodeAddr, Port: cfg.ClusterPort, LocalNodeID: cl.NodeID,
 			Logger: log.With("component", "cluster"), NodeCertLifetime: lifetime, Logs: logs,
-			RouterReports: routerReports, Version: version})
+			RouterReports: routerReports, RouteReaders: routeReaders, Version: version})
 		if err != nil {
 			ln.Close()
 			if mln != nil {

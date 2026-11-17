@@ -271,6 +271,22 @@ ALTER TABLE nodes ADD COLUMN version TEXT NOT NULL DEFAULT '';
 	`
 ALTER TABLE rollouts ADD COLUMN step_seen INTEGER NOT NULL DEFAULT 0;
 `,
+	// 15: path routes. app_routes replaces app_hosts: a route is a host and
+	// a path prefix, '' for the whole host, and the pair is the primary key,
+	// so one host can have routes in several apps, one app for each path.
+	// Every row of app_hosts becomes a whole host route.
+	`
+CREATE TABLE app_routes (
+	host TEXT NOT NULL CHECK (host != ''),
+	path TEXT NOT NULL CHECK (path = '' OR (substr(path, 1, 1) = '/' AND path != '/')),
+	app  TEXT NOT NULL REFERENCES apps(name) ON DELETE CASCADE,
+	port INTEGER NOT NULL CHECK (port BETWEEN 1 AND 65535),
+	PRIMARY KEY (host, path)
+) STRICT;
+CREATE INDEX app_routes_app ON app_routes(app);
+INSERT INTO app_routes (host, path, app, port) SELECT host, '', app, port FROM app_hosts;
+DROP TABLE app_hosts;
+`,
 }
 
 // migrationNotes says in a few words what each migration adds, for the log:
@@ -290,6 +306,7 @@ var migrationNotes = []string{
 	"app origins",
 	"node versions",
 	"rollout copy times",
+	"path routes",
 }
 
 // SchemaVersion is the schema version this build writes.

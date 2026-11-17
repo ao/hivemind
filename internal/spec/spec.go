@@ -8,6 +8,7 @@ import (
 	"net/netip"
 	"path"
 	"regexp"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -28,11 +29,18 @@ type App struct {
 	Routes    []Route           `json:"routes,omitempty" yaml:"routes,omitempty"`
 }
 
-// Route sends HTTPS requests for Host, through the routers, to Port in the
-// app's containers. Host is an exact DNS name: no wildcard and no IP
-// address. A host belongs to one app at a time.
+// Route sends HTTPS requests for Host, or for the paths under Path on
+// Host, through the routers, to Port in the app's containers. Host is an
+// exact DNS name: no wildcard and no IP address. A host and path belong to
+// one app at a time; one host can have routes with different paths in
+// different apps.
 type Route struct {
 	Host string `json:"host" yaml:"host"`
+	// Path is a path prefix: the route takes the requests whose path is
+	// Path or starts with Path and "/". Empty, or "/", which Normalize
+	// makes empty, is the whole host: every path no other route takes.
+	// ValidatePath says what a path may hold.
+	Path string `json:"path,omitempty" yaml:"path,omitempty"`
 	// Port is the container port, as in Port.Container.
 	Port int `json:"port" yaml:"port"`
 }
@@ -99,10 +107,12 @@ const (
 	defaultProto = "tcp"
 )
 
-// Limits on routes. MaxRoutes is the most routes one app may have.
+// Limits on routes. MaxRoutes is the most routes one app may have, and
+// MaxRoutePathLen the longest path a route may have.
 const (
-	MaxRoutes  = 16
-	maxHostLen = 253
+	MaxRoutes       = 16
+	maxHostLen      = 253
+	MaxRoutePathLen = 256
 )
 
 // The smallest limits a container engine accepts. A nonzero resources.cpu or
@@ -149,6 +159,7 @@ func (a *App) Normalize() {
 	}
 	for i := range a.Routes {
 		a.Routes[i].Host = NormalizeHost(a.Routes[i].Host)
+		a.Routes[i].Path = NormalizePath(a.Routes[i].Path)
 	}
 	if len(a.Routes) == 0 {
 		a.Routes = nil
@@ -322,20 +333,120 @@ func (a *App) Validate() error {
 	if len(a.Routes) > MaxRoutes {
 		add("routes: at most %d", MaxRoutes)
 	}
-	hosts := map[string]bool{}
+	routes := map[RouteKey]bool{}
 	for i, r := range a.Routes {
 		if err := ValidateHost(r.Host); err != nil {
+			add("routes[%d]: %v", i, err)
+		}
+		if err := ValidatePath(r.Path); err != nil {
 			add("routes[%d]: %v", i, err)
 		}
 		if !validPort(r.Port) {
 			add("routes[%d]: port must be a container port between 1 and 65535", i)
 		}
-		if hosts[r.Host] {
+		switch k := r.Key(); {
+		case routes[k] && r.Path == "":
 			add("routes[%d]: host %q listed twice", i, r.Host)
+		case routes[k]:
+			add("routes[%d]: host %q with path %q listed twice", i, r.Host, r.Path)
+		default:
+			routes[k] = true
 		}
-		hosts[r.Host] = true
 	}
 	return errors.Join(errs...)
+}
+
+// RouteKey is what a route is known by: its host and path. Two routes with
+// one key cannot both exist, in one app or in two.
+type RouteKey struct {
+	Host, Path string
+}
+
+// Key returns the route's key.
+func (r Route) Key() RouteKey { return RouteKey{r.Host, r.Path} }
+
+// String is the key as people read it: the host, then the path, if any, as
+// in www.example.com/api.
+func (k RouteKey) String() string { return k.Host + k.Path }
+
+// NormalizePath returns a route path in the form Validate expects: "" for
+// the whole host, which may be written as "" or "/", and otherwise the path
+// without one trailing slash, so "/api/" is "/api", which takes /api/ too.
+// Nothing else is changed: a path that needs more is refused.
+func NormalizePath(p string) string {
+	if p == "/" {
+		return ""
+	}
+	if len(p) > 1 && strings.HasSuffix(p, "/") {
+		return p[:len(p)-1]
+	}
+	return p
+}
+
+// ValidatePath checks that p, normalised, can be a route's path: "" for the
+// whole host, or a prefix of at most MaxRoutePathLen bytes that starts with
+// "/" and has one or more segments, separated by "/". Each segment has one
+// or more of the letters, digits and the characters - . _ ~ ! $ & ' ( ) * +
+// , = : @, which RFC 3986 allows in a path segment as they are, and is not
+// "." or "..". Prefixes are compared as they are, so case matters.
+//
+// The router matches a prefix on the request's decoded path, so a prefix is
+// written decoded too, and "%" is refused rather than read: "/a%2Fb" would
+// be one segment to some apps and two to others. "?" and "#" end a path, a
+// "." or ".." segment means another path, and an empty one ("//") is
+// cleaned away from requests before they are matched. ";" is refused
+// because servlet containers read what follows it in a segment as
+// parameters, and strip it before they route. Spaces, control characters,
+// backslashes, the characters RFC 3986 does not allow in a path (" < > [ ]
+// ^ ` { | }) and anything outside ASCII are refused: a letter outside ASCII
+// has more than one spelling in Unicode, which would make two prefixes of
+// one name.
+func ValidatePath(p string) error {
+	switch {
+	case p == "":
+		return nil
+	case len(p) > MaxRoutePathLen:
+		return fmt.Errorf("path is longer than %d characters", MaxRoutePathLen)
+	case p[0] != '/':
+		return fmt.Errorf("path %q must start with /", truncHost(p))
+	}
+	for seg := range strings.SplitSeq(p[1:], "/") {
+		switch seg {
+		case "":
+			return fmt.Errorf("path %q has an empty segment (//); write each / once", truncHost(p))
+		case ".", "..":
+			return fmt.Errorf("path %q has a %s segment; write the path it means", truncHost(p), seg)
+		}
+		for i := 0; i < len(seg); i++ {
+			if !pathChar(seg[i]) {
+				return fmt.Errorf("path %q has %s, which a route path may not hold: use letters, digits and - . _ ~ ! $ & ' ( ) * + , = : @ between the slashes", truncHost(p), quoteChar(seg[i]))
+			}
+		}
+	}
+	return nil
+}
+
+// pathChar reports whether c may be in a segment of a route path: an
+// unreserved character or a sub-delimiter of RFC 3986, but ";", or ":" or
+// "@".
+func pathChar(c byte) bool {
+	switch {
+	case c >= 'a' && c <= 'z', c >= 'A' && c <= 'Z', c >= '0' && c <= '9':
+		return true
+	}
+	return strings.IndexByte("-._~!$&'()*+,=:@", c) >= 0
+}
+
+// quoteChar names a byte for a message: a printable character quoted, any
+// other byte in hex.
+func quoteChar(c byte) string {
+	switch {
+	case c == ' ':
+		return "a space"
+	case c > ' ' && c < 0x7f:
+		return strconv.QuoteRune(rune(c))
+	}
+	return fmt.Sprintf("byte 0x%02x", c)
 }
 
 // NormalizeHost returns a route host in the form Validate expects: trimmed,
@@ -382,13 +493,20 @@ func ValidateHost(h string) error {
 	return nil
 }
 
-// RouteHosts returns the hosts the app routes, in spec order.
+// RouteHosts returns the distinct hosts the app routes, in spec order.
 func (a App) RouteHosts() []string {
 	out := make([]string, 0, len(a.Routes))
 	for _, r := range a.Routes {
-		out = append(out, r.Host)
+		if !slices.Contains(out, r.Host) {
+			out = append(out, r.Host)
+		}
 	}
 	return out
+}
+
+// HasPathRoutes reports whether a route of the app has a path.
+func (a App) HasPathRoutes() bool {
+	return slices.ContainsFunc(a.Routes, func(r Route) bool { return r.Path != "" })
 }
 
 // RoutePorts returns the distinct container ports the app's routes name,

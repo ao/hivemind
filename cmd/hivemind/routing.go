@@ -47,7 +47,7 @@ func storeRoutes(st *store.Store) func(context.Context) (router.Table, error) {
 		}
 		t := make(router.Table, len(rt))
 		for _, r := range rt {
-			t[r.Host] = append(t[r.Host], router.Route{Endpoints: r.Endpoints})
+			t[r.Host] = append(t[r.Host], router.Route{Path: r.Path, Endpoints: r.Endpoints})
 		}
 		return t, nil
 	}
@@ -67,7 +67,7 @@ func nodeRoutes(c *nodeapi.Client, nodeID string, missing *nodeapi.MissingRoute)
 		}
 		t := make(router.Table, len(rs))
 		for _, r := range rs {
-			t[r.Host] = append(t[r.Host], router.Route{Endpoints: r.Endpoints})
+			t[r.Host] = append(t[r.Host], router.Route{Path: r.Path, Endpoints: r.Endpoints})
 		}
 		return t, nil
 	}

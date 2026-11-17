@@ -88,9 +88,11 @@ func decodeRoutePorts(s string) ([]RoutePort, error) {
 	return out, nil
 }
 
-// Route is one host in the routing table.
+// Route is one route in the routing table: a host, or a path prefix of one.
 type Route struct {
 	Host string
+	// Path is the route's path prefix, or "" for the whole host.
+	Path string
 	App  string
 	// Port is the container port the route names.
 	Port int
@@ -99,11 +101,15 @@ type Route struct {
 	Endpoints []string
 }
 
-// RouteTable returns the routing table, sorted by host. Every host that a
-// live app routes is in it, with or without endpoints.
+// Key is the route's host and path.
+func (r Route) Key() spec.RouteKey { return spec.RouteKey{Host: r.Host, Path: r.Path} }
+
+// RouteTable returns the routing table, sorted by host and then path, the
+// whole host first. Every route that a live app has is in it, with or
+// without endpoints.
 func (s *Store) RouteTable(ctx context.Context) ([]Route, error) {
-	rows, err := s.rdb.QueryContext(ctx, `SELECT h.host, h.app, h.port FROM app_hosts h JOIN apps a ON a.name = h.app
-		WHERE a.deleted = 0 ORDER BY h.host`)
+	rows, err := s.rdb.QueryContext(ctx, `SELECT h.host, h.path, h.app, h.port FROM app_routes h JOIN apps a ON a.name = h.app
+		WHERE a.deleted = 0 ORDER BY h.host, h.path`)
 	if err != nil {
 		return nil, err
 	}
@@ -111,7 +117,7 @@ func (s *Store) RouteTable(ctx context.Context) ([]Route, error) {
 	apps := map[string]bool{}
 	for rows.Next() {
 		var r Route
-		if err := rows.Scan(&r.Host, &r.App, &r.Port); err != nil {
+		if err := rows.Scan(&r.Host, &r.Path, &r.App, &r.Port); err != nil {
 			rows.Close()
 			return nil, err
 		}

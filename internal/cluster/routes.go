@@ -13,9 +13,15 @@ import (
 )
 
 // routes returns the routing table. Every node reads the whole table: a
-// router on any node serves every routed host.
+// router on any node serves every routed host. A router that asks for paths
+// gets every route; any other is of a build before path routes, and gets the
+// table it can read, one entry per host with no paths, in which a host with
+// path routes has no endpoints (nodeapi.HostTableFromStore). The server
+// logs a warning when such a router is first given that, and again when the
+// hosts change.
 func (a *nodeAPI) routes(w http.ResponseWriter, r *http.Request) {
-	if _, ok := a.node(w, r); !ok {
+	id, ok := a.node(w, r)
+	if !ok {
 		return
 	}
 	rt, err := a.st.RouteTable(r.Context())
@@ -23,7 +29,27 @@ func (a *nodeAPI) routes(w http.ResponseWriter, r *http.Request) {
 		a.fail(w, r, err)
 		return
 	}
-	writeJSON(w, http.StatusOK, nodeapi.RouteTableFromStore(rt))
+	version := nodeVersion(r)
+	if r.URL.Query().Get(nodeapi.RoutesPathsParam) == "1" {
+		a.readers.Seen(id, version, true, nil, a.now())
+		writeJSON(w, http.StatusOK, nodeapi.RouteTableFromStore(rt))
+		return
+	}
+	t, held := nodeapi.HostTableFromStore(rt)
+	if a.readers.Seen(id, version, false, held, a.now()) && len(held) > 0 {
+		a.log.Warn("this node's router is of a build before path routes, and answers 503 for the hosts that have them; upgrade the node",
+			"node", id, "version", firstNonEmpty(version, "none"), "hosts", held)
+	}
+	writeJSON(w, http.StatusOK, t)
+}
+
+func firstNonEmpty(s ...string) string {
+	for _, x := range s {
+		if x != "" {
+			return x
+		}
+	}
+	return ""
 }
 
 // tls serves one operation on the shared TLS storage: certmagic's Storage

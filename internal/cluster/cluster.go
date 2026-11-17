@@ -89,6 +89,10 @@ type Config struct {
 	// RouterReports keeps the router counters workers post, for the API's
 	// /metrics, which must share it. Nil drops them.
 	RouterReports *nodeapi.RouterReports
+	// RouteReaders keeps how each router read the routing table, for the
+	// API's warnings about routers that cannot read paths, which must share
+	// it. Nil keeps nothing.
+	RouteReaders *nodeapi.RouteReaders
 	// NodeCertLifetime is the lifetime of the certificates the server
 	// issues: at join, at renewal, and its own. Zero means
 	// pki.NodeCertLifetime. Only tests set it.

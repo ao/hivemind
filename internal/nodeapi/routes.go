@@ -11,6 +11,8 @@ import (
 	"net/http"
 	"net/http/httptrace"
 	"net/netip"
+	"slices"
+	"strings"
 	"sync"
 	"time"
 
@@ -52,16 +54,97 @@ func (c *Client) LocalAddress(ctx context.Context, nodeID string) (string, error
 	return ip.Unmap().String(), nil
 }
 
-// Routes returns the routing table.
+// Routes returns the routing table, with path routes: the router of this
+// build reads them. An older server ignores the parameter and sends whole
+// host routes only, which this build reads as well.
 func (c *Client) Routes(ctx context.Context, nodeID string) ([]Route, error) {
 	var t RouteTable
-	if err := c.do(ctx, http.MethodGet, RoutesPath(nodeID), nil, &t); err != nil {
+	if err := c.do(ctx, http.MethodGet, RoutesPath(nodeID)+"?"+RoutesPathsParam+"=1", nil, &t); err != nil {
 		return nil, err
 	}
 	if err := t.Validate(); err != nil {
 		return nil, fmt.Errorf("server sent a routing table that does not validate: %w", err)
 	}
 	return t.Routes, nil
+}
+
+// RouteReaderMaxAge is how long the server remembers a router's last read
+// of the routing table. Routers read it every second, so one that has not
+// read it for this long has stopped, or was upgraded and reads paths now.
+const RouteReaderMaxAge = time.Minute
+
+// RouteReaders keeps, on the server, how each worker's router last read the
+// routing table: with or without paths, and its version. A router of a
+// build before path routes reads it without, and answers 503 for the hosts
+// that have path routes (see HostTableFromStore); the server warns about
+// such routers in its log, in GET /v1/routes and in the status of the apps
+// that have path routes. It is safe for concurrent use; a nil one keeps
+// nothing.
+type RouteReaders struct {
+	mu sync.Mutex
+	m  map[string]routeRead
+}
+
+type routeRead struct {
+	version string
+	paths   bool
+	held    []string
+	at      time.Time
+}
+
+// OldRouter is a router that read the routing table without paths.
+type OldRouter struct {
+	Node string `json:"node"`
+	// Version is the version its node sent with the read, or "" for none.
+	Version string `json:"version"`
+	// Hosts are the hosts it was given with no endpoints because they have
+	// path routes, and answers 503 for. Empty while no host has one.
+	Hosts []string `json:"hosts"`
+}
+
+// NewRouteReaders returns an empty holder.
+func NewRouteReaders() *RouteReaders { return &RouteReaders{m: map[string]routeRead{}} }
+
+// Seen records a read of the table by node's router at at: with paths, or
+// without and with the hosts held from it. It reports whether the read
+// differs from the node's last one, in version, paths or held hosts, so the
+// caller logs a change once.
+func (rr *RouteReaders) Seen(node, version string, paths bool, held []string, at time.Time) bool {
+	if rr == nil {
+		return false
+	}
+	rr.mu.Lock()
+	defer rr.mu.Unlock()
+	last, ok := rr.m[node]
+	rr.m[node] = routeRead{version: version, paths: paths, held: held, at: at}
+	return !ok || last.version != version || last.paths != paths || !slices.Equal(last.held, held)
+}
+
+// Old returns the routers that read the table without paths within
+// RouteReaderMaxAge before now, sorted by node, and forgets the reads
+// older than that.
+func (rr *RouteReaders) Old(now time.Time) []OldRouter {
+	if rr == nil {
+		return nil
+	}
+	rr.mu.Lock()
+	defer rr.mu.Unlock()
+	var out []OldRouter
+	for node, r := range rr.m {
+		if now.Sub(r.at) > RouteReaderMaxAge {
+			delete(rr.m, node)
+			continue
+		}
+		if !r.paths {
+			hosts := slices.Clone(r.held)
+			if hosts == nil {
+				hosts = []string{}
+			}
+			out = append(out, OldRouter{Node: node, Version: r.version, Hosts: hosts})
+		}
+	}
+	slices.SortFunc(out, func(a, b OldRouter) int { return strings.Compare(a.Node, b.Node) })
+	return out
 }
 
 // TLS returns the node's view of the shared TLS storage on the server. It

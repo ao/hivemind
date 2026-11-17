@@ -14,6 +14,7 @@ import (
 	"fmt"
 	"io"
 	"net/netip"
+	"slices"
 	"strings"
 	"time"
 	"unicode"
@@ -123,17 +124,29 @@ type RoutePort struct {
 	HostPort int `json:"host_port"`
 }
 
-// Route is one host of the routing table and the address:port of each
-// replica that takes its traffic now.
+// Route is one route of the routing table, a whole host or a path prefix of
+// one, and the address:port of each replica that takes its traffic now.
+// Path is "" for the whole host, and left out then, so the entry of a whole
+// host route reads as it did before paths existed.
 type Route struct {
 	Host      string   `json:"host"`
+	Path      string   `json:"path,omitempty"`
 	Endpoints []string `json:"endpoints"`
 }
 
-// RouteTable is the reply to GET routes.
+// RouteTable is the reply to GET routes. A router that asks for paths, with
+// RoutesPathsParam, gets one entry per route (RouteTableFromStore); any
+// other router gets one per host and no paths (HostTableFromStore).
 type RouteTable struct {
 	Routes []Route `json:"routes"`
 }
+
+// RoutesPathsParam is the query parameter, with the value "1", with which a
+// router asks GET routes for path routes. A router of a build before path
+// routes sends none, and decodes the reply strictly, as every node API
+// reply is decoded: a path field would make it refuse the whole table, and
+// two entries for one host as well.
+const RoutesPathsParam = "paths"
 
 // TLSRequest is the body of every TLS storage operation. Each one reads the
 // fields it needs: Key for the storage methods (a prefix for list), Value
@@ -312,27 +325,32 @@ func ValidateNodeAddress(s string) error {
 	return nil
 }
 
-// Validate checks the routing table a server sent.
+// Validate checks the routing table a server sent: each host and path as
+// spec allows them, and no route twice.
 func (t RouteTable) Validate() error {
 	if len(t.Routes) > maxRoutes {
 		return fmt.Errorf("%w: more than %d routes", ErrInvalid, maxRoutes)
 	}
-	seen := make(map[string]bool, len(t.Routes))
+	seen := make(map[spec.RouteKey]bool, len(t.Routes))
 	for _, r := range t.Routes {
 		if err := spec.ValidateHost(r.Host); err != nil {
 			return fmt.Errorf("%w: route: %v", ErrInvalid, err)
 		}
-		if seen[r.Host] {
-			return fmt.Errorf("%w: route %s is listed twice", ErrInvalid, r.Host)
+		if err := spec.ValidatePath(r.Path); err != nil {
+			return fmt.Errorf("%w: route %s: %v", ErrInvalid, r.Host, err)
 		}
-		seen[r.Host] = true
+		k := spec.RouteKey{Host: r.Host, Path: r.Path}
+		if seen[k] {
+			return fmt.Errorf("%w: route %s is listed twice", ErrInvalid, k)
+		}
+		seen[k] = true
 		if len(r.Endpoints) > maxEndpoints {
-			return fmt.Errorf("%w: route %s has more than %d endpoints", ErrInvalid, r.Host, maxEndpoints)
+			return fmt.Errorf("%w: route %s has more than %d endpoints", ErrInvalid, k, maxEndpoints)
 		}
 		for _, e := range r.Endpoints {
 			ap, err := netip.ParseAddrPort(e)
 			if err != nil || ap.Port() == 0 || ap.Addr().Zone() != "" || ap.Addr().IsUnspecified() {
-				return fmt.Errorf("%w: route %s has endpoint %q, which is not ip:port", ErrInvalid, r.Host, truncate(e))
+				return fmt.Errorf("%w: route %s has endpoint %q, which is not ip:port", ErrInvalid, k, truncate(e))
 			}
 		}
 	}
@@ -530,7 +548,8 @@ func StatusFromStore(sts []store.Status) StatusReport {
 	return out
 }
 
-// RouteTableFromStore converts the store's routing table to the wire form.
+// RouteTableFromStore converts the store's routing table to the wire form
+// for a router that reads paths: one entry per route.
 func RouteTableFromStore(rt []store.Route) RouteTable {
 	out := RouteTable{Routes: make([]Route, 0, len(rt))}
 	for _, r := range rt {
@@ -538,9 +557,46 @@ func RouteTableFromStore(rt []store.Route) RouteTable {
 		if eps == nil {
 			eps = []string{}
 		}
-		out.Routes = append(out.Routes, Route{Host: r.Host, Endpoints: eps})
+		out.Routes = append(out.Routes, Route{Host: r.Host, Path: r.Path, Endpoints: eps})
 	}
 	return out
+}
+
+// HostTableFromStore converts the store's routing table to the form a
+// router of a build before path routes reads: one entry per host, and no
+// paths. Such a router would send every request for a host to one app, so a
+// host with a path route is listed with no endpoints, and the router
+// answers 503 for it rather than send one app's requests, with their
+// cookies and credentials, to another. It keeps the host's certificate.
+// Hosts without path routes are as they were. held lists, sorted, the hosts
+// given no endpoints for that reason.
+func HostTableFromStore(rt []store.Route) (t RouteTable, held []string) {
+	withPaths := map[string]bool{}
+	for _, r := range rt {
+		if r.Path != "" {
+			withPaths[r.Host] = true
+		}
+	}
+	t = RouteTable{Routes: make([]Route, 0, len(rt))}
+	listed := map[string]bool{}
+	for _, r := range rt {
+		switch {
+		case withPaths[r.Host]:
+			if !listed[r.Host] {
+				t.Routes = append(t.Routes, Route{Host: r.Host, Endpoints: []string{}})
+				held = append(held, r.Host)
+			}
+		case r.Path == "":
+			eps := r.Endpoints
+			if eps == nil {
+				eps = []string{}
+			}
+			t.Routes = append(t.Routes, Route{Host: r.Host, Endpoints: eps})
+		}
+		listed[r.Host] = true
+	}
+	slices.Sort(held)
+	return t, held
 }
 
 func hasControl(s string) bool {

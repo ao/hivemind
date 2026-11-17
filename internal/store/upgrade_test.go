@@ -43,6 +43,11 @@ func seedSchema(t *testing.T, db *sql.DB, k int) {
 		// the generation, as PutApp does.
 		exec(`INSERT INTO app_specs (app, generation, spec) VALUES ('web', 1, ?)`, string(specJSON))
 	}
+	if k >= 9 && k < 15 {
+		// Versions 9 to 14 give a route host to one app in app_hosts;
+		// version 15 moves it to app_routes.
+		exec(`INSERT INTO app_hosts (host, app, port) VALUES ('www.example.com', 'web', 80)`)
+	}
 }
 
 // TestOpenMigratesStoresFromEarlierSchemas builds a store at schema version
@@ -141,12 +146,19 @@ func TestOpenMigratesStoresFromEarlierSchemas(t *testing.T) {
 				t.Fatalf("drains after migration: %+v, %v", ds, err)
 			}
 
-			// Migration 9 gives nodes no address, and routes no host.
+			// Migration 9 gives nodes no address, and migration 15 makes
+			// each route host of versions 9 to 14 a whole host route.
 			if n, _ := s.GetNode(ctx, "node-1"); n.Address != "" {
 				t.Fatalf("node address after migration: %q", n.Address)
 			}
-			if rt, err := s.RouteTable(ctx); err != nil || len(rt) != 0 {
-				t.Fatalf("route table after migration: %+v, %v", rt, err)
+			rt, err := s.RouteTable(ctx)
+			switch {
+			case err != nil:
+				t.Fatal(err)
+			case k >= 9 && (len(rt) != 1 || rt[0].Host != "www.example.com" || rt[0].Path != "" || rt[0].App != "web" || rt[0].Port != 80):
+				t.Fatalf("route table after migration from %d: %+v", k, rt)
+			case k < 9 && len(rt) != 0:
+				t.Fatalf("route table after migration from %d: %+v", k, rt)
 			}
 			if sts, err := s.ListStatus(ctx, ""); err != nil || len(sts) == 0 || sts[0].RoutePorts != nil {
 				t.Fatalf("status after migration: %+v, %v", sts, err)

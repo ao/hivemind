@@ -499,7 +499,7 @@ func (s *Store) PutAppWith(ctx context.Context, a spec.App, o PutOptions) (App, 
 		if err := s.placePending(ctx, tx); err != nil {
 			return err
 		}
-		if err := syncHosts(ctx, tx, c); err != nil {
+		if err := syncRoutes(ctx, tx, c); err != nil {
 			return err
 		}
 		// Placement kept every new copy within MaxNodeAssignmentBytes; the
@@ -538,23 +538,27 @@ func OriginText(o string) string {
 	return fmt.Sprintf("from %q", o)
 }
 
-// syncHosts gives the app's route hosts to it, and frees the hosts it no
-// longer routes. A host that another app routes is ErrConflict, naming that
-// app, and the whole put is rolled back.
-func syncHosts(ctx context.Context, tx *sql.Tx, a spec.App) error {
-	if _, err := tx.ExecContext(ctx, `DELETE FROM app_hosts WHERE app = ?`, a.Name); err != nil {
+// syncRoutes gives the app its routes, and frees the routes it no longer
+// has. A route, a host and a path, that another app has is ErrConflict,
+// naming that app, and the whole put is rolled back. Apps may share a host
+// with routes of different paths.
+func syncRoutes(ctx context.Context, tx *sql.Tx, a spec.App) error {
+	if _, err := tx.ExecContext(ctx, `DELETE FROM app_routes WHERE app = ?`, a.Name); err != nil {
 		return err
 	}
 	for _, r := range a.Routes {
 		var owner string
-		err := tx.QueryRowContext(ctx, `SELECT app FROM app_hosts WHERE host = ?`, r.Host).Scan(&owner)
+		err := tx.QueryRowContext(ctx, `SELECT app FROM app_routes WHERE host = ? AND path = ?`, r.Host, r.Path).Scan(&owner)
 		switch {
-		case err == nil:
+		case err == nil && r.Path == "":
 			return fmt.Errorf("%w: host %s is routed by app %s; remove it there first", ErrConflict, r.Host, owner)
+		case err == nil:
+			return fmt.Errorf("%w: host %s with path %s is routed by app %s; remove it there first", ErrConflict, r.Host, r.Path, owner)
 		case !errors.Is(err, sql.ErrNoRows):
 			return err
 		}
-		if _, err := tx.ExecContext(ctx, `INSERT INTO app_hosts (host, app, port) VALUES (?, ?, ?)`, r.Host, a.Name, r.Port); err != nil {
+		if _, err := tx.ExecContext(ctx, `INSERT INTO app_routes (host, path, app, port) VALUES (?, ?, ?, ?)`,
+			r.Host, r.Path, a.Name, r.Port); err != nil {
 			return err
 		}
 	}
@@ -795,9 +799,9 @@ func (s *Store) DeleteAppWith(ctx context.Context, name, origin string) error {
 		if _, err := tx.ExecContext(ctx, `DELETE FROM rollouts WHERE app = ?`, name); err != nil {
 			return err
 		}
-		// A deleted app stops routing at once, and its hosts are free for
+		// A deleted app stops routing at once, and its routes are free for
 		// another app.
-		if _, err := tx.ExecContext(ctx, `DELETE FROM app_hosts WHERE app = ?`, name); err != nil {
+		if _, err := tx.ExecContext(ctx, `DELETE FROM app_routes WHERE app = ?`, name); err != nil {
 			return err
 		}
 		if err := s.syncReplicas(ctx, tx, name, 0, 1, false); err != nil {

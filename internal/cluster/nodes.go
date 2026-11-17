@@ -25,6 +25,8 @@ type nodeAPI struct {
 	logs *logrelay.Relay
 	// routers keeps the workers' router reports (routermetrics.go).
 	routers *nodeapi.RouterReports
+	// readers keeps how each router read the routing table (routes.go).
+	readers *nodeapi.RouteReaders
 	// ca, lifetime and now issue renewed certificates (renew.go).
 	ca       *pki.CA
 	lifetime time.Duration
@@ -40,7 +42,7 @@ type nodeAPI struct {
 // Every request passes the denylist check first, then the check that the
 // client certificate is valid now. Every reply carries the server's version.
 func nodeRoutes(cfg Config, log *slog.Logger) http.Handler {
-	a := &nodeAPI{st: cfg.Store, log: log, logs: cfg.Logs, routers: cfg.RouterReports,
+	a := &nodeAPI{st: cfg.Store, log: log, logs: cfg.Logs, routers: cfg.RouterReports, readers: cfg.RouteReaders,
 		ca: cfg.CA, lifetime: cfg.NodeCertLifetime, now: cfg.now(), certs: &certNotes{}, versions: map[string]string{}}
 	mux := http.NewServeMux()
 	mux.HandleFunc("POST "+nodeapi.Prefix+"/nodes/{id}/register", a.register)
