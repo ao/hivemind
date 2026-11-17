@@ -1,8 +1,9 @@
 # Shared helpers for the scripts that run a hivemind cluster in Docker: one
 # server and N-1 workers, each a docker:dind container on a private network.
-# Sourced by scripts/integration-cluster.sh and scripts/fault-suite.sh. The
-# caller sets REPO before sourcing, and calls cl_init, then cl_start_nodes,
-# and cl_trap_cleanup. Written for bash 3.2 (macOS) as well as bash 5.
+# Sourced by scripts/integration-cluster.sh, scripts/integration-newaddr.sh
+# and scripts/fault-suite.sh. The caller sets REPO before sourcing, and calls
+# cl_init, then cl_start_nodes, and cl_trap_cleanup. Written for bash 3.2
+# (macOS) as well as bash 5.
 #
 # Node names: index 0 is the server, 1.. are workers. CL_NAMES and CL_IDS are
 # parallel arrays; CL_IDS is filled by cl_join.
@@ -176,23 +177,25 @@ cl_start_server() {
 	wait_for 30 docker exec "$s" hivemind status || cl_fail "the API did not answer on 127.0.0.1:4483"
 }
 
-# cl_serve_server starts (or restarts) the server process in the background.
-# CL_SERVER_ENV, if set, is one NAME=value passed to it.
+# cl_serve_server starts (or restarts) the server process in the background,
+# with --advertise CL_ADVERTISE (default CL_S_IP) and the flags in
+# CL_SERVE_ARGS, if set. CL_SERVER_ENV, if set, is one NAME=value passed to it.
 cl_serve_server() {
 	local envs=()
 	[ -n "${CL_SERVER_ENV:-}" ] && envs=(-e "$CL_SERVER_ENV")
-	docker exec -d ${envs[@]+"${envs[@]}"} "${CL_NAMES[0]}" sh -c "exec hivemind serve --advertise $CL_S_IP >>/var/log/hivemind.log 2>&1"
+	docker exec -d ${envs[@]+"${envs[@]}"} "${CL_NAMES[0]}" sh -c "exec hivemind serve --advertise ${CL_ADVERTISE:-$CL_S_IP} ${CL_SERVE_ARGS:-} >>/var/log/hivemind.log 2>&1"
 }
 
-# cl_join: each worker (index 1..) gets a join token from the server and joins.
-# Sets CL_IDS[i] to the node ID of each node, the server included.
+# cl_join: each worker (index 1..) gets a join token from the server and joins
+# CL_JOIN_ADDR (default CL_S_IP:4484). Sets CL_IDS[i] to the node ID of each
+# node, the server included.
 cl_join() {
 	local s=${CL_NAMES[0]} i tok c
 	CL_IDS[0]=$CL_S_ID
 	for ((i = 1; i < ${#CL_NAMES[@]}; i++)); do
 		c=${CL_NAMES[$i]}
 		tok=$(docker exec "$s" hivemind join-token --ttl 1h 2>/dev/null) || cl_fail "join-token failed"
-		docker exec -d -e "HM_TOKEN=$tok" "$c" sh -c "exec hivemind join $CL_S_IP:4484 --token \"\$HM_TOKEN\" >>/var/log/hivemind.log 2>&1"
+		docker exec -d -e "HM_TOKEN=$tok" "$c" sh -c "exec hivemind join ${CL_JOIN_ADDR:-$CL_S_IP:4484} --token \"\$HM_TOKEN\" >>/var/log/hivemind.log 2>&1"
 		wait_for 60 docker exec "$c" test -s /var/lib/hivemind/node.json || cl_fail "$c did not join"
 		CL_IDS[$i]=$(cl_node_id_of "$c")
 		[ -n "${CL_IDS[$i]}" ] || cl_fail "$c has no node ID in node.json"

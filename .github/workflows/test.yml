@@ -192,6 +192,17 @@ jobs:
       - uses: actions/checkout@v4
       - run: ./scripts/integration-cluster.sh
 
+  # A server restored on a machine with a new IP address, twice: a cluster
+  # that advertises a DNS name, whose record moves, and one that advertises
+  # an IP address, whose workers move with hivemind node set-server.
+  integration-newaddr:
+    name: Integration (new server address)
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - run: ./scripts/integration-newaddr.sh
+
   # A cluster of mixed versions: the 2.0.0 release binary as the server and
   # as a worker, and this build as a worker and then as the upgraded server.
   integration-mixed:
