@@ -47,12 +47,16 @@ The directory gets mode 0700 and every file mode 0600. On any failure, `restore`
 
 ## Replacing a lost server
 
-The workers keep running their containers while the server is gone (see [concepts](concepts.md#server-and-workers)). Each worker dials the address in its `node.json`, the one it joined, and checks that the server's certificate names it. When the server advertises a DNS name, which is the recommended set-up ([concepts](concepts.md#the-servers-address)), the new machine can have any IP address: update the name's record, and the workers follow it. When it advertises an IP address, give the new machine that address, or move each worker to the new one with `hivemind node set-server` ([below](#at-a-new-ip-address)). To bring the cluster back on a new machine:
+The workers keep running their containers while the server is gone (see [concepts](concepts.md#server-and-workers)). Each worker dials the address in its `node.json`, the one it joined, and checks that the server's certificate names it. When the server advertises a DNS name, which is the recommended set-up ([concepts](concepts.md#the-servers-address)), the new machine can have any IP address: update the name's record, and the workers follow it. When it advertises an IP address, give the new machine that address, or move each worker to the new one with `hivemind node set-server` ([below](#at-a-new-ip-address)). A new address, by name or with `set-server`, needs the unreleased 2.2.0; with 2.1.0 the new machine needs the old address.
+
+Make sure the old server cannot come back first: disable its unit (`systemctl disable hivemind`), or terminate the machine. If it does come back with its data directory, its `serve` starts as a second server of the same cluster, with the same CA, unless it refuses its `--advertise` address: one that names a DNS name, without `--cluster-addr`, whose record now names the new machine. That copy marks the workers that do not reach it lost when its start grace ends, starts every replica it can on its own node, and its router serves those copies; a worker that still dials the old address reaches it and takes its assignments. Stop it, and disable its unit, as soon as you see it.
+
+To bring the cluster back on a new machine:
 
 1. Install the same or a newer hivemind, and Docker Engine.
 2. Copy the latest backup to the machine, and run `sudo hivemind restore <file> --data-dir /var/lib/hivemind`.
 3. Start the server with the address the workers dial, and with the same `--cluster-port` as before if you changed it: `sudo hivemind serve --advertise <address>`, or the [server unit](systemd.md#server).
-   - A DNS name whose record still names the old machine resolves to none of this machine's addresses, and `serve` refuses it, and says so. Add this machine's address to bind: `sudo hivemind serve --advertise hivemind.example.internal --cluster-addr 10.0.0.9`. The certificate names both. `serve` logs a warning until the name resolves to that address.
+   - A DNS name whose record still names the old machine resolves to none of this machine's addresses, and `serve` refuses it, and says so. Add this machine's address to bind: `sudo hivemind serve --advertise hivemind.example.internal --cluster-addr 10.0.0.9`. The certificate names both. `serve` logs a warning at its start that the name resolves elsewhere.
    - An IP address must be on this machine: the old one, given to the new machine first, or its own, with the workers moved after.
 4. For a DNS name, update its record to the new machine's address. For a new IP address, move each worker ([below](#at-a-new-ip-address)).
 
