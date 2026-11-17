@@ -20,12 +20,25 @@
 #     alias, restores the backup and serves with --advertise hm-server
 #     --cluster-addr <its IP>, as before a DNS record is updated: its
 #     listeners bind that IP, and it warns that the name does not resolve.
+#   - every node runs a router, against Pebble (a test ACME CA) and its DNS,
+#     pebble-challtestsrv, on the same network, as in
+#     integration-routing.sh; a curl container plays the client. A third
+#     app, who, has a route and two replicas, both on the workers: the
+#     server's node is ineligible while it is deployed.
 #   - the alias moves to the new container (disconnected from the network
 #     and connected again, at the same IP, with the alias), as the record
-#     would be updated. The workers, never restarted, reconnect: the same
-#     processes, node.json and node.crt unchanged, both ready, the apps
-#     back at their counts, no replica twice, and the workers' containers
-#     the ones that ran before.
+#     would be updated, 30 s after the restored server started: later than
+#     the 15 s lease timeout, as when the workers' resolvers keep the old
+#     record a while. Until then the workers cannot reach it. 20 s after
+#     the start both are "waiting" in hivemind nodes, not lost. The workers,
+#     never restarted, reconnect: the same processes, node.json and
+#     node.crt unchanged, both ready, the apps back at their counts, no
+#     node lost, no replica twice, and the workers' containers the ones
+#     that ran before.
+#   - requests through a worker's router, from before the loss until the
+#     workers are back, all get 200. Requests through the new server's
+#     router, from before it starts until the alias moves, get no 503: its
+#     routing table has the waiting workers' replicas from the start.
 #
 # By IP address:
 #   - serve runs with --advertise <its IP>, and the workers join that IP.
@@ -46,8 +59,9 @@
 # the volumes it created, also after a failure or Ctrl-C. The Go build cache
 # volume (hivemind-cache) is kept.
 #
-# Needs Docker on the host, and the docker:dind and golang images. Run it
-# from anywhere in the repository.
+# Needs Docker on the host, and the docker:dind, golang, Pebble,
+# pebble-challtestsrv, curl and traefik/whoami images. Run it from anywhere
+# in the repository.
 set -euo pipefail
 
 REPO=$(cd "$(dirname "$0")/.." && pwd)
@@ -55,6 +69,121 @@ REPO=$(cd "$(dirname "$0")/.." && pwd)
 . "$REPO/scripts/lib/cluster.sh"
 
 ALIAS=hm-server
+
+PEBBLE_IMAGE=${PEBBLE_IMAGE:-ghcr.io/letsencrypt/pebble:latest}
+CHALL_IMAGE=${CHALL_IMAGE:-ghcr.io/letsencrypt/pebble-challtestsrv:latest}
+CURL_IMAGE=${CURL_IMAGE:-curlimages/curl:8.11.1}
+APP_IMAGE=${APP_IMAGE:-traefik/whoami:v1.10.3}
+HOST=who.newaddr.test
+HTTP_PORT=5002 # Pebble's httpPort: where it checks HTTP-01 answers
+HTTPS_PORT=8443
+ACME_CA=https://pebble:14000/dir
+MINICA=/etc/pebble-minica.pem
+EXTRA=()
+
+# route_flags ADDR: the router's flags, with the router on ADDR.
+route_flags() {
+	echo "--route-addr $1 --route-http-port $HTTP_PORT --route-https-port $HTTPS_PORT --acme-email ops@newaddr.test --acme-ca $ACME_CA"
+}
+
+# na_cleanup removes the ACME containers, then what cl_cleanup removes.
+na_cleanup() {
+	local rc=$? c
+	set +e
+	for c in ${EXTRA[@]+"${EXTRA[@]}"}; do
+		docker rm -fv "$c" >/dev/null 2>&1
+	done
+	(exit "$rc")
+	cl_cleanup
+}
+
+# start_acme: Pebble; its DNS, which answers HOST with the three nodes'
+# addresses; and the client, a curl container that trusts Pebble's root.
+start_acme() {
+	local c chall_ip
+	PEBBLE=$CL_RUN-pebble
+	CHALL=$CL_RUN-chall
+	CLIENT=$CL_RUN-client
+	EXTRA=("$PEBBLE" "$CHALL" "$CLIENT")
+	trap na_cleanup EXIT
+	docker run -d --name "$CHALL" --network "$CL_NET" "$CHALL_IMAGE" \
+		-defaultIPv4 "$(cl_ip_of "$S")" -defaultIPv6 "" -http01 "" -https01 "" -tlsalpn01 "" -doh "" >/dev/null
+	chall_ip=$(cl_ip_of "$CHALL")
+	docker run -d --name "$PEBBLE" --network "$CL_NET" --network-alias pebble \
+		-e PEBBLE_VA_NOSLEEP=1 -e PEBBLE_WFE_NONCEREJECT=0 \
+		"$PEBBLE_IMAGE" -config test/config/pebble-config.json -dnsserver "$chall_ip:8053" >/dev/null
+	docker run -d --name "$CLIENT" --network "$CL_NET" --entrypoint sleep "$CURL_IMAGE" 100000 >/dev/null
+	docker cp "$PEBBLE:/test/certs/pebble.minica.pem" "$CL_WORK/minica.pem"
+	for c in "${CL_NAMES[@]}"; do
+		docker cp "$CL_WORK/minica.pem" "$c:$MINICA"
+	done
+	docker cp "$CL_WORK/minica.pem" "$CLIENT:/tmp/minica.pem"
+	wait_for 60 docker exec "$CLIENT" curl -sf --cacert /tmp/minica.pem "$ACME_CA" || cl_fail "Pebble did not answer at $ACME_CA"
+	docker exec "$CLIENT" sh -c "curl -sf --cacert /tmp/minica.pem https://pebble:15000/roots/0 >/tmp/root.pem" ||
+		cl_fail "could not read Pebble's root"
+	docker exec "$CLIENT" curl -sf -d "{\"host\":\"$HOST\",\"addresses\":[\"$(cl_ip_of "$S")\",\"$W1_IP\",\"$W2_IP\"]}" \
+		"http://$chall_ip:8055/add-a" >/dev/null || cl_fail "challtestsrv did not take the A records"
+	cl_note "Pebble is up; challtestsrv answers $HOST with the three nodes"
+}
+
+# code IP: the status code of an https request for HOST through IP's router.
+code() {
+	docker exec "$CLIENT" curl -s -o /dev/null -w '%{http_code}' --max-time 10 --cacert /tmp/root.pem \
+		--resolve "$HOST:$HTTPS_PORT:$1" "https://$HOST:$HTTPS_PORT/" || true
+}
+served() { [ "$(code "$1")" = 200 ]; }
+
+# loop_start FILE IP: requests through IP's router in the client, one after
+# another, each status code on a line of FILE ("000" for none), until
+# FILE.stop exists.
+loop_start() {
+	docker exec -d "$CLIENT" sh -c "while [ ! -e $1.stop ]; do curl -s -o /dev/null -w '%{http_code}\n' --connect-timeout 3 \
+		--max-time 15 --cacert /tmp/root.pem --resolve $HOST:$HTTPS_PORT:$2 https://$HOST:$HTTPS_PORT/ >>$1; sleep 0.05; done"
+}
+
+# loop_stop FILE [WAIT]: stops the loop and prints its codes, one a line,
+# after WAIT seconds (16 by default, for the request in flight to end).
+loop_stop() {
+	docker exec "$CLIENT" touch "$1.stop"
+	sleep "${2:-16}"
+	docker exec "$CLIENT" cat "$1"
+}
+
+# codes_summary prints the count of each code on standard input.
+codes_summary() { sort | uniq -c | awk '{ printf "%s %s; ", $2, $1 }'; }
+
+# who_on_workers: who's two replicas run, one on each worker.
+who_on_workers() {
+	local rows
+	rows=$(app_rows who)
+	[ "$(awk '$3 == "running"' <<<"$rows" | wc -l)" -eq 2 ] &&
+		[ "$(awk -v a="$W1_ID" -v b="$W2_ID" '$3 == "running" && ($2 == a || $2 == b) { print $2 }' <<<"$rows" | sort -u | wc -l)" -eq 2 ]
+}
+
+# deploy_who: the routed app, with the server's node ineligible, so both
+# replicas go to the workers; then the node is eligible again, and the
+# first worker's router serves the host.
+deploy_who() {
+	docker exec "$S" hivemind node eligibility "$CL_S_ID" --disable >/dev/null || cl_fail "making the server's node ineligible"
+	docker exec -i "$S" hivemind deploy -f - >/dev/null <<EOF || cl_fail "deploy who"
+name: who
+image: $APP_IMAGE
+replicas: 2
+routes:
+  - host: $HOST
+    port: 80
+health:
+  http:
+    port: 80
+    path: /health
+  interval: 1s
+  timeout: 1s
+EOF
+	wait_for 180 who_on_workers || cl_fail "who did not run on both workers: $(app_rows who | tr '\n' ';')"
+	docker exec "$S" hivemind node eligibility "$CL_S_ID" --enable >/dev/null || cl_fail "making the server's node eligible"
+	wait_for 120 served "$W1_IP" || cl_fail "the router on $W1 does not serve $HOST: $(code "$W1_IP")"
+	cl_note "who runs on both workers, and $W1's router serves $HOST"
+}
 
 # app_rows APP prints "index node state detail" for each replica of APP, from
 # the replica table of hivemind status.
@@ -84,9 +213,9 @@ containers_of() {
 	done
 }
 
-# no_duplicates: no replica name appears on two nodes, for either app.
+# no_duplicates: no replica name appears on two nodes, for any app.
 no_duplicates() {
-	[ -z "$( (containers_of spread; containers_of web) | awk '{ print $2 }' | sort | uniq -d)" ]
+	[ -z "$( (containers_of spread; containers_of web; containers_of who) | awk '{ print $2 }' | sort | uniq -d)" ]
 }
 
 # worker_containers NODE: the IDs of the hivemind containers on NODE.
@@ -98,6 +227,10 @@ workers_ready() {
 	[ "$(docker exec "$S" hivemind nodes | awk -v a="$W1_ID" -v b="$W2_ID" '($1 == a || $1 == b) && / ready /' | wc -l)" -eq 2 ]
 }
 
+workers_waiting() {
+	[ "$(docker exec "$S" hivemind nodes | awk -v a="$W1_ID" -v b="$W2_ID" '($1 == a || $1 == b) && / waiting /' | wc -l)" -eq 2 ]
+}
+
 # server_address: the ADDRESS of the server's node in hivemind nodes.
 server_address() { docker exec "$S" hivemind nodes | awk '$3 == "server" { print $4 }'; }
 
@@ -105,7 +238,9 @@ worker_stopped() { ! docker exec "$1" pgrep -x hivemind >/dev/null; }
 
 # start_cluster: three nodes, the server's container with ALIAS when
 # CL_ADVERTISE is set, serve, the workers joined, and both apps at their
-# counts. Records what the checks after the loss compare against.
+# counts. With ROUTED set, the ACME containers too, a router on every node,
+# and who on the workers. Records what the checks after the loss compare
+# against.
 start_cluster() {
 	local c i
 	cl_add_node
@@ -127,8 +262,17 @@ start_cluster() {
 	for c in "${CL_NAMES[@]}"; do
 		cl_ready_node "$c"
 	done
+	W1_IP=$(cl_ip_of "$W1")
+	W2_IP=$(cl_ip_of "$W2")
 	# Workers take replicas once they have been ready for 5 s.
 	CL_SERVE_ARGS="--min-ready 5s"
+	if [ -n "${ROUTED:-}" ]; then
+		start_acme
+		CL_SERVE_ARGS="$CL_SERVE_ARGS $(route_flags 0.0.0.0)"
+		CL_SERVER_ENV=SSL_CERT_FILE=$MINICA
+		CL_JOIN_ARGS=$(route_flags @IP@)
+		CL_JOIN_ENV=SSL_CERT_FILE=$MINICA
+	fi
 	cl_start_server
 	cl_check_server_listeners
 	cl_join
@@ -141,6 +285,7 @@ start_cluster() {
 	docker exec "$S" hivemind deploy --name spread --image nginx:alpine --replicas 3 >/dev/null || cl_fail "deploy spread"
 	docker exec "$S" hivemind deploy --name web --image nginx:alpine --replicas 3 --port 8080:80 >/dev/null || cl_fail "deploy web"
 	wait_for 180 apps_converged || cl_fail "the apps did not start on three nodes: spread $(app_rows spread | tr '\n' ';') web $(app_rows web | tr '\n' ';')"
+	[ -z "${ROUTED:-}" ] || deploy_who
 	# Per worker, by node index: node.json, node.crt and the containers.
 	SUM_STATE=()
 	SUM_CERT=()
@@ -171,6 +316,7 @@ lose_server() {
 	cl_ready_node "$S"
 	[ "$(cl_ip_of "$S")" = "$NEW_IP" ] || cl_fail "the new server node has address $(cl_ip_of "$S"), not $NEW_IP"
 	docker cp "$CL_WORK/hm.tar" "$S:/root/hm.tar"
+	[ -z "${ROUTED:-}" ] || docker cp "$CL_WORK/minica.pem" "$S:$MINICA"
 	CL_S_IP=$NEW_IP
 }
 
@@ -178,11 +324,13 @@ lose_server() {
 # outage lasts at least 40 s, as a real restore does: longer than the
 # worker's 30 s request timeout, which a request sent to the old server just
 # before the loss waits out, since a lost machine sends no reset.
+# BEFORE_SERVE, if set, is a command run just before serve starts.
 restore_and_serve() {
 	local out left
 	left=$((LOST_AT + 40 - $(date +%s)))
 	[ "$left" -le 0 ] || sleep "$left"
 	out=$(docker exec "$S" hivemind restore /root/hm.tar --data-dir /var/lib/hivemind 2>&1) || cl_fail "hivemind restore: $out"
+	[ -z "${BEFORE_SERVE:-}" ] || "$BEFORE_SERVE"
 	cl_serve_server
 	wait_for 30 docker exec "$S" hivemind status || cl_fail "the restored server's API did not answer"
 	SERVED_AT=$(date +%s)
@@ -204,7 +352,10 @@ check_back() {
 		[ "$(docker exec "$c" grep -c 'joined the cluster' /var/log/hivemind.log)" = 1 ] || cl_fail "$c joined again"
 	done
 	wait_for 150 apps_converged || cl_fail "the apps did not converge: spread $(app_rows spread | tr '\n' ';') web $(app_rows web | tr '\n' ';')"
-	wait_for 60 no_duplicates || cl_fail "a replica runs twice: $( (containers_of spread; containers_of web) | sort | tr '\n' ';')"
+	if [ -n "${ROUTED:-}" ]; then
+		wait_for 60 who_on_workers || cl_fail "who is not on both workers: $(app_rows who | tr '\n' ';')"
+	fi
+	wait_for 60 no_duplicates || cl_fail "a replica runs twice: $( (containers_of spread; containers_of web; containers_of who) | sort | tr '\n' ';')"
 	if docker exec "$S" grep "node lost" /var/log/hivemind.log; then
 		cl_fail "the restored server released a node whose worker came back"
 	fi
@@ -219,29 +370,64 @@ check_back() {
 
 # Part 1: a server that advertises a DNS name.
 by_name() {
-	local pids i
+	local pids i left codes total bad ok n503 after
 	cl_init newaddr-name
 	CL_NET_SUBNET=auto
 	CL_ADVERTISE=$ALIAS
 	CL_JOIN_ADDR=$ALIAS
+	ROUTED=1
 	start_cluster
 	pids="$(docker exec "$W1" pgrep -x hivemind) $(docker exec "$W2" pgrep -x hivemind)"
+	# Requests through the first worker's router, across the loss and the
+	# restore.
+	loop_start /tmp/w1 "$W1_IP"
 
 	lose_server
-	CL_SERVE_ARGS="--min-ready 5s --cluster-addr $NEW_IP"
+	CL_SERVE_ARGS="--min-ready 5s --cluster-addr $NEW_IP $(route_flags 0.0.0.0)"
+	# Requests through the new server's router, from before it starts.
+	server_loop() { loop_start /tmp/s "$NEW_IP"; }
+	BEFORE_SERVE=server_loop
 	restore_and_serve
 	docker exec "$S" grep -q -- '--advertise does not resolve' /var/log/hivemind.log ||
 		cl_fail "serve did not warn that $ALIAS does not resolve: $(docker exec "$S" tail -n 5 /var/log/hivemind.log)"
+	docker exec "$S" grep -q 'workers that were up before this start wait for their first report.* waiting=2 ' /var/log/hivemind.log ||
+		cl_fail "serve did not log that two workers wait: $(docker exec "$S" tail -n 5 /var/log/hivemind.log)"
 
-	# The record is updated: the alias moves to the new server.
+	# The workers cannot reach the new server until the record changes.
+	# Past the lease timeout they wait; they are not lost.
+	left=$((SERVED_AT + 20 - $(date +%s)))
+	[ "$left" -le 0 ] || sleep "$left"
+	workers_waiting || cl_fail "20 s after the start the workers are not waiting: $(docker exec "$S" hivemind nodes | tr '\n' ';')"
+	cl_note "20 s after the start both workers are waiting: $(docker exec "$S" hivemind nodes | awk -v a="$W1_ID" '$1 == a' | tr -s ' ')"
+
+	left=$((SERVED_AT + 30 - $(date +%s)))
+	[ "$left" -le 0 ] || sleep "$left"
+	# The new server's router is checked up to here: the move below takes
+	# its address away for a moment. A request in flight is not counted.
+	codes=$(loop_stop /tmp/s 0)
+	ok=$(grep -cx 200 <<<"$codes" || true)
+	n503=$(grep -cx 503 <<<"$codes" || true)
+	after=$(awk 'up && $1 != "200" { n++ } $1 == "200" { up = 1 } END { print n + 0 }' <<<"$codes")
+	[ "$n503" -eq 0 ] && [ "$after" -eq 0 ] && [ "$ok" -ge 50 ] ||
+		cl_fail "requests through the new server's router: $(codes_summary <<<"$codes")($after not 200 after the first 200)"
+	cl_note "the new server's router from before its start: $(codes_summary <<<"$codes")no 503, all 200 once it listened"
+
+	# The record is updated, 30 s after the start: the alias moves to the
+	# new server.
 	docker network disconnect "$CL_NET" "$S"
 	docker network connect --ip "$NEW_IP" --alias "$ALIAS" "$CL_NET" "$S"
 	[ "$(cl_ip_of "$S")" = "$NEW_IP" ] || cl_fail "the new server has address $(cl_ip_of "$S") after the alias moved, not $NEW_IP"
 	docker exec "$S" pgrep -x hivemind >/dev/null || cl_fail "serve stopped when the alias moved"
-	cl_note "moved the alias $ALIAS to $NEW_IP"
+	cl_note "moved the alias $ALIAS to $NEW_IP, $(($(date +%s) - SERVED_AT)) s after serve started"
 	cl_check_server_listeners
 
 	check_back
+	codes=$(loop_stop /tmp/w1)
+	total=$(wc -l <<<"$codes")
+	bad=$(grep -cvx 200 <<<"$codes" || true)
+	[ "$total" -ge 200 ] && [ "$bad" -eq 0 ] ||
+		cl_fail "requests through $W1's router across the restore: $(codes_summary <<<"$codes")"
+	cl_note "$W1's router across the loss and the restore: $total requests, $bad not 200"
 	[ "$(docker exec "$W1" pgrep -x hivemind) $(docker exec "$W2" pgrep -x hivemind)" = "$pids" ] || cl_fail "a worker process was restarted"
 	for i in 1 2; do
 		[ "$(file_sum "${CL_NAMES[$i]}" /var/lib/hivemind/node.json)" = "${SUM_STATE[$i]}" ] || cl_fail "node.json on ${CL_NAMES[$i]} changed"
