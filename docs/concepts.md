@@ -258,12 +258,12 @@ Status reports the state of each replica, its node, its generation, its health, 
 
 ## Ports
 
-A port in the spec is published on a host address. The default address is `127.0.0.1`, so a port is reachable from the machine only. Write `0.0.0.0:8080:80` or another address to publish it elsewhere. The protocol is `tcp` by default, and `udp` is allowed. An IPv6 address goes in brackets, such as `[::1]:8080:80`.
+A port in the spec is published on a host address. The default address is `127.0.0.1`, so the host port is reachable from the machine only; the other containers on the node can still reach the container port itself (see below). Write `0.0.0.0:8080:80` or another address to publish it elsewhere. The protocol is `tcp` by default, and `udp` is allowed. An IPv6 address goes in brackets, such as `[::1]:8080:80`.
 
 Replicas that publish the same host port cannot share a node. The scheduler enforces this (see [Placement](#placement)). Two more cases:
 
 - A port held by something outside hivemind, such as another program on the machine, makes Docker refuse the bind with `port is already allocated`. The agent removes that container, and the replica stays `pending` with the error in status. Each pass tries again with a new container, so the replica starts, with its port published, once the port is free. A container whose start failed is never started again, because Docker can let a second start succeed without the published port.
-- Containers on different machines reach each other only through host ports. There is no overlay network and no DNS. A container gets an address on its Docker network, which other containers on the same node can reach, but nothing finds it by name.
+- Containers on different machines reach each other only through host ports. There is no overlay network and no DNS. A container gets an address on Docker's default bridge network, and the other containers on the same node can reach any of its ports there, published or not, whatever address the host port is bound to; nothing finds it by name. See [security](security.md#apps-on-one-node).
 
 ## Routing
 

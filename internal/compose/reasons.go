@@ -4,12 +4,13 @@ package compose
 // fallback its caller passes. docs/compose.md lists them all.
 
 const (
-	noDiscovery = "hivemind starts each app on its own, and apps reach each other only through published ports"
+	noDiscovery = "hivemind starts each app on its own, with no name another app can find it by; one app reaches another at a published port"
+	bridge      = "hivemind puts every container on Docker's default bridge network, where containers on one node can reach each other's ports"
 	oneFile     = "hivemind reads one file and does not merge services; use YAML anchors and merge keys (<<) instead"
 )
 
 var topReasons = map[string]string{
-	"networks": "hivemind has no networks between apps: apps reach each other only through published ports",
+	"networks": "hivemind makes no networks: " + bridge,
 	"secrets":  "hivemind has no secrets: pass values in a service's environment, from variables",
 	"configs":  "hivemind has no configs: build the files into the image",
 	"include":  "hivemind reads one file: merge the files first, for example with docker compose config",
@@ -29,9 +30,9 @@ var serviceReasons = map[string]string{
 	"depends_on":      noDiscovery,
 	"links":           noDiscovery,
 	"external_links":  noDiscovery,
-	"networks":        "hivemind has no networks between apps: " + noDiscovery,
-	"network_mode":    "hivemind gives each container Docker's default network: " + noDiscovery,
-	"expose":          "apps reach each other only through published ports; list them under ports",
+	"networks":        "hivemind makes no networks: " + bridge,
+	"network_mode":    bridge,
+	"expose":          "expose publishes nothing, and the app spec has no field for it; list a port that must be reached from other machines under ports",
 	"env_file":        "list the variables under environment; a value can come from .env beside the file, as ${VAR}",
 	"container_name":  "hivemind names each container hivemind-<app>-<replica>-g<generation>",
 	"hostname":        "hivemind does not set a container's hostname",

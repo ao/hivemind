@@ -257,7 +257,7 @@ func TestConvertRefuses(t *testing.T) {
 		dotenv                string
 	}{
 		// The top level.
-		{name: "networks", file: web("") + "networks: {}\n", path: "networks", msg: "not supported: hivemind has no networks between apps"},
+		{name: "networks", file: web("") + "networks: {}\n", path: "networks", msg: "not supported: hivemind makes no networks: hivemind puts every container on Docker's default bridge network"},
 		{name: "secrets", file: web("") + "secrets: {}\n", path: "secrets", msg: "not supported: hivemind has no secrets"},
 		{name: "configs", file: web("") + "configs: {}\n", path: "configs", msg: "not supported: hivemind has no configs"},
 		{name: "include", file: web("") + "include: [a.yaml]\n", path: "include", msg: "not supported: hivemind reads one file"},
@@ -404,8 +404,8 @@ func TestConvertRefuses(t *testing.T) {
 		{name: "restart other", file: web("restart: sometimes"), path: "services.web.restart", msg: "must be always or unless-stopped"},
 
 		// Other service keys.
-		{name: "depends_on", file: web("depends_on: [db]"), path: "services.web.depends_on", msg: "not supported: hivemind starts each app on its own, and apps reach each other only through published ports"},
-		{name: "service networks", file: web("networks: [front]"), path: "services.web.networks", msg: "not supported: hivemind has no networks between apps"},
+		{name: "depends_on", file: web("depends_on: [db]"), path: "services.web.depends_on", msg: "not supported: hivemind starts each app on its own, with no name another app can find it by; one app reaches another at a published port"},
+		{name: "service networks", file: web("networks: [front]"), path: "services.web.networks", msg: "not supported: hivemind makes no networks: hivemind puts every container on Docker's default bridge network, where containers on one node can reach each other's ports"},
 		{name: "container_name", file: web("container_name: web"), path: "services.web.container_name", msg: "not supported: hivemind names each container hivemind-<app>-<replica>-g<generation>"},
 		{name: "labels", file: web("labels: {a: b}"), path: "services.web.labels", msg: "not supported: hivemind labels each container"},
 		{name: "links", file: web("links: [db]"), path: "services.web.links", msg: "not supported: hivemind starts each app on its own"},
@@ -534,7 +534,7 @@ func TestConvertReportsEveryProblemSorted(t *testing.T) {
 		t.Fatalf("message:\n%s", err)
 	}
 	_, err = Convert([]byte(web("depends_on: [a]")), Options{})
-	if err == nil || err.Error() != "services.web.depends_on: not supported: hivemind starts each app on its own, and apps reach each other only through published ports" {
+	if err == nil || err.Error() != "services.web.depends_on: not supported: hivemind starts each app on its own, with no name another app can find it by; one app reaches another at a published port" {
 		t.Fatalf("one problem: %v", err)
 	}
 }

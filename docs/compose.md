@@ -39,7 +39,7 @@ Errors name the file and list the problems sorted by path:
 ```
 error: compose.yaml: 2 problems:
   services.web.build: not supported: build and push the image, then name it in image
-  services.web.depends_on: not supported: hivemind starts each app on its own, and apps reach each other only through published ports
+  services.web.depends_on: not supported: hivemind starts each app on its own, with no name another app can find it by; one app reaches another at a published port
 ```
 
 No error message contains a value from an `environment` section or the value of a variable, since those may be secrets.
@@ -56,7 +56,9 @@ An address in the file is kept as written, `0.0.0.0` included.
 
 ## No service discovery
 
-Apps do not find each other by service name. hivemind has no networks between apps and no DNS for them, so `depends_on`, `links` and `networks` are refused, and a hostname such as `db` in a connection string resolves to nothing. Each app starts on its own, in no particular order.
+Apps do not find each other by service name. hivemind makes no networks and has no DNS for apps: every container is on Docker's default bridge network, where names do not resolve, so `depends_on`, `links` and `networks` are refused, and a hostname such as `db` in a connection string resolves to nothing. Each app starts on its own, in no particular order.
+
+Apps on one node are not kept apart, though. Containers on the default bridge reach each other's container ports at their container addresses (`172.17.0.x`), whether the port is published or not, so a port published on `127.0.0.1` is private from other machines, not from the other apps on its node. Do not rely on that path, since a container's address changes each time it is replaced, and do not count on its absence either: an app that the node's other apps must not reach has to authenticate its clients. See [security](security.md#apps-on-one-node).
 
 One app reaches another through a published port on an address its containers can reach. `127.0.0.1` inside a container is the container itself, so a port published on the node's `127.0.0.1` is reachable from the node's own processes but not from other containers. Publish the port on the node's private address instead, and pass that address to the client, for example with a variable from `.env`. The [worked example](#worked-example) does this. An app with a volume stays on the node where it was first placed, so its address does not change. See [Ports](concepts.md#ports) and [Placement](concepts.md#placement) in the concepts.
 
@@ -193,7 +195,7 @@ Each refused key gets one of these reasons. A key not listed here gets the gener
 
 | Key | Reason |
 |---|---|
-| `networks` (top level) | hivemind has no networks between apps: apps reach each other only through published ports |
+| `networks` (top level) | hivemind makes no networks: hivemind puts every container on Docker's default bridge network, where containers on one node can reach each other's ports |
 | `secrets` (top level and service) | hivemind has no secrets: pass values in a service's environment, from variables |
 | `configs` (top level and service) | hivemind has no configs: build the files into the image |
 | `include` | hivemind reads one file: merge the files first, for example with `docker compose config` |
@@ -203,10 +205,10 @@ Each refused key gets one of these reasons. A key not listed here gets the gener
 | `volumes.<name>.driver`, `driver_opts` | hivemind volumes use Docker's local driver, with no options |
 | `volumes.<name>.labels` | hivemind labels each volume with `hivemind.app` and `hivemind.volume`, and nothing else |
 | `build` | build and push the image, then name it in `image` |
-| `depends_on`, `links`, `external_links` | hivemind starts each app on its own, and apps reach each other only through published ports |
-| `networks` (service) | hivemind has no networks between apps |
-| `network_mode` | hivemind gives each container Docker's default network |
-| `expose` | apps reach each other only through published ports; list them under `ports` |
+| `depends_on`, `links`, `external_links` | hivemind starts each app on its own, with no name another app can find it by; one app reaches another at a published port |
+| `networks` (service) | hivemind makes no networks: hivemind puts every container on Docker's default bridge network, where containers on one node can reach each other's ports |
+| `network_mode` | hivemind puts every container on Docker's default bridge network, where containers on one node can reach each other's ports |
+| `expose` | `expose` publishes nothing, and the app spec has no field for it; list a port that must be reached from other machines under `ports` |
 | `env_file` | list the variables under `environment`; a value can come from `.env` beside the file, as `${VAR}` |
 | `container_name` | hivemind names each container `hivemind-<app>-<replica>-g<generation>` |
 | `hostname`, `domainname` | hivemind does not set them |
@@ -234,7 +236,7 @@ Each refused key gets one of these reasons. A key not listed here gets the gener
 | `deploy.placement` | hivemind places replicas by free CPU, memory and host ports; it has no constraints or preferences |
 | `deploy.update_config` | hivemind updates one replica at a time; see [rolling updates](concepts.md#rolling-updates) |
 | `deploy.rollback_config` | hivemind has no automatic rollback: deploy the old spec to roll back |
-| `deploy.endpoint_mode` | hivemind starts each app on its own, and apps reach each other only through published ports |
+| `deploy.endpoint_mode` | hivemind starts each app on its own, with no name another app can find it by; one app reaches another at a published port |
 | `deploy.labels` | hivemind has no service labels |
 | `deploy.resources.limits.pids` | hivemind sets no PID limit |
 | `deploy.resources.reservations.devices`, `generic_resources` | hivemind gives containers no devices |
