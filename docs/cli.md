@@ -343,23 +343,16 @@ hivemind join <server> [flags]
 |---|---|---|---|---|
 | `--acme-ca` | string | `https://acme-v02.api.letsencrypt.org/directory` | `HIVEMIND_ACME_CA` | ACME directory URL the routers get certificates from |
 | `--acme-email` | string | - | `HIVEMIND_ACME_EMAIL` | contact email of the ACME account; required with --route-addr, and setting it accepts the CA's terms |
-| `--api-addr` | string | `127.0.0.1:4483` | `HIVEMIND_API_ADDR` | address of the API, host:port |
-| `--api-tls-cert` | string | - | `HIVEMIND_API_TLS_CERT` | TLS certificate for the API (PEM) |
-| `--api-tls-key` | string | - | `HIVEMIND_API_TLS_KEY` | TLS private key for the API (PEM) |
-| `--cluster-port` | string | `4484` | `HIVEMIND_CLUSTER_PORT` | port of the node-to-node listener; the join listener uses the port above it |
 | `--config` | string | - | `HIVEMIND_CONFIG` | YAML config file (default <data-dir>/hivemind.yaml) |
 | `--data-dir` | string | see description | `HIVEMIND_DATA_DIR` | directory for node state. The default is /var/lib/hivemind for root, and $XDG_STATE_HOME/hivemind or ~/.local/state/hivemind for other users. |
 | `--docker-host` | string | `unix:///var/run/docker.sock` | `HIVEMIND_DOCKER_HOST` | Docker Engine endpoint |
 | `--log-format` | string | `text` | `HIVEMIND_LOG_FORMAT` | log format: text or json |
 | `--log-level` | string | `info` | `HIVEMIND_LOG_LEVEL` | log level: debug, info, warn or error |
-| `--metrics-addr` | string | - | `HIVEMIND_METRICS_ADDR` | separate loopback address for /metrics, host:port; empty means API only |
-| `--min-ready` | string | `30s` | `HIVEMIND_MIN_READY` | how long a node must be ready before it gets new replicas; 0s means no wait |
 | `--reconcile-interval` | string | `2s` | `HIVEMIND_RECONCILE_INTERVAL` | how often the agent reconciles containers and renews its lease (at most 5s) |
 | `--route-addr` | string | - | `HIVEMIND_ROUTE_ADDR` | IP address the HTTPS router listens on, such as 0.0.0.0 for every interface; empty means no router on this node |
 | `--route-http-port` | string | `80` | `HIVEMIND_ROUTE_HTTP_PORT` | port of the router's HTTP listener, for ACME HTTP-01 challenges and redirects to https |
 | `--route-https-port` | string | `443` | `HIVEMIND_ROUTE_HTTPS_PORT` | port of the router's HTTPS listener |
 | `--route-max-conns-per-ip` | string | `256` | `HIVEMIND_ROUTE_MAX_CONNS_PER_IP` | most connections the router keeps open from one client IP address (an IPv6 /64), over both its ports; 0 means no limit, for a router behind a proxy that does not pass client addresses |
-| `--start-grace` | string | `2m` | `HIVEMIND_START_GRACE` | how long after serve starts a worker that was up before it waits for its first report, keeping its replicas and its routes, before it is lost; at least 15s |
 | `--token` | string | - | - | join token from hivemind join-token on the server |
 
 ### hivemind join-token

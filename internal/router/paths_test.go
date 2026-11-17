@@ -64,7 +64,8 @@ func TestRoutingPath(t *testing.T) {
 		if err != nil {
 			t.Fatalf("%q: %v", c.target, err)
 		}
-		got, ok := routingPath(u)
+		got, bad := routingPath(u)
+		ok := bad == ""
 		if got != c.want || ok != c.ok {
 			t.Errorf("routingPath(%q) = %q, %v; want %q, %v", c.target, got, ok, c.want, c.ok)
 		}
@@ -118,10 +119,10 @@ func TestMatchLongestPrefixOnSegments(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		rt, ok := p.lookup(c.host).match(u)
+		rt, bad := p.lookup(c.host).match(u)
 		got := "-"
 		switch {
-		case !ok:
+		case bad != "":
 			got = "400"
 		case rt != nil:
 			got = rt.path
@@ -136,8 +137,8 @@ func TestMatchLongestPrefixOnSegments(t *testing.T) {
 	p.setTable(Table{"www.example.com": whole("10.0.0.1:1")})
 	for _, target := range []string{"/", "/api/../x", "/api%2Fx", `/a\b`, "/a%00", "*"} {
 		u, _ := url.ParseRequestURI(target)
-		if rt, ok := p.lookup("www.example.com").match(u); !ok || rt == nil || rt.path != "" {
-			t.Errorf("%s on a host without paths: %v, %v", target, rt, ok)
+		if rt, bad := p.lookup("www.example.com").match(u); bad != "" || rt == nil || rt.path != "" {
+			t.Errorf("%s on a host without paths: %v, %q", target, rt, bad)
 		}
 	}
 }
@@ -208,10 +209,18 @@ func TestTwoUpstreamsOnOneHost(t *testing.T) {
 	}
 	// Paths that could be read as under another prefix are refused, by the
 	// router, before any replica sees them.
-	for _, target := range []string{"/api/../admin", "/x/../api/y", "/api/%2e%2e/web", "/api%2Fusers", "/api/..;/x",
-		`/api/x\..\..\admin`, "/api%5C..%5Cx"} {
-		if code, body := tr.rawGet(t, "www.example.com", target); code != http.StatusBadRequest || !strings.Contains(body, "bad request") {
-			t.Errorf("%s: %d %s, want 400", target, code, body)
+	// The body names the one reason found.
+	for target, reason := range map[string]string{
+		"/api/../admin":      "a dot segment (. or .., or %2E)",
+		"/x/../api/y":        "a dot segment (. or .., or %2E)",
+		"/api/%2e%2e/web":    "a dot segment (. or .., or %2E)",
+		"/api%2Fusers":       "an encoded slash (%2F)",
+		"/api/..;/x":         "a dot segment (. or .., or %2E)",
+		`/api/x\..\..\admin`: `a backslash (\ or %5C)`,
+		"/api%5C..%5Cx":      `a backslash (\ or %5C)`,
+	} {
+		if code, body := tr.rawGet(t, "www.example.com", target); code != http.StatusBadRequest || strings.TrimSpace(body) != "bad request: the path has "+reason {
+			t.Errorf("%s: %d %q, want 400 with %q", target, code, body, reason)
 		}
 	}
 	if code, body := tr.rawGet(t, "www.example.com", "/api/users"); code != http.StatusOK || !strings.Contains(body, `"Name":"api`) {
@@ -277,6 +286,29 @@ func TestPathsWithoutAWholeHostRoute(t *testing.T) {
 		code, body := tr.rawGet(t, "www.example.com", target)
 		if code != http.StatusOK || !strings.Contains(body, `"URI":`+fmt.Sprintf("%q", uri)) {
 			t.Errorf("%s on a host without paths: %d %s", target, code, body)
+		}
+	}
+}
+
+// routingPath gives the first reason it finds to refuse a path.
+func TestRoutingPathReason(t *testing.T) {
+	for target, want := range map[string]string{
+		"/a/./b":    "a dot segment (. or .., or %2E)",
+		"/a/%2E%2E": "a dot segment (. or .., or %2E)",
+		"/a%00b":    "a control character",
+		"/a%2fb":    "an encoded slash (%2F)",
+		"/a%5cb":    "an encoded backslash (%5C)",
+		`/a\b`:      `a backslash (\ or %5C)`,
+		`/a%00\..`:  "a control character",
+		"/a/b":      "",
+		"*":         "",
+	} {
+		u, err := url.ParseRequestURI(target)
+		if err != nil {
+			t.Fatalf("%q: %v", target, err)
+		}
+		if _, bad := routingPath(u); bad != want {
+			t.Errorf("routingPath(%q): %q, want %q", target, bad, want)
 		}
 	}
 }

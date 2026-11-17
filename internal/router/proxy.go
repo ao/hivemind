@@ -183,25 +183,25 @@ func (h *hostRoutes) find(p string) *route {
 // the longest prefix of the request's path on a segment boundary, or else
 // the whole host's. It is nil when no route takes it. A host without path
 // routes sends every request to its whole host route, as before paths
-// existed. For a host with path routes, ok is false when routingPath refuses
-// the path.
-func (h *hostRoutes) match(u *url.URL) (rt *route, ok bool) {
+// existed. For a host with path routes, bad is routingPath's reason when it
+// refuses the path.
+func (h *hostRoutes) match(u *url.URL) (rt *route, bad string) {
 	if !h.paths {
 		if len(h.routes) == 0 {
-			return nil, true
+			return nil, ""
 		}
-		return h.routes[0], true
+		return h.routes[0], ""
 	}
-	p, ok := routingPath(u)
-	if !ok {
-		return nil, false
+	p, bad := routingPath(u)
+	if bad != "" {
+		return nil, bad
 	}
 	for _, r := range h.routes {
 		if r.path == "" || underPrefix(p, r.path) {
-			return r, true
+			return r, ""
 		}
 	}
-	return nil, true
+	return nil, ""
 }
 
 // underPrefix reports whether the clean path p is prefix or below it: the
@@ -217,10 +217,10 @@ func underPrefix(p, prefix string) bool {
 // that does not start with "/", such as the "*" of OPTIONS *, comes back as
 // "", which only the whole host's route takes.
 //
-// ok is false for a path that the app behind the route, or a proxy or
-// framework in front of it, could read as being under another prefix than
-// the one the router would choose. The router refuses such a request with
-// 400 rather than guess:
+// bad is the first reason found to refuse a path that the app behind the
+// route, or a proxy or framework in front of it, could read as being under
+// another prefix than the one the router would choose. The router refuses
+// such a request with 400, and that reason in the body, rather than guess:
 //
 //   - an encoded slash or backslash (%2F, %5C). Decoded, it splits a segment
 //     in two; left encoded, it does not. Apps differ in which they do, so
@@ -238,29 +238,35 @@ func underPrefix(p, prefix string) bool {
 // encode neither slashes nor backslashes in paths, so these are requests
 // that a person or a script crafted. A host without path routes passes them
 // to its app as before.
-func routingPath(u *url.URL) (string, bool) {
+func routingPath(u *url.URL) (p, bad string) {
 	// RawPath is set only when the client's escaping differs from Go's
 	// own, which never encodes a slash; an encoded backslash is a
 	// backslash in Path.
-	if raw := strings.ToLower(u.RawPath); strings.Contains(raw, "%2f") || strings.Contains(raw, "%5c") {
-		return "", false
+	switch raw := strings.ToLower(u.RawPath); {
+	case strings.Contains(raw, "%2f"):
+		return "", "an encoded slash (%2F)"
+	case strings.Contains(raw, "%5c"):
+		return "", "an encoded backslash (%5C)"
 	}
-	p := u.Path
+	p = u.Path
 	for i := 0; i < len(p); i++ {
-		if c := p[i]; c < 0x20 || c == 0x7f || c == '\\' {
-			return "", false
+		switch c := p[i]; {
+		case c < 0x20 || c == 0x7f:
+			return "", "a control character"
+		case c == '\\':
+			return "", `a backslash (\ or %5C)`
 		}
 	}
 	if !strings.HasPrefix(p, "/") {
-		return "", true
+		return "", ""
 	}
 	for seg := range strings.SplitSeq(p[1:], "/") {
 		name, _, _ := strings.Cut(seg, ";")
 		if name == "." || name == ".." {
-			return "", false
+			return "", "a dot segment (. or .., or %2E)"
 		}
 	}
-	return path.Clean(p), true
+	return path.Clean(p), ""
 }
 
 // proxy holds the table and routes requests by host and path.
@@ -485,10 +491,10 @@ func (p *proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "not found", http.StatusNotFound)
 		return
 	}
-	rt, ok := hr.match(r.URL)
+	rt, bad := hr.match(r.URL)
 	switch {
-	case !ok:
-		http.Error(w, "bad request: the path has an encoded slash or backslash, a backslash, a dot segment or a control character", http.StatusBadRequest)
+	case bad != "":
+		http.Error(w, "bad request: the path has "+bad, http.StatusBadRequest)
 		return
 	case rt == nil:
 		http.Error(w, "not found", http.StatusNotFound)

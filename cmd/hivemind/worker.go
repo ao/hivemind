@@ -142,7 +142,7 @@ certificates through the server.`,
 			return runWorker(cmd.Context(), cfg, log, rt)
 		},
 	}
-	config.Bind(cmd.Flags(), config.Options{})
+	config.BindWorker(cmd.Flags(), config.Options{})
 	cmd.Flags().String("token", "", "join token from hivemind join-token on the server")
 	_ = cmd.Flags().SetAnnotation("token", noEnvAnnotation, []string{"true"})
 	cmd.Flags().Lookup("advertise").Hidden = true

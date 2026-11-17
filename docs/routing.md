@@ -46,7 +46,7 @@ WebSocket and other HTTP/1.1 upgrades pass through to the replica. An upgrade to
 | A host in the table, with a Ready replica for the request's route | The replica's reply |
 | A host in the table, with no Ready replica for the request's route | `503` |
 | A path that no route of a host with path routes takes, because the host has no whole host route | `404`, with the body `not found` |
-| On a host with path routes, a path with an encoded slash or backslash, a backslash, a dot segment or a control character | `400` (see [paths](#paths)) |
+| On a host with path routes, a path with an encoded slash or backslash, a backslash, a dot segment or a control character | `400`, whose body names the one found, as `bad request: the path has a dot segment (. or .., or %2E)` (see [paths](#paths)) |
 | A host not in the table, on the http port | `404`, with the body `not found`. No host is listed |
 | A TLS handshake for a name not in the table | The handshake fails: there is no default certificate |
 | A `Host` header that is not the name the client asked for in TLS (SNI) | `421` |

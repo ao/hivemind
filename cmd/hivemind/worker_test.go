@@ -514,3 +514,35 @@ func TestJoinOnARemovedNodesMachine(t *testing.T) {
 		t.Fatalf("join over a removed node: %v", err)
 	}
 }
+
+// join binds the settings a worker reads, and none of the server's, so its
+// help and docs/cli.md list only those. --advertise and --cluster-addr stay,
+// hidden, to be refused with the reason.
+func TestJoinTakesTheWorkersFlags(t *testing.T) {
+	isolate(t)
+	root := newRoot(strings.NewReader(""), io.Discard, io.Discard)
+	join, _, err := root.Find([]string{"join"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, name := range []string{"api-addr", "api-tls-cert", "api-tls-key", "metrics-addr", "min-ready", "start-grace", "cluster-port"} {
+		if join.Flags().Lookup(name) != nil {
+			t.Errorf("join has --%s, which only the server reads", name)
+		}
+	}
+	for _, name := range []string{"token", "data-dir", "config", "docker-host", "log-level", "log-format", "reconcile-interval",
+		"route-addr", "route-http-port", "route-https-port", "route-max-conns-per-ip", "acme-email", "acme-ca"} {
+		if join.Flags().Lookup(name) == nil {
+			t.Errorf("join has no --%s", name)
+		}
+	}
+	dir := filepath.Join(t.TempDir(), "worker")
+	if _, _, err := run(t, "", "join", "10.255.255.1", "--token", pki.JoinToken{}.String(), "--data-dir", dir, "--start-grace", "1m"); err == nil ||
+		!strings.Contains(err.Error(), "unknown flag: --start-grace") {
+		t.Errorf("join --start-grace: %v", err)
+	}
+	if _, _, err := run(t, "", "join", "10.255.255.1", "--token", pki.JoinToken{}.String(), "--data-dir", dir, "--advertise", "10.0.0.5"); err == nil ||
+		!strings.Contains(err.Error(), "--advertise does not apply to join") {
+		t.Errorf("join --advertise: %v", err)
+	}
+}
