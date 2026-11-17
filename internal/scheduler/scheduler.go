@@ -75,6 +75,11 @@ type Replica struct {
 type Assignment struct {
 	Replica Replica
 	NodeID  string
+	// Leaving is set on a copy that goes away without anyone acting: one
+	// marked for removal, or a surge, which its rollout or drain promotes or
+	// removes. It counts against its node like any other; only Blocked
+	// reads the flag.
+	Leaving bool
 }
 
 // Unplaced is a replica that Place could not put anywhere, and why.
@@ -168,6 +173,42 @@ func HostPortsOf(app spec.App) []string {
 // generation. Node IDs should be unique; for a repeated ID the first node
 // is used.
 func Place(nodes []Node, existing []Assignment, pending []Replica, now time.Time, opts Options) (placed []Assignment, unplaced []Unplaced) {
+	states, byID, why, minReady := loadNodes(nodes, existing, now, opts)
+
+	order := make([]Replica, len(pending))
+	copy(order, pending)
+	sort.SliceStable(order, func(i, j int) bool {
+		a, b := order[i], order[j]
+		if (a.PinnedNode != "") != (b.PinnedNode != "") {
+			return a.PinnedNode != ""
+		}
+		if a.App != b.App {
+			return a.App < b.App
+		}
+		if a.Index != b.Index {
+			return a.Index < b.Index
+		}
+		return a.Generation < b.Generation
+	})
+
+	for _, r := range order {
+		s, reason := choose(r, states, byID, why, minReady, opts.MaxNodeBytes)
+		if s == nil {
+			unplaced = append(unplaced, Unplaced{Replica: r, Reason: reason})
+			continue
+		}
+		cpu, mem, _ := request(r.Resources)
+		s.add(r.App, cpu, mem, r.Bytes, heldPorts(r.HostPorts, r.App, false))
+		placed = append(placed, Assignment{Replica: r, NodeID: s.id})
+	}
+	return placed, unplaced
+}
+
+// loadNodes is the nodes as Place starts from them: sorted by ID, a
+// repeated ID dropped, each with its existing assignments counted. It also
+// returns the nodes by ID, what kinds of ready node there are, and the
+// minimum ready time that opts means.
+func loadNodes(nodes []Node, existing []Assignment, now time.Time, opts Options) ([]*nodeState, map[string]*nodeState, reasons, time.Duration) {
 	minReady := opts.MinReady
 	if minReady == 0 {
 		minReady = DefaultMinReady
@@ -211,36 +252,85 @@ func Place(nodes []Node, existing []Assignment, pending []Replica, now time.Time
 			// Count an unreadable request as filling the node.
 			cpu, mem = s.cpuCap+1, s.memCap
 		}
-		s.add(a.Replica.App, cpu, mem, a.Replica.Bytes, parsePorts(a.Replica.HostPorts))
+		s.add(a.Replica.App, cpu, mem, a.Replica.Bytes, heldPorts(a.Replica.HostPorts, a.Replica.App, a.Leaving))
 	}
+	return states, byID, why, minReady
+}
 
-	order := make([]Replica, len(pending))
-	copy(order, pending)
-	sort.SliceStable(order, func(i, j int) bool {
-		a, b := order[i], order[j]
-		if (a.PinnedNode != "") != (b.PinnedNode != "") {
-			return a.PinnedNode != ""
-		}
-		if a.App != b.App {
-			return a.App < b.App
-		}
-		if a.Index != b.Index {
-			return a.Index < b.Index
-		}
-		return a.Generation < b.Generation
-	})
+// heldPorts parses the host ports of a copy of app on a node.
+func heldPorts(list []string, app string, leaving bool) []hostPort {
+	out := parsePorts(list)
+	for i := range out {
+		out[i].app, out[i].leaving = app, leaving
+	}
+	return out
+}
 
-	for _, r := range order {
-		s, reason := choose(r, states, byID, why, minReady, opts.MaxNodeBytes)
+// Block says more about a replica that Place could not put anywhere than
+// its reason does.
+type Block struct {
+	// Holders are the apps whose copies publish a host port the replica
+	// needs, on the eligible nodes where that port is what stops it: the
+	// nodes its reason counts as having the port in use. Sorted; empty when
+	// a port stops it nowhere.
+	Holders []string
+	// Lasting is set when nothing changes by itself to let the replica onto
+	// any of the nodes: on each one it needs more CPU or memory than the
+	// node has in all, or a host port that a copy which is not Leaving
+	// holds. A node that is not ready, not eligible, or full only of what
+	// is leaving may take it later, so it is false then, and with no nodes.
+	Lasting bool
+}
+
+// Blocked explains why Place, given the same nodes, existing assignments,
+// time and options, put the replica r nowhere. It changes nothing, and does
+// not check that Place would in fact leave r unplaced.
+func Blocked(nodes []Node, existing []Assignment, r Replica, now time.Time, opts Options) Block {
+	states, byID, _, _ := loadNodes(nodes, existing, now, opts)
+	cpu, mem, ok := request(r.Resources)
+	if !ok {
+		return Block{Lasting: len(states) > 0}
+	}
+	if r.PinnedNode != "" {
+		s := byID[r.PinnedNode]
 		if s == nil {
-			unplaced = append(unplaced, Unplaced{Replica: r, Reason: reason})
-			continue
+			return Block{}
 		}
-		cpu, mem, _ := request(r.Resources)
-		s.add(r.App, cpu, mem, r.Bytes, parsePorts(r.HostPorts))
-		placed = append(placed, Assignment{Replica: r, NodeID: s.id})
+		states = []*nodeState{s}
 	}
-	return placed, unplaced
+	ports := parsePorts(r.HostPorts)
+	holders := map[string]bool{}
+	lasting := len(states) > 0
+	for _, s := range states {
+		if f, _ := s.check(cpu, mem, r.Bytes, ports); s.eligible && f == portInUse {
+			for _, p := range ports {
+				for _, q := range s.ports {
+					if p.conflicts(q) {
+						holders[q.app] = true
+					}
+				}
+			}
+		}
+		lasting = lasting && s.neverFits(cpu, mem, ports)
+	}
+	return Block{Holders: sortedKeys(holders), Lasting: lasting}
+}
+
+// neverFits reports whether a replica with the given request and host ports
+// cannot go on s until something that is not leaving changes: it needs more
+// than s has in all, or a port that such a copy holds.
+func (s *nodeState) neverFits(cpu, mem int64, ports []hostPort) bool {
+	if cpu > s.cpuCap || mem > s.memCap {
+		return true
+	}
+	for _, p := range ports {
+		for _, q := range s.ports {
+			if !q.leaving && p.conflicts(q) {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 type nodeState struct {

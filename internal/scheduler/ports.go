@@ -17,6 +17,11 @@ type hostPort struct {
 	// opaque entries could not be parsed and conflict only with an
 	// identical entry.
 	opaque bool
+	// app is the app of the copy that publishes the port on a node, and
+	// leaving is its Assignment.Leaving. They are unset on the ports of a
+	// replica being placed.
+	app     string
+	leaving bool
 }
 
 func parsePorts(list []string) []hostPort {

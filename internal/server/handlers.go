@@ -39,6 +39,50 @@ type PutResult struct {
 	// Unchanged is set when the app existed with the same spec and origin,
 	// so the put changed nothing but its update time.
 	Unchanged bool `json:"unchanged,omitempty"`
+	// Pending lists the first MaxPendingListed replicas, by index, that
+	// should run and that no node took when the put placed them, and why.
+	// PendingCount counts them all. Both are absent when every replica has a
+	// node.
+	Pending      []PendingReplica `json:"pending,omitempty"`
+	PendingCount int              `json:"pending_count,omitempty"`
+}
+
+// MaxPendingListed is how many pending replicas a write's reply lists.
+const MaxPendingListed = 10
+
+// PendingReplica is a replica that a write left with no node.
+type PendingReplica struct {
+	Replica int `json:"replica"`
+	// Reason is the pending reason status shows. When a host port in use
+	// stops the replica, it ends with the apps that hold the port: "...;
+	// held by app api".
+	Reason string `json:"reason"`
+	// Stuck is set when the reason does not change by itself: a host port
+	// that a running replica holds on every node that could take this one,
+	// a bind address no node has, or more CPU or memory than any node has.
+	// It takes someone to delete or change an app, or to add a node.
+	Stuck bool `json:"stuck,omitempty"`
+}
+
+// ScaleResult is the reply to a scale: the app, and the replicas the scale
+// left with no node, as in PutResult.
+type ScaleResult struct {
+	AppView
+	Pending      []PendingReplica `json:"pending,omitempty"`
+	PendingCount int              `json:"pending_count,omitempty"`
+}
+
+// pendingOf is a write's unplaced replicas as its reply lists them, and
+// their count.
+func pendingOf(un []store.Unplaced) ([]PendingReplica, int) {
+	if len(un) == 0 {
+		return nil, 0
+	}
+	out := make([]PendingReplica, 0, min(len(un), MaxPendingListed))
+	for _, u := range un[:min(len(un), MaxPendingListed)] {
+		out = append(out, PendingReplica{Replica: u.Index, Reason: u.Reason, Stuck: u.Lasting})
+	}
+	return out, len(un)
 }
 
 // ScaleRequest is the body of POST /v1/apps/{name}/scale.
@@ -229,7 +273,7 @@ func (s *Server) put(w http.ResponseWriter, r *http.Request, a spec.App) {
 		s.fail(w, r, err)
 		return
 	}
-	got, err := s.cfg.Store.PutAppWith(r.Context(), a, opts)
+	got, un, err := s.cfg.Store.PutAppPlaced(r.Context(), a, opts)
 	if err != nil {
 		s.fail(w, r, err)
 		return
@@ -240,7 +284,9 @@ func (s *Server) put(w http.ResponseWriter, r *http.Request, a spec.App) {
 		code = http.StatusCreated
 	}
 	unchanged := !created && got.Generation == old.Generation && got.Origin == old.Origin && sameSpec(got.Spec, old.Spec)
-	writeJSON(w, code, PutResult{App: view(got), Created: created, Unchanged: unchanged})
+	res := PutResult{App: view(got), Created: created, Unchanged: unchanged}
+	res.Pending, res.PendingCount = pendingOf(un)
+	writeJSON(w, code, res)
 }
 
 // sameSpec reports whether two stored specs are the same, as the store
@@ -265,13 +311,15 @@ func (s *Server) scaleApp(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, fmt.Sprintf("replicas %d: must be between 1 and %d", req.Replicas, spec.MaxReplicas))
 		return
 	}
-	a, err := s.cfg.Store.Scale(r.Context(), name, req.Replicas)
+	a, un, err := s.cfg.Store.ScalePlaced(r.Context(), name, req.Replicas)
 	if err != nil {
 		s.fail(w, r, err)
 		return
 	}
 	s.cfg.Trigger()
-	writeJSON(w, http.StatusOK, view(a))
+	res := ScaleResult{AppView: view(a)}
+	res.Pending, res.PendingCount = pendingOf(un)
+	writeJSON(w, http.StatusOK, res)
 }
 
 // deleteApp deletes the app. The query may name an origin, as the put's

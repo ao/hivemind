@@ -574,3 +574,131 @@ func TestPlaceKeepsNodeBytesWithinTheBound(t *testing.T) {
 		t.Fatalf("no bound: %v", where(placed, unplaced))
 	}
 }
+
+// Blocked names the apps that hold a port where the port is what stops a
+// replica, and says when nothing will change by itself to let it on.
+func TestBlocked(t *testing.T) {
+	two := []Node{node("a", 2, 2*gi), node("b", 2, 2*gi)}
+	leaving := func(a Assignment) Assignment { a.Leaving = true; return a }
+	notReady := node("c", 2, 2*gi)
+	notReady.ReadySince = now
+	closed := node("d", 2, 2*gi)
+	closed.Ineligible = true
+	tests := []struct {
+		name     string
+		nodes    []Node
+		existing []Assignment
+		r        Replica
+		holders  []string
+		lasting  bool
+	}{
+		{
+			name:     "another app holds the port on every node",
+			nodes:    two,
+			existing: []Assignment{on(rep("api", 0, 0, 0, "127.0.0.1:8080/tcp"), "a"), on(rep("api", 1, 0, 0, "0.0.0.0:8080/tcp"), "b")},
+			r:        rep("web", 0, 0, 0, "127.0.0.1:8080/tcp"),
+			holders:  []string{"api"},
+			lasting:  true,
+		},
+		{
+			name:     "two apps, and another replica of the same one",
+			nodes:    two,
+			existing: []Assignment{on(rep("api", 0, 0, 0, "8080/tcp"), "a"), on(rep("db", 0, 0, 0, "127.0.0.1:8080/tcp"), "b"), on(rep("web", 0, 0, 0, "127.0.0.1:8080/tcp"), "b")},
+			r:        rep("web", 1, 0, 0, "127.0.0.1:8080/tcp"),
+			holders:  []string{"api", "db", "web"},
+			lasting:  true,
+		},
+		{
+			name:     "the copy on one node is leaving",
+			nodes:    two,
+			existing: []Assignment{on(rep("api", 0, 0, 0, "127.0.0.1:8080/tcp"), "a"), leaving(on(rep("old", 0, 0, 0, "127.0.0.1:8080/tcp"), "b"))},
+			r:        rep("web", 0, 0, 0, "127.0.0.1:8080/tcp"),
+			holders:  []string{"api", "old"},
+		},
+		{
+			name:     "a node that is not ready yet has the port free",
+			nodes:    []Node{node("a", 2, 2*gi), notReady},
+			existing: []Assignment{on(rep("api", 0, 0, 0, "127.0.0.1:8080/tcp"), "a")},
+			r:        rep("web", 0, 0, 0, "127.0.0.1:8080/tcp"),
+			holders:  []string{"api"},
+		},
+		{
+			name:     "an ineligible node has the port free",
+			nodes:    []Node{node("a", 2, 2*gi), closed},
+			existing: []Assignment{on(rep("api", 0, 0, 0, "127.0.0.1:8080/tcp"), "a")},
+			r:        rep("web", 0, 0, 0, "127.0.0.1:8080/tcp"),
+			holders:  []string{"api"},
+		},
+		{
+			name:    "more memory than any node has",
+			nodes:   two,
+			r:       rep("web", 0, 0, 3*gi),
+			lasting: true,
+		},
+		{
+			name:    "more CPU than any node has",
+			nodes:   two,
+			r:       rep("web", 0, 2.5, 0),
+			lasting: true,
+		},
+		{
+			name:     "more memory than is free, not than a node has",
+			nodes:    two,
+			existing: []Assignment{on(rep("db", 0, 0, 2*gi), "a"), on(rep("db", 1, 0, 2*gi), "b")},
+			r:        rep("web", 0, 0, gi),
+		},
+		{
+			name:     "one node too small, the other's port held",
+			nodes:    []Node{node("a", 1, gi), node("b", 4, 4*gi)},
+			existing: []Assignment{on(rep("api", 0, 0, 0, "127.0.0.1:8080/tcp"), "b")},
+			r:        rep("web", 0, 2, 0, "127.0.0.1:8080/tcp"),
+			holders:  []string{"api"},
+			lasting:  true,
+		},
+		{
+			name:     "a port held on a node without the CPU is not named",
+			nodes:    []Node{node("a", 1, gi)},
+			existing: []Assignment{on(rep("api", 0, 1, 0, "127.0.0.1:8080/tcp"), "a")},
+			r:        rep("web", 0, 0.5, 0, "127.0.0.1:8080/tcp"),
+			lasting:  true,
+		},
+		{
+			name:  "no nodes",
+			r:     rep("web", 0, 0, 0, "127.0.0.1:8080/tcp"),
+			nodes: nil,
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			placed, unplaced := Place(tc.nodes, tc.existing, []Replica{tc.r}, now, Options{})
+			if len(placed) != 0 || len(unplaced) != 1 {
+				t.Fatalf("Place put the replica on a node: %v", placed)
+			}
+			b := Blocked(tc.nodes, tc.existing, tc.r, now, Options{})
+			if !reflect.DeepEqual(b.Holders, tc.holders) && !(len(b.Holders) == 0 && len(tc.holders) == 0) {
+				t.Errorf("holders %v, want %v (reason %q)", b.Holders, tc.holders, unplaced[0].Reason)
+			}
+			if b.Lasting != tc.lasting {
+				t.Errorf("lasting %v, want %v (reason %q)", b.Lasting, tc.lasting, unplaced[0].Reason)
+			}
+			if len(b.Holders) > 0 && !strings.Contains(unplaced[0].Reason, "in use") {
+				t.Errorf("holders %v for a reason that is not a port in use: %q", b.Holders, unplaced[0].Reason)
+			}
+		})
+	}
+}
+
+// Blocked on a pinned replica looks at its node only.
+func TestBlockedPinned(t *testing.T) {
+	nodes := []Node{node("a", 2, 2*gi), node("b", 2, 2*gi)}
+	existing := []Assignment{on(rep("api", 0, 0, 0, "127.0.0.1:5432/tcp"), "a")}
+	r := rep("db", 0, 0, 0, "127.0.0.1:5432/tcp")
+	r.PinnedNode = "a"
+	if b := Blocked(nodes, existing, r, now, Options{}); !b.Lasting || !reflect.DeepEqual(b.Holders, []string{"api"}) {
+		t.Fatalf("pinned to the node with the port: %+v", b)
+	}
+	r.PinnedNode = "gone"
+	if b := Blocked(nodes, existing, r, now, Options{}); b.Lasting || len(b.Holders) != 0 {
+		t.Fatalf("pinned to a node that is not registered: %+v", b)
+	}
+}

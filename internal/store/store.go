@@ -416,6 +416,11 @@ func (s *Store) PutApp(ctx context.Context, a spec.App) (App, error) {
 // Without one, the app keeps the origin it has, and a new app has none. An
 // app that was deleted counts as new.
 func (s *Store) PutAppWith(ctx context.Context, a spec.App, o PutOptions) (App, error) {
+	return s.putApp(ctx, a, o, nil)
+}
+
+// putApp is PutAppWith. then, when set, runs last in the transaction.
+func (s *Store) putApp(ctx context.Context, a spec.App, o PutOptions, then afterPlace) (App, error) {
 	if err := checkOrigin(o.Origin); err != nil {
 		return App{}, err
 	}
@@ -510,6 +515,11 @@ func (s *Store) PutAppWith(ctx context.Context, a spec.App, o PutOptions) (App, 
 		}
 		if err := checkNodeBytes(before, after, "app "+c.Name+"'s spec", "use fewer replicas on that node, a smaller spec, or more nodes"); err != nil {
 			return err
+		}
+		if then != nil {
+			if err := then(ctx, tx, c.Name); err != nil {
+				return err
+			}
 		}
 		out = App{Spec: c, Generation: gen, CreatedAt: time.Unix(0, created), UpdatedAt: now, Origin: origin}
 		return nil
@@ -813,6 +823,11 @@ func (s *Store) DeleteAppWith(ctx context.Context, name, origin string) error {
 
 // Scale sets the app's replica count. The generation does not change.
 func (s *Store) Scale(ctx context.Context, name string, replicas int) (App, error) {
+	return s.scale(ctx, name, replicas, nil)
+}
+
+// scale is Scale. then, when set, runs last in the transaction.
+func (s *Store) scale(ctx context.Context, name string, replicas int, then afterPlace) (App, error) {
 	var out App
 	err := s.tx(ctx, func(tx *sql.Tx) error {
 		a, err := getAppTx(ctx, tx, name)
@@ -838,6 +853,11 @@ func (s *Store) Scale(ctx context.Context, name string, replicas int) (App, erro
 		}
 		if err := s.placePending(ctx, tx); err != nil {
 			return err
+		}
+		if then != nil {
+			if err := then(ctx, tx, name); err != nil {
+				return err
+			}
 		}
 		a.UpdatedAt = now
 		out = a

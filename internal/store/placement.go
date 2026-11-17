@@ -38,17 +38,7 @@ func (s *Store) schedulerPlace(nodes []Node, placed []Assignment, app spec.App, 
 	if len(nodes) == 0 {
 		return "", errors.New("no nodes are registered")
 	}
-	sn := make([]scheduler.Node, 0, len(nodes))
-	for _, n := range nodes {
-		sn = append(sn, scheduler.Node{
-			ID:         n.ID,
-			CPU:        float64(n.CPU),
-			Memory:     n.Memory,
-			Ready:      now.Sub(n.LastLease) <= scheduler.DefaultLeaseTimeout,
-			ReadySince: n.ReadySince,
-			Ineligible: !n.Eligible,
-		})
-	}
+	sn := schedNodes(nodes, now)
 	// Bytes bound what each assignment takes in its node's list
 	// (MaxNodeAssignmentBytes). The new one's node ID is the longest any
 	// node has, and its reason gets room for one the server may set later.
@@ -69,13 +59,7 @@ func (s *Store) schedulerPlace(nodes []Node, placed []Assignment, app spec.App, 
 	want.Bytes = reasonRoom + assignmentBytes(Assignment{Replica: Replica{App: app.Name, NodeID: longest, Desired: Running}},
 		specBytes(app), credFor(creds, Running, app))
 
-	// scheduler.Options treats zero as the default wait. Here zero means no
-	// wait, so it is passed as a negative value, which Place reads as no wait.
-	minReady := s.minReady
-	if minReady == 0 {
-		minReady = -1
-	}
-	out, unplaced := scheduler.Place(sn, existing, []scheduler.Replica{want}, now, scheduler.Options{MinReady: minReady, MaxNodeBytes: MaxNodeAssignmentBytes})
+	out, unplaced := scheduler.Place(sn, existing, []scheduler.Replica{want}, now, s.schedOptions())
 	if len(out) == 1 {
 		return out[0].NodeID, nil
 	}
@@ -83,6 +67,33 @@ func (s *Store) schedulerPlace(nodes []Node, placed []Assignment, app spec.App, 
 		return "", errors.New(unplaced[0].Reason)
 	}
 	return "", errors.New("the replica could not be placed")
+}
+
+// schedNodes describes the nodes to the scheduler as it sees them at now.
+func schedNodes(nodes []Node, now time.Time) []scheduler.Node {
+	sn := make([]scheduler.Node, 0, len(nodes))
+	for _, n := range nodes {
+		sn = append(sn, scheduler.Node{
+			ID:         n.ID,
+			CPU:        float64(n.CPU),
+			Memory:     n.Memory,
+			Ready:      now.Sub(n.LastLease) <= scheduler.DefaultLeaseTimeout,
+			ReadySince: n.ReadySince,
+			Ineligible: !n.Eligible,
+		})
+	}
+	return sn
+}
+
+// schedOptions are the scheduler's options for this store.
+func (s *Store) schedOptions() scheduler.Options {
+	// scheduler.Options treats zero as the default wait. Here zero means no
+	// wait, so it is passed as a negative value, which Place reads as no wait.
+	minReady := s.minReady
+	if minReady == 0 {
+		minReady = -1
+	}
+	return scheduler.Options{MinReady: minReady, MaxNodeBytes: MaxNodeAssignmentBytes}
 }
 
 // schedReplica describes one replica to the scheduler. Its resources and host
