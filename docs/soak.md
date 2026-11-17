@@ -668,7 +668,7 @@ With a one-hour lifetime a few failed checks are enough; with Let's Encrypt's 90
 
 ### Lose the server; the name's record changes 30 s late
 
-[concepts.md](concepts.md#the-servers-address) suggests a TTL of a minute or so for the server's name, and a restored server gives each worker 15 s from its start to report. After the steady state the cluster was moved back to the name, as [backup.md](backup.md#at-a-new-ip-address) describes (the server restarted with `--advertise hivemind-server.soak.test --cluster-addr <its address>`, then `set-server hivemind-server.soak.test` on each worker, 0.13 s each), and the server was lost once more. This time the harness changed the name's line 30 s after the restored server's API answered, as a record whose old value is still cached would reach the workers late.
+[concepts.md](concepts.md#the-servers-address) suggests a TTL of a minute or so for the server's name, and the build of this run gave each worker 15 s from a restored server's start to report (since this run, the start grace gives it 2 minutes by default; see the end of this section). After the steady state the cluster was moved back to the name, as [backup.md](backup.md#at-a-new-ip-address) describes (the server restarted with `--advertise hivemind-server.soak.test --cluster-addr <its address>`, then `set-server hivemind-server.soak.test` on each worker, 0.13 s each), and the server was lost once more. This time the harness changed the name's line 30 s after the restored server's API answered, as a record whose old value is still cached would reach the workers late.
 
 | | UTC | Seconds |
 |---|---|---|
@@ -689,6 +689,8 @@ With a one-hour lifetime a few failed checks are enough; with Let's Encrypt's 90
 The workers did not join again and their `node.json` was unchanged, but every replica they ran, except `kv`, which has a volume and waited for its node, was placed on the new server, started there while the workers' copies kept running, and stayed there: when the workers reached the server they removed their copies, one `spread` container after another in 10 s stops; there were replicas on two machines for 35.0 s in all. The cluster ended with 13 of its 14 replicas on one machine. Through the workers' routers no request failed: they could not reach the server and served their last table. Through the new server's router, `api.soak.test` answered `503` 131 times, from 10:44:50.7 to 10:45:13.9 (no endpoint for 3 s after the start, then from the 15 s mark until its own new copies passed their health checks), and `www.soak.test` 32 times in its first 3 s.
 
 The table's first 15 s also show how the start grace fails: it was empty until about 10:44:53, when the server's own agent renewed its node's lease; from then until the 15 s mark it held the workers' endpoints from the store, as meant; in the two earlier restores the workers reported within those first 4 s.
+
+Since this run, `serve` has a start grace, 2 minutes by default (`--start-grace`): a worker that was up before the start is `waiting` until it reports, not lost, and the routing table keeps its endpoints as it last reported them ([concepts](concepts.md#leases-and-node-loss)). `scripts/integration-newaddr.sh` moves the name 30 s after the restored server starts, past the 15 s, and checks that the workers wait and that no replica runs twice. The soak was not run again on that build.
 
 ## Steady state
 
