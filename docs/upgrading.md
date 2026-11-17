@@ -21,7 +21,7 @@ Upgrading the workers first also works. A new worker with a 2.0.0 server logs on
 A 2.0.0 binary refuses a migrated store, and leaves its files unchanged:
 
 ```
-error: opening /var/lib/hivemind/hivemind.db: store schema is newer than this build: the store has schema version 14 and this build knows up to 6; use a newer hivemind
+error: opening /var/lib/hivemind/hivemind.db: store schema is newer than this build: the store has schema version 15 and this build knows up to 6; use a newer hivemind
 ```
 
 To go back to 2.0.0, restore the backup from step 1 into an empty data directory with the new binary's `hivemind restore`, then run 2.0.0 on it. Everything that changed since the backup is lost.
@@ -69,7 +69,7 @@ v2 serves the API on `127.0.0.1:4483`, and every route except `GET /healthz` nee
 
 ### Networking
 
-v1 bound `*:7946` for its membership protocol (memberlist). v2 has no membership protocol. Its API listens on `127.0.0.1:4483`, and nothing else listens unless the server runs with `--advertise`. With `--advertise`, v2 opens two ports on that address only: 4484 for the node API and 4485 for joins. See [security](security.md#listeners).
+v1 bound `*:7946` for its membership protocol (memberlist). v2 has no membership protocol. Its API listens on `127.0.0.1:4483`, and nothing else listens unless the server runs with `--advertise`, or a node with `--route-addr`. With `--advertise`, v2 opens two ports on that address only: 4484 for the node API and 4485 for joins. `--route-addr` (unreleased 2.2.0) opens the HTTPS router on ports 80 and 443. See [security](security.md#listeners).
 
 ### Removed
 
