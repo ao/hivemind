@@ -118,6 +118,8 @@ type Router struct {
 
 	ctx    context.Context
 	cancel context.CancelFunc
+	// bg counts the router's own background work, which Shutdown waits for.
+	bg sync.WaitGroup
 
 	// refreshMu, lastRefresh and refreshing limit the table reads that
 	// challenges for unknown hosts cause (see refresh). refreshing is closed
@@ -126,6 +128,8 @@ type Router struct {
 	lastRefresh time.Time
 	refreshing  chan struct{}
 
+	// mu guards the fields below, and orders Shutdown's cancel with the
+	// start of background work.
 	mu sync.Mutex
 	// manage starts certificate management for hosts: the certmagic
 	// config's ManageAsync. Tests replace it, under mu.
@@ -298,13 +302,18 @@ func (rt *Router) Serve() error {
 // requests in flight, up to shutdownTimeout. It may be called on a router
 // that was never served.
 func (rt *Router) Shutdown() error {
+	// Under mu, so that no background work starts after the cancel (see
+	// renewAtStart) and bg's count is complete before the Wait below.
+	rt.mu.Lock()
 	rt.cancel()
+	rt.mu.Unlock()
 	ctx, cancel := context.WithTimeout(context.Background(), shutdownTimeout)
 	defer cancel()
 	err := errors.Join(rt.httpSrv.Shutdown(ctx), rt.tlsSrv.Shutdown(ctx))
 	// A listener that was never served is not closed by Shutdown.
 	_ = rt.httpLn.Close()
 	_ = rt.tlsLn.Close()
+	rt.bg.Wait()
 	rt.cache.Stop()
 	return err
 }
@@ -359,13 +368,49 @@ func (rt *Router) warm() {
 		return
 	}
 	loaded := 0
+	var due []string
 	for h := range tab {
-		if _, err := rt.magic.CacheManagedCertificate(ctx, h); err == nil {
-			loaded++
+		cert, err := rt.magic.CacheManagedCertificate(ctx, h)
+		if err != nil {
+			continue
+		}
+		loaded++
+		if cert.NeedsRenewal(rt.magic) {
+			due = append(due, h)
 		}
 	}
 	rt.SetTable(tab)
 	rt.log.Info("router ready", "hosts", len(tab), "certificates_loaded", loaded)
+	if len(due) > 0 {
+		rt.renewAtStart(due)
+	}
+}
+
+// renewAtStart runs certmagic's renewal check now, in the background, for a
+// router that started with certificates in their renewal window. A
+// certificate warm cached is already managed, so the ManageAsync that
+// SetTable calls returns early for it (certmagic's manageOne), without the
+// renewal check it makes for a certificate it loads itself; certmagic's own
+// check runs only every 10 minutes, so without this a router restarted more
+// often than that would never renew one. The check is certmagic's: a
+// certificate that another router has renewed in the shared storage is
+// loaded from there, and the rest are renewed under the storage lock, with
+// certmagic's retry schedule.
+func (rt *Router) renewAtStart(hosts []string) {
+	slices.Sort(hosts)
+	rt.mu.Lock()
+	defer rt.mu.Unlock()
+	if rt.ctx.Err() != nil {
+		return
+	}
+	rt.log.Info("certificates in their renewal window at start; renewing them now", "hosts", hosts)
+	rt.bg.Add(1)
+	go func() {
+		defer rt.bg.Done()
+		if err := rt.cache.RenewManagedCertificates(rt.ctx); err != nil && rt.ctx.Err() == nil {
+			rt.log.Warn("renewing certificates at start", "hosts", hosts, "err", err)
+		}
+	}()
 }
 
 // acmeChallengePath is where an HTTP-01 challenge is fetched (RFC 8555, 8.3).
