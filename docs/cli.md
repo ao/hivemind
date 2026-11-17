@@ -33,6 +33,7 @@ hivemind
 | `nodes` | List the nodes in the cluster |
 | `registry` | Store credentials for private image registries |
 | `restore` | Restore a server's state from a backup into an empty data directory |
+| `routes` | Show the routing table |
 | `scale` | Set an app's replica count |
 | `serve` | Run the server and the agent on this node |
 | `status` | Show apps, their replicas and container state |
@@ -215,9 +216,11 @@ it names another bind address. --volume is name:/path, a named volume on the
 replica's node mounted at that path; an app with a volume has one replica. A
 path on the host in place of the name, a bind mount, is not supported.
 The words after -- are the container's command, in place of the image's. A
-health check, resources and routes need a file. -f - reads the spec from
-standard input. A key the spec does not have is refused with its line, and
-the key it is closest to.
+health check, resources and routes need a file. A route has a host, a
+container port and, optionally, a path prefix (path: /api), so several apps
+can share a host under different paths; hivemind routes shows them all. -f -
+reads the spec from standard input. A key the spec does not have is refused
+with its line, and the key it is closest to.
 
 deploy returns once the server has stored the spec; the image is pulled and
 the containers started after that. --wait waits until every replica that
@@ -733,6 +736,34 @@ hivemind restore <file> [flags]
 | `--client-config` | string | - | `HIVEMIND_CLIENT_CONFIG` | client config file to write (default $XDG_CONFIG_HOME/hivemind/config.yaml or ~/.config/hivemind/config.yaml; env HIVEMIND_CLIENT_CONFIG) |
 | `--data-dir` | string | see description | `HIVEMIND_DATA_DIR` | the new data directory, missing or empty (env HIVEMIND_DATA_DIR; default /var/lib/hivemind for root, else ~/.local/state/hivemind). The default is /var/lib/hivemind for root, and $XDG_STATE_HOME/hivemind or ~/.local/state/hivemind for other users. |
 
+### hivemind routes
+
+Show the routing table that every router serves: the host and path of each
+route, the app and container port it sends requests to, and the address:port
+of each replica that takes its traffic now.
+
+PATH "/" is the whole host. Any other path is a prefix: a request goes to the
+route whose path is the longest prefix of its own on a segment boundary, so
+/api takes /api and /api/x but not /apix, and to the whole host route when no
+prefix matches. ENDPOINTS "-" means no replica of that route is ready, and the
+routers answer 503 for it.
+
+A router of a build before path routes cannot tell paths apart, so it is given
+each host that has a path route with no replicas, and answers 503 for it. The
+command names such routers on standard error; upgrade their nodes.
+
+```
+hivemind routes [flags]
+```
+
+| Flag | Type | Default | Environment | Description |
+|---|---|---|---|---|
+| `--ca-cert` | string | - | - | PEM file of the CA certificates to trust for an https server, instead of the system's (env HIVEMIND_CA_CERT; default from the client config) |
+| `--client-config` | string | - | `HIVEMIND_CLIENT_CONFIG` | client config file (env HIVEMIND_CLIENT_CONFIG; default $XDG_CONFIG_HOME/hivemind/config.yaml or ~/.config/hivemind/config.yaml) |
+| `--json` | bool | - | - | print JSON instead of a table |
+| `--server` | string | - | `HIVEMIND_SERVER` | server URL (env HIVEMIND_SERVER; default from the client config, then http://127.0.0.1:4483) |
+| `--token` | string | - | `HIVEMIND_TOKEN` | API token (env HIVEMIND_TOKEN; default from the client config's token file) |
+
 ### hivemind scale
 
 Set an app's replica count. Scaling keeps the generation: new replicas start
@@ -830,6 +861,10 @@ During a rollout, a copy at the old generation counts until it is replaced.
 
 DETAIL shows why a replica is pending or cannot run on its node, or else the
 engine's last error for it.
+
+A line "<app>: warning: ..." after the first table says what keeps the app from
+being served as its spec says, such as a router of a build before path routes,
+which answers 503 for the app's host once the host has a path route.
 
 ```
 hivemind status [app] [flags]

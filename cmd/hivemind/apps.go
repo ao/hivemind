@@ -47,9 +47,11 @@ it names another bind address. --volume is name:/path, a named volume on the
 replica's node mounted at that path; an app with a volume has one replica. A
 path on the host in place of the name, a bind mount, is not supported.
 The words after -- are the container's command, in place of the image's. A
-health check, resources and routes need a file. -f - reads the spec from
-standard input. A key the spec does not have is refused with its line, and
-the key it is closest to.
+health check, resources and routes need a file. A route has a host, a
+container port and, optionally, a path prefix (path: /api), so several apps
+can share a host under different paths; hivemind routes shows them all. -f -
+reads the spec from standard input. A key the spec does not have is refused
+with its line, and the key it is closest to.
 
 deploy returns once the server has stored the spec; the image is pulled and
 the containers started after that. --wait waits until every replica that
@@ -340,7 +342,11 @@ replica that is running but unhealthy counts in RUNNING and not in READY.
 During a rollout, a copy at the old generation counts until it is replaced.
 
 DETAIL shows why a replica is pending or cannot run on its node, or else the
-engine's last error for it.`,
+engine's last error for it.
+
+A line "<app>: warning: ..." after the first table says what keeps the app from
+being served as its spec says, such as a router of a build before path routes,
+which answers 503 for the app's host once the host has a path route.`,
 		Args: cobra.MaximumNArgs(1),
 	}
 	cf := addClientFlags(cmd)
@@ -421,6 +427,9 @@ func printStatus(out io.Writer, apps []server.AppStatus, readyKnown bool) {
 			} else {
 				fmt.Fprintf(out, "%s: rolling out generation %d\n", termSafe(a.Name), ro.Target)
 			}
+		}
+		for _, w := range a.Warnings {
+			fmt.Fprintf(out, "%s: warning: %s\n", termSafe(a.Name), termSafe(w))
 		}
 	}
 	fmt.Fprintln(out)

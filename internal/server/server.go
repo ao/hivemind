@@ -79,6 +79,11 @@ type Config struct {
 	// share it). GET /metrics shows them all, labelled by node.
 	RouterReport  func() nodeapi.RouterReport
 	RouterReports *nodeapi.RouterReports
+	// RouteReaders keeps how the workers' routers read the routing table
+	// (the cluster listener must share it). GET /v1/routes and the status
+	// of the apps routed on a host with path routes warn about the routers
+	// that cannot read paths. Nil means none are known.
+	RouteReaders *nodeapi.RouteReaders
 	// Version is the server's hivemind version. Every reply to an
 	// authenticated request carries it in nodeapi.VersionHeader; GET
 	// /healthz, which needs no token, does not. Empty sends none.

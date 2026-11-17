@@ -603,7 +603,7 @@ func runServe(ctx context.Context, cfg *config.Config, log *slog.Logger, rt runt
 	}
 	api, err := server.New(server.Config{Store: st, Runtime: rt, NodeID: cl.NodeID, Auth: authn,
 		Trigger: ag.Trigger, Logger: log.With("component", "api"), Metrics: m, IssueJoinToken: issue,
-		Backup: writeBackup, Logs: logs, RouterReport: routerReport, RouterReports: routerReports,
+		Backup: writeBackup, Logs: logs, RouterReport: routerReport, RouterReports: routerReports, RouteReaders: routeReaders,
 		Started: started, Version: version})
 	if err != nil {
 		closeRouter()

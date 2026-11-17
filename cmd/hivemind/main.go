@@ -73,6 +73,7 @@ func newRoot(stdin io.Reader, stdout, stderr io.Writer) *cobra.Command {
 		scaleCmd(),
 		deleteCmd(),
 		nodesCmd(),
+		routesCmd(),
 		nodeCmd(),
 		registryCmd(),
 		backupCmd(),

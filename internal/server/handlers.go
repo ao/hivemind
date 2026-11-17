@@ -119,6 +119,9 @@ type AppStatus struct {
 	Replicas []ReplicaStatus `json:"replicas"`
 	// Rollout is set while a template change is rolling out, or after one stopped.
 	Rollout *RolloutStatus `json:"rollout,omitempty"`
+	// Warnings say what keeps the app from being served as its spec says,
+	// such as a router that cannot read the path routes of its hosts.
+	Warnings []string `json:"warnings,omitempty"`
 }
 
 // RolloutStatus is an unfinished rollout of an app to a new generation.
@@ -359,6 +362,7 @@ func (s *Server) statusOf(r *http.Request, app string) ([]AppStatus, error) {
 	for _, st := range sts {
 		byKey[key{st.NodeID, st.App, st.Replica, st.Generation}] = st
 	}
+	old := s.cfg.RouteReaders.Old(time.Now())
 	out := make([]AppStatus, 0, len(apps))
 	for _, a := range apps {
 		as := AppStatus{Name: a.Spec.Name, Image: a.Spec.Image, Generation: a.Generation, Desired: a.Spec.Replicas,
@@ -404,6 +408,7 @@ func (s *Server) statusOf(r *http.Request, app string) ([]AppStatus, error) {
 		case ro.State != store.RolloutDone:
 			as.Rollout = &RolloutStatus{Target: ro.Target, State: string(ro.State), Reason: ro.Reason, Moving: ro.Moving}
 		}
+		as.Warnings = routeWarnings(a.Spec, old)
 		out = append(out, as)
 	}
 	return out, nil
