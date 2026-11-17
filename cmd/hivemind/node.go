@@ -593,8 +593,10 @@ func runServe(ctx context.Context, cfg *config.Config, log *slog.Logger, rt runt
 	}
 
 	// Every listener is bound before this start is recorded, so a start
-	// that fails to bind, as with a wrong address, leaves the store as it
-	// was. Until they serve, below, nothing reaches the store through them.
+	// that fails to bind, as with a wrong address, records neither the
+	// start nor the node's address; cluster.Listen records only the expiry
+	// of the server certificate it issues. Until the listeners serve,
+	// below, nothing reaches the store through them.
 	var rtr *router.Router
 	var ln, mln net.Listener
 	var nodes *cluster.Cluster
