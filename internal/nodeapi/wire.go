@@ -13,8 +13,10 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"net/netip"
 	"slices"
+	"strconv"
 	"strings"
 	"time"
 	"unicode"
@@ -109,12 +111,15 @@ var TLSOps = []string{TLSLoad, TLSStore, TLSDelete, TLSExists, TLSList, TLSStat,
 // Register is the body of POST register. Address is the node's private
 // address, where its routed containers publish their ports: the local
 // address of the worker's connection to the server. A worker older than 2.2
-// sends none, and takes no routed replicas.
+// sends none, and takes no routed replicas. Server is the server address the
+// worker dials, host:port, from its node.json, which GET /v1/nodes shows; a
+// worker of an earlier build sends none.
 type Register struct {
 	Name    string `json:"name"`
 	CPU     int    `json:"cpu"`
 	Memory  int64  `json:"memory"`
 	Address string `json:"address,omitempty"`
+	Server  string `json:"server,omitempty"`
 }
 
 // RoutePort is a container port of a routed container and the host port it
@@ -301,6 +306,31 @@ func (g Register) Validate() error {
 		if err := ValidateNodeAddress(g.Address); err != nil {
 			return err
 		}
+	}
+	if g.Server != "" {
+		if err := ValidateServerAddress(g.Server); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// maxServerAddrLen is store.MaxNodeDialsLen: a DNS name of 253 characters,
+// an IPv6 address's brackets, a colon and a port.
+const maxServerAddrLen = store.MaxNodeDialsLen
+
+// ValidateServerAddress checks the server address a worker says it dials:
+// host:port, in printable ASCII, with a host and a port in 1-65535.
+func ValidateServerAddress(s string) error {
+	if len(s) > maxServerAddrLen || strings.IndexFunc(s, func(r rune) bool { return r <= ' ' || r > '~' }) >= 0 {
+		return fmt.Errorf("%w: server address must be at most %d printable characters", ErrInvalid, maxServerAddrLen)
+	}
+	host, port, err := net.SplitHostPort(s)
+	if err != nil || host == "" {
+		return fmt.Errorf("%w: server address %q is not host:port", ErrInvalid, truncate(s))
+	}
+	if n, err := strconv.Atoi(port); err != nil || n < 1 || n > 65535 {
+		return fmt.Errorf("%w: server address %q has no port in 1-65535", ErrInvalid, truncate(s))
 	}
 	return nil
 }

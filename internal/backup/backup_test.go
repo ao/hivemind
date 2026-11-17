@@ -436,7 +436,7 @@ func TestRestoreMigratesOlderSchema(t *testing.T) {
 	// Undo migrations 16 to 7. Migration 11 changed only drains, which
 	// migration 8 made, and migration 15 replaced app_hosts, which
 	// migration 9 made, with app_routes.
-	snap := editSnapshot(s.st, `ALTER TABLE cluster DROP COLUMN epoch`,
+	snap := editSnapshot(s.st, `ALTER TABLE cluster DROP COLUMN epoch`, `ALTER TABLE nodes DROP COLUMN dials`,
 		`ALTER TABLE rollouts DROP COLUMN step_seen`, `ALTER TABLE nodes DROP COLUMN version`, `ALTER TABLE apps DROP COLUMN origin`,
 		`DROP TABLE registries`, `DROP TABLE tls_locks`, `DROP TABLE tls_storage`, `DROP TABLE app_routes`,
 		`ALTER TABLE container_status DROP COLUMN route_ports`, `ALTER TABLE nodes DROP COLUMN address`,

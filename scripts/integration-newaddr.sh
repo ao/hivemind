@@ -453,7 +453,16 @@ check_back() {
 			cl_fail "the containers on $c changed: ${CONTAINERS[$i]}before, $(worker_containers "$c")now"
 	done
 	[ "$(server_address)" = "$NEW_IP" ] || cl_fail "hivemind nodes gives the server address $(server_address), not $NEW_IP"
-	cl_note "apps converged, no replica twice, no node lost, the workers' containers kept; hivemind nodes: server at $NEW_IP"
+	# What the workers dial: the server's --advertise after its address,
+	# and each worker's node.json in nodes --json.
+	local dials=${CL_JOIN_ADDR:-$NEW_IP}:4484
+	[ "$(docker exec "$S" hivemind nodes --json | grep -cF "\"dials\": \"$dials\"")" -eq 2 ] ||
+		cl_fail "nodes --json does not show both workers dialling $dials: $(docker exec "$S" hivemind nodes --json | tr '\n' ' ')"
+	if [ -n "${CL_ADVERTISE:-}" ]; then
+		docker exec "$S" hivemind nodes | awk '$3 == "server"' | grep -qF "$NEW_IP ($CL_ADVERTISE)" ||
+			cl_fail "hivemind nodes does not show the server as $NEW_IP ($CL_ADVERTISE): $(docker exec "$S" hivemind nodes | tr '\n' ';')"
+	fi
+	cl_note "apps converged, no replica twice, no node lost, the workers' containers kept; hivemind nodes: server at $NEW_IP${CL_ADVERTISE:+ ($CL_ADVERTISE)}, both workers dial $dials"
 }
 
 # Part 1: a server that advertises a DNS name.

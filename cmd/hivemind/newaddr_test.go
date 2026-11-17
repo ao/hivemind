@@ -360,6 +360,13 @@ func TestRestoreAtANewAddress(t *testing.T) {
 	rt := newMemRuntime()
 	stopWorker := startWorker(t, wdir, rt)
 	waitUntil(t, "the worker registering", func() bool { return len(nodeRows(t, a, dataA)) == 2 })
+	// nodes --json shows what each node dials: the server's --advertise,
+	// and the address in the worker's node.json.
+	for _, r := range nodeRows(t, a, dataA) {
+		if r.Server && r.Advertise != "127.0.0.2" || !r.Server && r.Dials != net.JoinHostPort("127.0.0.2", strconv.Itoa(portA)) {
+			t.Errorf("GET /v1/nodes before the loss: %+v", r.NodeView)
+		}
+	}
 	stopWorker()
 
 	// The server's machine is lost; its backup is restored on another.
@@ -391,7 +398,8 @@ func TestRestoreAtANewAddress(t *testing.T) {
 		t.Errorf("the restored server's node has address %q, want 127.0.0.3", got)
 	}
 	if l := b.logs.String(); !strings.Contains(l, "this server's address changed since its last start") ||
-		!strings.Contains(l, "hivemind node set-server 127.0.0.3") || !strings.Contains(l, "old_address=127.0.0.2") {
+		!strings.Contains(l, "hivemind node set-server 127.0.0.3") || !strings.Contains(l, "old_address=127.0.0.2") ||
+		!strings.Contains(l, "dial_old_address="+joined.state.NodeID) {
 		t.Errorf("the restored server did not say that the workers need set-server:\n%s", l)
 	}
 
@@ -401,9 +409,11 @@ func TestRestoreAtANewAddress(t *testing.T) {
 		t.Fatal(err)
 	}
 	stopWorker = startWorker(t, wdir, rt)
-	waitUntil(t, "the moved worker ready on the restored server", func() bool {
+	// The row from the backup can read ready at once; the worker's own
+	// registration is the one that names the new address.
+	waitUntil(t, "the moved worker registered and ready on the restored server", func() bool {
 		for _, r := range nodeRows(t, b, dataB) {
-			if r.ID == joined.state.NodeID && r.State == "ready" {
+			if r.ID == joined.state.NodeID && r.State == "ready" && r.Dials == newAddr {
 				return true
 			}
 		}
@@ -466,6 +476,26 @@ func TestNoteAddressChange(t *testing.T) {
 		l := note(c.advertise, c.clusterAddr, c.addr)
 		if (c.want == "") != (l == "") || !strings.Contains(l, c.want) {
 			t.Errorf("advertise %q, cluster-addr %q, address %s: logged %q, want %q", c.advertise, c.clusterAddr, c.addr, l, c.want)
+		}
+	}
+
+	// Workers that registered what they dial: the ones on the old IP
+	// address are named, whatever --advertise is; one that dials the name
+	// is not.
+	for _, n := range []store.Node{{ID: "node-w1", Name: "w1", Dials: "10.0.0.5:4484"}, {ID: "node-w2", Name: "w2", Dials: "hm.example.internal:4484"},
+		{ID: "node-w3", Name: "w3", Dials: "10.0.0.5:4484"}} {
+		if err := st.UpsertNode(ctx, n); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for _, c := range []struct{ advertise, want string }{
+		{"10.0.0.9", `level=WARN msg="this server's address changed since its last start: workers that joined the old address still dial it`},
+		{"hm.example.internal", `level=WARN msg="this server's address changed since its last start: the workers in dial_old_address dial the old IP address, not --advertise, ` +
+			`and reach this server only once each is moved, with the worker stopped, by hivemind node set-server hm.example.internal (docs/backup.md)`},
+	} {
+		l := note(c.advertise, "", "10.0.0.9")
+		if !strings.Contains(l, c.want) || !strings.Contains(l, `workers=3 dial_old_address="node-w1 node-w3"`) {
+			t.Errorf("advertise %q, with workers that dial 10.0.0.5: logged %q", c.advertise, l)
 		}
 	}
 }

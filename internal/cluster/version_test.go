@@ -154,3 +154,36 @@ func TestNotRegisteredIsMarked(t *testing.T) {
 		t.Fatalf("a route the server lacks: %d %v %q", resp.StatusCode, resp.Header, b)
 	}
 }
+
+// A worker's registration carries the server address it dials, which the
+// store keeps for GET /v1/nodes; one without it, from an earlier build, is
+// taken, and leaves none. A malformed one is refused.
+func TestRegisterRecordsWhatTheNodeDials(t *testing.T) {
+	fx := newFixture(t, nil)
+	ctx := context.Background()
+	c, id, _ := joinedClient(t, fx)
+	dials := func() string {
+		t.Helper()
+		n, err := fx.st.GetNode(ctx, id)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return n.Dials
+	}
+	if err := c.Register(ctx, id, nodeapi.Register{Name: "w1", CPU: 2, Memory: 1 << 30, Server: "hm.example.internal:4484"}); err != nil {
+		t.Fatal(err)
+	}
+	if got := dials(); got != "hm.example.internal:4484" {
+		t.Fatalf("dials after register: %q", got)
+	}
+	if err := c.Register(ctx, id, nodeapi.Register{Name: "w1", CPU: 2, Memory: 1 << 30}); err != nil {
+		t.Fatal(err)
+	}
+	if got := dials(); got != "" {
+		t.Fatalf("dials after a register without it: %q", got)
+	}
+	var refused *nodeapi.RefusedError
+	if err := c.Register(ctx, id, nodeapi.Register{Name: "w1", Server: "hm.example.internal"}); !errors.As(err, &refused) || refused.Code != http.StatusBadRequest {
+		t.Fatalf("a server address without a port: %v", err)
+	}
+}

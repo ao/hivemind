@@ -166,11 +166,14 @@ func onThisMachine(flag string, ip netip.Addr, local addrSource, log *slog.Logge
 
 // noteAddressChange logs what the workers need when the server's node had
 // another address before this start, as after a restore on a new machine,
-// and the store has workers. A worker dials the address it joined. One that
-// joined a DNS name follows its record, which is logged at info. One that
-// joined the old IP address cannot reach this server until it is moved with
-// node set-server, which is a warning; that is when --advertise is the
-// address the listeners bind, so that the workers dialled the old one.
+// and the store has workers. A worker dials the address it joined, or the
+// one set-server gave it, and registers it (store.Node.Dials). One that
+// dials a DNS name follows its record, which is logged at info. One that
+// dials the old IP address cannot reach this server until it is moved with
+// node set-server, which is a warning, and names it when it registered what
+// it dials (dial_old_address); a worker of an earlier build did not. That
+// is every worker when --advertise is the address the listeners bind, so
+// that the workers dialled the old one.
 func noteAddressChange(ctx context.Context, st *store.Store, cfg *config.Config, serverID, addr string, log *slog.Logger) {
 	if cfg.Advertise == "" {
 		return
@@ -184,22 +187,48 @@ func noteAddressChange(ctx context.Context, st *store.Store, cfg *config.Config,
 		return
 	}
 	workers := 0
+	var onOld []string
 	for _, n := range nodes {
-		if n.ID != serverID {
-			workers++
+		if n.ID == serverID {
+			continue
+		}
+		workers++
+		if host, _, err := net.SplitHostPort(n.Dials); err == nil && sameAddr(host, prev.Address) {
+			onOld = append(onOld, n.ID)
 		}
 	}
 	if workers == 0 {
 		return
 	}
+	attrs := []any{"old_address", prev.Address, "address", addr, "workers", workers}
+	if len(onOld) > 0 {
+		attrs = append(attrs, "dial_old_address", strings.Join(onOld, " "))
+	}
+	setServer := "hivemind node set-server " + cfg.Advertise + " (docs/backup.md)"
 	if ip, err := netip.ParseAddr(cfg.Advertise); err == nil && ip.Unmap().String() == addr {
 		log.Warn("this server's address changed since its last start: workers that joined the old address still dial it, and reach this server "+
-			"only once each is moved, with the worker stopped, by hivemind node set-server "+cfg.Advertise+" (docs/backup.md)",
-			"old_address", prev.Address, "address", addr, "workers", workers)
+			"only once each is moved, with the worker stopped, by "+setServer, attrs...)
 		return
 	}
-	log.Info("this server's address changed since its last start: workers that dial --advertise reach it once that leads to the new address",
-		"advertise", cfg.Advertise, "old_address", prev.Address, "address", addr, "workers", workers)
+	attrs = append([]any{"advertise", cfg.Advertise}, attrs...)
+	if len(onOld) > 0 {
+		log.Warn("this server's address changed since its last start: the workers in dial_old_address dial the old IP address, not --advertise, "+
+			"and reach this server only once each is moved, with the worker stopped, by "+setServer+"; the others reach it once --advertise "+
+			"leads to the new address", attrs...)
+		return
+	}
+	log.Info("this server's address changed since its last start: workers that dial --advertise reach it once that leads to the new address", attrs...)
+}
+
+// sameAddr reports whether a and b are the same IP address, or the same
+// string when either is not one.
+func sameAddr(a, b string) bool {
+	x, errA := netip.ParseAddr(strings.TrimSuffix(strings.TrimPrefix(a, "["), "]"))
+	y, errB := netip.ParseAddr(b)
+	if errA != nil || errB != nil {
+		return a == b
+	}
+	return x.Unmap() == y.Unmap()
 }
 
 // preferred picks a non-loopback IPv4 address, then a non-loopback IPv6 one,

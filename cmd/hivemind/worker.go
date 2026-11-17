@@ -506,12 +506,18 @@ func runWorker(ctx context.Context, cfg *config.Config, log *slog.Logger, rt run
 	// worker registers it again once the server takes it (retryAddress).
 	var addr string
 	var addrRefused atomic.Bool
+	// dials is the server address in node.json, which GET /v1/nodes shows
+	// for this node.
+	dials := w.state.Server
+	if nodeapi.ValidateServerAddress(dials) != nil {
+		dials = ""
+	}
 	register := func(ctx context.Context) error {
 		info, err := rt.Info(ctx)
 		if err != nil {
 			return dockerReachError(cfg.DockerHost, err)
 		}
-		reg := nodeapi.Register{Name: hostname, CPU: info.NCPU, Memory: info.MemTotal, Address: addr}
+		reg := nodeapi.Register{Name: hostname, CPU: info.NCPU, Memory: info.MemTotal, Address: addr, Server: dials}
 		refused, err := registerWith(ctx, client, w.state.NodeID, reg)
 		if err != nil {
 			return err
@@ -673,21 +679,23 @@ type registrar interface {
 }
 
 // registerWith registers the node. A server older than 2.2 refuses the
-// address field with 400, as it refuses any field it does not know, so a
-// refusal of a registration with an address is tried once more without it:
-// that server places no routed replicas anyway. addressRefused reports that
-// the node is registered without its address.
+// address and server fields with 400, as it refuses any field it does not
+// know, so a refusal of a registration with either is tried once more
+// without both: that server places no routed replicas anyway, and does not
+// show what a node dials. addressRefused reports that the node had an
+// address and is registered without it.
 func registerWith(ctx context.Context, c registrar, nodeID string, reg nodeapi.Register) (addressRefused bool, err error) {
 	err = c.Register(ctx, nodeID, reg)
 	var refused *nodeapi.RefusedError
-	if !errors.As(err, &refused) || refused.Code != http.StatusBadRequest || reg.Address == "" {
+	if !errors.As(err, &refused) || refused.Code != http.StatusBadRequest || (reg.Address == "" && reg.Server == "") {
 		return false, err
 	}
-	reg.Address = ""
+	hadAddress := reg.Address != ""
+	reg.Address, reg.Server = "", ""
 	if err := c.Register(ctx, nodeID, reg); err != nil {
 		return false, err
 	}
-	return true, nil
+	return hadAddress, nil
 }
 
 // addressRetry is how often a worker whose address the server refused

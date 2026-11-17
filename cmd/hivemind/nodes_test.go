@@ -85,7 +85,8 @@ func TestNodesCommands(t *testing.T) {
 	if err := st.InitCluster(ctx, store.Cluster{AdminTokenHash: [32]byte{1}, NodeID: "node-s"}); err != nil {
 		t.Fatal(err)
 	}
-	for _, n := range []store.Node{{ID: "node-s", Name: "srv", CPU: 4, Memory: 8 << 30, Version: "v2.2.0", Address: "10.0.0.5"}, {ID: "node-w", Name: "wrk", CPU: 2, Memory: 1 << 30}} {
+	for _, n := range []store.Node{{ID: "node-s", Name: "srv", CPU: 4, Memory: 8 << 30, Version: "v2.2.0", Address: "10.0.0.5"},
+		{ID: "node-w", Name: "wrk", CPU: 2, Memory: 1 << 30, Dials: "hivemind.example.internal:4484"}} {
 		if err := st.UpsertNode(ctx, n); err != nil {
 			t.Fatal(err)
 		}
@@ -97,7 +98,7 @@ func TestNodesCommands(t *testing.T) {
 	tok, _ := auth.NewToken()
 	sess, _ := auth.NewSessions(time.Hour)
 	authn, _ := auth.NewAuthenticator(auth.HashToken(tok), sess)
-	api, err := server.New(server.Config{Store: st, Runtime: fakeRuntime{}, NodeID: "node-s", Auth: authn,
+	api, err := server.New(server.Config{Store: st, Runtime: fakeRuntime{}, NodeID: "node-s", Auth: authn, Advertise: "hivemind.example.internal",
 		Logger: slog.New(slog.NewTextHandler(io.Discard, nil))})
 	if err != nil {
 		t.Fatal(err)
@@ -116,7 +117,7 @@ func TestNodesCommands(t *testing.T) {
 		t.Fatalf("nodes table:\n%s", out)
 	}
 	for _, want := range []map[string]string{
-		{"ID": "node-s", "NAME": "srv", "ROLE": "server", "ADDRESS": "10.0.0.5", "VERSION": "v2.2.0", "CPU": "4", "MEMORY": "8.0Gi", "STATE": "ready",
+		{"ID": "node-s", "NAME": "srv", "ROLE": "server", "ADDRESS": "10.0.0.5 (hivemind.example.internal)", "VERSION": "v2.2.0", "CPU": "4", "MEMORY": "8.0Gi", "STATE": "ready",
 			"ELIGIBILITY": "eligible", "REPLICAS": "1", "CERT EXPIRES": "-"},
 		{"ID": "node-w", "NAME": "wrk", "ROLE": "worker", "ADDRESS": "-", "VERSION": "-", "CPU": "2", "MEMORY": "1.0Gi", "STATE": "ready",
 			"ELIGIBILITY": "eligible", "REPLICAS": "1", "CERT EXPIRES": "-"},
@@ -129,6 +130,19 @@ func TestNodesCommands(t *testing.T) {
 	var views []server.NodeView
 	if err != nil || json.Unmarshal([]byte(out), &views) != nil || len(views) != 2 {
 		t.Fatalf("nodes --json: %q, %v", out, err)
+	}
+	// What the workers dial: the server's --advertise on its node, and
+	// what each worker registered.
+	for _, v := range views {
+		switch {
+		case v.ID == "node-s" && (v.Advertise != "hivemind.example.internal" || v.Dials != ""):
+			t.Errorf("the server's node in --json: %+v", v)
+		case v.ID == "node-w" && (v.Dials != "hivemind.example.internal:4484" || v.Advertise != ""):
+			t.Errorf("the worker in --json: %+v", v)
+		}
+	}
+	if !strings.Contains(out, `"advertise": "hivemind.example.internal"`) || !strings.Contains(out, `"dials": "hivemind.example.internal:4484"`) {
+		t.Errorf("nodes --json lacks advertise or dials:\n%s", out)
 	}
 
 	// The worker still renews its lease, so it needs --force.

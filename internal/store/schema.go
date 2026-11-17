@@ -287,13 +287,17 @@ CREATE INDEX app_routes_app ON app_routes(app);
 INSERT INTO app_routes (host, path, app, port) SELECT host, '', app, port FROM app_hosts;
 DROP TABLE app_hosts;
 `,
-	// 16: the cluster's epoch. cluster.epoch is 0 when init writes the
-	// record, and a store from before this version has 0 too; restore
-	// makes it one higher than the backup's. The server sends it on every
-	// node API reply, and a worker refuses a server whose epoch is lower
-	// than one it has seen: a copy of the cluster from before a restore.
+	// 16: the cluster's epoch, and what each node dials. cluster.epoch is
+	// 0 when init writes the record, and a store from before this version
+	// has 0 too; restore makes it one higher than the backup's. The server
+	// sends it on every node API reply, and a worker refuses a server whose
+	// epoch is lower than one it has seen: a copy of the cluster from
+	// before a restore. nodes.dials is the server address, host:port, that
+	// a worker registered from its node.json; '' for the server's own node
+	// and for a worker that sent none, a build from before this version.
 	`
 ALTER TABLE cluster ADD COLUMN epoch INTEGER NOT NULL DEFAULT 0 CHECK (epoch >= 0);
+ALTER TABLE nodes ADD COLUMN dials TEXT NOT NULL DEFAULT '';
 `,
 }
 
@@ -315,7 +319,7 @@ var migrationNotes = []string{
 	"node versions",
 	"rollout copy times",
 	"path routes",
-	"the cluster epoch",
+	"the cluster epoch and the server address each node dials",
 }
 
 // SchemaVersion is the schema version this build writes.

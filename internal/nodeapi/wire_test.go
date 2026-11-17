@@ -52,6 +52,12 @@ func TestValidateRegister(t *testing.T) {
 		"negative memory": {Name: "a", Memory: -1},
 		"control in name": {Name: "a\nb"},
 		"long name":       {Name: strings.Repeat("x", maxNameLen+1)},
+		"server no port":  {Name: "a", Server: "hm.example.internal"},
+		"server port 0":   {Name: "a", Server: "hm.example.internal:0"},
+		"server no host":  {Name: "a", Server: ":4484"},
+		"server space":    {Name: "a", Server: "hm example:4484"},
+		"server unicode":  {Name: "a", Server: "hä.example:4484"},
+		"server long":     {Name: "a", Server: strings.Repeat("x", maxServerAddrLen) + ":1"},
 	} {
 		if err := g.Validate(); !errors.Is(err, ErrInvalid) {
 			t.Errorf("%s: got %v, want ErrInvalid", name, err)
@@ -295,5 +301,14 @@ func TestAssignmentBytesBoundTheReply(t *testing.T) {
 	}
 	if got, bound := int64(len(reply)), sizes["node-1"]; got > bound || bound > 3*got {
 		t.Fatalf("the reply is %d bytes, the bound %d", got, bound)
+	}
+}
+
+// The server address a worker dials is host:port, a name or an IP address.
+func TestValidateServerAddress(t *testing.T) {
+	for _, s := range []string{"hm.example.internal:4484", "10.0.0.5:4484", "[fd00::5]:4484", "localhost:1", "a:65535"} {
+		if err := (Register{Name: "w", Server: s}).Validate(); err != nil {
+			t.Errorf("%q: %v", s, err)
+		}
 	}
 }

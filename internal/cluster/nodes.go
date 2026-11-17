@@ -186,7 +186,8 @@ func (a *nodeAPI) node(w http.ResponseWriter, r *http.Request) (string, bool) {
 	return id, true
 }
 
-// register records the node's name and capacity, and renews its lease.
+// register records the node's name, capacity, address and the server address
+// it dials, and renews its lease.
 func (a *nodeAPI) register(w http.ResponseWriter, r *http.Request) {
 	id, ok := a.node(w, r)
 	if !ok {
@@ -202,7 +203,8 @@ func (a *nodeAPI) register(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	v := nodeVersion(r)
-	if err := a.st.UpsertNode(r.Context(), store.Node{ID: id, Name: g.Name, CPU: g.CPU, Memory: g.Memory, Address: g.Address, Version: v}); err != nil {
+	if err := a.st.UpsertNode(r.Context(), store.Node{ID: id, Name: g.Name, CPU: g.CPU, Memory: g.Memory, Address: g.Address, Version: v,
+		Dials: g.Server}); err != nil {
 		a.fail(w, r, err)
 		return
 	}

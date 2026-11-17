@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/netip"
 	"net/url"
 	"strings"
 	"text/tabwriter"
@@ -31,7 +32,13 @@ is printed in days.
 ADDRESS is the node's private address, where its routed replicas publish
 their ports. "-" means it reported none: such a node takes no routed replicas.
 A worker whose server refused its address, as a server older than 2.2 does,
-registers it again once the server is upgraded.
+registers it again once the server is upgraded. On the server's node, the
+address the workers dial follows, when serve --advertise gives another, as
+"172.31.19.207 (hivemind.example.internal)".
+
+--json has, besides, "advertise" on the server's node, and "dials" on each
+worker: the server address it dials, host:port, from its node.json, as it
+last registered it. A worker of an earlier build sends none.
 
 VERSION is the hivemind version the node reports with each request; the
 server's own node shows the server's. "-" means the node reports none, which
@@ -94,10 +101,24 @@ func printNodes(out io.Writer, nodes []nodeRow) {
 		}
 		age := leaseAge(time.Duration(n.LeaseAgeSeconds * float64(time.Second)))
 		fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%s\t%d\t%s\t%s\t%s\t%s\t%d\t%s\n", termSafe(n.ID), termSafe(firstNonEmpty(n.Name, "-")), role,
-			termSafe(firstNonEmpty(n.Address, "-")), termSafe(firstNonEmpty(n.Version, "-")), n.CPU, bytesIEC(n.Memory), age, termSafe(n.State),
+			termSafe(nodeAddress(n)), termSafe(firstNonEmpty(n.Version, "-")), n.CPU, bytesIEC(n.Memory), age, termSafe(n.State),
 			eligibility(n), n.Replicas, certExpiry(n.CertNotAfter, n.CertNotRenewing, now))
 	}
 	tw.Flush()
+}
+
+// nodeAddress is the ADDRESS column of hivemind nodes: the node's address,
+// and for the server's node the address the workers dial, when it is
+// another, as "172.31.19.207 (hivemind.example.internal)". "-" for none.
+func nodeAddress(n nodeRow) string {
+	addr := firstNonEmpty(n.Address, "-")
+	if n.Advertise == "" || n.Advertise == n.Address {
+		return addr
+	}
+	if ip, err := netip.ParseAddr(n.Advertise); err == nil && ip.Unmap().String() == n.Address {
+		return addr
+	}
+	return addr + " (" + n.Advertise + ")"
 }
 
 // eligibility is the ELIGIBILITY column of hivemind nodes: "-" when the

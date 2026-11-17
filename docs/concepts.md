@@ -31,7 +31,7 @@ The trust rests on the token:
 
 ## The server's address
 
-The address in `serve --advertise <address>` is the one workers dial. `hivemind join <address>` stores it in the worker's `node.json`, and the worker checks, at every connection, that the server's certificate names it. It can be an IP address or a DNS name.
+The address in `serve --advertise <address>` is the one workers dial. `hivemind join <address>` stores it in the worker's `node.json`, and the worker checks, at every connection, that the server's certificate names it. It can be an IP address or a DNS name. `hivemind nodes` shows it on the server's row after the node's address, as `172.31.19.207 (hivemind.example.internal)`, and `nodes --json` has it as the server's `advertise`, and what each worker dials, from its `node.json`, as its `dials`.
 
 A DNS name is the recommended set-up. A server replaced by a machine with another IP address, as a replaced cloud instance usually is, then needs only the name's record updated: the workers reconnect without joining again, with their certificates ([backup](backup.md#replacing-a-lost-server)). A worker looks the name up at each new connection, so it follows the record as soon as its resolver does; a TTL of a minute or so keeps that short, and inside the 2-minute start grace in which a restored server waits for the workers ([leases](#leases-and-node-loss)). With a longer TTL, lower it well before you need it, or raise `--start-grace` to more than the TTL. With an IP address, the new machine needs the old address, or each worker is moved to the new one with `hivemind node set-server`, which first checks that the new address serves this cluster ([backup](backup.md#at-a-new-ip-address)).
 

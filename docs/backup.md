@@ -103,7 +103,7 @@ level=ERROR msg="a newer copy of this cluster exists: this server was replaced b
 
 ### At a new IP address
 
-A worker that joined an IP address keeps dialing it, and the new server's certificate does not name it. Start the server at its own address, `sudo hivemind serve --advertise 10.0.0.9`. It logs a warning that the workers which joined the old address need `hivemind node set-server 10.0.0.9`, with the count of workers in the store. Then, on each worker:
+A worker that joined an IP address keeps dialing it, and the new server's certificate does not name it. Start the server at its own address, `sudo hivemind serve --advertise 10.0.0.9`. It logs a warning that the workers which joined the old address need `hivemind node set-server 10.0.0.9`, with the count of workers in the store, and names in `dial_old_address` each one that registered the old address as the one it dials. `hivemind nodes --json` shows what each worker dials, as `dials`; a worker of an earlier build sends none. Then, on each worker:
 
 ```sh
 sudo systemctl stop hivemind

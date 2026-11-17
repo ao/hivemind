@@ -89,6 +89,10 @@ type Config struct {
 	// authenticated request carries it in nodeapi.VersionHeader; GET
 	// /healthz, which needs no token, does not. Empty sends none.
 	Version string
+	// Advertise is serve's --advertise, the address the workers dial for
+	// the server, as given: GET /v1/nodes shows it on the server's node.
+	// Empty without --advertise.
+	Advertise string
 }
 
 // Defaults for Config.LoginLimiter: an address may fail LoginFailLimit

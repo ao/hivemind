@@ -137,10 +137,19 @@ type Node struct {
 	// Version is the hivemind version the node last reported, such as
 	// v2.2.0. Empty for a node that reported none: a build older than 2.2.
 	Version string
+	// Dials is the server address the node dials, host:port, as the worker
+	// registered it from its node.json, such as hivemind.example.internal:4484.
+	// Empty for the server's own node, and for a worker that sent none: a
+	// build from before schema version 16.
+	Dials string
 }
 
 // MaxNodeVersionLen caps Node.Version.
 const MaxNodeVersionLen = 64
+
+// MaxNodeDialsLen caps Node.Dials: a DNS name of 253 characters, the
+// brackets of an IPv6 address, a colon and a port.
+const MaxNodeDialsLen = 253 + 2 + 6
 
 // RoutePort is one container port of a routed container and the host port
 // the engine published it on, on its node's Address.
@@ -933,6 +942,9 @@ func (s *Store) UpsertNode(ctx context.Context, n Node) error {
 	if err := checkNodeVersion(n.Version); err != nil {
 		return err
 	}
+	if err := checkNodeDials(n.Dials); err != nil {
+		return err
+	}
 	return s.tx(ctx, func(tx *sql.Tx) error {
 		if removed, err := isRemoved(ctx, tx, n.ID); err != nil {
 			return err
@@ -940,11 +952,11 @@ func (s *Store) UpsertNode(ctx context.Context, n Node) error {
 			return fmt.Errorf("node %q: %w", n.ID, ErrNodeRemoved)
 		}
 		now := s.now().UnixNano()
-		if _, err := tx.ExecContext(ctx, `INSERT INTO nodes (id, name, cpu, memory, last_lease, ready_since, address, version)
-			VALUES (?, ?, ?, ?, ?, CASE WHEN ? = (SELECT node_id FROM cluster WHERE id = 1) THEN 0 ELSE ? END, ?, ?)
+		if _, err := tx.ExecContext(ctx, `INSERT INTO nodes (id, name, cpu, memory, last_lease, ready_since, address, version, dials)
+			VALUES (?, ?, ?, ?, ?, CASE WHEN ? = (SELECT node_id FROM cluster WHERE id = 1) THEN 0 ELSE ? END, ?, ?, ?)
 			ON CONFLICT (id) DO UPDATE SET name = excluded.name, cpu = excluded.cpu, memory = excluded.memory,
-				address = excluded.address, version = excluded.version, ready_since = `+readySinceExpr+`, last_lease = excluded.last_lease`,
-			n.ID, n.Name, n.CPU, n.Memory, now, n.ID, now, n.Address, n.Version, now-int64(scheduler.DefaultLeaseTimeout), now); err != nil {
+				address = excluded.address, version = excluded.version, dials = excluded.dials, ready_since = `+readySinceExpr+`, last_lease = excluded.last_lease`,
+			n.ID, n.Name, n.CPU, n.Memory, now, n.ID, now, n.Address, n.Version, n.Dials, now-int64(scheduler.DefaultLeaseTimeout), now); err != nil {
 			return err
 		}
 		return s.placePending(ctx, tx)
@@ -969,7 +981,7 @@ func (s *Store) GetNode(ctx context.Context, id string) (Node, error) {
 func (s *Store) ListNodes(ctx context.Context) ([]Node, error) { return listNodes(ctx, s.rdb) }
 
 func listNodes(ctx context.Context, q querier) ([]Node, error) {
-	rows, err := q.QueryContext(ctx, `SELECT n.id, n.name, n.cpu, n.memory, n.last_lease, n.ready_since, coalesce(c.not_after, 0), coalesce(c.issued_at, 0), n.eligible, n.address, n.version
+	rows, err := q.QueryContext(ctx, `SELECT n.id, n.name, n.cpu, n.memory, n.last_lease, n.ready_since, coalesce(c.not_after, 0), coalesce(c.issued_at, 0), n.eligible, n.address, n.version, n.dials
 		FROM nodes n LEFT JOIN node_certs c ON c.id = n.id ORDER BY n.id`)
 	if err != nil {
 		return nil, err
@@ -980,7 +992,7 @@ func listNodes(ctx context.Context, q querier) ([]Node, error) {
 		var n Node
 		var lease, ready, certNA, certIssued int64
 		var eligible int
-		if err := rows.Scan(&n.ID, &n.Name, &n.CPU, &n.Memory, &lease, &ready, &certNA, &certIssued, &eligible, &n.Address, &n.Version); err != nil {
+		if err := rows.Scan(&n.ID, &n.Name, &n.CPU, &n.Memory, &lease, &ready, &certNA, &certIssued, &eligible, &n.Address, &n.Version, &n.Dials); err != nil {
 			return nil, err
 		}
 		n.Eligible = eligible == 1
@@ -1014,6 +1026,15 @@ func (s *Store) SetNodeVersion(ctx context.Context, id, version string) error {
 func checkNodeVersion(v string) error {
 	if len(v) > MaxNodeVersionLen || strings.IndexFunc(v, func(r rune) bool { return r <= ' ' || r > '~' }) >= 0 {
 		return fmt.Errorf("%w: node version must be at most %d printable characters", ErrInvalid, MaxNodeVersionLen)
+	}
+	return nil
+}
+
+// checkNodeDials refuses a server address that is too long or holds a
+// character that is not printable ASCII. The node API checks its form.
+func checkNodeDials(d string) error {
+	if len(d) > MaxNodeDialsLen || strings.IndexFunc(d, func(r rune) bool { return r <= ' ' || r > '~' }) >= 0 {
+		return fmt.Errorf("%w: the server address a node dials must be at most %d printable characters", ErrInvalid, MaxNodeDialsLen)
 	}
 	return nil
 }

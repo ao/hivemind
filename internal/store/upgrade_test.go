@@ -152,10 +152,11 @@ func TestOpenMigratesStoresFromEarlierSchemas(t *testing.T) {
 				t.Fatalf("drains after migration: %+v, %v", ds, err)
 			}
 
-			// Migration 9 gives nodes no address, and migration 15 makes
+			// Migration 9 gives nodes no address, migration 16 no server
+			// address they dial, and migration 15 makes
 			// each route host of versions 9 to 14 a whole host route.
-			if n, _ := s.GetNode(ctx, "node-1"); n.Address != "" {
-				t.Fatalf("node address after migration: %q", n.Address)
+			if n, _ := s.GetNode(ctx, "node-1"); n.Address != "" || n.Dials != "" {
+				t.Fatalf("node address after migration: %q, dials %q", n.Address, n.Dials)
 			}
 			rt, err := s.RouteTable(ctx)
 			switch {

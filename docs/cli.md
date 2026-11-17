@@ -599,7 +599,13 @@ is printed in days.
 ADDRESS is the node's private address, where its routed replicas publish
 their ports. "-" means it reported none: such a node takes no routed replicas.
 A worker whose server refused its address, as a server older than 2.2 does,
-registers it again once the server is upgraded.
+registers it again once the server is upgraded. On the server's node, the
+address the workers dial follows, when serve --advertise gives another, as
+"172.31.19.207 (hivemind.example.internal)".
+
+--json has, besides, "advertise" on the server's node, and "dials" on each
+worker: the server address it dials, host:port, from its node.json, as it
+last registered it. A worker of an earlier build sends none.
 
 VERSION is the hivemind version the node reports with each request; the
 server's own node shows the server's. "-" means the node reports none, which

@@ -54,6 +54,14 @@ type NodeView struct {
 	// Version is the hivemind version the node last reported, such as
 	// v2.2.0. It is absent for a node that reports none: one older than 2.2.
 	Version string `json:"version,omitempty"`
+	// Advertise is, on the server's node, the address the workers dial for
+	// the server: serve's --advertise, an IP address or a DNS name. It is
+	// absent on the workers, and without --advertise.
+	Advertise string `json:"advertise,omitempty"`
+	// Dials is, on a worker, the server address it dials, host:port, as it
+	// registered it from its node.json. It is absent on the server's node,
+	// and for a worker of an earlier build, which does not send it.
+	Dials string `json:"dials,omitempty"`
 }
 
 // EligibilityRequest is the body of POST /v1/nodes/{id}/eligibility.
@@ -198,7 +206,10 @@ func (s *Server) listNodes(w http.ResponseWriter, r *http.Request) {
 		}
 		v := NodeView{ID: n.ID, Name: n.Name, CPU: n.CPU, Memory: n.Memory, LastLease: n.LastLease.UTC(),
 			LeaseAgeSeconds: age.Seconds(), State: state, Server: n.ID == s.cfg.NodeID, Replicas: count[n.ID],
-			Eligible: n.Eligible, Address: n.Address, Version: n.Version}
+			Eligible: n.Eligible, Address: n.Address, Version: n.Version, Dials: n.Dials}
+		if v.Server {
+			v.Advertise = s.cfg.Advertise
+		}
 		if !n.CertNotAfter.IsZero() {
 			t := n.CertNotAfter.UTC()
 			v.CertNotAfter = &t

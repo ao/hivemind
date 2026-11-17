@@ -118,8 +118,9 @@ func TestClusterAddress(t *testing.T) {
 	}
 }
 
-// fakeRegistrar refuses a registration with an address, as a 2.1 server's
-// decoder refuses a field it does not know, when old is set.
+// fakeRegistrar refuses a registration with an address or a server
+// address, as a 2.1 server's decoder refuses a field it does not know,
+// when old is set.
 type fakeRegistrar struct {
 	old   bool
 	calls []nodeapi.Register
@@ -127,7 +128,7 @@ type fakeRegistrar struct {
 
 func (f *fakeRegistrar) Register(_ context.Context, _ string, g nodeapi.Register) error {
 	f.calls = append(f.calls, g)
-	if f.old && g.Address != "" {
+	if f.old && (g.Address != "" || g.Server != "") {
 		return &nodeapi.RefusedError{Code: http.StatusBadRequest, Status: "400 Bad Request", Message: "invalid request body"}
 	}
 	return nil
@@ -135,21 +136,30 @@ func (f *fakeRegistrar) Register(_ context.Context, _ string, g nodeapi.Register
 
 func TestRegisterFallsBackForAnOlderServer(t *testing.T) {
 	ctx := context.Background()
-	reg := nodeapi.Register{Name: "w", CPU: 2, Memory: 1 << 30, Address: "10.0.0.6"}
+	reg := nodeapi.Register{Name: "w", CPU: 2, Memory: 1 << 30, Address: "10.0.0.6", Server: "hm.example.internal:4484"}
 
 	newer := &fakeRegistrar{}
-	if refused, err := registerWith(ctx, newer, "node-w", reg); err != nil || refused || len(newer.calls) != 1 || newer.calls[0].Address != "10.0.0.6" {
+	if refused, err := registerWith(ctx, newer, "node-w", reg); err != nil || refused || len(newer.calls) != 1 ||
+		newer.calls[0].Address != "10.0.0.6" || newer.calls[0].Server != "hm.example.internal:4484" {
 		t.Fatalf("a 2.2 server: %v %v, %+v", refused, err, newer.calls)
 	}
 	older := &fakeRegistrar{old: true}
-	if refused, err := registerWith(ctx, older, "node-w", reg); err != nil || !refused || len(older.calls) != 2 || older.calls[1].Address != "" {
+	if refused, err := registerWith(ctx, older, "node-w", reg); err != nil || !refused || len(older.calls) != 2 ||
+		older.calls[1].Address != "" || older.calls[1].Server != "" {
 		t.Fatalf("an older server: %v %v, %+v", refused, err, older.calls)
 	}
-	// Without an address there is nothing to retry.
+	// Without an address, the server address alone is taken out, and the
+	// address is not counted as refused.
 	noAddr := &fakeRegistrar{old: true}
 	reg.Address = ""
-	if refused, err := registerWith(ctx, noAddr, "node-w", reg); err != nil || refused || len(noAddr.calls) != 1 {
+	if refused, err := registerWith(ctx, noAddr, "node-w", reg); err != nil || refused || len(noAddr.calls) != 2 || noAddr.calls[1].Server != "" {
 		t.Fatalf("no address: %v %v, %+v", refused, err, noAddr.calls)
+	}
+	// Without either there is nothing to retry.
+	neither := &fakeRegistrar{old: true}
+	reg.Server = ""
+	if refused, err := registerWith(ctx, neither, "node-w", reg); err != nil || refused || len(neither.calls) != 1 {
+		t.Fatalf("neither: %v %v, %+v", refused, err, neither.calls)
 	}
 }
 
