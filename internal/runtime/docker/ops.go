@@ -293,15 +293,19 @@ func (c *Client) Stop(ctx context.Context, id string, timeout time.Duration) err
 	return resp.Body.Close()
 }
 
-// Remove deletes a container. Named volumes stay, because the engine is asked
-// to remove only anonymous volumes (v=false).
+// Remove deletes a container and its anonymous volumes, the ones an image's
+// VOLUME instruction makes: v=true, "remove anonymous volumes associated
+// with the container" (ContainerDelete in the Engine API). The engine never
+// removes a named volume this way, so an app's volumes,
+// hivemind-<app>_<volume>, stay with their data. Without v, every replaced
+// container of such an image left a volume behind, with its data.
 func (c *Client) Remove(ctx context.Context, id string, force bool) error {
 	const op = "remove"
 	p, err := containerPath(op, id)
 	if err != nil {
 		return err
 	}
-	q := url.Values{"v": {"false"}, "force": {strconv.FormatBool(force)}}
+	q := url.Values{"v": {"true"}, "force": {strconv.FormatBool(force)}}
 	resp, err := c.call(ctx, op, http.MethodDelete, p, q, nil)
 	if err != nil {
 		return err

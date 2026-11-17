@@ -277,7 +277,9 @@ The replica stays on the node where it was first placed. If that node is lost, t
 
 Volume names are scoped to the app. The Docker volume for volume `data` of app `web` is `hivemind-web_data`, so two apps that both use a volume called `data` get separate volumes and never see each other's files. App and volume names can't contain `_`, so no two pairs of names map to the same Docker volume. Docker creates the volume the first time a container mounts it, with the labels `hivemind.app` and `hivemind.volume`, so `docker volume ls --filter label=hivemind.app=web` lists an app's volumes. A volume that already exists is mounted as it is, and keeps its labels.
 
-Deleting an app removes its containers and keeps its volumes. hivemind never deletes a volume. Deploying an app with the same name and volume name on the same node mounts the same volume and finds the data again. To free the space, remove the volume with `docker volume rm` on the node.
+Deleting an app removes its containers and keeps its volumes. hivemind never deletes a named volume. Deploying an app with the same name and volume name on the same node mounts the same volume and finds the data again. To free the space, remove the volume with `docker volume rm` on the node.
+
+An image can declare volumes of its own, with `VOLUME` in its Dockerfile, as the `postgres` and `redis` images do. Docker gives each container an anonymous volume for each of them, which is not one of the app's volumes: it lasts across restarts of the container, but each new container gets an empty one, so after a rollout or a move the data is not there. hivemind removes a container's anonymous volumes with the container, as `docker rm -v` does. Put data that must last in a volume of the app's spec, mounted at the same path; a named volume mounted there takes the place of the anonymous one.
 
 ## Resources
 

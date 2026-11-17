@@ -5,7 +5,9 @@ package docker
 import (
 	"bytes"
 	"encoding/json"
+	"io"
 	"net/http"
+	"net/url"
 	"strings"
 	"testing"
 	"time"
@@ -122,5 +124,119 @@ func TestIntegrationExistingVolumeMountedAsIs(t *testing.T) {
 	}
 	if labels := itVolumeLabels(t, c, name); len(labels) != 0 {
 		t.Errorf("labels of the existing volume changed to %v", labels)
+	}
+}
+
+// itRawJSON calls the engine directly with a JSON body.
+func itRawJSON(t *testing.T, c *Client, method, path, body string) (int, []byte) {
+	t.Helper()
+	req, err := http.NewRequestWithContext(itCtx(t), method, c.base+"/v"+APIVersion+path, strings.NewReader(body))
+	if err != nil {
+		t.Fatal(err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := c.http.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	b, _ := io.ReadAll(resp.Body)
+	return resp.StatusCode, b
+}
+
+// itImageWithVolume makes an image from alpine that declares VOLUME path, as
+// a Dockerfile's VOLUME does, by committing a container with that change. It
+// removes the image when the test ends, and returns its reference.
+func itImageWithVolume(t *testing.T, c *Client, path string) string {
+	t.Helper()
+	itPull(t, c, alpineImage)
+	code, body := itRawJSON(t, c, http.MethodPost, "/containers/create", `{"Image":"`+alpineImage+`"}`)
+	if code != http.StatusCreated {
+		t.Fatalf("create the base container: HTTP %d %s", code, body)
+	}
+	var created struct {
+		ID string `json:"Id"`
+	}
+	if err := json.Unmarshal(body, &created); err != nil {
+		t.Fatal(err)
+	}
+	defer itRawAPI(t, c, http.MethodDelete, "/containers/"+created.ID+"?force=1")
+	repo, tag := "hivemind-it-anon", itName("v")
+	q := url.Values{"container": {created.ID}, "repo": {repo}, "tag": {tag}, "changes": {"VOLUME " + path}}
+	if code, body := itRawJSON(t, c, http.MethodPost, "/commit?"+q.Encode(), "{}"); code != http.StatusCreated {
+		t.Fatalf("commit: HTTP %d %s", code, body)
+	}
+	ref := repo + ":" + tag
+	t.Cleanup(func() { itRawAPI(t, c, http.MethodDelete, "/images/"+ref+"?force=1") })
+	return ref
+}
+
+// itMounts returns the volume each of a container's mounts uses, by
+// destination, read from the engine directly.
+func itMounts(t *testing.T, c *Client, id string) map[string]string {
+	t.Helper()
+	code, body := itRawAPI(t, c, http.MethodGet, "/containers/"+id+"/json")
+	if code != http.StatusOK {
+		t.Fatalf("inspect %s: HTTP %d %s", id, code, body)
+	}
+	var b struct {
+		Mounts []struct{ Type, Name, Destination string }
+	}
+	if err := json.Unmarshal(body, &b); err != nil {
+		t.Fatal(err)
+	}
+	out := map[string]string{}
+	for _, m := range b.Mounts {
+		if m.Type == "volume" {
+			out[m.Destination] = m.Name
+		}
+	}
+	return out
+}
+
+// A container whose image declares a VOLUME gets an anonymous volume for
+// it. Remove takes that volume with the container, and keeps the app's
+// named volume and its data.
+func TestIntegrationRemoveTakesAnonymousVolumes(t *testing.T) {
+	c := itClient(t)
+	img := itImageWithVolume(t, c, "/anon")
+	app := itName("anon")
+	named := runtime.VolumeName(app, "data")
+	t.Cleanup(func() { itRawAPI(t, c, http.MethodDelete, "/volumes/"+named) })
+
+	id, err := c.Create(itCtx(t), runtime.ContainerConfig{
+		Name: itName(app), Image: img, App: app,
+		Command: []string{"sh", "-c", "echo kept > /data/f; echo lost > /anon/f"},
+		Volumes: []runtime.VolumeMount{{Name: "data", Path: "/data"}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := c.Start(itCtx(t), id); err != nil {
+		t.Fatal(err)
+	}
+	if got := itWaitState(t, c, id, "exited", 30*time.Second); got.ExitCode != 0 {
+		t.Fatalf("exit code %d", got.ExitCode)
+	}
+	mounts := itMounts(t, c, id)
+	anon := mounts["/anon"]
+	if anon == "" || anon == named || mounts["/data"] != named {
+		t.Fatalf("mounts = %v, want an anonymous volume at /anon and %s at /data", mounts, named)
+	}
+	if code, _ := itRawAPI(t, c, http.MethodGet, "/volumes/"+anon); code != http.StatusOK {
+		t.Fatalf("anonymous volume %s before the remove: HTTP %d", anon, code)
+	}
+
+	if err := c.Remove(itCtx(t), id, true); err != nil {
+		t.Fatal(err)
+	}
+	if code, _ := itRawAPI(t, c, http.MethodGet, "/volumes/"+anon); code != http.StatusNotFound {
+		t.Errorf("anonymous volume %s after its container was removed: HTTP %d, want 404", anon, code)
+	}
+	if code, _ := itRawAPI(t, c, http.MethodGet, "/volumes/"+named); code != http.StatusOK {
+		t.Fatalf("named volume %s after the remove: HTTP %d, want 200", named, code)
+	}
+	if got := itRunOnce(t, c, app, "data", "cat /data/f"); got != "kept" {
+		t.Errorf("the named volume holds %q after the remove, want kept", got)
 	}
 }

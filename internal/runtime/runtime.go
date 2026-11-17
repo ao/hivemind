@@ -247,8 +247,8 @@ type Runtime interface {
 	// Stop sends SIGTERM and waits up to timeout before SIGKILL. Stopping a
 	// stopped container is not an error.
 	Stop(ctx context.Context, id string, timeout time.Duration) error
-	// Remove deletes a container. Named volumes are kept: no Runtime method
-	// deletes a volume.
+	// Remove deletes a container and its anonymous volumes, the ones its
+	// image declares. Named volumes are kept: no Runtime method deletes one.
 	Remove(ctx context.Context, id string, force bool) error
 	// Inspect returns one container.
 	Inspect(ctx context.Context, id string) (Container, error)

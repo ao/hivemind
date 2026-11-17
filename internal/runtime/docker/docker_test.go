@@ -594,7 +594,9 @@ func TestStopResults(t *testing.T) {
 	}
 }
 
-func TestRemoveKeepsVolumesAndEscapesID(t *testing.T) {
+// Remove asks the engine to remove the container's anonymous volumes too
+// (v=true), which never touches a named volume.
+func TestRemoveTakesAnonymousVolumesAndEscapesID(t *testing.T) {
 	c, fd := newFake(t, func(w http.ResponseWriter, ex exchange) { w.WriteHeader(http.StatusNoContent) })
 	requireNoErr(t, c.Remove(context.Background(), "a/b", true))
 	requireNoErr(t, c.Remove(context.Background(), "plain", false))
@@ -605,11 +607,11 @@ func TestRemoveKeepsVolumesAndEscapesID(t *testing.T) {
 	if reqs[0].Method != http.MethodDelete || reqs[0].Path != "/containers/a%2Fb" {
 		t.Errorf("request 0 = %s %s", reqs[0].Method, reqs[0].Path)
 	}
-	if reqs[0].Query.Get("force") != "true" || reqs[0].Query.Get("v") != "false" {
-		t.Errorf("query = %v, want force=true and v=false", reqs[0].Query)
+	if reqs[0].Query.Get("force") != "true" || reqs[0].Query.Get("v") != "true" {
+		t.Errorf("query = %v, want force=true and v=true", reqs[0].Query)
 	}
-	if reqs[1].Query.Get("force") != "false" {
-		t.Errorf("force = %q, want false", reqs[1].Query.Get("force"))
+	if reqs[1].Query.Get("force") != "false" || reqs[1].Query.Get("v") != "true" {
+		t.Errorf("query = %v, want force=false and v=true", reqs[1].Query)
 	}
 
 	c404, _ := newFake(t, func(w http.ResponseWriter, ex exchange) {
