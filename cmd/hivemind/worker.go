@@ -498,6 +498,7 @@ func certNodeID(dir string) string {
 // (workerEpochGuard): the worker then sends it nothing, keeps its
 // containers, and asks again now and then.
 func runWorker(ctx context.Context, cfg *config.Config, log *slog.Logger, rt runtime.Runtime) error {
+	noteRouterSettings(cfg, log)
 	w, err := loadWorkerState(cfg.DataDir)
 	if err != nil {
 		return err

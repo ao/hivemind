@@ -427,3 +427,26 @@ func TestTokenFlagBeatsEnv(t *testing.T) {
 		t.Fatalf("token %q, want the flag's", cfg.Token.Value())
 	}
 }
+
+// Source names where each setting came from, and is "" at the default.
+func TestSource(t *testing.T) {
+	opts := testOpts(map[string]string{"HOME": "/home/t", "HIVEMIND_ROUTE_MAX_CONNS_PER_IP": "0"}, "acme-email: \"a@example.com\"\n")
+	fl := newFlags(t, opts)
+	if err := fl.Set("route-https-port", "8443"); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := resolve(fl, opts)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for name, want := range map[string]string{
+		"route-https-port":       "flag --route-https-port",
+		"route-max-conns-per-ip": "env HIVEMIND_ROUTE_MAX_CONNS_PER_IP",
+		"acme-email":             "config file " + cfg.ConfigFile,
+		"route-http-port":        "",
+	} {
+		if got := cfg.Source(name); got != want {
+			t.Errorf("Source(%q) = %q, want %q", name, got, want)
+		}
+	}
+}

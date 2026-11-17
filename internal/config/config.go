@@ -79,7 +79,15 @@ type Config struct {
 	ACMECA             string `json:"acme_ca"`
 	Server             string `json:"server"`
 	Token              Secret `json:"token"`
+	// sources is where each setting that is not at its default came from
+	// (Source). Only resolve sets it.
+	sources map[string]string
 }
+
+// Source says where the setting name came from: "flag --name", "env
+// HIVEMIND_...", or "config file <path>". It is "" for a setting at its
+// default.
+func (c *Config) Source(name string) string { return c.sources[name] }
 
 // DefaultACMECA is the default ACME directory: Let's Encrypt's production CA.
 const DefaultACMECA = "https://acme-v02.api.letsencrypt.org/directory"
@@ -209,6 +217,12 @@ func resolve(fl *pflag.FlagSet, opts Options) (*Config, error) {
 		}
 		if err := s.set(cfg, val); err != nil {
 			return nil, fmt.Errorf("%s (from %s): %w", s.name, src, err)
+		}
+		if src != "default" {
+			if cfg.sources == nil {
+				cfg.sources = map[string]string{}
+			}
+			cfg.sources[s.name] = src
 		}
 	}
 	cfg.ConfigFile = cfgPath

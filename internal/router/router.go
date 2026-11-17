@@ -287,7 +287,7 @@ func (rt *Router) Serve() error {
 	go func() { errc <- rt.tlsSrv.ServeTLS(rt.tlsLn, "", "") }()
 	go rt.poll()
 	rt.log.Info("router listening", "http", rt.HTTPAddr(), "https", rt.HTTPSAddr(), "acme_ca", rt.cfg.CA,
-		"max_conns", rt.cfg.MaxConns, "max_conns_per_ip", rt.cfg.MaxConnsPerAddr)
+		"max_conns", rt.cfg.MaxConns, "max_conns_per_ip", loggedPerAddr(rt.cfg.MaxConnsPerAddr))
 	err := <-errc
 	if errors.Is(err, http.ErrServerClosed) {
 		err = <-errc
@@ -576,3 +576,7 @@ func (rt *Router) certExpiry() map[string]time.Time {
 	}
 	return expiry
 }
+
+// loggedPerAddr is the per-address cap as the router logs it: 0 for no cap,
+// as --route-max-conns-per-ip spells it, where Config has a negative number.
+func loggedPerAddr(n int) int { return max(n, 0) }

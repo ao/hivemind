@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"strings"
 	"time"
 
 	"github.com/ao/hivemind/internal/config"
@@ -137,5 +138,26 @@ func reportRouter(ctx context.Context, c routerReporter, nodeID string, report f
 			log.Warn("post router metrics to the server; retrying", "err", err)
 			failing = true
 		}
+	}
+}
+
+// routerOnlySettings are the settings that only a router reads.
+var routerOnlySettings = []string{"route-http-port", "route-https-port", "route-max-conns-per-ip", "acme-email", "acme-ca"}
+
+// noteRouterSettings logs, on a node without --route-addr, the router
+// settings that were given all the same, with where each came from: the
+// node runs no router, so they do nothing.
+func noteRouterSettings(cfg *config.Config, log *slog.Logger) {
+	if cfg.RouteAddr != "" {
+		return
+	}
+	var ignored []string
+	for _, name := range routerOnlySettings {
+		if src := cfg.Source(name); src != "" {
+			ignored = append(ignored, "--"+name+" ("+src+")")
+		}
+	}
+	if len(ignored) > 0 {
+		log.Warn("router settings are ignored without --route-addr: this node runs no router", "ignored", strings.Join(ignored, ", "))
 	}
 }

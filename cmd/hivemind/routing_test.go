@@ -284,6 +284,8 @@ func TestServeRunsTheRouter(t *testing.T) {
 		"HIVEMIND_ACME_EMAIL":         "ops@example.com",
 		// .invalid never resolves (RFC 6761), so no request leaves the host.
 		"HIVEMIND_ACME_CA": "https://acme.invalid/directory",
+		// 0 turns the per-address cap off, and is logged as given.
+		"HIVEMIND_ROUTE_MAX_CONNS_PER_IP": "0",
 	}
 	cfg, err := config.Load(nil, config.Options{Lookup: func(k string) (string, bool) { v, ok := env[k]; return v, ok }})
 	if err != nil {
@@ -362,8 +364,8 @@ func TestServeRunsTheRouter(t *testing.T) {
 			t.Errorf("metrics have no %s:\n%s", want, metrics)
 		}
 	}
-	if s := logs.String(); !strings.Contains(s, "router listening") {
-		t.Errorf("no router line in the log:\n%s", s)
+	if s := logs.String(); !strings.Contains(s, "router listening") || !strings.Contains(s, " max_conns_per_ip=0") || strings.Contains(s, "router settings are ignored") {
+		t.Errorf("no router line with max_conns_per_ip=0 in the log, or a note that the router settings are ignored:\n%s", s)
 	}
 }
 
@@ -455,4 +457,31 @@ func (l *lockedWriter) Write(p []byte) (int, error) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	return l.w.Write(p)
+}
+
+// A node without --route-addr runs no router, so router settings given to
+// it do nothing: it says so once, with where each came from. Defaults, and
+// a node with a router, say nothing.
+func TestRouterSettingsWithoutARouter(t *testing.T) {
+	note := func(env map[string]string) string {
+		t.Helper()
+		cfg, err := config.Load(nil, config.Options{Lookup: func(k string) (string, bool) { v, ok := env[k]; return v, ok }})
+		if err != nil {
+			t.Fatal(err)
+		}
+		logs := &syncLog{}
+		noteRouterSettings(cfg, slog.New(slog.NewTextHandler(logs, nil)))
+		return logs.String()
+	}
+	if l := note(map[string]string{}); l != "" {
+		t.Errorf("defaults: %s", l)
+	}
+	l := note(map[string]string{"HIVEMIND_ROUTE_MAX_CONNS_PER_IP": "0", "HIVEMIND_ACME_EMAIL": "ops@example.com"})
+	if !strings.Contains(l, `level=WARN msg="router settings are ignored without --route-addr: this node runs no router" `+
+		`ignored="--route-max-conns-per-ip (env HIVEMIND_ROUTE_MAX_CONNS_PER_IP), --acme-email (env HIVEMIND_ACME_EMAIL)"`) {
+		t.Errorf("without a router: %s", l)
+	}
+	if l := note(map[string]string{"HIVEMIND_ROUTE_ADDR": "127.0.0.1", "HIVEMIND_ROUTE_MAX_CONNS_PER_IP": "64", "HIVEMIND_ACME_EMAIL": "ops@example.com"}); l != "" {
+		t.Errorf("with a router: %s", l)
+	}
 }

@@ -499,6 +499,7 @@ func runServe(ctx context.Context, cfg *config.Config, log *slog.Logger, rt runt
 	// The token prints as [redacted]: config.Secret masks itself, and the
 	// redacting handler masks it again.
 	log.Debug("resolved config", "config", cfg)
+	noteRouterSettings(cfg, log)
 	if err := upgrade.CheckDataDir(cfg.DataDir); err != nil {
 		return err
 	}
