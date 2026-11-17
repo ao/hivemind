@@ -230,10 +230,19 @@ func TestTwoUpstreamsOnOneHost(t *testing.T) {
 	}
 
 	// The api app moves to /v2, and the table read changes nothing else.
-	tr.rt.SetTable(Table{"www.example.com": {
+	// The test router reads its table every 20 ms, so the new one is what
+	// it reads, and it is set at once too.
+	moved := Table{"www.example.com": {
 		{Endpoints: []string{web1.Listener.Addr().String()}},
 		{Path: "/v2", Endpoints: []string{api1.Listener.Addr().String()}},
-	}})
+	}}
+	tr.setRoutes(moved, nil)
+	tr.rt.SetTable(moved)
+	// A read of the old table that was in flight may set it once more;
+	// two reads after this one, the new table holds.
+	for n := tr.readCount() + 2; tr.readCount() < n; {
+		time.Sleep(5 * time.Millisecond)
+	}
 	for path, want := range map[string]string{"/api/x": "web1", "/v2": "api1", "/v2/x": "api1", "/": "web1"} {
 		req, _ := http.NewRequest(http.MethodGet, "https://www.example.com"+path, nil)
 		if resp, s, body := get(t, tr.client(false), req); resp.StatusCode != http.StatusOK || s.Name != want {

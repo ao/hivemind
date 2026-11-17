@@ -129,6 +129,8 @@ func FuzzDecodeRoutes(f *testing.F) {
 	f.Add([]byte(`{"routes":[{"host":"www.example.com","endpoints":[]},{"host":"a.example.com","endpoints":["[fd00::1]:1"]}]}`))
 	f.Add([]byte(`{"routes":[{"host":"*.example.com","endpoints":["x"]}]}`))
 	f.Add([]byte(`{"routes":null}`))
+	f.Add([]byte(`{"routes":[{"host":"www.example.com","endpoints":[]},{"host":"www.example.com","path":"/api","endpoints":["10.0.0.5:1"]}]}`))
+	f.Add([]byte(`{"routes":[{"host":"www.example.com","path":"/a/../b","endpoints":[]},{"host":"www.example.com","path":"/a%2F","endpoints":[]}]}`))
 	f.Fuzz(func(t *testing.T, data []byte) {
 		var rt RouteTable
 		if err := Decode(bytes.NewReader(data), MaxRoutesBytes, &rt); err != nil {
