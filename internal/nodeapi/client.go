@@ -106,6 +106,8 @@ type swapTransport struct {
 	version string
 	server  *serverState
 	clock   *clock
+	// answered, if set, is called after each reply (OnAnswer).
+	answered atomic.Pointer[func()]
 }
 
 func (s *swapTransport) RoundTrip(r *http.Request) (*http.Response, error) {
@@ -121,7 +123,23 @@ func (s *swapTransport) RoundTrip(r *http.Request) (*http.Response, error) {
 	}
 	s.server.see(resp.Header.Get(VersionHeader))
 	s.clock.observe(sent, time.Now(), resp)
+	if f := s.answered.Load(); f != nil {
+		(*f)()
+	}
 	return resp, nil
+}
+
+// OnAnswer makes the client call f after each reply from the server, of any
+// status, to any of its requests: the server could be reached. f must not
+// block. A worker passes its agent's ServerAnswered, so that a pass backed
+// off while the server was away runs as soon as any request gets through.
+// A later call replaces f; nil removes it.
+func (c *Client) OnAnswer(f func()) {
+	if f == nil {
+		c.tr.answered.Store(nil)
+		return
+	}
+	c.tr.answered.Store(&f)
 }
 
 // CloseIdleConnections is what http.Client.CloseIdleConnections calls.

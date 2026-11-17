@@ -16,6 +16,7 @@ import (
 	"slices"
 	"strconv"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/ao/hivemind/internal/runtime"
@@ -121,6 +122,10 @@ type Agent struct {
 	cfg     Config
 	log     *slog.Logger
 	trigger chan struct{}
+	// backingOff is set from the end of a pass that could not reach the
+	// server until the next pass starts, while Run waits out the backoff,
+	// so ServerAnswered knows to end the wait.
+	backingOff atomic.Bool
 
 	// mu makes one pass at a time, and guards the fields below.
 	mu       sync.Mutex
@@ -200,6 +205,19 @@ func (a *Agent) Trigger() {
 	}
 }
 
+// ServerAnswered tells the agent that a call to the server got a reply: a
+// lease renewal, a router's table read, a log poll, any call. While Run
+// waits out the backoff of passes that could not reach the server, it ends
+// the wait, so the next pass runs at once and the node's containers are
+// reported as soon as the server can take the report, rather than up to
+// UnreachableWait later. Otherwise it does nothing, so it is cheap to call
+// on every reply. It does not block.
+func (a *Agent) ServerAnswered() {
+	if a.backingOff.Load() {
+		a.Trigger()
+	}
+}
+
 // outage is a run of passes that could not reach the server.
 type outage struct {
 	failures int       // passes in a row that could not reach it
@@ -251,6 +269,8 @@ func (a *Agent) notePass(o *outage, err error) {
 // Source cannot reach the server, the passes back off, from the interval
 // doubling to UnreachableWait, and the outage is logged at its start, every
 // OutageLogEvery, and at its end; the lease heartbeat keeps its own timer.
+// The first call to the server that gets a reply after that, the heartbeat's
+// or any other that reports it with ServerAnswered, ends the wait.
 // It returns nil when ctx is cancelled.
 func (a *Agent) Run(ctx context.Context) error {
 	defer a.Close()
@@ -279,6 +299,10 @@ func (a *Agent) Run(ctx context.Context) error {
 				t.Reset(a.cfg.Interval)
 			}
 		}
+		// From the end of a pass that could not reach the server to the
+		// start of the next, a reply to any other call ends the wait. A
+		// reply that comes before the wait begins leaves a trigger for it.
+		a.backingOff.Store(down.failures > 0)
 		if a.cfg.OnPass != nil && ctx.Err() == nil {
 			a.cfg.OnPass(time.Since(start), err)
 		}
@@ -291,7 +315,8 @@ func (a *Agent) Run(ctx context.Context) error {
 			due = timer.C
 		}
 		// While the server cannot be reached, the next pass waits out the
-		// backoff instead of the tick.
+		// backoff instead of the tick, or until a call to the server gets a
+		// reply (ServerAnswered).
 		tick := t.C
 		var backoff *time.Timer
 		if down.failures > 0 {
@@ -304,6 +329,7 @@ func (a *Agent) Run(ctx context.Context) error {
 		case <-a.trigger:
 		case <-due:
 		}
+		a.backingOff.Store(false)
 		if timer != nil {
 			timer.Stop()
 		}
@@ -319,6 +345,7 @@ func (a *Agent) Run(ctx context.Context) error {
 // heartbeat renews the lease every Heartbeat until ctx ends. It does not take
 // a.mu, so it keeps going while a pass is slow. A failure is logged at debug
 // level and tried again at the next tick: the passes report the same errors.
+// A renewal that works ends a backed-off wait (ServerAnswered).
 func (a *Agent) heartbeat(ctx context.Context, lr LeaseRenewer) {
 	t := time.NewTicker(a.cfg.Heartbeat)
 	defer t.Stop()
@@ -328,7 +355,11 @@ func (a *Agent) heartbeat(ctx context.Context, lr LeaseRenewer) {
 			return
 		case <-t.C:
 		}
-		if err := lr.RenewLease(ctx, a.cfg.NodeID); err != nil && ctx.Err() == nil {
+		err := lr.RenewLease(ctx, a.cfg.NodeID)
+		switch {
+		case err == nil:
+			a.ServerAnswered()
+		case ctx.Err() == nil:
 			a.log.Debug("lease renewal", "err", err)
 		}
 	}

@@ -558,6 +558,11 @@ func runWorker(ctx context.Context, cfg *config.Config, log *slog.Logger, rt run
 	if err != nil {
 		return err
 	}
+	// Any reply from the server, to the lease, the router's table read or
+	// the log poll, ends a pass's backoff after an outage: the containers
+	// are reported at once, not up to 30 s after the server is back.
+	client.OnAnswer(ag.ServerAnswered)
+	defer client.OnAnswer(nil)
 	// The router reads the routing table and keeps its certificates through
 	// the node API, so it needs nothing from this machine but its listeners.
 	if cfg.RouteAddr != "" {
