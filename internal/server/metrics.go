@@ -2,6 +2,7 @@ package server
 
 import (
 	"bytes"
+	"context"
 	"maps"
 	"net/http"
 	"slices"
@@ -208,7 +209,9 @@ func (s *Server) writeMetrics(r *http.Request, b *bytes.Buffer) error {
 
 	w.Family("hivemind_http_requests_total", "HTTP requests by method, route pattern and status code.", metrics.TypeCounter)
 	s.metrics.requests.Write(w, "hivemind_http_requests_total")
-	s.writeRouterMetrics(w)
+	if err := s.writeRouterMetrics(ctx, w); err != nil {
+		return err
+	}
 	return w.Flush()
 }
 
@@ -219,17 +222,27 @@ const routerReportAge = 2 * time.Minute
 
 // writeRouterMetrics writes every router's counters, this node's and the
 // workers', with a node label. There are no router families when no node
-// routes.
-func (s *Server) writeRouterMetrics(w *metrics.Writer) {
+// routes. This node's router keeps counting a host after its apps are
+// deleted, so its report is cut to the hosts in the routing table and the
+// unknown host, as a worker's is when it arrives.
+func (s *Server) writeRouterMetrics(ctx context.Context, w *metrics.Writer) error {
 	reports := s.cfg.RouterReports.Fresh(time.Now(), routerReportAge)
 	if s.cfg.RouterReport != nil {
+		rt, err := s.cfg.Store.RouteTable(ctx)
+		if err != nil {
+			return err
+		}
+		routed := make(map[string]bool, len(rt))
+		for _, x := range rt {
+			routed[x.Host] = true
+		}
 		if reports == nil {
 			reports = map[string]nodeapi.RouterReport{}
 		}
-		reports[s.cfg.NodeID] = s.cfg.RouterReport()
+		reports[s.cfg.NodeID] = s.cfg.RouterReport().Routed(routed)
 	}
 	if len(reports) == 0 {
-		return
+		return nil
 	}
 	nodes := slices.Sorted(maps.Keys(reports))
 	w.Family("hivemind_router_requests_total",
@@ -260,4 +273,5 @@ func (s *Server) writeRouterMetrics(w *metrics.Writer) {
 			w.Sample("hivemind_router_cert_expiry_timestamp_seconds", metrics.L("node", n, "host", x.Host), float64(x.NotAfter.Unix()))
 		}
 	}
+	return nil
 }

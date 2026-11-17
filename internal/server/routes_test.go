@@ -86,15 +86,23 @@ func TestRouterMetricsAreServed(t *testing.T) {
 		c.RouterReports = reports
 		c.RouterReport = func() nodeapi.RouterReport {
 			return nodeapi.RouterReport{
-				Requests: []nodeapi.RouterRequests{{Host: "www.example.com", Code: 200, Count: 3}},
-				Certs:    []nodeapi.RouterCert{{Host: "www.example.com", NotAfter: expiry}},
+				Requests: []nodeapi.RouterRequests{{Host: "www.example.com", Code: 200, Count: 3},
+					{Host: nodeapi.UnknownHost, Code: 404, Count: 5}, {Host: "gone.example.com", Code: 200, Count: 7}},
+				Upstream: []nodeapi.RouterUpstream{{Host: "gone.example.com", Kind: "dial", Count: 1}},
+				Certs:    []nodeapi.RouterCert{{Host: "www.example.com", NotAfter: expiry}, {Host: "gone.example.com", NotAfter: expiry}},
 				Refused:  []nodeapi.RouterRefused{{Reason: "total", Count: 1}},
 			}
 		}
 	})
+	// www.example.com is routed. gone.example.com was, and this node's
+	// router still counts it; its series are left out, as a worker's are.
+	if rec := h.do(t, http.MethodPut, "/v1/apps/web", routedWeb); rec.Code/100 != 2 {
+		t.Fatalf("put: %d %s", rec.Code, rec.Body)
+	}
 	body := h.do(t, http.MethodGet, "/metrics", "").Body.String()
 	for _, want := range []string{
 		`hivemind_router_requests_total{node="` + testNode + `",host="www.example.com",code="200"} 3`,
+		`hivemind_router_requests_total{node="` + testNode + `",host="unknown",code="404"} 5`,
 		`hivemind_router_requests_total{node="node-w",host="www.example.com",code="502"} 4`,
 		`hivemind_router_upstream_errors_total{node="node-w",host="www.example.com",kind="dial"} 2`,
 		`hivemind_router_connections_refused_total{node="node-w",reason="address"} 6`,
@@ -106,6 +114,9 @@ func TestRouterMetricsAreServed(t *testing.T) {
 		if !strings.Contains(body, want) {
 			t.Errorf("/metrics has no %s:\n%s", want, body)
 		}
+	}
+	if strings.Contains(body, "gone.example.com") {
+		t.Errorf("a host the server no longer routes is shown for its own router:\n%s", body)
 	}
 	if strings.Contains(body, "node-gone") {
 		t.Errorf("a stale report is shown:\n%s", body)

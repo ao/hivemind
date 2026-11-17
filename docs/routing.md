@@ -210,7 +210,7 @@ The server's `/metrics` has every router's counters, and the expiry of the certi
 - `hivemind_router_connections_refused_total{node,reason}`, the connections closed as they were accepted, with `reason` `address` (the client's address had as many open as `--route-max-conns-per-ip`) or `total` (the router had as many open as its total cap; see [limits](#limits));
 - `hivemind_router_cert_expiry_timestamp_seconds{node,host}`.
 
-A worker has no metrics listener. It posts its router's counters to the server over the node API every 15 seconds, so its series lag by up to that. The server keeps only the hosts it routes from a worker's report, and shows a report for 2 minutes after it arrives, so a worker that stops drops out. Sum over `node` for a host's totals across the routers, for example `sum by (host, code) (rate(hivemind_router_requests_total[5m]))`. A server older than 2.2 has no route for the counters; a 2.2 worker logs that once and keeps routing.
+A worker has no metrics listener. It posts its router's counters to the server over the node API every 15 seconds, so its series lag by up to that. The server keeps only the hosts it routes, and `unknown`, from a worker's report, and from its own router's at each scrape, so a host whose apps were deleted drops out for every router; it shows a worker's report for 2 minutes after it arrives, so a worker that stops drops out. Sum over `node` for a host's totals across the routers, for example `sum by (host, code) (rate(hivemind_router_requests_total[5m]))`. A server older than 2.2 has no route for the counters; a 2.2 worker logs that once and keeps routing.
 
 ## Limits
 
