@@ -3,6 +3,7 @@ package store
 import (
 	"bytes"
 	"errors"
+	"fmt"
 	"io/fs"
 	"path/filepath"
 	"slices"
@@ -290,5 +291,78 @@ func TestTLSLockOneHolderAtATime(t *testing.T) {
 	wg.Wait()
 	if most != 1 || done != 8 {
 		t.Fatalf("at most %d holders at once, %d of 8 done", most, done)
+	}
+}
+
+// Taking a lock deletes every expired lock, whatever its name, so lock
+// names used once do not pile up in the table.
+func TestTLSLockDeletesExpiredLocksOfOtherNames(t *testing.T) {
+	clock := &fakeClock{t: time.Unix(1_700_000_000, 0)}
+	s := openT(t, filepath.Join(t.TempDir(), "data", "hivemind.db"), WithClock(clock.Now))
+	ctx := ctxT(t)
+	for i := 0; i < 50; i++ {
+		if ok, err := s.TLSTryLock(ctx, fmt.Sprintf("once-%d", i), "node-a/x", time.Second); !ok || err != nil {
+			t.Fatalf("lock %d: %v %v", i, ok, err)
+		}
+	}
+	if ok, _ := s.TLSTryLock(ctx, "held", "node-b/x", time.Hour); !ok {
+		t.Fatal("lock held")
+	}
+	count := func() int {
+		var n int
+		if err := s.db.QueryRowContext(ctx, `SELECT count(*) FROM tls_locks`).Scan(&n); err != nil {
+			t.Fatal(err)
+		}
+		return n
+	}
+	if n := count(); n != 51 {
+		t.Fatalf("%d rows, want 51", n)
+	}
+	clock.Advance(2 * time.Second)
+	if ok, err := s.TLSTryLock(ctx, "next", "node-a/y", time.Second); !ok || err != nil {
+		t.Fatalf("lock after expiry: %v %v", ok, err)
+	}
+	if n := count(); n != 2 {
+		t.Fatalf("%d rows after a lock was taken, want 2: the held one and the new one", n)
+	}
+}
+
+// A holder, the node ID before the owner's "/", may have at most
+// MaxTLSLocksPerHolder locks: the next is refused with a clear error, other
+// holders are not affected, and once one is released, or expires, it may
+// take another.
+func TestTLSLocksPerHolderAreCapped(t *testing.T) {
+	clock := &fakeClock{t: time.Unix(1_700_000_000, 0)}
+	s := openT(t, filepath.Join(t.TempDir(), "data", "hivemind.db"), WithClock(clock.Now))
+	ctx := ctxT(t)
+	for i := 0; i < MaxTLSLocksPerHolder; i++ {
+		if ok, err := s.TLSTryLock(ctx, fmt.Sprintf("lock-%d", i), fmt.Sprintf("node-a/%d", i%7), time.Minute); !ok || err != nil {
+			t.Fatalf("lock %d: %v %v", i, ok, err)
+		}
+	}
+	_, err := s.TLSTryLock(ctx, "one-more", "node-a/z", time.Minute)
+	if !errors.Is(err, ErrTLSLockLimit) || !errors.Is(err, ErrConflict) ||
+		!strings.Contains(err.Error(), "node-a holds 1000 TLS locks, the most one may hold") {
+		t.Fatalf("lock over the cap: %v", err)
+	}
+	// A held name is not taken, and is no error, at the cap.
+	if ok, err := s.TLSTryLock(ctx, "lock-0", "node-a/z", time.Minute); ok || err != nil {
+		t.Fatalf("a held lock at the cap: %v %v", ok, err)
+	}
+	// node-ab is another holder, not a prefix of node-a's.
+	for _, owner := range []string{"node-b/1", "node-ab/1", "node-a0"} {
+		if ok, err := s.TLSTryLock(ctx, "other-"+owner, owner, time.Minute); !ok || err != nil {
+			t.Fatalf("%s at node-a's cap: %v %v", owner, ok, err)
+		}
+	}
+	if err := s.TLSUnlock(ctx, "lock-0", "node-a/0"); err != nil {
+		t.Fatal(err)
+	}
+	if ok, err := s.TLSTryLock(ctx, "one-more", "node-a/z", time.Minute); !ok || err != nil {
+		t.Fatalf("lock after a release: %v %v", ok, err)
+	}
+	clock.Advance(2 * time.Minute)
+	if ok, err := s.TLSTryLock(ctx, "after-expiry", "node-a/z", time.Minute); !ok || err != nil {
+		t.Fatalf("lock after the others expired: %v %v", ok, err)
 	}
 }

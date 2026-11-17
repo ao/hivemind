@@ -2,6 +2,7 @@ package cluster
 
 import (
 	"errors"
+	"fmt"
 	"io/fs"
 	"net/http"
 	"slices"
@@ -129,6 +130,8 @@ func (a *nodeAPI) failTLS(w http.ResponseWriter, r *http.Request, err error) {
 	switch {
 	case errors.Is(err, store.ErrNotFound):
 		writeError(w, http.StatusConflict, "the lock is not held by this owner")
+	case errors.Is(err, store.ErrTLSLockLimit):
+		writeError(w, http.StatusConflict, fmt.Sprintf("this node holds %d TLS locks, the most a node may hold; release one first", store.MaxTLSLocksPerHolder))
 	case errors.Is(err, store.ErrConflict):
 		writeError(w, http.StatusConflict, "the TLS storage is full")
 	default:

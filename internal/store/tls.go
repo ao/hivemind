@@ -275,9 +275,28 @@ func (s *Store) TLSList(ctx context.Context, prefix string, recursive bool) ([]s
 // up to, not including, key + "0", the byte after "/".
 func descendants(key string) (string, string) { return key + "/", key + "0" }
 
+// MaxTLSLocksPerHolder is the most locks one holder may have at once. The
+// holder is the part of the owner before its first "/", which the node API
+// sets to the node's ID; certmagic takes a lock or two at a time.
+const MaxTLSLocksPerHolder = 1000
+
+// ErrTLSLockLimit is wrapped, with ErrConflict, by TLSTryLock's error for a
+// holder that has MaxTLSLocksPerHolder locks.
+var ErrTLSLockLimit = errors.New("too many TLS locks")
+
+// tlsHolder returns the holder of owner: the part before its first "/", or
+// all of it.
+func tlsHolder(owner string) string {
+	h, _, _ := strings.Cut(owner, "/")
+	return h
+}
+
 // TLSTryLock takes the lock name for owner until ttl from now, if no one
 // holds it or its holder's expiry has passed. It reports whether it took it.
-// The check and the take are one transaction.
+// The check and the take are one transaction. Every expired lock is deleted
+// first, whatever its name, so that names used once do not pile up; a
+// holder that has MaxTLSLocksPerHolder locks gets an error wrapping
+// ErrConflict and ErrTLSLockLimit.
 func (s *Store) TLSTryLock(ctx context.Context, name, owner string, ttl time.Duration) (bool, error) {
 	if err := ValidTLSLockName(name); err != nil {
 		return false, err
@@ -291,8 +310,24 @@ func (s *Store) TLSTryLock(ctx context.Context, name, owner string, ttl time.Dur
 	took := false
 	err := s.tx(ctx, func(tx *sql.Tx) error {
 		now := s.now().UnixNano()
-		if _, err := tx.ExecContext(ctx, `DELETE FROM tls_locks WHERE name = ? AND expires <= ?`, name, now); err != nil {
+		if _, err := tx.ExecContext(ctx, `DELETE FROM tls_locks WHERE expires <= ?`, now); err != nil {
 			return err
+		}
+		var held int
+		if err := tx.QueryRowContext(ctx, `SELECT count(*) FROM tls_locks WHERE name = ?`, name).Scan(&held); err != nil {
+			return err
+		}
+		if held > 0 {
+			return nil
+		}
+		holder := tlsHolder(owner)
+		if err := tx.QueryRowContext(ctx, `SELECT count(*) FROM tls_locks WHERE owner = ? OR (owner >= ? AND owner < ?)`,
+			holder, holder+"/", holder+"0").Scan(&held); err != nil {
+			return err
+		}
+		if held >= MaxTLSLocksPerHolder {
+			return fmt.Errorf("%w: %w: %s holds %d TLS locks, the most one may hold; it must release one first",
+				ErrConflict, ErrTLSLockLimit, holder, held)
 		}
 		res, err := tx.ExecContext(ctx, `INSERT INTO tls_locks (name, owner, expires) VALUES (?, ?, ?) ON CONFLICT (name) DO NOTHING`,
 			name, owner, now+int64(ttl))

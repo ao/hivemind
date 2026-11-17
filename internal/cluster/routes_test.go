@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io/fs"
 	"net/http"
 	"slices"
@@ -213,5 +214,30 @@ func TestRoutesAndTLSStorageRefuseRemovedAndExpiredNodes(t *testing.T) {
 	}
 	if _, err := c2.TLS(id2).TryLock(ctx, "issue_cert_x", "o-1", time.Minute); !errors.Is(err, nodeapi.ErrNodeRemoved) {
 		t.Errorf("TLS lock for a removed node: %v", err)
+	}
+}
+
+// A node may hold at most store.MaxTLSLocksPerHolder TLS locks: the next is
+// refused with 409 and a message that says why, and another node is not
+// affected.
+func TestTLSLocksPerNodeOverTheNodeAPI(t *testing.T) {
+	fx := newFixture(t, nil)
+	ctx := context.Background()
+	idA, certA := fx.enroll(fx.issue(time.Hour))
+	idB, certB := fx.enroll(fx.issue(time.Hour))
+	fx.registerNode(fx.nodeClient(certA), idA)
+	fx.registerNode(fx.nodeClient(certB), idB)
+	for i := 0; i < store.MaxTLSLocksPerHolder; i++ {
+		if ok, err := fx.st.TLSTryLock(ctx, fmt.Sprintf("lock-%d", i), idA+"/o", time.Minute); !ok || err != nil {
+			t.Fatalf("lock %d: %v %v", i, ok, err)
+		}
+	}
+	body, _ := json.Marshal(nodeapi.TLSRequest{Name: "one-more", Owner: "o", TTLMillis: 30_000})
+	code, reply := fx.send(fx.nodeClient(certA), http.MethodPost, fx.nodeURL(nodeapi.TLSPath(idA, nodeapi.TLSLock)), body)
+	if code != http.StatusConflict || !strings.Contains(string(reply), "this node holds 1000 TLS locks, the most a node may hold") {
+		t.Fatalf("lock over the cap: %d %s", code, reply)
+	}
+	if ok, err := fx.apiClient(certB).TLS(idB).TryLock(ctx, "one-more", "o", 30*time.Second); !ok || err != nil {
+		t.Fatalf("another node at A's cap: %v %v", ok, err)
 	}
 }
