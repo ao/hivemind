@@ -1,7 +1,9 @@
 // Package router is the HTTPS router that runs on every node that opts in.
 // It serves the routing table that the server builds from the replicas'
-// reports: for each host, the private address and ephemeral port of every
-// Ready replica. Requests for a host go round-robin to its replicas through
+// reports: for each host, its routes, and for each route, the private
+// address and ephemeral port of every Ready replica. A route is the whole
+// host or a path prefix of it; a request goes to the route with the longest
+// prefix of its path, and round-robin to that route's replicas through
 // net/http/httputil.ReverseProxy; a replica that cannot be dialled is
 // skipped for a few seconds, and the next one is tried.
 //

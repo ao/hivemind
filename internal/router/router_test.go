@@ -241,13 +241,14 @@ type seen struct {
 	Host   string
 	Header http.Header
 	Body   int
+	URI    string // the request target the replica received
 }
 
 func upstream(t *testing.T, name string) *httptest.Server {
 	t.Helper()
 	s := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		n, _ := io.Copy(io.Discard, r.Body)
-		_ = json.NewEncoder(w).Encode(seen{Name: name, Host: r.Host, Header: r.Header, Body: int(n)})
+		_ = json.NewEncoder(w).Encode(seen{Name: name, Host: r.Host, Header: r.Header, Body: int(n), URI: r.RequestURI})
 	}))
 	t.Cleanup(s.Close)
 	return s
@@ -281,7 +282,7 @@ func get(t *testing.T, c *http.Client, req *http.Request) (*http.Response, seen,
 func TestRoundRobinFailoverAndHTTP2(t *testing.T) {
 	up1, up2 := upstream(t, "up1"), upstream(t, "up2")
 	dead := deadAddr(t)
-	tr := newTestRouter(t, Table{"www.example.com": {up1.Listener.Addr().String(), dead, up2.Listener.Addr().String()}})
+	tr := newTestRouter(t, Table{"www.example.com": whole(up1.Listener.Addr().String(), dead, up2.Listener.Addr().String())})
 	c := tr.client(false)
 
 	names := map[string]int{}
@@ -305,7 +306,7 @@ func TestRoundRobinFailoverAndHTTP2(t *testing.T) {
 	}
 
 	// Every endpoint down: 502.
-	tr.rt.SetTable(Table{"www.example.com": {dead}})
+	tr.rt.SetTable(Table{"www.example.com": whole(dead)})
 	req, _ := http.NewRequest(http.MethodGet, "https://www.example.com/", nil)
 	if resp, _, _ := get(t, c, req); resp.StatusCode != http.StatusBadGateway {
 		t.Fatalf("all endpoints dead: %d", resp.StatusCode)
@@ -316,7 +317,7 @@ func TestRoundRobinFailoverAndHTTP2(t *testing.T) {
 // next one with its whole body.
 func TestFailoverKeepsTheBody(t *testing.T) {
 	up := upstream(t, "up")
-	tr := newTestRouter(t, Table{"post.example.com": {deadAddr(t), up.Listener.Addr().String()}})
+	tr := newTestRouter(t, Table{"post.example.com": whole(deadAddr(t), up.Listener.Addr().String())})
 	body := strings.Repeat("x", 100<<10)
 	for _, h1 := range []bool{true, false} {
 		req, _ := http.NewRequest(http.MethodPost, "https://post.example.com/upload", strings.NewReader(body))
@@ -333,7 +334,7 @@ func TestFailoverKeepsTheBody(t *testing.T) {
 // trailing dot or port the client wrote.
 func TestForwardedHeadersAreReplaced(t *testing.T) {
 	up := upstream(t, "up")
-	tr := newTestRouter(t, Table{"www.example.com": {up.Listener.Addr().String()}})
+	tr := newTestRouter(t, Table{"www.example.com": whole(up.Listener.Addr().String())})
 	authority := fmt.Sprintf("www.example.com:%d", tr.rt.HTTPSPort())
 	sent := map[string]string{
 		"X-Forwarded-For": "6.6.6.6", "X-Forwarded-Host": "evil.example", "X-Forwarded-Proto": "http",
@@ -434,7 +435,7 @@ func upgrade(t *testing.T, c *http.Client, host string, protos string) *http.Res
 // HTTP/2 with the client directly, past the router. WebSocket upgrades pass,
 // alone or beside h2c.
 func TestH2CUpgradeIsDroppedAndWebSocketsWork(t *testing.T) {
-	tr := newTestRouter(t, Table{"www.example.com": {switcher(t, false)}, "api.example.com": {switcher(t, true)}})
+	tr := newTestRouter(t, Table{"www.example.com": whole(switcher(t, false)), "api.example.com": whole(switcher(t, true))})
 	c := tr.client(true)
 
 	resp := upgrade(t, c, "www.example.com", "h2c")
@@ -508,7 +509,7 @@ func accepted(t *testing.T, addr string) (net.Conn, bool) {
 // listeners, and the router at most MaxConns; one more is closed as it is
 // accepted, and counted. A connection that closes makes room.
 func TestConnectionCaps(t *testing.T) {
-	tr := newTestRouterWith(t, Table{"www.example.com": {}}, testOptions{poll: time.Hour,
+	tr := newTestRouterWith(t, Table{"www.example.com": whole()}, testOptions{poll: time.Hour,
 		config: func(c *Config) { c.MaxConnsPerAddr = 3 }})
 	var held []net.Conn
 	for _, addr := range []string{tr.rt.HTTPAddr(), tr.rt.HTTPSAddr(), tr.rt.HTTPAddr()} {
@@ -538,7 +539,7 @@ func TestConnectionCaps(t *testing.T) {
 		c.Close()
 	}
 
-	tr = newTestRouterWith(t, Table{"www.example.com": {}}, testOptions{poll: time.Hour,
+	tr = newTestRouterWith(t, Table{"www.example.com": whole()}, testOptions{poll: time.Hour,
 		config: func(c *Config) { c.MaxConns, c.MaxConnsPerAddr = 2, -1 }})
 	for _, addr := range []string{tr.rt.HTTPAddr(), tr.rt.HTTPSAddr()} {
 		c, ok := accepted(t, addr)
@@ -596,7 +597,7 @@ func TestStalledHTTPSWritesEndTheConnection(t *testing.T) {
 		}
 	}))
 	t.Cleanup(big.Close)
-	tr := newTestRouterWith(t, Table{"big.example.com": {big.Listener.Addr().String()}}, testOptions{poll: time.Hour,
+	tr := newTestRouterWith(t, Table{"big.example.com": whole(big.Listener.Addr().String())}, testOptions{poll: time.Hour,
 		config: func(c *Config) { c.WriteTimeout = 200 * time.Millisecond }})
 
 	for _, h1 := range []bool{true, false} {
@@ -630,7 +631,7 @@ func TestStalledHTTPSWritesEndTheConnection(t *testing.T) {
 // UpgradeIdleTimeout is closed; one that carries data stays open.
 func TestIdleUpgradedConnectionsClose(t *testing.T) {
 	const idle = 300 * time.Millisecond
-	tr := newTestRouterWith(t, Table{"www.example.com": {switcher(t, false)}}, testOptions{poll: time.Hour,
+	tr := newTestRouterWith(t, Table{"www.example.com": whole(switcher(t, false))}, testOptions{poll: time.Hour,
 		config: func(c *Config) { c.UpgradeIdleTimeout = idle }})
 	c := tr.client(true)
 	c.Timeout = 0
@@ -674,7 +675,7 @@ func TestAuthorityHasThePortOnlyWhenNot443(t *testing.T) {
 }
 
 func TestUnknownHostsAndHostsWithoutReplicas(t *testing.T) {
-	tr := newTestRouter(t, Table{"www.example.com": {}, "api.example.com": {deadAddr(t)}})
+	tr := newTestRouter(t, Table{"www.example.com": whole(), "api.example.com": whole(deadAddr(t))})
 	c := tr.client(true)
 
 	req, _ := http.NewRequest(http.MethodGet, "https://www.example.com/", nil)
@@ -704,7 +705,7 @@ func TestUnknownHostsAndHostsWithoutReplicas(t *testing.T) {
 }
 
 func TestHTTPRedirectsAndAnswersChallenges(t *testing.T) {
-	tr := newTestRouter(t, Table{"www.example.com": {}})
+	tr := newTestRouter(t, Table{"www.example.com": whole()})
 	c := tr.plain()
 	req, _ := http.NewRequest(http.MethodGet, "http://www.example.com/a/b?c=d", nil)
 	resp, _, _ := get(t, c, req)
@@ -745,7 +746,7 @@ func TestHeaderLimits(t *testing.T) {
 	}))
 	t.Cleanup(bigHeaders.Close)
 	up := upstream(t, "up")
-	tr := newTestRouter(t, Table{"www.example.com": {up.Listener.Addr().String()}, "big.example.com": {bigHeaders.Listener.Addr().String()}})
+	tr := newTestRouter(t, Table{"www.example.com": whole(up.Listener.Addr().String()), "big.example.com": whole(bigHeaders.Listener.Addr().String())})
 
 	req, _ := http.NewRequest(http.MethodGet, "https://www.example.com/", nil)
 	req.Header.Set("X-Big", strings.Repeat("x", 100<<10))
@@ -765,7 +766,7 @@ func TestHeaderLimits(t *testing.T) {
 // that join are managed, and hosts that leave are not.
 func TestTablePollAndManagedHosts(t *testing.T) {
 	up := upstream(t, "up")
-	tr := newTestRouter(t, Table{"www.example.com": {up.Listener.Addr().String()}})
+	tr := newTestRouter(t, Table{"www.example.com": whole(up.Listener.Addr().String())})
 	var mu sync.Mutex
 	var managed [][]string
 	tr.rt.mu.Lock()
@@ -776,7 +777,7 @@ func TestTablePollAndManagedHosts(t *testing.T) {
 		return nil
 	}
 	tr.rt.mu.Unlock()
-	tr.setRoutes(Table{"www.example.com": {up.Listener.Addr().String()}, "api.example.com": {up.Listener.Addr().String()}}, nil)
+	tr.setRoutes(Table{"www.example.com": whole(up.Listener.Addr().String()), "api.example.com": whole(up.Listener.Addr().String())}, nil)
 	waitFor(t, func() bool { return slices.Equal(tr.rt.Managed(), []string{"api.example.com", "www.example.com"}) })
 	mu.Lock()
 	if len(managed) != 1 || !slices.Equal(managed[0], []string{"api.example.com"}) {
@@ -794,7 +795,7 @@ func TestTablePollAndManagedHosts(t *testing.T) {
 		t.Error("a failed read was not logged")
 	}
 
-	tr.setRoutes(Table{"api.example.com": {up.Listener.Addr().String()}}, nil)
+	tr.setRoutes(Table{"api.example.com": whole(up.Listener.Addr().String())}, nil)
 	waitFor(t, func() bool { return slices.Equal(tr.rt.Managed(), []string{"api.example.com"}) })
 	req, _ = http.NewRequest(http.MethodGet, "https://api.example.com/", nil)
 	req.Host = "api.example.com"
@@ -874,7 +875,7 @@ func TestChallengeForAHostNotReadYet(t *testing.T) {
 		time.Sleep(5 * time.Millisecond)
 	}
 	// The server's table has the host now; the poll will not read it for an hour.
-	tr.setRoutes(Table{"www.example.com": {}}, nil)
+	tr.setRoutes(Table{"www.example.com": whole()}, nil)
 	chal := `{"type":"http-01","url":"https://acme.invalid/chal/1","status":"pending","token":"tok_9",` +
 		`"keyAuthorization":"tok_9.thumbprint","identifier":{"type":"dns","value":"www.example.com"}}`
 	if err := tr.st.TLSStore(context.Background(), "acme/acme.invalid-dir/challenge_tokens/www.example.com.json", []byte(chal)); err != nil {
@@ -964,7 +965,7 @@ func challenges(t *testing.T, tr *testRouter, n int, host, token string) (codes 
 func TestChallengeReadsAreBounded(t *testing.T) {
 	sb := &slowBackend{delay: 100 * time.Millisecond}
 	const every = 200 * time.Millisecond
-	tr := newTestRouterWith(t, Table{"www.example.com": {}}, testOptions{poll: time.Hour,
+	tr := newTestRouterWith(t, Table{"www.example.com": whole()}, testOptions{poll: time.Hour,
 		backend: func(b tlsstore.Backend) tlsstore.Backend { sb.Backend = b; return sb },
 		config:  func(c *Config) { c.ChallengeReadInterval = every }})
 	chal := `{"type":"http-01","url":"https://acme.invalid/chal/1","status":"pending","token":"tok_7",` +
@@ -1035,7 +1036,7 @@ func TestChallengeRefreshOutlivesItsClient(t *testing.T) {
 	tr.mu.Lock()
 	tr.gate = gate
 	tr.mu.Unlock()
-	tr.setRoutes(Table{"www.example.com": {}}, nil)
+	tr.setRoutes(Table{"www.example.com": whole()}, nil)
 	chal := `{"type":"http-01","url":"https://acme.invalid/chal/1","status":"pending","token":"tok_5",` +
 		`"keyAuthorization":"tok_5.thumbprint","identifier":{"type":"dns","value":"www.example.com"}}`
 	if err := tr.st.TLSStore(context.Background(), "acme/acme.invalid-dir/challenge_tokens/www.example.com.json", []byte(chal)); err != nil {
@@ -1086,7 +1087,7 @@ func TestStartLoadsStoredCertificatesBeforeTLS(t *testing.T) {
 		case <-ctx.Done():
 			return nil, ctx.Err()
 		}
-		return Table{"www.example.com": {}}, nil
+		return Table{"www.example.com": whole()}, nil
 	}
 	rt, err := New(Config{Addr: "127.0.0.1", Routes: routes, Storage: ts, Email: "ops@example.com",
 		CA: "https://acme.invalid/dir", Logger: log, Metrics: NewMetrics(), Poll: time.Hour})
@@ -1164,7 +1165,7 @@ func resetter(t *testing.T) string {
 // connection to a machine that had just lost power wait for its timeout.
 func TestRetryWhenAConnectionFailsBeforeTheReply(t *testing.T) {
 	up := upstream(t, "up")
-	tr := newTestRouter(t, Table{"www.example.com": {resetter(t), up.Listener.Addr().String()}})
+	tr := newTestRouter(t, Table{"www.example.com": whole(resetter(t), up.Listener.Addr().String())})
 	c := tr.client(true)
 	for i := range 4 {
 		req, _ := http.NewRequest(http.MethodGet, "https://www.example.com/", nil)
@@ -1176,7 +1177,7 @@ func TestRetryWhenAConnectionFailsBeforeTheReply(t *testing.T) {
 		t.Fatalf("no connection error counted:\n%s", m)
 	}
 	// A fresh router: the GETs marked the failing replica down for a while.
-	tr = newTestRouter(t, Table{"www.example.com": {resetter(t), up.Listener.Addr().String()}})
+	tr = newTestRouter(t, Table{"www.example.com": whole(resetter(t), up.Listener.Addr().String())})
 	c = tr.client(true)
 	bad := 0
 	for range 4 {

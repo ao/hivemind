@@ -1,6 +1,7 @@
 package router
 
 import (
+	"cmp"
 	"context"
 	"errors"
 	"io"
@@ -8,6 +9,8 @@ import (
 	"net"
 	"net/http"
 	"net/http/httputil"
+	"net/url"
+	"path"
 	"slices"
 	"strconv"
 	"strings"
@@ -35,10 +38,20 @@ const (
 	upstreamUserTimeout = 5 * time.Second
 )
 
-// Table is the routing table: for each host, the address:port of every
-// replica that takes its traffic now. A host with no endpoints is known, and
+// Table is the routing table: the routes of each host. A host in the table
+// is known, whatever its routes: it has a certificate, and a request for a
+// path none of its routes takes gets 404.
+type Table map[string][]Route
+
+// Route is one route of a host: a path prefix, and the address:port of
+// every replica that takes its traffic now. Path "" is the whole host; any
+// other path is a prefix as spec.ValidatePath allows, such as "/api", which
+// takes "/api" and "/api/..." but not "/apix". A route with no endpoints is
 // answered with 503.
-type Table map[string][]string
+type Route struct {
+	Path      string
+	Endpoints []string
+}
 
 // endpoint is one replica's address, with its own connection pool and the
 // time until which it is skipped after a failed dial. An endpoint is shared
@@ -67,7 +80,8 @@ func newEndpoint(addr string) *endpoint {
 	}}
 }
 
-// pool is one host's endpoints, in table order, and its round-robin counter.
+// pool is one route's endpoints, in table order, and its round-robin
+// counter.
 type pool struct {
 	endpoints []*endpoint
 	next      atomic.Uint64
@@ -95,7 +109,119 @@ func (p *pool) order(now time.Time) []*endpoint {
 	return append(up, down...)
 }
 
-// proxy holds the table and routes requests by host.
+// hostRoutes is one host's routes, longest path first, so that the first
+// one that matches a request is its longest prefix; the whole host's route,
+// if there is one, is last.
+type hostRoutes struct {
+	routes []*route
+	// paths is set when a route has a path. Requests then go through
+	// routingPath, and some are refused.
+	paths bool
+}
+
+type route struct {
+	path string
+	pool *pool
+}
+
+// find returns the route with path p, or nil.
+func (h *hostRoutes) find(p string) *route {
+	if h == nil {
+		return nil
+	}
+	for _, r := range h.routes {
+		if r.path == p {
+			return r
+		}
+	}
+	return nil
+}
+
+// match returns the route that takes a request for u: the one whose path is
+// the longest prefix of the request's path on a segment boundary, or else
+// the whole host's. It is nil when no route takes it. A host without path
+// routes sends every request to its whole host route, as before paths
+// existed. For a host with path routes, ok is false when routingPath refuses
+// the path.
+func (h *hostRoutes) match(u *url.URL) (rt *route, ok bool) {
+	if !h.paths {
+		if len(h.routes) == 0 {
+			return nil, true
+		}
+		return h.routes[0], true
+	}
+	p, ok := routingPath(u)
+	if !ok {
+		return nil, false
+	}
+	for _, r := range h.routes {
+		if r.path == "" || underPrefix(p, r.path) {
+			return r, true
+		}
+	}
+	return nil, true
+}
+
+// underPrefix reports whether the clean path p is prefix or below it: the
+// prefix ends at a segment boundary of p. "/api" has "/api" and "/api/x"
+// under it, and not "/apix".
+func underPrefix(p, prefix string) bool {
+	return strings.HasPrefix(p, prefix) && (len(p) == len(prefix) || p[len(prefix)] == '/')
+}
+
+// routingPath returns the path that a request for u is matched on, on a
+// host with path routes: the decoded path, with empty segments and a
+// trailing slash cleaned away, so "//api/x/" is matched as "/api/x". A path
+// that does not start with "/", such as the "*" of OPTIONS *, comes back as
+// "", which only the whole host's route takes.
+//
+// ok is false for a path that the app behind the route, or a proxy or
+// framework in front of it, could read as being under another prefix than
+// the one the router would choose. The router refuses such a request with
+// 400 rather than guess:
+//
+//   - an encoded slash or backslash (%2F, %5C). Decoded, it splits a segment
+//     in two; left encoded, it does not. Apps differ in which they do, so
+//     "/api%2Fx" is under /api to some and not to others;
+//   - a backslash, which some servers read as a slash;
+//   - a "." or ".." segment, written as it is or encoded (%2E), and also
+//     when ";" parameters follow it ("..;"), which servlet containers
+//     strip before they resolve the dots. "/api/../admin" is /admin, but an
+//     app that does not resolve dots itself would see a path under /api, or
+//     the reverse: "/admin/../api/x" would reach the /api app, which could
+//     serve its own /admin for it;
+//   - a control character, NUL included.
+//
+// Browsers and curl remove dot segments before they send a request, and
+// encode neither slashes nor backslashes in paths, so these are requests
+// that a person or a script crafted. A host without path routes passes them
+// to its app as before.
+func routingPath(u *url.URL) (string, bool) {
+	// RawPath is set only when the client's escaping differs from Go's
+	// own, which never encodes a slash; an encoded backslash is a
+	// backslash in Path.
+	if raw := strings.ToLower(u.RawPath); strings.Contains(raw, "%2f") || strings.Contains(raw, "%5c") {
+		return "", false
+	}
+	p := u.Path
+	for i := 0; i < len(p); i++ {
+		if c := p[i]; c < 0x20 || c == 0x7f || c == '\\' {
+			return "", false
+		}
+	}
+	if !strings.HasPrefix(p, "/") {
+		return "", true
+	}
+	for seg := range strings.SplitSeq(p[1:], "/") {
+		name, _, _ := strings.Cut(seg, ";")
+		if name == "." || name == ".." {
+			return "", false
+		}
+	}
+	return path.Clean(p), true
+}
+
+// proxy holds the table and routes requests by host and path.
 type proxy struct {
 	log     *slog.Logger
 	metrics *Metrics
@@ -108,12 +234,12 @@ type proxy struct {
 	upgradeIdle time.Duration
 
 	mu        sync.RWMutex
-	pools     map[string]*pool
+	table     map[string]*hostRoutes
 	endpoints map[string]*endpoint
 }
 
 func newProxy(log *slog.Logger, m *Metrics) *proxy {
-	p := &proxy{log: log, metrics: m, now: time.Now, pools: map[string]*pool{}, endpoints: map[string]*endpoint{}}
+	p := &proxy{log: log, metrics: m, now: time.Now, table: map[string]*hostRoutes{}, endpoints: map[string]*endpoint{}}
 	p.rp = &httputil.ReverseProxy{
 		Rewrite:        p.rewrite,
 		Transport:      balancer{p},
@@ -217,28 +343,44 @@ func dropH2C(h http.Header) {
 }
 
 // setTable replaces the routing table. Endpoints that stay keep their
-// connections and their down marks; endpoints that leave close their idle
-// connections. A request in flight to one finishes.
+// connections and their down marks, and a route that stays keeps its place
+// in the round-robin; endpoints that leave close their idle connections. A
+// request in flight to one finishes. A path listed twice for one host keeps
+// its first entry; the table's validation refuses that before it gets here.
 func (p *proxy) setTable(t Table) {
-	pools := make(map[string]*pool, len(t))
+	hosts := make(map[string]*hostRoutes, len(t))
 	eps := make(map[string]*endpoint)
 	p.mu.Lock()
-	for host, addrs := range t {
-		pl := &pool{}
-		if old := p.pools[host]; old != nil {
-			pl.next.Store(old.next.Load())
-		}
-		for _, a := range addrs {
-			e := eps[a]
-			if e == nil {
-				if e = p.endpoints[a]; e == nil {
-					e = newEndpoint(a)
-				}
-				eps[a] = e
+	for host, routes := range t {
+		hr := &hostRoutes{}
+		old := p.table[host]
+		for _, r := range routes {
+			if hr.find(r.Path) != nil {
+				continue
 			}
-			pl.endpoints = append(pl.endpoints, e)
+			pl := &pool{}
+			if o := old.find(r.Path); o != nil {
+				pl.next.Store(o.pool.next.Load())
+			}
+			for _, a := range r.Endpoints {
+				e := eps[a]
+				if e == nil {
+					if e = p.endpoints[a]; e == nil {
+						e = newEndpoint(a)
+					}
+					eps[a] = e
+				}
+				pl.endpoints = append(pl.endpoints, e)
+			}
+			hr.routes = append(hr.routes, &route{path: r.Path, pool: pl})
+			if r.Path != "" {
+				hr.paths = true
+			}
 		}
-		pools[host] = pl
+		// Longest path first, so the first match is the longest prefix;
+		// the whole host's "" sorts last.
+		slices.SortStableFunc(hr.routes, func(a, b *route) int { return cmp.Compare(len(b.path), len(a.path)) })
+		hosts[host] = hr
 	}
 	var gone []*endpoint
 	for a, e := range p.endpoints {
@@ -246,29 +388,29 @@ func (p *proxy) setTable(t Table) {
 			gone = append(gone, e)
 		}
 	}
-	p.pools, p.endpoints = pools, eps
+	p.table, p.endpoints = hosts, eps
 	p.mu.Unlock()
 	for _, e := range gone {
 		e.tr.CloseIdleConnections()
 	}
 }
 
-// pool returns the host's endpoints, or nil for a host not in the table.
-func (p *proxy) pool(host string) *pool {
+// lookup returns the host's routes, or nil for a host not in the table.
+func (p *proxy) lookup(host string) *hostRoutes {
 	p.mu.RLock()
 	defer p.mu.RUnlock()
-	return p.pools[host]
+	return p.table[host]
 }
 
 // known reports whether host is in the table.
-func (p *proxy) known(host string) bool { return p.pool(host) != nil }
+func (p *proxy) known(host string) bool { return p.lookup(host) != nil }
 
 // hosts returns the hosts in the table, sorted.
 func (p *proxy) hosts() []string {
 	p.mu.RLock()
 	defer p.mu.RUnlock()
-	out := make([]string, 0, len(p.pools))
-	for h := range p.pools {
+	out := make([]string, 0, len(p.table))
+	for h := range p.table {
 		out = append(out, h)
 	}
 	slices.Sort(out)
@@ -283,25 +425,36 @@ type reqInfo struct {
 }
 
 // ServeHTTP is the HTTPS handler. A host the table does not have gets a
-// plain 404, which names no other host; a known host with no Ready replica
-// gets 503. Over TLS, the Host header must name the host the client asked
-// for in SNI, or the reply is 421.
+// plain 404, which names no other host. Over TLS, the Host header must name
+// the host the client asked for in SNI, or the reply is 421. On a known host
+// the request goes to the route that match chooses: a path that no route
+// takes gets 404, a path that routingPath refuses gets 400, and a route with
+// no Ready replica gets 503. The request's path goes to the replica as the
+// client sent it: the router matches on it and does not rewrite it.
 func (p *proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	host := requestHost(r)
 	if r.TLS != nil && r.TLS.ServerName != "" && !strings.EqualFold(r.TLS.ServerName, host) {
 		http.Error(w, "misdirected request", http.StatusMisdirectedRequest)
 		return
 	}
-	pl := p.pool(host)
-	switch {
-	case pl == nil:
+	hr := p.lookup(host)
+	if hr == nil {
 		http.Error(w, "not found", http.StatusNotFound)
 		return
-	case len(pl.endpoints) == 0:
+	}
+	rt, ok := hr.match(r.URL)
+	switch {
+	case !ok:
+		http.Error(w, "bad request: the path has an encoded slash or backslash, a backslash, a dot segment or a control character", http.StatusBadRequest)
+		return
+	case rt == nil:
+		http.Error(w, "not found", http.StatusNotFound)
+		return
+	case len(rt.pool.endpoints) == 0:
 		http.Error(w, "no replica is ready", http.StatusServiceUnavailable)
 		return
 	}
-	ctx := context.WithValue(r.Context(), ctxKey{}, reqInfo{host: host, pool: pl})
+	ctx := context.WithValue(r.Context(), ctxKey{}, reqInfo{host: host, pool: rt.pool})
 	p.rp.ServeHTTP(w, r.WithContext(ctx))
 }
 
