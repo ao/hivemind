@@ -826,7 +826,9 @@ server's certificate names <addr>. <addr> may be a DNS name: the listeners
 then bind the address of this machine that it resolves to, and the
 certificate names both. --cluster-addr <ip> binds that address of this
 machine instead, for a name whose record does not lead here yet, as after a
-restore on a new machine (docs/backup.md).
+restore on a new machine (docs/backup.md). An --advertise IP address, or a
+--cluster-addr, that is not an address of this machine is refused, with
+the machine's addresses, before serve records its start or binds anything.
 
 --role worker runs only the agent, for a machine that joined with hivemind
 join. It has no API listener. --role server is the default.

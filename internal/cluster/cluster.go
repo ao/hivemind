@@ -264,6 +264,15 @@ func (c *Cluster) Serve() error {
 	return err
 }
 
+// Close closes both listeners at once, for a Cluster that Serve was never
+// called on, as when serve fails after binding them. Shutdown does not
+// close a listener that was never served.
+func (c *Cluster) Close() error {
+	c.stop()
+	c.logs.Close()
+	return errors.Join(c.mln.Close(), c.jln.Close())
+}
+
 // Shutdown closes both listeners and waits for requests in flight, up to
 // shutdownTimeout. It closes the log relay first, so log polls and streams end
 // at once instead of holding the shutdown.

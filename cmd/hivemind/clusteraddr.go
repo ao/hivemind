@@ -56,6 +56,9 @@ func lookupName(ctx context.Context, name string) ([]netip.Addr, error) {
 //     to: a non-loopback IPv4 address first, then a non-loopback IPv6 one,
 //     then loopback, which is logged, since no other machine reaches it.
 //
+// --cluster-addr, and --advertise when it is an IP address, must be an
+// address of this machine (onThisMachine): one that is not is refused with
+// this machine's addresses, before serve records anything or binds.
 // A name that resolves to no address of this machine is refused, with what
 // to do: its record names another machine, as it does after a restore until
 // it is updated, and --cluster-addr lets the server start before then. With
@@ -76,6 +79,9 @@ func clusterAddress(ctx context.Context, cfg *config.Config, local addrSource, l
 			return "", fmt.Errorf("--cluster-addr %q: %w", cfg.ClusterAddr, err)
 		}
 		bind = bind.Unmap()
+		if err := onThisMachine("--cluster-addr", bind, local, log); err != nil {
+			return "", fmt.Errorf("%w. Give one of them", err)
+		}
 		if advErr != nil {
 			ips, err := lookup(ctx, cfg.Advertise)
 			switch {
@@ -90,7 +96,12 @@ func clusterAddress(ctx context.Context, cfg *config.Config, local addrSource, l
 		return bind.String(), nil
 	}
 	if advErr == nil {
-		return advIP.Unmap().String(), nil
+		ip := advIP.Unmap()
+		if err := onThisMachine("--advertise", ip, local, log); err != nil {
+			return "", fmt.Errorf("%w. Give one of them, or, for an address that leads to this machine from elsewhere, "+
+				"as a NAT's, add this machine's address with --cluster-addr", err)
+		}
+		return ip.String(), nil
 	}
 	ips, err := lookup(ctx, cfg.Advertise)
 	if err != nil {
@@ -124,6 +135,33 @@ func clusterAddress(ctx context.Context, cfg *config.Config, local addrSource, l
 			"advertise", cfg.Advertise, "cluster_addr", bind.String())
 	}
 	return bind.String(), nil
+}
+
+// onThisMachine checks that ip, given with flag, is an address of this
+// machine, which the cluster listeners can bind. A loopback address is one,
+// as Linux routes all of 127/8 to loopback. When this machine's addresses
+// cannot be listed, that is logged and ip is taken: a wrong one then fails
+// at the bind.
+func onThisMachine(flag string, ip netip.Addr, local addrSource, log *slog.Logger) error {
+	if ip.IsLoopback() {
+		return nil
+	}
+	mine, err := local()
+	if err != nil {
+		log.Warn("listing this machine's addresses", "err", err)
+		return nil
+	}
+	if slices.Contains(mine, ip) {
+		return nil
+	}
+	var shown []netip.Addr
+	for _, a := range mine {
+		if !a.IsLinkLocalUnicast() {
+			shown = append(shown, a)
+		}
+	}
+	return fmt.Errorf("%s %s is not an address of this machine, so the cluster listeners cannot bind it; this machine's addresses are %s",
+		flag, ip, addrList(shown))
 }
 
 // noteAddressChange logs what the workers need when the server's node had

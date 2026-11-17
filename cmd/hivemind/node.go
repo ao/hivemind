@@ -404,7 +404,9 @@ server's certificate names <addr>. <addr> may be a DNS name: the listeners
 then bind the address of this machine that it resolves to, and the
 certificate names both. --cluster-addr <ip> binds that address of this
 machine instead, for a name whose record does not lead here yet, as after a
-restore on a new machine (docs/backup.md).
+restore on a new machine (docs/backup.md). An --advertise IP address, or a
+--cluster-addr, that is not an address of this machine is refused, with
+the machine's addresses, before serve records its start or binds anything.
 
 --role worker runs only the agent, for a machine that joined with hivemind
 join. It has no API listener. --role server is the default.
@@ -541,44 +543,12 @@ func runServe(ctx context.Context, cfg *config.Config, log *slog.Logger, rt runt
 	if err != nil {
 		return err
 	}
-	noteAddressChange(ctx, st, cfg, cl.NodeID, nodeAddr, log)
-	// The start is recorded before this process renews any lease, its own
-	// node's included: the workers that were up before it wait for their
-	// first report for the start grace.
-	started := time.Now()
-	if err := st.SetStarted(ctx, started, cfg.StartGrace); err != nil {
-		return err
-	}
-	hostname, _ := os.Hostname()
-	if err := st.UpsertNode(ctx, store.Node{ID: cl.NodeID, Name: hostname, CPU: info.NCPU, Memory: info.MemTotal, Address: nodeAddr,
-		Version: nodeapi.CleanVersion(version)}); err != nil {
-		return err
-	}
-	noteWaiting(ctx, st, cfg.StartGrace, log)
 
 	sessions, err := auth.NewSessions(12 * time.Hour)
 	if err != nil {
 		return err
 	}
 	authn, err := auth.NewAuthenticator(auth.TokenHash(cl.AdminTokenHash), sessions)
-	if err != nil {
-		return err
-	}
-	m := server.NewMetrics()
-	// After each agent pass, which has just reported status, the rollout and
-	// drain controllers move the next replica or check a deadline. The agent
-	// passes on every interval, so deadlines are checked even when nothing
-	// reports.
-	agentLog := log.With("component", "agent")
-	onPass := func(d time.Duration, err error) {
-		m.ObserveReconcile(d, err)
-		if aerr := st.AdvanceRollouts(context.Background()); aerr != nil {
-			agentLog.Warn("advance rollouts", "err", aerr)
-		}
-		advanceDrains(context.Background(), st, agentLog, started)
-	}
-	ag, err := agent.New(agent.Config{NodeID: cl.NodeID, Runtime: rt, Source: st,
-		Interval: cfg.ReconcileInterval, Logger: agentLog, OnPass: onPass, RouteBind: nodeAddr})
 	if err != nil {
 		return err
 	}
@@ -613,9 +583,29 @@ func runServe(ctx context.Context, cfg *config.Config, log *slog.Logger, rt runt
 		routerReports = nodeapi.NewRouterReports()
 		routeReaders = nodeapi.NewRouteReaders()
 	}
+
+	// Every listener is bound before this start is recorded, so a start
+	// that fails to bind, as with a wrong address, leaves the store as it
+	// was. Until they serve, below, nothing reaches the store through them.
+	var rtr *router.Router
+	var ln, mln net.Listener
+	var nodes *cluster.Cluster
+	closeListeners := func() {
+		if rtr != nil {
+			_ = rtr.Shutdown()
+		}
+		if ln != nil {
+			ln.Close()
+		}
+		if mln != nil {
+			mln.Close()
+		}
+		if nodes != nil {
+			_ = nodes.Close()
+		}
+	}
 	// The router opens only with --route-addr. It is the one listener that
 	// may bind every address: it serves the apps' public traffic.
-	var rtr *router.Router
 	var routerReport func() nodeapi.RouterReport
 	if cfg.RouteAddr != "" {
 		if rtr, err = newRouter(cfg, log, storeRoutes(st), tlsstore.StoreBackend{St: st, NodeID: cl.NodeID}); err != nil {
@@ -623,51 +613,23 @@ func runServe(ctx context.Context, cfg *config.Config, log *slog.Logger, rt runt
 		}
 		routerReport = rtr.Report
 	}
-	closeRouter := func() {
-		if rtr != nil {
-			_ = rtr.Shutdown()
-		}
-	}
-	api, err := server.New(server.Config{Store: st, Runtime: rt, NodeID: cl.NodeID, Auth: authn,
-		Trigger: ag.Trigger, Logger: log.With("component", "api"), Metrics: m, IssueJoinToken: issue,
-		Backup: writeBackup, Logs: logs, RouterReport: routerReport, RouterReports: routerReports, RouteReaders: routeReaders,
-		Started: started, Version: version})
-	if err != nil {
-		closeRouter()
-		return err
-	}
-
-	ln, err := net.Listen("tcp", cfg.APIAddr)
-	if err != nil {
-		closeRouter()
+	if ln, err = net.Listen("tcp", cfg.APIAddr); err != nil {
+		closeListeners()
 		return fmt.Errorf("listen on %s: %w", cfg.APIAddr, err)
 	}
-	hs := server.NewHTTPServer(api.Handler(), log)
-	hs.TLSConfig = tlsCfg
-
 	// The metrics listener is plain HTTP on loopback and needs the admin
 	// token, like /metrics on the API.
-	var mln net.Listener
-	var mhs *http.Server
 	if cfg.MetricsAddr != "" {
 		if mln, err = listenMetrics(cfg.MetricsAddr); err != nil {
-			ln.Close()
-			closeRouter()
+			closeListeners()
 			return err
 		}
-		mhs = server.NewHTTPServer(api.MetricsHandler(), log)
 	}
-
 	// The cluster listeners open only with --advertise, on that address only.
-	var nodes *cluster.Cluster
 	if cfg.Advertise != "" {
 		lifetime, err := testCertLifetime()
 		if err != nil {
-			ln.Close()
-			if mln != nil {
-				mln.Close()
-			}
-			closeRouter()
+			closeListeners()
 			return err
 		}
 		if lifetime != 0 {
@@ -678,14 +640,61 @@ func runServe(ctx context.Context, cfg *config.Config, log *slog.Logger, rt runt
 			Logger: log.With("component", "cluster"), NodeCertLifetime: lifetime, Logs: logs,
 			RouterReports: routerReports, RouteReaders: routeReaders, Version: version, Epoch: cl.Epoch})
 		if err != nil {
-			ln.Close()
-			if mln != nil {
-				mln.Close()
-			}
-			closeRouter()
+			closeListeners()
 			return err
 		}
 		nodes = c
+	}
+
+	noteAddressChange(ctx, st, cfg, cl.NodeID, nodeAddr, log)
+	// The start is recorded before this process renews any lease, its own
+	// node's included: the workers that were up before it wait for their
+	// first report for the start grace.
+	started := time.Now()
+	if err := st.SetStarted(ctx, started, cfg.StartGrace); err != nil {
+		closeListeners()
+		return err
+	}
+	hostname, _ := os.Hostname()
+	if err := st.UpsertNode(ctx, store.Node{ID: cl.NodeID, Name: hostname, CPU: info.NCPU, Memory: info.MemTotal, Address: nodeAddr,
+		Version: nodeapi.CleanVersion(version)}); err != nil {
+		closeListeners()
+		return err
+	}
+	noteWaiting(ctx, st, cfg.StartGrace, log)
+
+	m := server.NewMetrics()
+	// After each agent pass, which has just reported status, the rollout and
+	// drain controllers move the next replica or check a deadline. The agent
+	// passes on every interval, so deadlines are checked even when nothing
+	// reports.
+	agentLog := log.With("component", "agent")
+	onPass := func(d time.Duration, err error) {
+		m.ObserveReconcile(d, err)
+		if aerr := st.AdvanceRollouts(context.Background()); aerr != nil {
+			agentLog.Warn("advance rollouts", "err", aerr)
+		}
+		advanceDrains(context.Background(), st, agentLog, started)
+	}
+	ag, err := agent.New(agent.Config{NodeID: cl.NodeID, Runtime: rt, Source: st,
+		Interval: cfg.ReconcileInterval, Logger: agentLog, OnPass: onPass, RouteBind: nodeAddr})
+	if err != nil {
+		closeListeners()
+		return err
+	}
+	api, err := server.New(server.Config{Store: st, Runtime: rt, NodeID: cl.NodeID, Auth: authn,
+		Trigger: ag.Trigger, Logger: log.With("component", "api"), Metrics: m, IssueJoinToken: issue,
+		Backup: writeBackup, Logs: logs, RouterReport: routerReport, RouterReports: routerReports, RouteReaders: routeReaders,
+		Started: started, Version: version})
+	if err != nil {
+		closeListeners()
+		return err
+	}
+	hs := server.NewHTTPServer(api.Handler(), log)
+	hs.TLSConfig = tlsCfg
+	var mhs *http.Server
+	if mln != nil {
+		mhs = server.NewHTTPServer(api.MetricsHandler(), log)
 	}
 
 	agentCtx, stopAgent := context.WithCancel(context.Background())

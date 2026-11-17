@@ -50,9 +50,17 @@ func TestClusterAddress(t *testing.T) {
 		want, warn, err        string
 	}{
 		{"", "", "127.0.0.1", "", ""},
-		{"10.0.0.5", "", "10.0.0.5", "", ""},
-		{"::ffff:10.0.0.5", "", "10.0.0.5", "", ""},
-		{"fd00::5", "", "fd00::5", "", ""},
+		{"10.0.0.9", "", "10.0.0.9", "", ""},
+		{"::ffff:10.0.0.9", "", "10.0.0.9", "", ""},
+		{"fd00::9", "", "fd00::9", "", ""},
+		// Linux routes all of 127/8 to loopback.
+		{"127.0.0.2", "", "127.0.0.2", "", ""},
+		// An IP address this machine does not have is refused before
+		// anything binds it, with this machine's addresses.
+		{"10.0.0.5", "", "", "", "--advertise 10.0.0.5 is not an address of this machine, so the cluster listeners cannot bind it; " +
+			"this machine's addresses are 127.0.0.1, 10.0.0.9, fd00::9. Give one of them, or, for an address that leads to this machine " +
+			"from elsewhere, as a NAT's, add this machine's address with --cluster-addr"},
+		{"fd00::5", "", "", "", "--advertise fd00::5 is not an address of this machine"},
 		{"hm.example.internal", "", "10.0.0.9", "", ""},
 		// The address of this machine among several, and IPv4 first.
 		{"both.example.internal", "", "10.0.0.9", "", ""},
@@ -69,6 +77,10 @@ func TestClusterAddress(t *testing.T) {
 		{"none.example.internal", "10.0.0.9", "10.0.0.9", "--advertise does not resolve", ""},
 		{"hm.example.internal", "10.0.0.9", "10.0.0.9", "", ""},
 		{"203.0.113.5", "10.0.0.9", "10.0.0.9", "", ""},
+		// --cluster-addr must be this machine's, whatever --advertise is.
+		{"hm.example.internal", "10.0.0.99", "", "", "--cluster-addr 10.0.0.99 is not an address of this machine, so the cluster listeners " +
+			"cannot bind it; this machine's addresses are 127.0.0.1, 10.0.0.9, fd00::9. Give one of them"},
+		{"203.0.113.5", "203.0.113.5", "", "", "--cluster-addr 203.0.113.5 is not an address of this machine"},
 		{"", "10.0.0.9", "", "", "--cluster-addr 10.0.0.9 needs --advertise"},
 	}
 	for _, c := range cases {
@@ -93,6 +105,12 @@ func TestClusterAddress(t *testing.T) {
 	noList := func() ([]netip.Addr, error) { return nil, errors.New("no interfaces") }
 	if got, err := clusterAddress(ctx, &config.Config{Advertise: "old.example.internal"}, noList, lookup, slog.New(slog.NewTextHandler(io.Discard, nil))); err != nil || got != "10.0.0.5" {
 		t.Errorf("without the machine's addresses: %q, %v", got, err)
+	}
+	// So is an IP address, and that is logged: the bind is the check then.
+	noListLog := &syncLog{}
+	if got, err := clusterAddress(ctx, &config.Config{Advertise: "10.0.0.5"}, noList, lookup, slog.New(slog.NewTextHandler(noListLog, nil))); err != nil ||
+		got != "10.0.0.5" || !strings.Contains(noListLog.String(), "listing this machine's addresses") {
+		t.Errorf("an IP address without the machine's addresses: %q, %v, logged %q", got, err, noListLog.String())
 	}
 	// The real lookup and interfaces: localhost is on every machine.
 	if got, err := clusterAddress(ctx, &config.Config{Advertise: "localhost"}, interfaceAddrs, lookupName, slog.New(slog.NewTextHandler(io.Discard, nil))); err != nil || got != "127.0.0.1" {
