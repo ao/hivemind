@@ -77,6 +77,7 @@ Assume an attacker has the worker's data directory, or root on the worker. The c
 - Write and delete keys in the TLS storage, within certmagic's namespace and the limits: 128 KiB a value and 10,000 keys. It can replace a host's certificate and key, which every router then serves, delete them so the routers issue again, fill the storage, or hold the issuing locks, 30 seconds at a time for as long as it renews them, so no router issues. It can hold at most 1,000 locks at once, and every expired lock is deleted whenever a lock is taken, so lock names it uses once do not fill the database.
 - Register any private address that is an IP address and is not loopback, a wildcard or multicast, and report any ports for its own containers. The routers then send the traffic of the routed replicas placed on that worker to that address and those ports, which can be another machine on the routers' network.
 - Read the whole routing table: every routed host, and the address and port of each of its replicas.
+- Post any counts and certificate expiries for its own router's series in the server's `/metrics`. They carry its own node ID, and the server keeps only the hosts in the routing table and `unknown`, so it cannot add hosts or touch another node's series; the figures are what the worker says they are, like its logs.
 
 A worker's router needs nothing more than this: the routes above are what it uses.
 
