@@ -90,7 +90,12 @@ func (s *Store) PutRegistry(ctx context.Context, host, username, password string
 		return Registry{}, err
 	}
 	var out Registry
+	defer s.forgetRegistryBytes()
 	err = s.tx(ctx, func(tx *sql.Tx) error {
+		before, berr := nodeBytes(ctx, tx, "", 0)
+		if berr != nil {
+			return berr
+		}
 		now := s.now().UnixNano()
 		var created int64
 		err := tx.QueryRowContext(ctx, `SELECT created_at FROM registries WHERE host = ?`, h).Scan(&created)
@@ -113,6 +118,15 @@ func (s *Store) PutRegistry(ctx context.Context, host, username, password string
 				username, password, now, h)
 		}
 		if err != nil {
+			return err
+		}
+		// The credential goes with each running replica of an image from h.
+		after, err := nodeBytes(ctx, tx, "", 0)
+		if err != nil {
+			return err
+		}
+		if err := checkNodeBytes(before, after, "the credential for "+h,
+			"use a shorter password or token, or run fewer replicas of images from "+h+" on that node"); err != nil {
 			return err
 		}
 		out = Registry{Host: h, Username: username, CreatedAt: time.Unix(0, created), UpdatedAt: time.Unix(0, now)}
@@ -150,6 +164,7 @@ func (s *Store) DeleteRegistry(ctx context.Context, host string) error {
 	if err != nil {
 		return err
 	}
+	defer s.forgetRegistryBytes()
 	return s.tx(ctx, func(tx *sql.Tx) error {
 		res, err := tx.ExecContext(ctx, `DELETE FROM registries WHERE host = ?`, h)
 		if err != nil {

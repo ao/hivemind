@@ -539,3 +539,38 @@ func TestSpreadIsEven(t *testing.T) {
 		}
 	}
 }
+
+// With MaxNodeBytes, a node takes replicas while their Bytes, with the ones
+// it has, stay within it; the rest wait with a reason that names the bound.
+// Zero is no bound.
+func TestPlaceKeepsNodeBytesWithinTheBound(t *testing.T) {
+	sized := func(r Replica, b int64) Replica { r.Bytes = b; return r }
+	nodes := []Node{node("a", 64, 64*gi), node("b", 64, 64*gi)}
+	existing := []Assignment{on(sized(rep("old", 0, 0, 0), 6<<20), "a")}
+	var pending []Replica
+	for i := 0; i < 6; i++ {
+		pending = append(pending, sized(rep("web", i, 0, 0), 4<<20))
+	}
+	placed, unplaced := Place(nodes, existing, pending, now, Options{MaxNodeBytes: 15 << 20})
+	got := where(placed, unplaced)
+	count := map[string]int{}
+	for _, n := range got {
+		count[n]++
+	}
+	// a has 6 MiB, so it takes two of 4 MiB; b takes three.
+	if count["a"] != 2 || count["b"] != 3 || len(unplaced) != 1 {
+		t.Fatalf("placement %v", got)
+	}
+	if want := "every eligible node's assignments would be more than the 15 MiB a node reads"; !strings.Contains(unplaced[0].Reason, want) {
+		t.Fatalf("reason %q, want %q", unplaced[0].Reason, want)
+	}
+	pin := sized(rep("db", 0, 0, 0), 10<<20)
+	pin.PinnedNode = "a"
+	if _, unplaced := Place(nodes, existing, []Replica{pin}, now, Options{MaxNodeBytes: 15 << 20}); len(unplaced) != 1 ||
+		unplaced[0].Reason != "volume pinned to node a, whose assignments would be more than the 15 MiB a node reads" {
+		t.Fatalf("pinned: %+v", unplaced)
+	}
+	if placed, unplaced := Place(nodes, existing, pending, now, Options{}); len(placed) != 6 || len(unplaced) != 0 {
+		t.Fatalf("no bound: %v", where(placed, unplaced))
+	}
+}

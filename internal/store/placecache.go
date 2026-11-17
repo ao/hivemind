@@ -145,6 +145,7 @@ func queryPending(ctx context.Context, q querier) ([]pendingRow, error) {
 		if err := rows.Scan(&p.as.App, &p.as.Index, &p.as.Generation, &p.as.Desired, &p.as.PendingReason, &p.json); err != nil {
 			return nil, err
 		}
+		p.as.specLen = len(p.json)
 		if p.as.Spec, err = c.decode(p.as.App, p.as.Generation, p.json); err != nil {
 			return nil, err
 		}

@@ -49,11 +49,25 @@ func (s *Store) schedulerPlace(nodes []Node, placed []Assignment, app spec.App, 
 			Ineligible: !n.Eligible,
 		})
 	}
+	// Bytes bound what each assignment takes in its node's list
+	// (MaxNodeAssignmentBytes). The new one's node ID is the longest any
+	// node has, and its reason gets room for one the server may set later.
+	creds := s.registryBytesCached()
 	existing := make([]scheduler.Assignment, 0, len(placed))
 	for _, a := range placed {
-		existing = append(existing, scheduler.Assignment{NodeID: a.NodeID, Replica: schedReplica(a.App, a.Index, a.Generation, a.Spec)})
+		r := schedReplica(a.App, a.Index, a.Generation, a.Spec)
+		r.Bytes = assignmentBytes(a, a.specLen, credFor(creds, a.Desired, a.Spec))
+		existing = append(existing, scheduler.Assignment{NodeID: a.NodeID, Replica: r})
 	}
 	want := schedReplica(app.Name, replica, 0, app)
+	longest := ""
+	for _, n := range nodes {
+		if len(n.ID) > len(longest) {
+			longest = n.ID
+		}
+	}
+	want.Bytes = reasonRoom + assignmentBytes(Assignment{Replica: Replica{App: app.Name, NodeID: longest, Desired: Running}},
+		specBytes(app), credFor(creds, Running, app))
 
 	// scheduler.Options treats zero as the default wait. Here zero means no
 	// wait, so it is passed as a negative value, which Place reads as no wait.
@@ -61,7 +75,7 @@ func (s *Store) schedulerPlace(nodes []Node, placed []Assignment, app spec.App, 
 	if minReady == 0 {
 		minReady = -1
 	}
-	out, unplaced := scheduler.Place(sn, existing, []scheduler.Replica{want}, now, scheduler.Options{MinReady: minReady})
+	out, unplaced := scheduler.Place(sn, existing, []scheduler.Replica{want}, now, scheduler.Options{MinReady: minReady, MaxNodeBytes: MaxNodeAssignmentBytes})
 	if len(out) == 1 {
 		return out[0].NodeID, nil
 	}

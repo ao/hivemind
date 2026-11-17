@@ -189,7 +189,7 @@ Workers talk to the server over a second API, on the cluster port that `serve --
 | `GET /v1/apps` | none | 200, a list of apps | List apps |
 | `POST /v1/apps` | app spec | 201 when created, 200 when updated, with `PutResult` | Create or update the app named in the body |
 | `GET /v1/apps/{name}` | none | 200, `AppView` | Read one app |
-| `PUT /v1/apps/{name}` | app spec | 201 or 200, with `PutResult` | Create or update the app at `{name}`. A `name` in the body must match. The query may name an origin, as `origin=compose:shop` (at most 128 printable characters): an app that exists with another origin, or with none, is refused with `409` unless the query also has `replace=true`, and the app then takes the origin. Without `origin`, the app keeps the one it has |
+| `PUT /v1/apps/{name}` | app spec | 201 or 200, with `PutResult` | Create or update the app at `{name}`. A `name` in the body must match. The query may name an origin, as `origin=compose:shop` (at most 128 printable characters): an app that exists with another origin, or with none, is refused with `409` unless the query also has `replace=true`, and the app then takes the origin. Without `origin`, the app keeps the one it has. A spec that would take a node's assignments past 15 MiB, on the replicas the node has, is refused with `409` ([placement](concepts.md#placement)) |
 | `DELETE /v1/apps/{name}` | none | 202 `{"name":"...","status":"deleting"}` | Delete the app. The query may name an origin, as the put's does: an app that exists with another origin, or with none, is refused with `409` and kept. `hivemind compose delete` sends `origin=compose:<project>`, and leaves it out with `--force` |
 | `POST /v1/apps/{name}/scale` | `{"replicas": N}` | 200, `AppView` | Set the replica count, 1 to 100 |
 | `GET /v1/apps/{name}/status` | none | 200, `AppStatus` | Replicas of one app |
@@ -205,7 +205,7 @@ Workers talk to the server over a second API, on the cluster port that `serve --
 | `GET /v1/nodes/{id}/drain` | none | 200, the drain | Read a node's drain |
 | `GET /v1/routes` | none | 200, `{"routes": [...]}` | The routing table. See [routing table](#routing-table) |
 | `GET /v1/registries` | none | 200, `{"registries": [...]}` | The stored registry credentials, without passwords. See [registries](#registries) |
-| `PUT /v1/registries/{host}` | `{"username", "password"}` | 200, the record without the password | Store or replace a registry credential |
+| `PUT /v1/registries/{host}` | `{"username", "password"}` | 200, the record without the password | Store or replace a registry credential. `409` when it would take a node's assignments past 15 MiB, as it goes with each running replica of an image from the registry |
 | `DELETE /v1/registries/{host}` | none | 204 | Remove a registry credential |
 | `POST /v1/backup` | none | 200, `application/x-tar` | A backup of the data directory, CA private key included. TLS or loopback only. See [backup](#backup) |
 | `GET /metrics` | none | 200, Prometheus text | Metrics |

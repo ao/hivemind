@@ -2,8 +2,10 @@ package nodeapi
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"errors"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -237,5 +239,61 @@ func TestStatusTextIsMadePrintable(t *testing.T) {
 	}
 	if Printable("plain text, ü") != "plain text, ü" {
 		t.Error("Printable changed printable text")
+	}
+}
+
+// The bound the store keeps on a node's assignments is at least what the
+// node API sends that node, every credential included, for specs, reasons
+// and a credential whose characters JSON escapes; and it is below what a
+// worker reads, with room for the rest of the reply.
+func TestAssignmentBytesBoundTheReply(t *testing.T) {
+	if store.MaxNodeAssignmentBytes+(1<<20) > MaxAssignmentsBytes {
+		t.Fatalf("the store's bound, %d, leaves too little room under the worker's %d", store.MaxNodeAssignmentBytes, MaxAssignmentsBytes)
+	}
+	ctx := context.Background()
+	st, err := store.Open(ctx, filepath.Join(t.TempDir(), "data", "hivemind.db"), store.WithMinReady(0))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+	if err := st.UpsertNode(ctx, store.Node{ID: "node-1", Name: "one", CPU: 4, Memory: 8 << 30}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := st.PutRegistry(ctx, "reg.example.com", `u<"\`, `p<>&"\ü`+" x"); err != nil {
+		t.Fatal(err)
+	}
+	odd := `<>&"\ü` + " é"
+	for _, a := range []spec.App{
+		{Name: "web", Image: "reg.example.com/app:1", Replicas: 3, Env: map[string]string{"A": odd, "B": "x"},
+			Command: []string{"sh", "-c", "echo " + odd}, Ports: []spec.Port{{Host: 8080, Container: 80}},
+			Health: &spec.Health{Exec: []string{"true", odd}}},
+		{Name: "db", Image: "postgres:16", Replicas: 1, Volumes: []spec.Volume{{Name: "data", Path: "/var/lib/postgresql/data"}}},
+		{Name: "api", Image: "reg.example.com/api:2", Replicas: 2},
+	} {
+		if _, err := st.PutApp(ctx, a); err != nil {
+			t.Fatal(err)
+		}
+	}
+	// A scaled-down replica that never had a container goes at once.
+	if _, err := st.Scale(ctx, "web", 1); err != nil {
+		t.Fatal(err)
+	}
+	sizes, err := st.AssignmentBytes(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	as, err := st.AssignmentsForNode(ctx, "node-1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	reply, err := json.Marshal(AssignmentList{Assignments: FromStore(as, true)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(as) != 4 || !strings.Contains(string(reply), `"registry_auth"`) {
+		t.Fatalf("%d assignments, reply %.300s", len(as), reply)
+	}
+	if got, bound := int64(len(reply)), sizes["node-1"]; got > bound || bound > 3*got {
+		t.Fatalf("the reply is %d bytes, the bound %d", got, bound)
 	}
 }

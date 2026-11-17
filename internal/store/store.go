@@ -104,6 +104,9 @@ type Assignment struct {
 	// replica that is to run. It is nil when there is none. Only
 	// AssignmentsForNode sets it.
 	Auth *RegistryAuth
+	// specLen is the length of the stored spec, as the queries read it, or
+	// 0 (assignmentBytes).
+	specLen int
 }
 
 // Node is a machine that runs an agent.
@@ -264,6 +267,12 @@ type Store struct {
 	placeMu      sync.Mutex
 	placeKey     [sha256.Size]byte
 	placeSet     bool
+
+	// credSizes is the size of each stored registry credential in an
+	// assignment, by host, or nil until it is read (assignbytes.go).
+	// credMu guards it.
+	credMu    sync.Mutex
+	credSizes map[string]int
 }
 
 // readConns is the size of the read-only pool.
@@ -418,6 +427,10 @@ func (s *Store) PutAppWith(ctx context.Context, a spec.App, o PutOptions) (App, 
 	tmpl := c.Template()
 	var out App
 	err = s.tx(ctx, func(tx *sql.Tx) error {
+		before, berr := nodeBytes(ctx, tx, "", 0)
+		if berr != nil {
+			return berr
+		}
 		now := s.now()
 		var gen int
 		var oldTmpl, origin string
@@ -487,6 +500,15 @@ func (s *Store) PutAppWith(ctx context.Context, a spec.App, o PutOptions) (App, 
 			return err
 		}
 		if err := syncHosts(ctx, tx, c); err != nil {
+			return err
+		}
+		// Placement kept every new copy within MaxNodeAssignmentBytes; the
+		// replicas the app has may get the new spec in place.
+		after, err := nodeBytes(ctx, tx, c.Name, len(specJSON))
+		if err != nil {
+			return err
+		}
+		if err := checkNodeBytes(before, after, "app "+c.Name+"'s spec", "use fewer replicas on that node, a smaller spec, or more nodes"); err != nil {
 			return err
 		}
 		out = App{Spec: c, Generation: gen, CreatedAt: time.Unix(0, created), UpdatedAt: now, Origin: origin}
@@ -687,6 +709,7 @@ func queryAssignments(ctx context.Context, q querier, where string, args ...any)
 		if err := rows.Scan(&a.App, &a.Index, &a.NodeID, &a.Generation, &a.Desired, &a.PendingReason, &specJSON); err != nil {
 			return nil, err
 		}
+		a.specLen = len(specJSON)
 		if a.Spec, err = c.decode(a.App, a.Generation, specJSON); err != nil {
 			return nil, err
 		}

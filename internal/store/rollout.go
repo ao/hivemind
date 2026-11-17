@@ -545,6 +545,7 @@ func querySurges(ctx context.Context, q querier, where string, args ...any) ([]A
 		if err := rows.Scan(&x.App, &x.Index, &x.NodeID, &x.Generation, &x.Desired, &specJSON); err != nil {
 			return nil, err
 		}
+		x.specLen = len(specJSON)
 		if x.Spec, err = c.decode(x.App, x.Generation, specJSON); err != nil {
 			return nil, err
 		}

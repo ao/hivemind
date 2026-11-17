@@ -66,6 +66,9 @@ type Replica struct {
 	Volumes []string
 	// PinnedNode, when set, is the only node the replica may run on.
 	PinnedNode string
+	// Bytes is what the replica's assignment takes in the list its node
+	// reads. Options.MaxNodeBytes bounds the sum on a node.
+	Bytes int64
 }
 
 // Assignment puts a replica on a node.
@@ -85,6 +88,9 @@ type Options struct {
 	// MinReady is how long a node must have been ready before it gets new
 	// replicas. Zero means DefaultMinReady; a negative value means no wait.
 	MinReady time.Duration
+	// MaxNodeBytes bounds the Bytes of the replicas on one node, existing
+	// and new. Zero means no bound.
+	MaxNodeBytes int64
 }
 
 // NodeLease is the last time a node's agent renewed its lease.
@@ -152,6 +158,8 @@ func HostPortsOf(app spec.App) []string {
 //   - The CPU and memory of existing and new replicas on a node never exceed
 //     the node's totals.
 //   - No two replicas on a node publish conflicting host ports.
+//   - With opts.MaxNodeBytes set, a replica goes to a node only if the
+//     Bytes of the node's replicas, with it, stay within it.
 //   - A replica with PinnedNode set goes to that node or nowhere.
 //   - Among nodes that fit, a replica goes to the node with the fewest
 //     replicas of its app, then the least loaded, then the lowest ID.
@@ -180,6 +188,7 @@ func Place(nodes []Node, existing []Assignment, pending []Replica, now time.Time
 			eligible:   n.Ready && !n.Ineligible && now.Sub(n.ReadySince) >= minReady,
 			ineligible: n.Ineligible,
 			perApp:     map[string]int{},
+			maxBytes:   max(opts.MaxNodeBytes, 0),
 		}
 		switch {
 		case n.Ready && n.Ineligible:
@@ -202,7 +211,7 @@ func Place(nodes []Node, existing []Assignment, pending []Replica, now time.Time
 			// Count an unreadable request as filling the node.
 			cpu, mem = s.cpuCap+1, s.memCap
 		}
-		s.add(a.Replica.App, cpu, mem, parsePorts(a.Replica.HostPorts))
+		s.add(a.Replica.App, cpu, mem, a.Replica.Bytes, parsePorts(a.Replica.HostPorts))
 	}
 
 	order := make([]Replica, len(pending))
@@ -222,13 +231,13 @@ func Place(nodes []Node, existing []Assignment, pending []Replica, now time.Time
 	})
 
 	for _, r := range order {
-		s, reason := choose(r, states, byID, why, minReady)
+		s, reason := choose(r, states, byID, why, minReady, opts.MaxNodeBytes)
 		if s == nil {
 			unplaced = append(unplaced, Unplaced{Replica: r, Reason: reason})
 			continue
 		}
 		cpu, mem, _ := request(r.Resources)
-		s.add(r.App, cpu, mem, parsePorts(r.HostPorts))
+		s.add(r.App, cpu, mem, r.Bytes, parsePorts(r.HostPorts))
 		placed = append(placed, Assignment{Replica: r, NodeID: s.id})
 	}
 	return placed, unplaced
@@ -240,6 +249,8 @@ type nodeState struct {
 	memCap     int64
 	cpuUsed    int64
 	memUsed    int64
+	bytes      int64 // Replica.Bytes in use
+	maxBytes   int64 // Options.MaxNodeBytes; 0 is no bound
 	eligible   bool
 	ineligible bool // Node.Ineligible
 	total      int
@@ -254,7 +265,8 @@ type reasons struct {
 	closed bool // a ready node that is Ineligible
 }
 
-func (s *nodeState) add(app string, cpu, mem int64, ports []hostPort) {
+func (s *nodeState) add(app string, cpu, mem, bytes int64, ports []hostPort) {
+	s.bytes = satAdd(s.bytes, max(bytes, 0))
 	s.cpuUsed = satAdd(s.cpuUsed, cpu)
 	s.memUsed = satAdd(s.memUsed, mem)
 	s.total++
@@ -285,11 +297,12 @@ const (
 	noCPU
 	noMemory
 	portInUse
+	noRoom // the node's assignments are at MaxNodeBytes
 )
 
 // check reports whether the replica fits on s, and if not, why. For a port
 // conflict it also returns the replica's port that conflicts.
-func (s *nodeState) check(cpu, mem int64, ports []hostPort) (failure, string) {
+func (s *nodeState) check(cpu, mem, bytes int64, ports []hostPort) (failure, string) {
 	if cpu > s.cpuCap-s.cpuUsed {
 		return noCPU, ""
 	}
@@ -303,10 +316,13 @@ func (s *nodeState) check(cpu, mem int64, ports []hostPort) (failure, string) {
 			}
 		}
 	}
+	if s.maxBytes > 0 && bytes > s.maxBytes-s.bytes {
+		return noRoom, ""
+	}
 	return fits, ""
 }
 
-func choose(r Replica, states []*nodeState, byID map[string]*nodeState, why reasons, minReady time.Duration) (*nodeState, string) {
+func choose(r Replica, states []*nodeState, byID map[string]*nodeState, why reasons, minReady time.Duration, maxBytes int64) (*nodeState, string) {
 	cpu, mem, ok := request(r.Resources)
 	if !ok {
 		return nil, fmt.Sprintf("invalid resources: cpu %v, memory %d", r.Resources.CPU, int64(r.Resources.Memory))
@@ -321,13 +337,15 @@ func choose(r Replica, states []*nodeState, byID map[string]*nodeState, why reas
 		if s == nil || !s.eligible {
 			return nil, fmt.Sprintf("volume pinned to node %s, which is unavailable", r.PinnedNode)
 		}
-		switch f, port := s.check(cpu, mem, ports); f {
+		switch f, port := s.check(cpu, mem, r.Bytes, ports); f {
 		case fits:
 			return s, ""
 		case noCPU:
 			return nil, fmt.Sprintf("volume pinned to node %s, which does not have %s free", r.PinnedNode, cpuText(r.Resources.CPU))
 		case noMemory:
 			return nil, fmt.Sprintf("volume pinned to node %s, which does not have %s of memory free", r.PinnedNode, memText(mem))
+		case noRoom:
+			return nil, fmt.Sprintf("volume pinned to node %s, whose assignments would be more than the %s a node reads", r.PinnedNode, mibText(maxBytes))
 		default:
 			return nil, fmt.Sprintf("volume pinned to node %s, where host port %s is in use", r.PinnedNode, port)
 		}
@@ -342,7 +360,7 @@ func choose(r Replica, states []*nodeState, byID map[string]*nodeState, why reas
 			continue
 		}
 		eligible++
-		f, port := s.check(cpu, mem, ports)
+		f, port := s.check(cpu, mem, r.Bytes, ports)
 		if f != fits {
 			counts[f]++
 			if f == portInUse {
@@ -375,6 +393,9 @@ func choose(r Replica, states []*nodeState, byID map[string]*nodeState, why reas
 			return nil, fmt.Sprintf("host port %s is in use on every eligible node", list[0])
 		}
 		return nil, fmt.Sprintf("host ports %s are in use on the eligible nodes", strings.Join(list, ", "))
+	case counts[noRoom] == eligible:
+		return nil, fmt.Sprintf("every eligible node's assignments would be more than the %s a node reads; "+
+			"use fewer replicas, a smaller spec or more nodes", mibText(maxBytes))
 	}
 	var parts []string
 	if n := counts[noCPU]; n > 0 {
@@ -385,6 +406,9 @@ func choose(r Replica, states []*nodeState, byID map[string]*nodeState, why reas
 	}
 	if n := counts[portInUse]; n > 0 {
 		parts = append(parts, fmt.Sprintf("%s with host port %s in use", nodesText(n), strings.Join(sortedKeys(conflicting), ", ")))
+	}
+	if n := counts[noRoom]; n > 0 {
+		parts = append(parts, fmt.Sprintf("%s whose assignments would be more than the %s a node reads", nodesText(n), mibText(maxBytes)))
 	}
 	return nil, "no eligible node fits: " + strings.Join(parts, "; ")
 }
@@ -455,4 +479,11 @@ func sortedKeys(m map[string]bool) []string {
 	}
 	sort.Strings(out)
 	return out
+}
+
+func mibText(n int64) string {
+	if n%(1<<20) == 0 {
+		return strconv.FormatInt(n>>20, 10) + " MiB"
+	}
+	return strconv.FormatFloat(float64(n)/(1<<20), 'f', 1, 64) + " MiB"
 }
