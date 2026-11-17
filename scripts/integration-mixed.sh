@@ -26,12 +26,19 @@
 #   - n1 registers its address without a restart, and nodes shows it
 #   - nodes shows this build's version for n0 and n1, and "-" for n2;
 #     hivemind version prints the server's
+#   - with a host that has a whole host route in one app and a path route
+#     in another, the node API's table for a router of a build before path
+#     routes (no ?paths=1, an older version) has each host once, no path
+#     field, and that host with no endpoints; with ?paths=1 it has the path.
+#     The server logs a warning naming the node, and hivemind routes and
+#     status warn, until the router reads paths. curl in a curlimages/curl
+#     container, with n1's node certificate, plays that router
 #   - hivemind logs of the replica on n2 says the worker is older than 2.1
 #     and cannot stream logs; the log of the replica on n1 is read
 #
 # It publishes no ports. On exit it removes the containers, the network and
 # the volumes it created, also after a failure or Ctrl-C. Needs Docker, curl,
-# and the docker:dind and golang images.
+# and the docker:dind, golang and curlimages/curl images.
 set -euo pipefail
 
 REPO=$(cd "$(dirname "$0")/.." && pwd)
@@ -185,6 +192,68 @@ row() { docker exec "$S" hivemind nodes | awk -v n="$1" '$1 == n { print $4, $5 
 docker exec "$S" hivemind version | grep -qF "server http://127.0.0.1:4483: hivemind $NEW_VERSION" ||
 	cl_fail "hivemind version against the upgraded server: $(docker exec "$S" hivemind version | tr '\n' ';')"
 cl_note "after the upgrade: $W1 registered its address in $(($(date +%s) - up)) s without a restart; versions shown"
+
+# Path routes and a router of a build before them. Such a router asks the
+# node API for the table without ?paths=1 and decodes it strictly, so it
+# must get no path field and each host once, and a host with a path route
+# with no endpoints. The request is made as that router makes it, with W1's
+# node certificate and an older version; this build's router asks with
+# ?paths=1 and gets the path.
+docker exec -i "$S" hivemind deploy -f - >/dev/null <<EOF || cl_fail "deploy web with routes"
+name: web
+image: busybox:stable
+command: [sleep, "3600"]
+routes:
+  - {host: www.mixed.test, port: 80}
+  - {host: only.mixed.test, port: 80}
+EOF
+docker exec -i "$S" hivemind deploy -f - >/dev/null <<EOF || cl_fail "deploy api with a path route"
+name: api
+image: busybox:stable
+command: [sleep, "3600"]
+routes:
+  - {host: www.mixed.test, path: /api, port: 8080}
+EOF
+mkdir -p "$CL_WORK/w1-cert"
+for f in node.crt node.key ca.crt; do
+	docker cp "$W1:/var/lib/hivemind/$f" "$CL_WORK/w1-cert/$f"
+done
+node_routes() { # node_routes QUERY: GET routes on the node API as W1
+	docker run --rm --network "$CL_NET" --user "$(id -u)" -v "$CL_WORK/w1-cert:/certs:ro" "${CURL_IMAGE:-curlimages/curl:8.11.1}" \
+		-sf --cacert /certs/ca.crt --cert /certs/node.crt --key /certs/node.key -H "Hivemind-Version: v2.2.0-before-paths" \
+		"https://$S_IP:4484/node/v1/nodes/$W1_ID/routes$1"
+}
+old_table=$(node_routes "") || cl_fail "the node API did not answer W1's GET routes"
+if grep -qF '"path"' <<<"$old_table"; then
+	cl_fail "a router before paths got a path field: $old_table"
+fi
+dups=$(grep -o '"host":"[^"]*"' <<<"$old_table" | sort | uniq -d)
+[ -z "$dups" ] || cl_fail "a router before paths got a host twice: $dups in $old_table"
+grep -qF '{"host":"www.mixed.test","endpoints":[]}' <<<"$old_table" ||
+	cl_fail "a router before paths did not get www.mixed.test without endpoints: $old_table"
+grep -qF '"host":"only.mixed.test"' <<<"$old_table" || cl_fail "a router before paths did not get only.mixed.test: $old_table"
+new_table=$(node_routes "?paths=1") || cl_fail "the node API did not answer W1's GET routes?paths=1"
+grep -qF '"host":"www.mixed.test","path":"/api"' <<<"$new_table" || cl_fail "a router of this build did not get the path route: $new_table"
+# The read without paths again, and the warnings it causes: the server's
+# log, hivemind routes and the status of each app on the host.
+node_routes "" >/dev/null || cl_fail "GET routes as W1"
+warned() { [ "$(count "$S" "is of a build before path routes")" -ge 1 ]; }
+wait_for 10 warned || cl_fail "the server did not log a warning about the router before paths"
+docker exec "$S" grep -F "is of a build before path routes" /var/log/hivemind.log | grep -qF "node=$W1_ID" ||
+	cl_fail "the server's warning does not name $W1_ID: $(docker exec "$S" grep -F 'before path routes' /var/log/hivemind.log)"
+routes_err=$(docker exec "$S" hivemind routes 2>&1 >/dev/null)
+grep -qF "warning: the router on node $W1_ID (v2.2.0-before-paths) is of a build before path routes, and answers 503 for www.mixed.test" <<<"$routes_err" ||
+	cl_fail "hivemind routes does not warn about $W1_ID's router: $routes_err"
+status_out=$(docker exec "$S" hivemind status)
+for app in web api; do
+	grep -qF "$app: warning: the router on node $W1_ID (v2.2.0-before-paths)" <<<"$status_out" ||
+		cl_fail "hivemind status does not warn for $app: $(tr '\n' ';' <<<"$status_out")"
+done
+# Once the router reads paths, the warnings go.
+node_routes "?paths=1" >/dev/null || cl_fail "GET routes?paths=1 as W1"
+routes_err=$(docker exec "$S" hivemind routes 2>&1 >/dev/null)
+[ -z "$routes_err" ] || cl_fail "hivemind routes still warns after the router read paths: $routes_err"
+cl_note "a router before paths gets each host once and no path field, with no endpoints for www.mixed.test; the server, routes and status warn until it reads paths"
 
 # Logs, once the server has run a minute: the 2.0.0 worker is named as
 # such, and the new worker streams.

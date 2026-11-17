@@ -29,6 +29,12 @@
 #     expiry, by node (the workers post theirs through the node API)
 #   - a rolling update: every response during it, through all three routers,
 #     is a 200
+#   - path routes: a second app on the same host under /v1. Through each
+#     router, /v1 and the paths under it reach it and every other path the
+#     first app, with the path as sent; dot segments, encoded slashes and
+#     backslashes get 400; hivemind routes shows both. A rolling update of
+#     each app in turn, with requests for / and /v1/x through all three
+#     routers: every one is a 200 from the app that owns the path
 #   - a node that runs a replica is killed: requests through the other two
 #     routers keep getting 200s while the replica is placed again
 #
@@ -166,7 +172,8 @@ for ip in "${IPS[@]}"; do
 done
 cl_note "each node registered its private address"
 
-# The app: two replicas of whoami, which answers with its host name.
+# The app: two replicas of whoami, which answers with its host name, the
+# name it is given with -name, and the request it got.
 deploy() { # deploy VERSION
 	docker exec -i "$S" hivemind deploy -f - >/dev/null <<EOF
 name: who
@@ -174,6 +181,7 @@ image: $APP_IMAGE
 replicas: 2
 env:
   V: "$1"
+command: [-name, who]
 routes:
   - host: $HOST
     port: 80
@@ -341,6 +349,116 @@ read -r total bad <<<"$(stop_loop /tmp/rollout)"
 cl_note "rolling update: $total requests through the three routers, $bad failed"
 old=$(for c in "${CL_NAMES[@]}"; do docker exec "$c" docker ps -a --filter label=hivemind.app=who --filter label=hivemind.generation=1 -q; done)
 [ -z "$old" ] || cl_fail "generation 1 containers are left: $old"
+
+# Path routes: a second app, api, on the same host under /v1 (whoami answers
+# /api itself, with JSON, so the prefix is /v1). Every
+# router sends /v1 and what is under it to api, and every other path to
+# who, as the client sent it; paths that could be read as under another
+# prefix are refused with 400.
+deploy_api() { # deploy_api VERSION
+	docker exec -i "$S" hivemind deploy -f - >/dev/null <<EOF
+name: api
+image: $APP_IMAGE
+replicas: 2
+env:
+  V: "$1"
+command: [-name, api]
+routes:
+  - host: $HOST
+    path: /v1
+    port: 80
+health:
+  http:
+    port: 80
+    path: /health
+  interval: 1s
+  timeout: 1s
+EOF
+}
+app_rows() { # app_rows APP: "index node generation state" for each replica
+	docker exec "$S" hivemind status "$1" | awk -v a="$1" '$1 == a && $2 ~ /^[0-9]+$/ { print $2, $3, $4, $5 }'
+}
+rolled() { # rolled APP GEN: two replicas run at GEN, and no rollout is in flight
+	[ "$(app_rows "$1" | awk -v g="$2" '$3 == g && $4 == "running"' | wc -l)" -eq 2 ] &&
+		! docker exec "$S" hivemind status "$1" | grep -q "rolling out"
+}
+deploy_api 1 || cl_fail "deploy api"
+wait_for 120 rolled api 1 || cl_fail "api did not run two replicas: $(app_rows api | tr '\n' ';')"
+# name_at IP PATH: the -name of the replica that answered, or the code.
+name_at() {
+	local out
+	out=$(docker exec "$CLIENT" curl -s --path-as-is --max-time 10 --cacert /tmp/root.pem --resolve "$HOST:$HTTPS_PORT:$1" \
+		-w '\ncode=%{http_code}\n' "https://$HOST:$HTTPS_PORT$2" | tr -d '\r') || true
+	if grep -q '^Name: ' <<<"$out"; then
+		sed -n 's/^Name: //p' <<<"$out"
+	else
+		sed -n 's/^code=//p' <<<"$out"
+	fi
+}
+api_served() { [ "$(name_at "$1" /v1)" = api ]; }
+for ip in "${IPS[@]}"; do
+	wait_for 30 api_served "$ip" || cl_fail "the router on $ip does not send /v1 to api: $(name_at "$ip" /v1)"
+done
+for ip in "${IPS[@]}"; do
+	# No "//" here: the router passes it on as it is, and whoami's own mux
+	# answers it with a 301 to the clean path. The unit tests cover it.
+	for x in "/ who" "/index.html who" "/v1 api" "/v1/ api" "/v1/users/7 api" "/v1x who" "/V1/x who" "/v1/x/ api" \
+		"/v1/../x 400" "/x/../v1/y 400" "/v1/%2e%2e/x 400" "/v1%2Fx 400" "/v1/..;/x 400" "/v1%5C..%5Cx 400"; do
+		p=${x% *} want=${x#* }
+		got=$(name_at "$ip" "$p")
+		[ "$got" = "$want" ] || cl_fail "the router on $ip sent $p to \"$got\", want $want"
+	done
+done
+# api gets the request as the client sent it: no prefix is stripped.
+seen=$(docker exec "$CLIENT" curl -s --max-time 10 --cacert /tmp/root.pem --resolve "$HOST:$HTTPS_PORT:$W2_IP" \
+	"https://$HOST:$HTTPS_PORT/v1/users/7?q=a%2Fb" | tr -d '\r')
+grep -qxF "GET /v1/users/7?q=a%2Fb HTTP/1.1" <<<"$seen" || cl_fail "api did not get the path as sent: $(tr '\n' ';' <<<"$seen")"
+routes_out=$(docker exec "$S" hivemind routes 2>&1)
+grep -qE "^$HOST +/ +who +80 +[0-9.:]+,[0-9.:]+$" <<<"$routes_out" && grep -qE "^$HOST +/v1 +api +80 +[0-9.:]+,[0-9.:]+$" <<<"$routes_out" ||
+	cl_fail "hivemind routes does not show both routes with two endpoints each: $(tr '\n' ';' <<<"$routes_out")"
+if grep -q "before path routes" <<<"$routes_out"; then
+	cl_fail "hivemind routes warns about a router of this build: $routes_out"
+fi
+cl_note "path routes: through each of the three routers, /v1 goes to api and the rest to who, unchanged; 6 kinds of path refused with 400"
+
+# A rolling update of each app in turn, with requests for / and for /v1/x
+# through all three routers the whole time: each must be a 200 from the app
+# that owns the path.
+docker exec -i "$CLIENT" sh -c 'cat >/tmp/paths.sh' <<'EOF'
+#!/bin/sh
+# paths.sh FILE HOST PORT IP...: until FILE.stop exists, requests / and
+# /v1/x through each router in turn, and appends "PATH CODE NAME" for each.
+f=$1 host=$2 port=$3
+shift 3
+while [ ! -e "$f.stop" ]; do
+	for ip in "$@"; do
+		for p in / /v1/x; do
+			out=$(curl -s --max-time 15 --cacert /tmp/root.pem --resolve "$host:$port:$ip" -w '\ncode=%{http_code}\n' "https://$host:$port$p" | tr -d '\r')
+			code=$(printf '%s\n' "$out" | sed -n 's/^code=//p')
+			name=$(printf '%s\n' "$out" | sed -n 's/^Name: //p')
+			echo "$p ${code:-none} ${name:--}" >>"$f"
+		done
+	done
+done
+EOF
+docker exec -d "$CLIENT" sh /tmp/paths.sh /tmp/paths "$HOST" "$HTTPS_PORT" "${IPS[@]}"
+sleep 3
+deploy_api 2 || cl_fail "deploy api version 2"
+ROLL_AT=$(date +%s)
+wait_for 180 rolled api 2 || cl_fail "the rollout of api did not finish: $(app_rows api | tr '\n' ';')"
+cl_note "rollout of api to generation 2 finished in $(($(date +%s) - ROLL_AT)) s"
+sleep 10
+deploy 3 || cl_fail "deploy who version 3"
+ROLL_AT=$(date +%s)
+wait_for 180 on_two_nodes 3 || cl_fail "the rollout of who did not finish: $(who_rows | tr '\n' ';')"
+cl_note "rollout of who to generation 3 finished in $(($(date +%s) - ROLL_AT)) s"
+sleep 10
+docker exec "$CLIENT" touch /tmp/paths.stop
+sleep 16
+read -r total bad <<<"$(docker exec "$CLIENT" awk '{ n++ } !(($1 == "/" && $2 == "200" && $3 == "who") || ($1 == "/v1/x" && $2 == "200" && $3 == "api")) { bad++ } END { print n+0, bad+0 }' /tmp/paths)"
+[ "$total" -ge 60 ] || cl_fail "only $total requests during the two rollouts"
+[ "$bad" -eq 0 ] || cl_fail "$bad of $total requests failed or reached the wrong app during the rollouts: $(docker exec "$CLIENT" sort /tmp/paths | uniq -c | tr '\n' ';')"
+cl_note "rolling updates of api, then who: $total requests for / and /v1/x through the three routers, $bad failed or misrouted"
 
 # Kill a worker that runs a replica. The other two routers keep answering.
 victim=""
