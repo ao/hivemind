@@ -111,7 +111,7 @@ func TestSetServerChecksTheServer(t *testing.T) {
 		var out bytes.Buffer
 		start := time.Now()
 		err := runSetServer(ctx, &out, wdir, addr)
-		if err == nil || !strings.Contains(err.Error(), want) || !strings.Contains(err.Error(), "node.json is unchanged") && !strings.Contains(want, "join port") {
+		if err == nil || !strings.Contains(err.Error(), want) || !strings.Contains(err.Error(), "node.json is unchanged") {
 			t.Errorf("%s (%s): %v; want an error with %q", name, addr, err, want)
 		}
 		if d := time.Since(start); d > 10*time.Second {

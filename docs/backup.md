@@ -92,11 +92,14 @@ Anything else is refused with what was found, and `node.json` is left as it was:
 error: the server at 10.0.0.9:4484 presents a certificate from the CA with fingerprint 5d1e..., not from this worker's cluster CA, fingerprint 3f9c...: it is another cluster's server, or something between this machine and 10.0.0.9 holds another CA. /var/lib/hivemind/node.json is unchanged
 error: the server at 10.0.0.7:4484 has a certificate from this cluster's CA, but it names 10.0.0.9, not 10.0.0.7: give set-server the address the server advertises, or start the server with --advertise 10.0.0.7. /var/lib/hivemind/node.json is unchanged
 error: cannot reach a server at 10.0.0.8:4484: connect: connection refused. /var/lib/hivemind/node.json is unchanged
+error: 10.0.0.9:4485 is the default join port, but set-server takes the server's cluster port, 10.0.0.9:4484, or no port. /var/lib/hivemind/node.json is unchanged
 ```
 
 The fingerprints are the SHA-256 of each CA's public key, the hex that a join token carries. A server whose certificate the worker accepts, but which refuses the worker's certificate in the TLS handshake, as a machine with a copy of a server certificate and another CA would, is refused too. A man in the middle without the cluster CA's key cannot pass the first check: the worker takes only a certificate signed by the CA in its own data directory.
 
 To move a cluster that advertises an IP address to a DNS name, without a restore: start the server with `--advertise <name> --cluster-addr <its IP>`. Its certificate then names both, so the workers that dial the IP keep working. Then run `hivemind node set-server <name>` on each worker, as above, at any time.
+
+The other way, from a name to the server's IP address, works the same: a server started with `--advertise <name> --cluster-addr <its IP>` has a certificate that names both, so stop each worker, run `hivemind node set-server <its IP>`, and start it again. Once every worker dials the IP, the server can be started with `--advertise <its IP>` alone. In the third soak ([soak](soak.md), on EC2 c7g.large machines) `set-server` took 0.13 s on each of three workers, in both directions.
 
 ## The file
 

@@ -78,9 +78,10 @@ func runSetServer(ctx context.Context, out io.Writer, dir, arg string) error {
 	if err != nil {
 		return err
 	}
+	statePath := filepath.Join(dir, workerStateFile)
 	if port == defaultClusterPort+1 {
-		return fmt.Errorf("%s is the default join port, but set-server takes the server's cluster port, %s, or no port",
-			net.JoinHostPort(host, strconv.Itoa(port)), net.JoinHostPort(host, strconv.Itoa(defaultClusterPort)))
+		return fmt.Errorf("%s is the default join port, but set-server takes the server's cluster port, %s, or no port. %s is unchanged",
+			net.JoinHostPort(host, strconv.Itoa(port)), net.JoinHostPort(host, strconv.Itoa(defaultClusterPort)), statePath)
 	}
 	// Before the lock, which would create the directory: a directory that
 	// holds no worker is refused as it is.
@@ -100,7 +101,6 @@ func runSetServer(ctx context.Context, out io.Writer, dir, arg string) error {
 		return err
 	}
 	server := net.JoinHostPort(host, strconv.Itoa(port))
-	statePath := filepath.Join(dir, workerStateFile)
 	if err := checkNewServer(ctx, w, host, server); err != nil {
 		return fmt.Errorf("%w. %s is unchanged", err, statePath)
 	}
