@@ -159,6 +159,7 @@ func New(cfg Config) (*Router, error) {
 		rt.httpLn.Close()
 		return nil, fmt.Errorf("router: https listener: %w", err)
 	}
+	rt.proxy.httpsPort = rt.HTTPSPort()
 
 	zl := newZap(log.With("component", "certmagic"))
 	rt.cache = certmagic.NewCache(certmagic.CacheOptions{
@@ -420,11 +421,7 @@ func (rt *Router) serveHTTP(w http.ResponseWriter, r *http.Request) {
 	if rt.issuer.HandleHTTPChallenge(w, r) {
 		return
 	}
-	target := "https://" + host
-	if p := rt.HTTPSPort(); p != 443 {
-		target += ":" + strconv.Itoa(p)
-	}
-	http.Redirect(w, r, target+r.URL.RequestURI(), http.StatusPermanentRedirect)
+	http.Redirect(w, r, "https://"+rt.proxy.authority(host)+r.URL.RequestURI(), http.StatusPermanentRedirect)
 }
 
 // Managed returns the hosts whose certificates the router manages, sorted.

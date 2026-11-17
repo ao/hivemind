@@ -278,31 +278,57 @@ func TestFailoverKeepsTheBody(t *testing.T) {
 	}
 }
 
+// The replica gets no forwarding header the client chose: every one the
+// client sends is removed, in any case and with "_" for "-", and the router
+// sets its own. Host and X-Forwarded-Host are the table's host, whatever case,
+// trailing dot or port the client wrote.
 func TestForwardedHeadersAreReplaced(t *testing.T) {
 	up := upstream(t, "up")
 	tr := newTestRouter(t, Table{"www.example.com": {up.Listener.Addr().String()}})
-	req, _ := http.NewRequest(http.MethodGet, "https://www.example.com/x", nil)
-	req.Header.Set("X-Forwarded-For", "6.6.6.6")
-	req.Header.Set("X-Forwarded-Host", "evil.example")
-	req.Header.Set("X-Forwarded-Proto", "http")
-	req.Header.Set("Forwarded", "for=6.6.6.6;host=evil.example")
-	req.Header.Set("X-Real-Ip", "6.6.6.6")
-	_, s, body := get(t, tr.client(false), req)
-	h := s.Header
-	if got := h.Values("X-Forwarded-For"); !slices.Equal(got, []string{"127.0.0.1"}) {
-		t.Errorf("X-Forwarded-For %v: %s", got, body)
+	authority := fmt.Sprintf("www.example.com:%d", tr.rt.HTTPSPort())
+	sent := map[string]string{
+		"X-Forwarded-For": "6.6.6.6", "X-Forwarded-Host": "evil.example", "X-Forwarded-Proto": "http",
+		"X-Forwarded-Port": "80", "X-Forwarded-Prefix": "/admin", "X-Forwarded-Ssl": "off",
+		"X-Forwarded-Server": "evil.example", "X-Forwarded-Uri": "/admin", "Forwarded": "for=6.6.6.6;host=evil.example",
+		"X-Real-Ip": "6.6.6.6", "True-Client-Ip": "6.6.6.6", "X-Client-Ip": "6.6.6.6",
+		"X-Cluster-Client-Ip": "6.6.6.6", "Cf-Connecting-Ip": "6.6.6.6",
+		"X_Forwarded_For": "6.6.6.6", "x-real_ip": "6.6.6.6",
 	}
-	if got := h.Get("X-Forwarded-Host"); got != "www.example.com" {
-		t.Errorf("X-Forwarded-Host %q", got)
+	for _, h1 := range []bool{true, false} {
+		req, _ := http.NewRequest(http.MethodGet, "https://www.example.com/x", nil)
+		req.Host = "WWW.Example.COM.:1234"
+		for k, v := range sent {
+			req.Header[k] = []string{v} // as written, not canonicalised
+		}
+		resp, s, body := get(t, tr.client(h1), req)
+		if resp.StatusCode != http.StatusOK {
+			t.Fatalf("h1=%v: %d %s", h1, resp.StatusCode, body)
+		}
+		want := map[string]string{
+			"X-Forwarded-For": "127.0.0.1", "X-Forwarded-Host": authority, "X-Forwarded-Proto": "https",
+			"X-Forwarded-Port": fmt.Sprint(tr.rt.HTTPSPort()),
+		}
+		for k, v := range want {
+			if got := s.Header.Values(k); !slices.Equal(got, []string{v}) {
+				t.Errorf("h1=%v: %s %q, want %q", h1, k, got, v)
+			}
+		}
+		for k, v := range s.Header {
+			if _, set := want[k]; isClientHeader(k) && !set {
+				t.Errorf("h1=%v: the client's %s %q reached the replica", h1, k, v)
+			}
+		}
+		if s.Host != authority {
+			t.Errorf("h1=%v: Host %q, want %q", h1, s.Host, authority)
+		}
 	}
-	if got := h.Get("X-Forwarded-Proto"); got != "https" {
-		t.Errorf("X-Forwarded-Proto %q", got)
-	}
-	if h.Get("Forwarded") != "" || h.Get("X-Real-Ip") != "" {
-		t.Errorf("client headers passed on: Forwarded %q, X-Real-Ip %q", h.Get("Forwarded"), h.Get("X-Real-Ip"))
-	}
-	if s.Host != "www.example.com" {
-		t.Errorf("Host %q", s.Host)
+}
+
+func TestAuthorityHasThePortOnlyWhenNot443(t *testing.T) {
+	for port, want := range map[int]string{443: "www.example.com", 8443: "www.example.com:8443"} {
+		if got := (&proxy{httpsPort: port}).authority("www.example.com"); got != want {
+			t.Errorf("https port %d: %q, want %q", port, got, want)
+		}
 	}
 }
 

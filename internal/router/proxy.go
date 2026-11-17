@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"net/http/httputil"
 	"slices"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -100,6 +101,9 @@ type proxy struct {
 	metrics *Metrics
 	now     func() time.Time
 	rp      *httputil.ReverseProxy
+	// httpsPort is the port of the https listener, which clients connect
+	// to. New sets it before anything is served.
+	httpsPort int
 
 	mu        sync.RWMutex
 	pools     map[string]*pool
@@ -109,7 +113,7 @@ type proxy struct {
 func newProxy(log *slog.Logger, m *Metrics) *proxy {
 	p := &proxy{log: log, metrics: m, now: time.Now, pools: map[string]*pool{}, endpoints: map[string]*endpoint{}}
 	p.rp = &httputil.ReverseProxy{
-		Rewrite:      rewrite,
+		Rewrite:      p.rewrite,
 		Transport:    balancer{p},
 		ErrorHandler: p.upstreamFailed,
 		ErrorLog:     slog.NewLogLogger(log.Handler(), slog.LevelWarn),
@@ -117,17 +121,60 @@ func newProxy(log *slog.Logger, m *Metrics) *proxy {
 	return p
 }
 
-// rewrite sets the outbound request. Rewrite mode has already removed the
-// client's X-Forwarded-For, -Host and -Proto; SetXForwarded sets them again
-// from the connection, so a client cannot choose them. Forwarded and
-// X-Real-Ip, which ReverseProxy passes on, are removed for the same reason.
-// The Host header stays the client's. The balancer fills in the endpoint.
-func rewrite(pr *httputil.ProxyRequest) {
+// clientHeaders are the request headers, other than X-Forwarded-*, in which
+// a proxy in front of an app names the client or what the client asked for.
+// A client can send any of them, so the router removes them all, and every
+// header that starts with clientHeaderPrefix, before it sets its own. This is
+// the one list of them.
+var clientHeaders = []string{
+	"forwarded", "x-real-ip", "true-client-ip", "x-client-ip", "x-cluster-client-ip", "cf-connecting-ip",
+}
+
+// clientHeaderPrefix starts X-Forwarded-For, -Host, -Proto, -Port, -Prefix,
+// -Ssl, -Server and the rest of that family.
+const clientHeaderPrefix = "x-forwarded-"
+
+// isClientHeader reports whether name is one of the headers the router
+// removes. Names are compared without case and with "_" read as "-": a
+// CGI-style server (WSGI, PHP) turns both into one variable, so a client's
+// X_Forwarded_For would reach the app as HTTP_X_FORWARDED_FOR.
+func isClientHeader(name string) bool {
+	n := strings.ReplaceAll(strings.ToLower(name), "_", "-")
+	return strings.HasPrefix(n, clientHeaderPrefix) || slices.Contains(clientHeaders, n)
+}
+
+// authority is what the router sends as Host and X-Forwarded-Host for host,
+// a table host: the host, with the https port when it is not 443. It is the
+// authority of the router's own redirects to https, so the URLs an app builds
+// from Host match the ones the router sends clients to.
+func (p *proxy) authority(host string) string {
+	if p.httpsPort == 443 {
+		return host
+	}
+	return net.JoinHostPort(host, strconv.Itoa(p.httpsPort))
+}
+
+// rewrite sets the outbound request. Every header a client could use to
+// name another client address, host, scheme or port is removed (see
+// clientHeaders), and the router sets X-Forwarded-For to the address the
+// connection came from, X-Forwarded-Proto to https, X-Forwarded-Port to the
+// https port, and Host and X-Forwarded-Host to the table's host (see
+// authority), not the client's spelling of it: its case, a trailing dot and
+// any port it wrote are gone. The balancer fills in the endpoint.
+func (p *proxy) rewrite(pr *httputil.ProxyRequest) {
+	info, _ := pr.In.Context().Value(ctxKey{}).(reqInfo)
+	authority := p.authority(info.host)
 	pr.Out.URL.Scheme = "http"
-	pr.Out.URL.Host = pr.In.Host
-	pr.Out.Header.Del("Forwarded")
-	pr.Out.Header.Del("X-Real-Ip")
+	pr.Out.URL.Host = authority
+	pr.Out.Host = authority
+	for name := range pr.Out.Header {
+		if isClientHeader(name) {
+			delete(pr.Out.Header, name)
+		}
+	}
 	pr.SetXForwarded()
+	pr.Out.Header.Set("X-Forwarded-Host", authority)
+	pr.Out.Header.Set("X-Forwarded-Port", strconv.Itoa(p.httpsPort))
 }
 
 // setTable replaces the routing table. Endpoints that stay keep their
