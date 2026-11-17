@@ -71,6 +71,21 @@ type Config struct {
 	// host's challenge token from Storage, which challenge requests cause.
 	// Zero means DefaultChallengeReadInterval.
 	ChallengeReadInterval time.Duration
+	// MaxConns caps the router's open connections, over both listeners; a
+	// connection over it is closed as it is accepted. Zero means
+	// DefaultMaxConns(); below zero, no cap.
+	MaxConns int
+	// MaxConnsPerAddr caps the open connections of one client address, or
+	// of one IPv6 /64, over both listeners. Zero means
+	// DefaultMaxConnsPerAddr; below zero, no cap.
+	MaxConnsPerAddr int
+	// WriteTimeout ends an https connection when a write to the client
+	// makes no progress for this long. Zero means DefaultWriteTimeout.
+	WriteTimeout time.Duration
+	// UpgradeIdleTimeout closes an upgraded connection, such as a
+	// WebSocket, that carries no data either way for this long. Zero
+	// means DefaultUpgradeIdleTimeout.
+	UpgradeIdleTimeout time.Duration
 	// Email is the ACME account's contact. Registering the account agrees
 	// to the CA's subscriber agreement.
 	Email string
@@ -95,6 +110,7 @@ type Router struct {
 	issuer  *certmagic.ACMEIssuer
 	httpLn  net.Listener
 	tlsLn   net.Listener
+	limits  *connLimits
 	httpSrv *http.Server
 	tlsSrv  *http.Server
 
@@ -140,12 +156,26 @@ func New(cfg Config) (*Router, error) {
 	if cfg.ChallengeReadInterval <= 0 {
 		cfg.ChallengeReadInterval = DefaultChallengeReadInterval
 	}
+	if cfg.MaxConns == 0 {
+		cfg.MaxConns = DefaultMaxConns()
+	}
+	if cfg.MaxConnsPerAddr == 0 {
+		cfg.MaxConnsPerAddr = DefaultMaxConnsPerAddr
+	}
+	if cfg.WriteTimeout <= 0 {
+		cfg.WriteTimeout = DefaultWriteTimeout
+	}
+	if cfg.UpgradeIdleTimeout <= 0 {
+		cfg.UpgradeIdleTimeout = DefaultUpgradeIdleTimeout
+	}
 	log := cfg.Logger
 	if log == nil {
 		log = slog.Default()
 	}
 	rt := &Router{cfg: cfg, log: log, managed: map[string]bool{}}
 	rt.proxy = newProxy(log, cfg.Metrics)
+	rt.proxy.upgradeIdle = cfg.UpgradeIdleTimeout
+	rt.limits = newConnLimits(cfg.MaxConns, cfg.MaxConnsPerAddr, log, cfg.Metrics)
 
 	// The listeners are bound before certmagic is told about any host, so
 	// its HTTP-01 solver finds the port taken and leaves the challenge to
@@ -159,15 +189,20 @@ func New(cfg Config) (*Router, error) {
 	if !ip.Is4() {
 		network = "tcp6"
 	}
-	rt.httpLn, err = net.Listen(network, net.JoinHostPort(ip.String(), strconv.Itoa(cfg.HTTPPort)))
+	httpLn, err := net.Listen(network, net.JoinHostPort(ip.String(), strconv.Itoa(cfg.HTTPPort)))
 	if err != nil {
 		return nil, fmt.Errorf("router: http listener: %w", err)
 	}
-	rt.tlsLn, err = net.Listen(network, net.JoinHostPort(ip.String(), strconv.Itoa(cfg.HTTPSPort)))
+	tlsLn, err := net.Listen(network, net.JoinHostPort(ip.String(), strconv.Itoa(cfg.HTTPSPort)))
 	if err != nil {
-		rt.httpLn.Close()
+		httpLn.Close()
 		return nil, fmt.Errorf("router: https listener: %w", err)
 	}
+	// Both listeners count against the same caps. Only the https one has
+	// the write limit: the http server's WriteTimeout bounds its replies,
+	// which are redirects and challenge answers.
+	rt.httpLn = &limitListener{Listener: httpLn, limits: rt.limits}
+	rt.tlsLn = &limitListener{Listener: tlsLn, limits: rt.limits, writeTimeout: cfg.WriteTimeout}
 	rt.proxy.httpsPort = rt.HTTPSPort()
 	rt.ctx, rt.cancel = context.WithCancel(context.Background())
 
@@ -245,7 +280,8 @@ func (rt *Router) Serve() error {
 	rt.warm()
 	go func() { errc <- rt.tlsSrv.ServeTLS(rt.tlsLn, "", "") }()
 	go rt.poll()
-	rt.log.Info("router listening", "http", rt.HTTPAddr(), "https", rt.HTTPSAddr(), "acme_ca", rt.cfg.CA)
+	rt.log.Info("router listening", "http", rt.HTTPAddr(), "https", rt.HTTPSAddr(), "acme_ca", rt.cfg.CA,
+		"max_conns", rt.cfg.MaxConns, "max_conns_per_ip", rt.cfg.MaxConnsPerAddr)
 	err := <-errc
 	if errors.Is(err, http.ErrServerClosed) {
 		err = <-errc

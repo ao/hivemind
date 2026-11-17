@@ -117,6 +117,9 @@ func (c *Config) Validate() error {
 	if c.RouteHTTPPort == c.RouteHTTPSPort {
 		fail("--route-http-port and --route-https-port must differ, both are %d", c.RouteHTTPPort)
 	}
+	if c.RouteMaxConnsPerIP < 0 {
+		fail("--route-max-conns-per-ip must be 0 (no limit) or more, got %d", c.RouteMaxConnsPerIP)
+	}
 
 	if c.Server != "" {
 		u, err := url.Parse(c.Server)

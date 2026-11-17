@@ -69,10 +69,13 @@ type Config struct {
 	RouteAddr         string        `json:"route_addr"`
 	RouteHTTPPort     int           `json:"route_http_port"`
 	RouteHTTPSPort    int           `json:"route_https_port"`
-	ACMEEmail         string        `json:"acme_email"`
-	ACMECA            string        `json:"acme_ca"`
-	Server            string        `json:"server"`
-	Token             Secret        `json:"token"`
+	// RouteMaxConnsPerIP caps the router's connections from one client
+	// address; 0 means no cap.
+	RouteMaxConnsPerIP int    `json:"route_max_conns_per_ip"`
+	ACMEEmail          string `json:"acme_email"`
+	ACMECA             string `json:"acme_ca"`
+	Server             string `json:"server"`
+	Token              Secret `json:"token"`
 }
 
 // DefaultACMECA is the default ACME directory: Let's Encrypt's production CA.
@@ -309,6 +312,10 @@ func settings(opts Options) []setting {
 		num("route-https-port", "port of the router's HTTPS listener", "443",
 			func(c *Config) *int { return &c.RouteHTTPSPort },
 			func(f *fileConfig) *string { return f.RouteHTTPSPort }),
+		// The default is router.DefaultMaxConnsPerAddr.
+		num("route-max-conns-per-ip", "most connections the router keeps open from one client IP address (an IPv6 /64), over both its ports; 0 means no limit, for a router behind a proxy that does not pass client addresses", "256",
+			func(c *Config) *int { return &c.RouteMaxConnsPerIP },
+			func(f *fileConfig) *string { return f.RouteMaxConnsPerIP }),
 		str("acme-email", "contact email of the ACME account; required with --route-addr, and setting it accepts the CA's terms", "",
 			func(c *Config) *string { return &c.ACMEEmail },
 			func(f *fileConfig) *string { return f.ACMEEmail }),

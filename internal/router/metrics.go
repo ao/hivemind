@@ -20,6 +20,7 @@ const unknownHost = nodeapi.UnknownHost
 type Metrics struct {
 	requests *metrics.CounterVec
 	upstream *metrics.CounterVec
+	refused  *metrics.CounterVec
 }
 
 // NewMetrics returns empty counters.
@@ -27,6 +28,14 @@ func NewMetrics() *Metrics {
 	return &Metrics{
 		requests: metrics.NewCounterVec("host", "code"),
 		upstream: metrics.NewCounterVec("host", "kind"),
+		refused:  metrics.NewCounterVec("reason"),
+	}
+}
+
+// connRefused counts a connection closed at accept for being over a cap.
+func (m *Metrics) connRefused(reason string) {
+	if m != nil {
+		m.refused.Inc(reason)
 	}
 }
 
@@ -104,6 +113,9 @@ func (m *Metrics) report(expiry map[string]time.Time) nodeapi.RouterReport {
 		}
 		for _, s := range m.upstream.Snapshot() {
 			r.Upstream = append(r.Upstream, nodeapi.RouterUpstream{Host: s.Values[0], Kind: s.Values[1], Count: nodeapi.CountOf(s.N)})
+		}
+		for _, s := range m.refused.Snapshot() {
+			r.Refused = append(r.Refused, nodeapi.RouterRefused{Reason: s.Values[0], Count: nodeapi.CountOf(s.N)})
 		}
 	}
 	for _, h := range slices.Sorted(maps.Keys(expiry)) {

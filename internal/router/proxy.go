@@ -102,8 +102,10 @@ type proxy struct {
 	now     func() time.Time
 	rp      *httputil.ReverseProxy
 	// httpsPort is the port of the https listener, which clients connect
-	// to. New sets it before anything is served.
-	httpsPort int
+	// to, and upgradeIdle the idle limit of upgraded connections. New sets
+	// them before anything is served.
+	httpsPort   int
+	upgradeIdle time.Duration
 
 	mu        sync.RWMutex
 	pools     map[string]*pool
@@ -113,10 +115,11 @@ type proxy struct {
 func newProxy(log *slog.Logger, m *Metrics) *proxy {
 	p := &proxy{log: log, metrics: m, now: time.Now, pools: map[string]*pool{}, endpoints: map[string]*endpoint{}}
 	p.rp = &httputil.ReverseProxy{
-		Rewrite:      p.rewrite,
-		Transport:    balancer{p},
-		ErrorHandler: p.upstreamFailed,
-		ErrorLog:     slog.NewLogLogger(log.Handler(), slog.LevelWarn),
+		Rewrite:        p.rewrite,
+		Transport:      balancer{p},
+		ModifyResponse: p.modifyResponse,
+		ErrorHandler:   p.upstreamFailed,
+		ErrorLog:       slog.NewLogLogger(log.Handler(), slog.LevelWarn),
 	}
 	return p
 }

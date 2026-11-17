@@ -152,6 +152,8 @@ func TestValidate(t *testing.T) {
 		{"route port zero", func(c *Config) { c.RouteHTTPPort = 0 }, "--route-http-port 0"},
 		{"route port high", func(c *Config) { c.RouteHTTPSPort = 70000 }, "--route-https-port 70000"},
 		{"route ports equal", func(c *Config) { c.RouteHTTPPort, c.RouteHTTPSPort = 8443, 8443 }, "must differ"},
+		{"router per-ip cap off", func(c *Config) { c.RouteMaxConnsPerIP = 0 }, ""},
+		{"router per-ip cap negative", func(c *Config) { c.RouteMaxConnsPerIP = -1 }, "--route-max-conns-per-ip must be 0"},
 	}
 	for _, tc := range cases {
 		tc := tc

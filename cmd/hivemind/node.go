@@ -393,8 +393,10 @@ join. It has no API listener. --role server is the default.
 --route-https-port (443) for the apps' routes. It may be 0.0.0.0, and it is
 the only listener that may: it serves the apps' public traffic, without
 authentication. It needs --acme-email; --acme-ca chooses the CA (Let's
-Encrypt by default). Without --route-addr there is no router. See
-docs/routing.md.
+Encrypt by default). Without --route-addr there is no router. It keeps at
+most --route-max-conns-per-ip (256) connections open from one client
+address; 0 turns that off, for a router behind a proxy that does not pass
+client addresses. See docs/routing.md.
 
 GET /metrics on the API serves Prometheus metrics and needs the admin token.
 --metrics-addr also serves it, and nothing else, on a separate loopback

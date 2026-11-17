@@ -16,26 +16,27 @@ import (
 // told apart from an empty one. Numbers and durations are read as strings and
 // parsed by the same code that parses flags and environment variables.
 type fileConfig struct {
-	DataDir           *string `yaml:"data-dir"`
-	APIAddr           *string `yaml:"api-addr"`
-	Advertise         *string `yaml:"advertise"`
-	ClusterAddr       *string `yaml:"cluster-addr"`
-	ClusterPort       *string `yaml:"cluster-port"`
-	APITLSCert        *string `yaml:"api-tls-cert"`
-	APITLSKey         *string `yaml:"api-tls-key"`
-	DockerHost        *string `yaml:"docker-host"`
-	LogLevel          *string `yaml:"log-level"`
-	LogFormat         *string `yaml:"log-format"`
-	MetricsAddr       *string `yaml:"metrics-addr"`
-	ReconcileInterval *string `yaml:"reconcile-interval"`
-	MinReady          *string `yaml:"min-ready"`
-	RouteAddr         *string `yaml:"route-addr"`
-	RouteHTTPPort     *string `yaml:"route-http-port"`
-	RouteHTTPSPort    *string `yaml:"route-https-port"`
-	ACMEEmail         *string `yaml:"acme-email"`
-	ACMECA            *string `yaml:"acme-ca"`
-	Server            *string `yaml:"server"`
-	Token             *string `yaml:"token"`
+	DataDir            *string `yaml:"data-dir"`
+	APIAddr            *string `yaml:"api-addr"`
+	Advertise          *string `yaml:"advertise"`
+	ClusterAddr        *string `yaml:"cluster-addr"`
+	ClusterPort        *string `yaml:"cluster-port"`
+	APITLSCert         *string `yaml:"api-tls-cert"`
+	APITLSKey          *string `yaml:"api-tls-key"`
+	DockerHost         *string `yaml:"docker-host"`
+	LogLevel           *string `yaml:"log-level"`
+	LogFormat          *string `yaml:"log-format"`
+	MetricsAddr        *string `yaml:"metrics-addr"`
+	ReconcileInterval  *string `yaml:"reconcile-interval"`
+	MinReady           *string `yaml:"min-ready"`
+	RouteAddr          *string `yaml:"route-addr"`
+	RouteHTTPPort      *string `yaml:"route-http-port"`
+	RouteHTTPSPort     *string `yaml:"route-https-port"`
+	RouteMaxConnsPerIP *string `yaml:"route-max-conns-per-ip"`
+	ACMEEmail          *string `yaml:"acme-email"`
+	ACMECA             *string `yaml:"acme-ca"`
+	Server             *string `yaml:"server"`
+	Token              *string `yaml:"token"`
 }
 
 // decodeFile decodes data into fc. Unknown keys are errors. The message names

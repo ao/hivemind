@@ -22,8 +22,14 @@ func newRouter(cfg *config.Config, log *slog.Logger, routes func(context.Context
 	if err != nil {
 		return nil, err
 	}
+	// --route-max-conns-per-ip 0 is no limit, which the router's Config
+	// spells as a negative number; its zero is the default.
+	perIP := cfg.RouteMaxConnsPerIP
+	if perIP == 0 {
+		perIP = -1
+	}
 	rt, err := router.New(router.Config{Addr: cfg.RouteAddr, HTTPPort: cfg.RouteHTTPPort, HTTPSPort: cfg.RouteHTTPSPort,
-		Routes: routes, Storage: ts, Email: cfg.ACMEEmail, CA: cfg.ACMECA,
+		Routes: routes, Storage: ts, Email: cfg.ACMEEmail, CA: cfg.ACMECA, MaxConnsPerAddr: perIP,
 		Logger: log.With("component", "router"), Metrics: router.NewMetrics()})
 	if err != nil {
 		return nil, fmt.Errorf("--route-addr %s: %w", cfg.RouteAddr, err)

@@ -31,12 +31,26 @@ const UnknownHost = "unknown"
 // The kinds of a router's upstream errors.
 var routerErrorKinds = []string{"dial", "connection", "proxy"}
 
+// The reasons a router refuses a connection: its client address has as many
+// open as the per-address cap allows, or the router has as many as its total
+// cap.
+var routerRefusedReasons = []string{"address", "total"}
+
 // RouterReport is a router's counters since it started, and the expiry of
 // the certificate it serves for each host.
 type RouterReport struct {
 	Requests []RouterRequests `json:"requests"`
 	Upstream []RouterUpstream `json:"upstream"`
 	Certs    []RouterCert     `json:"certs"`
+	// Refused is left out when empty, as it was before there was one.
+	Refused []RouterRefused `json:"refused,omitempty"`
+}
+
+// RouterRefused counts the connections a router closed at accept because
+// they were over one of its caps.
+type RouterRefused struct {
+	Reason string `json:"reason"`
+	Count  uint64 `json:"count"`
 }
 
 // RouterRequests counts a router's requests for one host with one status.
@@ -71,7 +85,7 @@ func validRouterHost(h string) error {
 // server's /metrics unreadable to Prometheus. Whether the hosts are routed
 // is the server's check.
 func (r RouterReport) Validate() error {
-	if n := len(r.Requests) + len(r.Upstream) + len(r.Certs); n > maxRouterSeries {
+	if n := len(r.Requests) + len(r.Upstream) + len(r.Certs) + len(r.Refused); n > maxRouterSeries {
 		return fmt.Errorf("%w: %d series, more than %d", ErrInvalid, n, maxRouterSeries)
 	}
 	type pair struct {
@@ -117,14 +131,25 @@ func (r RouterReport) Validate() error {
 		}
 		certs[x.Host] = true
 	}
+	refused := make(map[string]bool, len(r.Refused))
+	for _, x := range r.Refused {
+		if !slices.Contains(routerRefusedReasons, x.Reason) {
+			return fmt.Errorf("%w: refused connections: reason %q", ErrInvalid, truncate(x.Reason))
+		}
+		if refused[x.Reason] {
+			return fmt.Errorf("%w: connections refused for %s are there twice", ErrInvalid, x.Reason)
+		}
+		refused[x.Reason] = true
+	}
 	return nil
 }
 
 // Routed returns the report with only the hosts in routed, and the unknown
 // host's request counts: what a worker reports for a host the server does
-// not route is dropped, so a worker cannot add series of its choosing.
+// not route is dropped, so a worker cannot add series of its choosing. The
+// refused connections, which have no host, stay.
 func (r RouterReport) Routed(routed map[string]bool) RouterReport {
-	var out RouterReport
+	out := RouterReport{Refused: r.Refused}
 	for _, x := range r.Requests {
 		if routed[x.Host] || x.Host == UnknownHost {
 			out.Requests = append(out.Requests, x)

@@ -15,6 +15,7 @@ func TestRouterReportValidate(t *testing.T) {
 		Requests: []RouterRequests{{Host: "www.example.com", Code: 200, Count: 1}, {Host: UnknownHost, Code: 404, Count: 3}},
 		Upstream: []RouterUpstream{{Host: "www.example.com", Kind: "dial"}, {Host: "www.example.com", Kind: "connection"}, {Host: UnknownHost, Kind: "proxy"}},
 		Certs:    []RouterCert{{Host: "www.example.com", NotAfter: exp}},
+		Refused:  []RouterRefused{{Reason: "address", Count: 4}, {Reason: "total", Count: 1}},
 	}
 	if err := good.Validate(); err != nil {
 		t.Fatal(err)
@@ -36,6 +37,10 @@ func TestRouterReportValidate(t *testing.T) {
 		"twice requests":  {Requests: []RouterRequests{{Host: "a.example.com", Code: 200, Count: 1}, {Host: "a.example.com", Code: 200, Count: 2}}},
 		"twice upstream":  {Upstream: []RouterUpstream{{Host: "a.example.com", Kind: "dial"}, {Host: "a.example.com", Kind: "dial"}}},
 		"twice cert":      {Certs: []RouterCert{{Host: "a.example.com", NotAfter: exp}, {Host: "a.example.com", NotAfter: exp}}},
+		"refused reason":  {Refused: []RouterRefused{{Reason: "slow"}}},
+		"twice refused":   {Refused: []RouterRefused{{Reason: "total", Count: 1}, {Reason: "total", Count: 2}}},
+		"too many with refused": {Requests: make([]RouterRequests, maxRouterSeries),
+			Refused: []RouterRefused{{Reason: "total"}}},
 	} {
 		if err := bad.Validate(); !errors.Is(err, ErrInvalid) {
 			t.Errorf("%s: %v, want ErrInvalid", name, err)
@@ -49,8 +54,13 @@ func TestRouterReportRouted(t *testing.T) {
 		Requests: []RouterRequests{{Host: "a.example.com", Code: 200, Count: 1}, {Host: "b.example.com", Code: 200, Count: 2}, {Host: UnknownHost, Code: 404, Count: 3}},
 		Upstream: []RouterUpstream{{Host: "a.example.com", Kind: "dial", Count: 1}, {Host: "b.example.com", Kind: "dial", Count: 1}, {Host: UnknownHost, Kind: "dial", Count: 1}},
 		Certs:    []RouterCert{{Host: "a.example.com", NotAfter: exp}, {Host: "b.example.com", NotAfter: exp}},
+		Refused:  []RouterRefused{{Reason: "address", Count: 5}},
 	}
 	got := r.Routed(map[string]bool{"a.example.com": true})
+	// Refused connections have no host, and stay.
+	if len(got.Refused) != 1 || got.Refused[0] != (RouterRefused{Reason: "address", Count: 5}) {
+		t.Errorf("refused: %+v", got.Refused)
+	}
 	if len(got.Requests) != 2 || got.Requests[0].Host != "a.example.com" || got.Requests[1].Host != UnknownHost {
 		t.Errorf("requests: %+v", got.Requests)
 	}
@@ -111,6 +121,7 @@ func FuzzDecodeRouterReport(f *testing.F) {
 	f.Add([]byte(`{"requests":[{"host":"unknown","code":404,"count":1}]}`))
 	f.Add([]byte(`{"requests":[{"host":"x\"}","code":200}]}`))
 	f.Add([]byte(`{}`))
+	f.Add([]byte(`{"refused":[{"reason":"address","count":7},{"reason":"total","count":1}]}`))
 	f.Fuzz(func(t *testing.T, data []byte) {
 		var r RouterReport
 		if err := Decode(bytes.NewReader(data), MaxRouterReportBytes, &r); err != nil {
@@ -126,6 +137,11 @@ func FuzzDecodeRouterReport(f *testing.F) {
 		}
 		for _, x := range r.Upstream {
 			if strings.ContainsAny(x.Host, "\"\\\n{}= ") || strings.ContainsAny(x.Kind, "\"\\\n") {
+				t.Fatalf("accepted %+v", x)
+			}
+		}
+		for _, x := range r.Refused {
+			if x.Reason != "address" && x.Reason != "total" {
 				t.Fatalf("accepted %+v", x)
 			}
 		}

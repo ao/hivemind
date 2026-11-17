@@ -246,6 +246,13 @@ func (s *Server) writeRouterMetrics(w *metrics.Writer) {
 			w.Sample("hivemind_router_upstream_errors_total", metrics.L("node", n, "host", x.Host, "kind", x.Kind), float64(x.Count))
 		}
 	}
+	w.Family("hivemind_router_connections_refused_total",
+		"Connections each node's router closed as it accepted them, by node and reason: address (the client's address, or its IPv6 /64, had as many open as the per-address cap) or total (the router had as many open as its total cap).", metrics.TypeCounter)
+	for _, n := range nodes {
+		for _, x := range reports[n].Refused {
+			w.Sample("hivemind_router_connections_refused_total", metrics.L("node", n, "reason", x.Reason), float64(x.Count))
+		}
+	}
 	w.Family("hivemind_router_cert_expiry_timestamp_seconds",
 		"Unix time at which the certificate each node's router serves for the host expires. Hosts without a certificate yet are left out.", metrics.TypeGauge)
 	for _, n := range nodes {

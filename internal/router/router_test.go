@@ -18,6 +18,8 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"net/netip"
+	"os"
 	"path/filepath"
 	"slices"
 	"strings"
@@ -209,6 +211,9 @@ func (tr *testRouter) metrics(t *testing.T) string {
 	}
 	for _, x := range r.Certs {
 		fmt.Fprintf(&b, "hivemind_router_cert_expiry_timestamp_seconds{host=%q} %d\n", x.Host, x.NotAfter.Unix())
+	}
+	for _, x := range r.Refused {
+		fmt.Fprintf(&b, "hivemind_router_connections_refused_total{reason=%q} %d\n", x.Reason, x.Count)
 	}
 	return b.String()
 }
@@ -477,6 +482,187 @@ func TestH2CUpgradeIsDroppedAndWebSocketsWork(t *testing.T) {
 		}
 		rwc.Close()
 	}
+}
+
+// accepted dials addr and reports whether the router kept the connection:
+// one it refuses is closed at once, and a read sees EOF or a reset; one it
+// keeps waits for a request, and a short read times out. A kept connection
+// is returned open; the caller closes it.
+func accepted(t *testing.T, addr string) (net.Conn, bool) {
+	t.Helper()
+	c, err := net.Dial("tcp", addr)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = c.SetReadDeadline(time.Now().Add(300 * time.Millisecond))
+	_, err = c.Read(make([]byte, 1))
+	if errors.Is(err, os.ErrDeadlineExceeded) {
+		_ = c.SetReadDeadline(time.Time{})
+		return c, true
+	}
+	c.Close()
+	return nil, false
+}
+
+// A client address holds at most MaxConnsPerAddr connections over both
+// listeners, and the router at most MaxConns; one more is closed as it is
+// accepted, and counted. A connection that closes makes room.
+func TestConnectionCaps(t *testing.T) {
+	tr := newTestRouterWith(t, Table{"www.example.com": {}}, testOptions{poll: time.Hour,
+		config: func(c *Config) { c.MaxConnsPerAddr = 3 }})
+	var held []net.Conn
+	for _, addr := range []string{tr.rt.HTTPAddr(), tr.rt.HTTPSAddr(), tr.rt.HTTPAddr()} {
+		c, ok := accepted(t, addr)
+		if !ok {
+			t.Fatalf("connection %d of 3 from one address was refused", len(held)+1)
+		}
+		held = append(held, c)
+	}
+	for _, addr := range []string{tr.rt.HTTPAddr(), tr.rt.HTTPSAddr()} {
+		if c, ok := accepted(t, addr); ok {
+			c.Close()
+			t.Fatalf("a 4th connection from one address, to %s, was kept", addr)
+		}
+	}
+	held[0].Close()
+	waitFor(t, func() bool { return tr.rt.limits.open() == 2 })
+	c, ok := accepted(t, tr.rt.HTTPSAddr())
+	if !ok {
+		t.Fatal("a connection was refused after one of the 3 closed")
+	}
+	c.Close()
+	if m := tr.metrics(t); !strings.Contains(m, `hivemind_router_connections_refused_total{reason="address"} 2`) {
+		t.Fatalf("refused connections:\n%s", m)
+	}
+	for _, c := range held[1:] {
+		c.Close()
+	}
+
+	tr = newTestRouterWith(t, Table{"www.example.com": {}}, testOptions{poll: time.Hour,
+		config: func(c *Config) { c.MaxConns, c.MaxConnsPerAddr = 2, -1 }})
+	for _, addr := range []string{tr.rt.HTTPAddr(), tr.rt.HTTPSAddr()} {
+		c, ok := accepted(t, addr)
+		if !ok {
+			t.Fatal("a connection under the total cap was refused")
+		}
+		defer c.Close()
+	}
+	if c, ok := accepted(t, tr.rt.HTTPSAddr()); ok {
+		c.Close()
+		t.Fatal("a 3rd connection with a total cap of 2 was kept")
+	}
+	if m := tr.metrics(t); !strings.Contains(m, `hivemind_router_connections_refused_total{reason="total"} 1`) {
+		t.Fatalf("refused connections:\n%s", m)
+	}
+}
+
+func TestClientKeys(t *testing.T) {
+	for addr, want := range map[string]string{
+		"192.0.2.7:443":                 "192.0.2.7/32",
+		"[::ffff:192.0.2.7]:443":        "192.0.2.7/32",
+		"[2001:db8:1:2:3:4:5:6]:443":    "2001:db8:1:2::/64",
+		"[2001:db8:1:2:ffff::1%eth0]:1": "2001:db8:1:2::/64",
+	} {
+		ap := netip.MustParseAddrPort(addr)
+		if got := clientKey(net.TCPAddrFromAddrPort(ap)).String(); got != want {
+			t.Errorf("%s: %s, want %s", addr, got, want)
+		}
+	}
+}
+
+// An https write that makes no progress for WriteTimeout ends the
+// connection: a client that stops reading is cut off. A reply that is
+// quiet for longer between writes is not, since the limit counts from each
+// write.
+func TestStalledHTTPSWritesEndTheConnection(t *testing.T) {
+	const size = 64 << 20
+	big := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/quiet" {
+			for i := range 3 {
+				_, _ = w.Write([]byte("tick\n"))
+				w.(http.Flusher).Flush()
+				if i < 2 {
+					time.Sleep(500 * time.Millisecond)
+				}
+			}
+			return
+		}
+		w.Header().Set("Content-Length", fmt.Sprint(size))
+		buf := make([]byte, 1<<20)
+		for range size / len(buf) {
+			if _, err := w.Write(buf); err != nil {
+				return
+			}
+		}
+	}))
+	t.Cleanup(big.Close)
+	tr := newTestRouterWith(t, Table{"big.example.com": {big.Listener.Addr().String()}}, testOptions{poll: time.Hour,
+		config: func(c *Config) { c.WriteTimeout = 200 * time.Millisecond }})
+
+	for _, h1 := range []bool{true, false} {
+		c := tr.client(h1)
+		req, _ := http.NewRequest(http.MethodGet, "https://big.example.com/quiet", nil)
+		if resp, _, body := get(t, c, req); resp.StatusCode != http.StatusOK || body != "tick\ntick\ntick\n" {
+			t.Fatalf("h1=%v: a reply quiet for 500 ms between writes: %d %q", h1, resp.StatusCode, body)
+		}
+		c.CloseIdleConnections()
+	}
+
+	conn, err := tls.Dial("tcp", tr.rt.HTTPSAddr(), &tls.Config{RootCAs: tr.pool, ServerName: "big.example.com", NextProtos: []string{"http/1.1"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.Close()
+	if _, err := fmt.Fprintf(conn, "GET / HTTP/1.1\r\nHost: big.example.com\r\n\r\n"); err != nil {
+		t.Fatal(err)
+	}
+	time.Sleep(1500 * time.Millisecond) // reads nothing
+	_ = conn.SetReadDeadline(time.Now().Add(20 * time.Second))
+	n, err := io.Copy(io.Discard, conn)
+	if n >= size || errors.Is(err, os.ErrDeadlineExceeded) {
+		t.Fatalf("a client that read nothing for 1.5 s got %d bytes of a %d-byte reply, then %v; want the connection cut", n, size, err)
+	}
+	t.Logf("a client that read nothing for 1.5 s got %d bytes, then %v", n, err)
+	waitFor(t, func() bool { return tr.rt.limits.open() == 0 })
+}
+
+// An upgraded connection that carries no data either way for
+// UpgradeIdleTimeout is closed; one that carries data stays open.
+func TestIdleUpgradedConnectionsClose(t *testing.T) {
+	const idle = 300 * time.Millisecond
+	tr := newTestRouterWith(t, Table{"www.example.com": {switcher(t, false)}}, testOptions{poll: time.Hour,
+		config: func(c *Config) { c.UpgradeIdleTimeout = idle }})
+	c := tr.client(true)
+	c.Timeout = 0
+	resp := upgrade(t, c, "www.example.com", "websocket")
+	if resp.StatusCode != http.StatusSwitchingProtocols {
+		resp.Body.Close()
+		t.Fatalf("upgrade: %d", resp.StatusCode)
+	}
+	rwc := resp.Body.(io.ReadWriteCloser)
+	defer rwc.Close()
+	buf := make([]byte, 4)
+	for i := range 8 { // 800 ms, past the limit
+		if _, err := rwc.Write([]byte("ping")); err != nil {
+			t.Fatalf("write %d: %v", i, err)
+		}
+		if _, err := io.ReadFull(rwc, buf); err != nil {
+			t.Fatalf("echo %d: %v", i, err)
+		}
+		time.Sleep(idle / 3)
+	}
+	quiet := time.Now()
+	stop := time.AfterFunc(10*time.Second, func() { rwc.Close() })
+	defer stop.Stop()
+	if _, err := rwc.Read(buf); err == nil {
+		t.Fatal("read data from an idle upgraded connection")
+	}
+	if took := time.Since(quiet); took < idle/2 || took > 5*time.Second {
+		t.Fatalf("the idle connection closed after %v, want about %v", took, idle)
+	} else {
+		t.Logf("the idle connection closed %v after the last data", took)
+	}
+	waitFor(t, func() bool { return tr.rt.limits.open() == 0 })
 }
 
 func TestAuthorityHasThePortOnlyWhenNot443(t *testing.T) {

@@ -75,6 +75,7 @@ func TestRouterMetricsAreServed(t *testing.T) {
 	reports.Put("node-w", nodeapi.RouterReport{
 		Requests: []nodeapi.RouterRequests{{Host: "www.example.com", Code: 502, Count: 4}},
 		Upstream: []nodeapi.RouterUpstream{{Host: "www.example.com", Kind: "dial", Count: 2}},
+		Refused:  []nodeapi.RouterRefused{{Reason: "address", Count: 6}},
 	}, now)
 	// A worker that stopped reporting drops out.
 	reports.Put("node-gone", nodeapi.RouterReport{
@@ -87,6 +88,7 @@ func TestRouterMetricsAreServed(t *testing.T) {
 			return nodeapi.RouterReport{
 				Requests: []nodeapi.RouterRequests{{Host: "www.example.com", Code: 200, Count: 3}},
 				Certs:    []nodeapi.RouterCert{{Host: "www.example.com", NotAfter: expiry}},
+				Refused:  []nodeapi.RouterRefused{{Reason: "total", Count: 1}},
 			}
 		}
 	})
@@ -95,6 +97,9 @@ func TestRouterMetricsAreServed(t *testing.T) {
 		`hivemind_router_requests_total{node="` + testNode + `",host="www.example.com",code="200"} 3`,
 		`hivemind_router_requests_total{node="node-w",host="www.example.com",code="502"} 4`,
 		`hivemind_router_upstream_errors_total{node="node-w",host="www.example.com",kind="dial"} 2`,
+		`hivemind_router_connections_refused_total{node="node-w",reason="address"} 6`,
+		`hivemind_router_connections_refused_total{node="` + testNode + `",reason="total"} 1`,
+		"# TYPE hivemind_router_connections_refused_total counter",
 		`hivemind_router_cert_expiry_timestamp_seconds{node="` + testNode + `",host="www.example.com"} ` + strconv.FormatInt(expiry.Unix(), 10),
 		"# TYPE hivemind_router_requests_total counter",
 	} {

@@ -289,6 +289,7 @@ hivemind init [flags]
 | `--route-addr` | string | - | `HIVEMIND_ROUTE_ADDR` | IP address the HTTPS router listens on, such as 0.0.0.0 for every interface; empty means no router on this node |
 | `--route-http-port` | string | `80` | `HIVEMIND_ROUTE_HTTP_PORT` | port of the router's HTTP listener, for ACME HTTP-01 challenges and redirects to https |
 | `--route-https-port` | string | `443` | `HIVEMIND_ROUTE_HTTPS_PORT` | port of the router's HTTPS listener |
+| `--route-max-conns-per-ip` | string | `256` | `HIVEMIND_ROUTE_MAX_CONNS_PER_IP` | most connections the router keeps open from one client IP address (an IPv6 /64), over both its ports; 0 means no limit, for a router behind a proxy that does not pass client addresses |
 
 ### hivemind join
 
@@ -342,6 +343,7 @@ hivemind join <server> [flags]
 | `--route-addr` | string | - | `HIVEMIND_ROUTE_ADDR` | IP address the HTTPS router listens on, such as 0.0.0.0 for every interface; empty means no router on this node |
 | `--route-http-port` | string | `80` | `HIVEMIND_ROUTE_HTTP_PORT` | port of the router's HTTP listener, for ACME HTTP-01 challenges and redirects to https |
 | `--route-https-port` | string | `443` | `HIVEMIND_ROUTE_HTTPS_PORT` | port of the router's HTTPS listener |
+| `--route-max-conns-per-ip` | string | `256` | `HIVEMIND_ROUTE_MAX_CONNS_PER_IP` | most connections the router keeps open from one client IP address (an IPv6 /64), over both its ports; 0 means no limit, for a router behind a proxy that does not pass client addresses |
 | `--token` | string | - | - | join token from hivemind join-token on the server |
 
 ### hivemind join-token
@@ -777,8 +779,10 @@ join. It has no API listener. --role server is the default.
 --route-https-port (443) for the apps' routes. It may be 0.0.0.0, and it is
 the only listener that may: it serves the apps' public traffic, without
 authentication. It needs --acme-email; --acme-ca chooses the CA (Let's
-Encrypt by default). Without --route-addr there is no router. See
-docs/routing.md.
+Encrypt by default). Without --route-addr there is no router. It keeps at
+most --route-max-conns-per-ip (256) connections open from one client
+address; 0 turns that off, for a router behind a proxy that does not pass
+client addresses. See docs/routing.md.
 
 GET /metrics on the API serves Prometheus metrics and needs the admin token.
 --metrics-addr also serves it, and nothing else, on a separate loopback
@@ -812,6 +816,7 @@ hivemind serve [flags]
 | `--route-addr` | string | - | `HIVEMIND_ROUTE_ADDR` | IP address the HTTPS router listens on, such as 0.0.0.0 for every interface; empty means no router on this node |
 | `--route-http-port` | string | `80` | `HIVEMIND_ROUTE_HTTP_PORT` | port of the router's HTTP listener, for ACME HTTP-01 challenges and redirects to https |
 | `--route-https-port` | string | `443` | `HIVEMIND_ROUTE_HTTPS_PORT` | port of the router's HTTPS listener |
+| `--route-max-conns-per-ip` | string | `256` | `HIVEMIND_ROUTE_MAX_CONNS_PER_IP` | most connections the router keeps open from one client IP address (an IPv6 /64), over both its ports; 0 means no limit, for a router behind a proxy that does not pass client addresses |
 
 ### hivemind status
 
