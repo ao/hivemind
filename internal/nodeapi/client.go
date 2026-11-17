@@ -54,6 +54,23 @@ type Client struct {
 // long. It is what closes the connections a ResetConnections leaves behind.
 const idleConnTimeout = 90 * time.Second
 
+// Connection limits to the server. serverUserTimeout fails a connection whose
+// data or keep-alive probes the server's machine has not acknowledged for that
+// long (Linux only; see setUserTimeout), well inside the 15 s lease.
+const (
+	serverDialTimeout = 10 * time.Second
+	serverTLSTimeout  = 10 * time.Second
+	serverKeepAlive   = 15 * time.Second
+	serverUserTimeout = 10 * time.Second
+)
+
+// newTransport is the transport every request to the server goes through.
+func newTransport(tlsCfg *tls.Config) *http.Transport {
+	d := &net.Dialer{Timeout: serverDialTimeout, KeepAlive: serverKeepAlive, Control: setUserTimeout}
+	return &http.Transport{TLSClientConfig: tlsCfg, IdleConnTimeout: idleConnTimeout,
+		DialContext: d.DialContext, TLSHandshakeTimeout: serverTLSTimeout}
+}
+
 // ClientOption configures NewClient.
 type ClientOption func(*Client)
 
@@ -71,7 +88,7 @@ func NewClient(base string, tlsCfg *tls.Config, opts ...ClientOption) (*Client, 
 		return nil, fmt.Errorf("server URL %q must start with https://", base)
 	}
 	tr := &swapTransport{server: newServerState(), clock: &clock{}}
-	tr.cur.Store(&http.Transport{TLSClientConfig: tlsCfg, IdleConnTimeout: idleConnTimeout})
+	tr.cur.Store(newTransport(tlsCfg))
 	c := &Client{base: strings.TrimRight(base, "/"), tr: tr, clock: tr.clock,
 		http: &http.Client{Transport: tr, Timeout: clientTimeout}, stream: &http.Client{Transport: tr}}
 	for _, o := range opts {
