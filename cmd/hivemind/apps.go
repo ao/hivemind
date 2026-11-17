@@ -54,11 +54,18 @@ reads the spec from standard input. A key the spec does not have is refused
 with its line, and the key it is closest to.
 
 deploy returns once the server has stored the spec; the image is pulled and
-the containers started after that. --wait waits until every replica that
-should run is running and ready at the new generation, and has stayed so for
-3 seconds, printing why a replica waits each time the reason changes. After
---timeout (default 5m) it prints the app's status and exits with status 1;
-the spec stays deployed.`,
+the containers started after that. A replica that no node can take, such as
+one whose host port another app publishes on every node, waits as pending,
+and deploy prints a warning on standard error for it, with the reason
+hivemind status shows and the app that holds the port; the exit status is
+unchanged. --wait waits until every replica that should run is running and
+ready at the new generation, and has stayed so for 3 seconds, printing why a
+replica waits each time the reason changes. After --timeout (default 5m) it
+prints the app's status and exits with status 1; the spec stays deployed.
+--wait exits with status 1 at once, with the reason, when a replica has no
+node for a reason that does not change by itself: a host port that a
+running replica holds on every node that could take it, a bind address no
+node has, or more CPU or memory than any node has.`,
 		Args: func(cmd *cobra.Command, args []string) error {
 			if len(args) > 0 && cmd.ArgsLenAtDash() != 0 {
 				return fmt.Errorf("unexpected argument %q: put the container's command after --, as in hivemind deploy --name x --image busybox -- sleep 60", args[0])
@@ -146,6 +153,12 @@ the spec stays deployed.`,
 			printPut(cmd.OutOrStdout(), res)
 		}
 		if wf.wait {
+			if err := stuckPending(res.App.Name, res.Pending, res.PendingCount); err != nil {
+				return err
+			}
+		}
+		warnPending(cmd.ErrOrStderr(), res.App.Name, res.Pending, res.PendingCount)
+		if wf.wait {
 			if err := waitReady(cmd.Context(), c, progress, res.App.Name, res.App.Generation, wf.timeout); err != nil {
 				return err
 			}
@@ -170,6 +183,52 @@ func printPut(out io.Writer, res server.PutResult) {
 	}
 	fmt.Fprintf(out, "%s: %s, generation %d, %d %s\n", res.App.Name, verb, res.App.Generation,
 		res.App.Replicas, plural(res.App.Replicas, "replica", "replicas"))
+}
+
+// stuckPending is the error --wait returns at once, rather than at its
+// timeout, when a write left a replica with no node for a reason that does
+// not change by itself. It is nil when there is none, and from a server
+// older than 2.2, which lists no pending replicas.
+func stuckPending(app string, pending []server.PendingReplica, count int) error {
+	name := termSafe(app)
+	for _, p := range pending {
+		if !p.Stuck {
+			continue
+		}
+		more := ""
+		if count > 1 {
+			more = fmt.Sprintf("; %d replicas have no node, and hivemind status %s shows them", count, name)
+		}
+		return fmt.Errorf("%s: replica %d has no node, and will not get one by itself: %s; the spec stays deployed%s",
+			name, p.Replica, termSafe(p.Reason), more)
+	}
+	return nil
+}
+
+// warnPending prints a warning on w for the replicas a write left with no
+// node, as its reply lists them: a line for each reason, naming its
+// replicas, and one for those past the reply's list. The write stands.
+func warnPending(w io.Writer, app string, pending []server.PendingReplica, count int) {
+	name := termSafe(app)
+	var reasons []string
+	byReason := map[string][]string{}
+	for _, p := range pending {
+		if _, ok := byReason[p.Reason]; !ok {
+			reasons = append(reasons, p.Reason)
+		}
+		byReason[p.Reason] = append(byReason[p.Reason], strconv.Itoa(p.Replica))
+	}
+	for _, r := range reasons {
+		if idx := byReason[r]; len(idx) == 1 {
+			fmt.Fprintf(w, "%s: warning: replica %s has no node: %s\n", name, idx[0], termSafe(r))
+		} else {
+			fmt.Fprintf(w, "%s: warning: replicas %s have no node: %s\n", name, strings.Join(idx, ", "), termSafe(r))
+		}
+	}
+	if more := count - len(pending); more > 0 {
+		fmt.Fprintf(w, "%s: warning: %d more %s no node; hivemind status %s shows them\n",
+			name, more, plural(more, "replica has", "replicas have"), name)
+	}
 }
 
 // readSpecFile decodes one app spec. YAML is a superset of JSON, so one
@@ -559,9 +618,12 @@ func scaleCmd() *cobra.Command {
 		Long: `Set an app's replica count. Scaling keeps the generation: new replicas start
 from the same spec, and scaling down removes the highest-numbered replicas.
 
---wait waits until every replica that should run is running and ready, and
-has stayed so for 3 seconds, as deploy --wait does; after --timeout (default
-5m) it prints the app's status and exits with status 1.`,
+A new replica that no node can take waits as pending, with a warning on
+standard error, as deploy prints it. --wait waits until every replica that
+should run is running and ready, and has stayed so for 3 seconds, as deploy
+--wait does; after --timeout (default 5m) it prints the app's status and
+exits with status 1. Like deploy --wait, it exits with status 1 at once when
+a replica has no node for a reason that does not change by itself.`,
 		Args: cobra.ExactArgs(2),
 	}
 	cf := addClientFlags(cmd)
@@ -578,7 +640,7 @@ has stayed so for 3 seconds, as deploy --wait does; after --timeout (default
 		if err != nil {
 			return err
 		}
-		var v server.AppView
+		var v server.ScaleResult
 		if err := c.call(cmd.Context(), "POST", appPath(args[0], "scale"), server.ScaleRequest{Replicas: n}, &v); err != nil {
 			return err
 		}
@@ -588,6 +650,12 @@ has stayed so for 3 seconds, as deploy --wait does; after --timeout (default
 		} else {
 			fmt.Fprintf(cmd.OutOrStdout(), "%s: %d %s\n", v.Name, v.Replicas, plural(v.Replicas, "replica", "replicas"))
 		}
+		if wf.wait {
+			if err := stuckPending(v.Name, v.Pending, v.PendingCount); err != nil {
+				return err
+			}
+		}
+		warnPending(cmd.ErrOrStderr(), v.Name, v.Pending, v.PendingCount)
 		if wf.wait {
 			if err := waitReady(cmd.Context(), c, progress, v.Name, v.Generation, wf.timeout); err != nil {
 				return err

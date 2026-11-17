@@ -81,7 +81,9 @@ func composeDeployCmd() *cobra.Command {
 		Use:   "deploy <file>",
 		Short: "Create or update the apps in a compose file",
 		Long: `Convert a compose file, check every app, and then create or update each one
-as hivemind deploy -f does, in name order, printing a line for each.
+as hivemind deploy -f does, in name order, printing a line for each, and a
+warning on standard error for each replica that no node can take, as deploy
+does.
 
 Each app records the compose project that deployed it: the file's top-level
 name, or else the name of the file's directory, as Docker Compose takes it
@@ -137,6 +139,7 @@ so an app that another deploy took in the meantime is still refused.`,
 			if !cf.json {
 				printPut(cmd.OutOrStdout(), r)
 			}
+			warnPending(cmd.ErrOrStderr(), r.App.Name, r.Pending, r.PendingCount)
 		}
 		if cf.json {
 			return printJSON(cmd.OutOrStdout(), results)

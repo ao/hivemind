@@ -156,7 +156,9 @@ hivemind compose delete <file> [flags]
 #### hivemind compose deploy
 
 Convert a compose file, check every app, and then create or update each one
-as hivemind deploy -f does, in name order, printing a line for each.
+as hivemind deploy -f does, in name order, printing a line for each, and a
+warning on standard error for each replica that no node can take, as deploy
+does.
 
 Each app records the compose project that deployed it: the file's top-level
 name, or else the name of the file's directory, as Docker Compose takes it
@@ -224,11 +226,18 @@ reads the spec from standard input. A key the spec does not have is refused
 with its line, and the key it is closest to.
 
 deploy returns once the server has stored the spec; the image is pulled and
-the containers started after that. --wait waits until every replica that
-should run is running and ready at the new generation, and has stayed so for
-3 seconds, printing why a replica waits each time the reason changes. After
---timeout (default 5m) it prints the app's status and exits with status 1;
-the spec stays deployed.
+the containers started after that. A replica that no node can take, such as
+one whose host port another app publishes on every node, waits as pending,
+and deploy prints a warning on standard error for it, with the reason
+hivemind status shows and the app that holds the port; the exit status is
+unchanged. --wait waits until every replica that should run is running and
+ready at the new generation, and has stayed so for 3 seconds, printing why a
+replica waits each time the reason changes. After --timeout (default 5m) it
+prints the app's status and exits with status 1; the spec stays deployed.
+--wait exits with status 1 at once, with the reason, when a replica has no
+node for a reason that does not change by itself: a host port that a
+running replica holds on every node that could take it, a bind address no
+node has, or more CPU or memory than any node has.
 
 ```
 hivemind deploy [-- command [arg...]] [flags]
@@ -770,9 +779,12 @@ hivemind routes [flags]
 Set an app's replica count. Scaling keeps the generation: new replicas start
 from the same spec, and scaling down removes the highest-numbered replicas.
 
---wait waits until every replica that should run is running and ready, and
-has stayed so for 3 seconds, as deploy --wait does; after --timeout (default
-5m) it prints the app's status and exits with status 1.
+A new replica that no node can take waits as pending, with a warning on
+standard error, as deploy prints it. --wait waits until every replica that
+should run is running and ready, and has stayed so for 3 seconds, as deploy
+--wait does; after --timeout (default 5m) it prints the app's status and
+exits with status 1. Like deploy --wait, it exits with status 1 at once when
+a replica has no node for a reason that does not change by itself.
 
 ```
 hivemind scale <app> <replicas> [flags]

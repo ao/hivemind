@@ -237,8 +237,11 @@ func TestComposeDeployAndDelete(t *testing.T) {
 	if want := "db: created, generation 1, 1 replica\nweb: created, generation 1, 2 replicas\n"; out != want {
 		t.Fatalf("deploy:\n%s\nwant:\n%s", out, want)
 	}
-	if errOut != testNote {
-		t.Errorf("deploy stderr: %q", errOut)
+	// The one node takes one replica of web: the second one's host ports are
+	// the first one's.
+	if want := testNote + "web: warning: replica 1 has no node: host port 0.0.0.0:8443/tcp is in use on every eligible node; " +
+		"held by another replica of web\n"; errOut != want {
+		t.Errorf("deploy stderr:\n%q\nwant:\n%q", errOut, want)
 	}
 	web, err := st.GetApp(ctx, "web")
 	if err != nil {
