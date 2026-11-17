@@ -58,6 +58,27 @@ REGISTRY=${REGISTRY:-registry.soak.test}
 # The files prepare_node installs on each node, fetched by outside.sh.
 OUT_FILES=$SOAK_DIR/outside-files
 
+# The server's DNS name (the third soak). With SERVER_NAME set, the server
+# runs serve --advertise $SERVER_NAME --cluster-addr <its private address>,
+# and the workers join the name. One line in /etc/hosts on every machine,
+# "IP NAME # soak-server", stands in for the name's DNS record; the IP it
+# names is in $DNS_FILE (the server's address until dns_set changes it).
+# "ip" in $ADV_FILE makes the server advertise its address instead, for the
+# IP-joined half of that soak.
+SERVER_NAME=${SERVER_NAME:-}
+DNS_FILE=$SOAK_DIR/server-dns
+ADV_FILE=$SOAK_DIR/advertise
+advertise_mode() {
+	if [ -n "$SERVER_NAME" ] && [ "$(cat "$ADV_FILE" 2>/dev/null)" != ip ]; then echo name; else echo ip; fi
+}
+# server_addr: the address a worker joins, or set-server is given.
+server_addr() { if [ "$(advertise_mode)" = name ]; then echo "$SERVER_NAME"; else echo "$SERVER_IP"; fi; }
+dns_ip() { cat "$DNS_FILE" 2>/dev/null || echo "$SERVER_IP"; }
+# dns_line NAME IP: the server name's hosts line on machine NAME.
+dns_line() {
+	on "$1" "sudo sed -i '/ # soak-server\$/d' /etc/hosts && echo '$2 $SERVER_NAME # soak-server' | sudo tee -a /etc/hosts >/dev/null"
+}
+
 # The connection to each node is shared (ControlMaster), so a probe costs one
 # round trip. ServerAlive gives up on a dead master after about 4 s.
 SSH_OPTS=(-i "$SSH_KEY" -o IdentitiesOnly=yes -o BatchMode=yes -o StrictHostKeyChecking=accept-new
@@ -88,8 +109,17 @@ on() {
 	local ip
 	ip=$(ip_of "$1") || return 1
 	shift
+	on_ip "$ip" "$@"
+}
+# on_ip IP COMMAND: the same, for a machine by its address.
+on_ip() {
+	local ip=$1
+	shift
 	timeout "${SSH_TIMEOUT:-10}" ssh "${SSH_OPTS[@]}" -o ConnectTimeout="${SSH_CT:-3}" "$SSH_USER@$ip" "$@"
 }
+
+# port22_ip IP: port22 for a machine by its address.
+port22_ip() { timeout 1 bash -c "exec 3<>/dev/tcp/$1/22" 2>/dev/null; }
 
 # forget_host NAME: drop NAME's host key and shared connection, for a machine
 # that was replaced.
@@ -241,6 +271,8 @@ bg_start() {
 	setsid nohup "$@" >>"$SOAK_DIR/$name.out" 2>&1 </dev/null &
 	echo $! >"$SOAK_DIR/$name.pid"
 	ev bg "start $name pid=$!"
+	# not a job of this shell: a later bare wait must not wait for it
+	disown "$!" 2>/dev/null || true
 }
 
 bg_stop() {
@@ -262,13 +294,22 @@ Wants=network-online.target docker.service
 After=network-online.target docker.service
 
 [Service]
-ExecStart=/usr/local/bin/hivemind serve --advertise $1$(route_flags "$1")
+ExecStart=/usr/local/bin/hivemind serve $(advertise_flags "$1")$(route_flags "$1")
 Restart=on-failure
 RestartSec=5
 
 [Install]
 WantedBy=multi-user.target
 EOF
+}
+
+# advertise_flags IP: serve's address flags for a server at IP.
+advertise_flags() {
+	if [ "$(advertise_mode)" = name ]; then
+		printf -- '--advertise %s --cluster-addr %s' "$SERVER_NAME" "$1"
+	else
+		printf -- '--advertise %s' "$1"
+	fi
 }
 
 # route_flags IP: the router's flags for a node at IP, with SOAK_ROUTES=1.
@@ -340,6 +381,12 @@ prepare_node() {
 	[ -n "$OUT_IP" ] || die "prepare_node: no outside machine in $OUTSIDE_FILE"
 	[ -s "$OUT_FILES/pebble-minica.pem" ] && [ -s "$OUT_FILES/registry-ca.crt" ] || die "prepare_node: run outside.sh setup first"
 	on "$n" "sudo sed -i '/ # soak-outside\$/d' /etc/hosts && echo '$OUT_IP pebble $REGISTRY # soak-outside' | sudo tee -a /etc/hosts >/dev/null" || return 1
+	# The server's name resolves to what the record says now, which on a new
+	# server machine is still the old address.
+	if [ -n "$SERVER_NAME" ]; then
+		[ -s "$DNS_FILE" ] || echo "$SERVER_IP" >"$DNS_FILE"
+		dns_line "$n" "$(dns_ip)" || return 1
+	fi
 	on "$n" "sudo tee /etc/pki/ca-trust/source/anchors/pebble-minica.pem >/dev/null && sudo update-ca-trust" <"$OUT_FILES/pebble-minica.pem" || return 1
 	on "$n" "sudo install -d /etc/docker/certs.d/$REGISTRY && sudo tee /etc/docker/certs.d/$REGISTRY/ca.crt >/dev/null" <"$OUT_FILES/registry-ca.crt" || return 1
 	on "$n" "curl -fsS -m 5 -o /dev/null https://pebble:14000/dir" || die "$n: Pebble's ACME directory does not answer, or is not trusted"
@@ -363,7 +410,7 @@ join_worker() {
 	tok=$(hm "$SERVER" join-token --ttl 1h 2>/dev/null) || die "join-token on $SERVER"
 	note "joining $n"
 	# The token goes on stdin, so it is in no sudo log; join takes it only as a flag.
-	on "$n" "sudo sh -c 'read -r T; nohup $HM join $SERVER_IP --token \"\$T\"$(route_flags "$ip") >/var/log/hivemind-join.log 2>&1 </dev/null &'" <<<"$tok"
+	on "$n" "sudo sh -c 'read -r T; nohup $HM join $(server_addr) --token \"\$T\"$(route_flags "$ip") >/var/log/hivemind-join.log 2>&1 </dev/null &'" <<<"$tok"
 	wait_for 60 on "$n" "sudo test -s $DATA/node.json" || die "$n did not join: $(on "$n" 'sudo tail -n 5 /var/log/hivemind-join.log' 2>&1)"
 	# join keeps running as the agent. Stop it, and let systemd run the worker.
 	on "$n" "sudo pkill -TERM -f '^$HM join' ; for i in \$(seq 1 20); do pgrep -f '^$HM join' >/dev/null || exit 0; sleep 0.5; done; exit 1" ||

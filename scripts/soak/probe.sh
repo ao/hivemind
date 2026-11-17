@@ -12,7 +12,9 @@
 #     value on 127.0.0.1:6379, both run on that node over ssh. While the API
 #     is down, the last assignment it gave is used.
 # Every 60 s, one "res" line per node (the hivemind process's RSS, threads,
-# CPU time, open fds, start time; on the server the store's files), fifteen
+# CPU time, open fds, start time; on the server the store's files; Docker's
+# dangling volumes, and the largest json-file log of a hivemind container
+# and the most such files one has), fifteen
 # "lat" lines (five each of GET /v1/status, /v1/nodes and /v1/apps on the
 # server: curl's time_total and the reply's size), and one "metrics" line
 # (whether /metrics has go_goroutines, and its value).
@@ -45,7 +47,12 @@ for f in hivemind.db hivemind.db-wal hivemind.db-shm; do
 	[ -f /var/lib/hivemind/$f ] && st="$st ${f#hivemind.}_bytes=$(stat -c %s /var/lib/hivemind/$f)"
 done
 cs=$(docker ps -q --filter label=hivemind.app | wc -l)
-echo "pid=$pid rss_kb=$rss threads=$thr utime=${12} stime=${13} starttime=${20} clk_tck=$(getconf CLK_TCK) fds=$fds$st containers=$cs load1=$la memavail_kb=$ma"
+# Volumes no container uses (anonymous volumes left behind), and the json-file
+# logs of hivemind's containers: the most files one container has, and the
+# largest file.
+dv=$(docker volume ls -qf dangling=true | wc -l)
+lg=$(for c in $(docker ps -aq --no-trunc --filter label=hivemind.app); do find /var/lib/docker/containers/$c -maxdepth 1 -name '*-json.log*' -printf '%s\n' 2>/dev/null | awk '{ n++; if ($1 > m) m = $1 } END { printf "%d %d\n", n, m }'; done | awk '{ if ($1 > f) f = $1; if ($2 > m) m = $2 } END { printf "logfiles_max=%d logbytes_max=%d", f, m }')
+echo "pid=$pid rss_kb=$rss threads=$thr utime=${12} stime=${13} starttime=${20} clk_tck=$(getconf CLK_TCK) fds=$fds$st containers=$cs dangling_volumes=$dv $lg load1=$la memavail_kb=$ma"
 EOF
 
 read -r -d '' REMOTE_LAT <<'EOF' || true
@@ -58,7 +65,9 @@ for r in status nodes apps; do
 done
 if m=$(cfg | curl -sS -K - -m 5 http://127.0.0.1:4483/metrics 2>/dev/null); then
 	g=$(printf '%s\n' "$m" | awk '$1 == "go_goroutines" { print $2 }')
-	echo "metrics lines=$(printf '%s\n' "$m" | wc -l) go_goroutines=${g:-absent}"
+	# the nodes whose routers have series, by the node label
+	rn=$(printf '%s\n' "$m" | awk -F'node="' '/^hivemind_router_requests_total\{/ { split($2, a, "\""); if (!(a[1] in n)) { n[a[1]] = 1; c++ } } END { printf "%d", c }')
+	echo "metrics lines=$(printf '%s\n' "$m" | wc -l) go_goroutines=${g:-absent} router_nodes=${rn:-0}"
 else
 	echo "metrics fail"
 fi
@@ -136,7 +145,7 @@ resources_once() {
 	if out=$(on "$SERVER" "sudo bash -s" <<<"$REMOTE_LAT" 2>/dev/null); then
 		while read -r a b c d; do
 			case "$a" in
-			metrics) ev metrics "$b $c" ;;
+			metrics) ev metrics "$b $c $d" ;;
 			fail) ev lat "fail route=/v1/$c" ;;
 			*) ev lat "code=$a s=$b route=/v1/$c bytes=$d" ;;
 			esac

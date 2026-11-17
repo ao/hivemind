@@ -8,6 +8,11 @@
 #   outside.sh login          hivemind registry login on the server
 #   outside.sh wait-served S  until every router serves every host (S seconds)
 #   outside.sh client-start   the request streams and the certificate watcher
+#   outside.sh client-add IP  streams to a new router at IP
+#   outside.sh client-drop IP stop the streams to the router at IP
+#   outside.sh chall-update   the routed hosts' DNS answers: every node now listed
+#   outside.sh scratch-start  another cluster's server on the outside machine
+#   outside.sh scratch-stop
 #   outside.sh client-stop
 #   outside.sh client-status  requests and failures so far, per stream
 #   outside.sh fetch          the client logs, the certificate log and
@@ -208,6 +213,58 @@ client_start() {
 	ev client "start streams=$((${#IPS[@]} * $(wc -w <<<"$HOSTS"))) hosts=$HOSTS routers=${IPS[*]} curl=\"$(out 'curl --version | head -n 1')\""
 }
 
+# client_add IP: streams to the router at IP (a new machine), and the
+# certificate watcher started again over every node of the list.
+client_add() {
+	local ip=$1 h
+	for h in $HOSTS; do
+		out "sudo setsid nohup $CDIR/stream.sh $ip $h >/dev/null 2>&1 </dev/null &"
+	done
+	certwatch_restart
+	ev client "add router=$ip streams=$(wc -w <<<"$HOSTS")"
+}
+
+# client_drop IP: stop the streams to the router at IP (a machine that is gone).
+client_drop() {
+	local ip=$1
+	out "sudo pkill -f '/var/lib/soak-client/[s]tream.sh $ip '; sleep 0.5; sudo pkill -f '[-]-resolve [^ ]*:443:$ip '; true"
+	certwatch_restart
+	ev client "drop router=$ip"
+}
+
+certwatch_restart() {
+	out "sudo pkill -f '/var/lib/soak-client/[c]ertwatch.sh'; sudo setsid nohup $CDIR/certwatch.sh '$HOSTS' '${IPS[*]}' >/dev/null 2>&1 </dev/null &"
+}
+
+# chall_update: challtestsrv answers each routed host with the nodes of the
+# list now, as the hosts' DNS records would be changed for a new machine.
+chall_update() {
+	local h addrs
+	addrs=$(printf '"%s",' "${IPS[@]}")
+	for h in $HOSTS; do
+		out "curl -fsS -d '{\"host\":\"$h\",\"addresses\":[${addrs%,}]}' http://127.0.0.1:8055/add-a" >/dev/null || die "challtestsrv did not take $h"
+	done
+	ev outside "challtestsrv $HOSTS -> ${IPS[*]}"
+}
+
+# scratch_start: another cluster's server on the outside machine, for
+# set-server to be refused by: init in its own data directory, serve on the
+# outside machine's private address, the API on loopback, no router.
+SCRATCH=/var/lib/hivemind-scratch
+scratch_start() {
+	install_bin "$OUT_NAME"
+	out "sudo rm -rf $SCRATCH && sudo $HM init --data-dir $SCRATCH >/dev/null &&
+		sudo sh -c 'nohup $HM serve --data-dir $SCRATCH --advertise $OUT_IP >/var/log/hivemind-scratch.log 2>&1 </dev/null &'" ||
+		die "scratch init/serve on $OUT_NAME"
+	wait_for 30 out "timeout 1 bash -c 'exec 3<>/dev/tcp/$OUT_IP/4484'" || die "the scratch server does not listen on $OUT_IP:4484: $(out "tail -n 5 /var/log/hivemind-scratch.log")"
+	ev outside "scratch cluster serving on $OUT_IP:4484 ($(out "sudo ss -ltnH | awk '{ print \$4 }' | grep -E ':448[345]\$' | tr '\n' ' '"))"
+}
+
+scratch_stop() {
+	out "sudo pkill -TERM -f '^$HM serve --data-dir $SCRATCH'; sleep 2; ids=\$(sudo docker ps -aq --filter label=hivemind.app); [ -z \"\$ids\" ] || sudo docker rm -f \$ids >/dev/null; sudo rm -rf $SCRATCH"
+	ev outside "scratch cluster stopped and removed"
+}
+
 client_stop() {
 	# The brackets keep each pattern from matching the shell that runs pkill.
 	out "sudo pkill -f '/var/lib/soak-client/[s]tream.sh|/var/lib/soak-client/[c]ertwatch.sh'; sleep 0.5; sudo pkill -f '[-]-cacert /var/lib/soak-client/root.pem'; true"
@@ -233,11 +290,16 @@ setup) setup ;;
 login) login ;;
 wait-served) wait_served "$@" ;;
 client-start) client_start ;;
+client-add) client_add "$@" ;;
+client-drop) client_drop "$@" ;;
+chall-update) chall_update ;;
+scratch-start) scratch_start ;;
+scratch-stop) scratch_stop ;;
 client-stop) client_stop ;;
 client-status) client_status ;;
 fetch) fetch ;;
 *)
-	sed -n '2,15p' "$0"
+	sed -n '2,20p' "$0"
 	exit 2
 	;;
 esac

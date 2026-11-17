@@ -1,0 +1,27 @@
+lose-server-name: power-off request to API down (1 s watcher)|scenario lose-server-name begin|event lose-server-name .* fault poweroff|watch api down
+lose-server-name: launch request to new machine ready (EC2, boot, Docker)|scenario lose-server-name begin|event lose-server-name .* fault launch|event lose-server-name machine-ready
+lose-server-name: new machine ready to API up (binary, hosts, CAs, restore, start)|scenario lose-server-name begin|event lose-server-name machine-ready|event lose-server-name api-up
+lose-server-name: API down to API up (outage)|scenario lose-server-name begin|watch api down|event lose-server-name api-up
+lose-server-name: API up to the name's record changed on every machine|scenario lose-server-name begin|event lose-server-name api-up|event dns-update hivemind-server.soak.test .* end
+lose-server-name: record changed to hivemind-soakd-2 ready|scenario lose-server-name begin|event dns-update hivemind-server.soak.test .* end|watch node hivemind-soakd-2 ready
+lose-server-name: record changed to hivemind-soakd-4 ready|scenario lose-server-name begin|event dns-update hivemind-server.soak.test .* end|watch node hivemind-soakd-4 ready
+lose-server-name: record changed to hivemind-soakd-3 ready|scenario lose-server-name begin|event dns-update hivemind-server.soak.test .* end|watch node hivemind-soakd-3 ready
+lose-server-name: record changed to converged, every replica running|scenario lose-server-name begin|event dns-update hivemind-server.soak.test .* end|event lose-server-name converged-yes
+lose-server-ip: power-off request to API down (1 s watcher)|scenario lose-server-ip begin|event lose-server-ip .* fault poweroff|watch api down
+lose-server-ip: launch request to new machine ready (EC2, boot, Docker)|scenario lose-server-ip begin|event lose-server-ip .* fault launch|event lose-server-ip machine-ready
+lose-server-ip: new machine ready to API up (binary, hosts, CAs, restore, start)|scenario lose-server-ip begin|event lose-server-ip machine-ready|event lose-server-ip api-up
+lose-server-ip: API down to API up (outage)|scenario lose-server-ip begin|watch api down|event lose-server-ip api-up
+lose-server-ip: API up to set-server done on the last worker|scenario lose-server-ip begin|event lose-server-ip api-up|event set-server hivemind-soakd-4 end
+lose-server-ip: API up to hivemind-soakd-2 ready|scenario lose-server-ip begin|event lose-server-ip api-up|watch node hivemind-soakd-2 ready
+lose-server-ip: API up to hivemind-soakd-3 ready|scenario lose-server-ip begin|event lose-server-ip api-up|watch node hivemind-soakd-3 ready
+lose-server-ip: API up to hivemind-soakd-4 ready|scenario lose-server-ip begin|event lose-server-ip api-up|watch node hivemind-soakd-4 ready
+lose-server-ip: API up to converged, every replica running|scenario lose-server-ip begin|event lose-server-ip api-up|event lose-server-ip converged-yes
+kill-worker: power-off request to port 22 closed|scenario kill-worker begin|event kill-worker .* fault poweroff|watch port22 hivemind-soakd-4 down
+kill-worker: port 22 closed to node lost|scenario kill-worker begin|watch port22 hivemind-soakd-4 down|watch node hivemind-soakd-4 lost
+kill-worker: node lost to its replicas running elsewhere, converged|scenario kill-worker begin|watch node hivemind-soakd-4 lost|event kill-worker .* replicas-elsewhere
+kill-worker: port 22 closed to its router series gone from /metrics (5 s polls)|scenario kill-worker begin|watch port22 hivemind-soakd-4 down|event metrics-nodes hivemind-soakd-2 hivemind-soakd-3 hivemind-soakd-7 $
+kill-worker: start request to port 22 open|scenario kill-worker begin|event kill-worker .* fault start|watch port22 hivemind-soakd-4 up
+kill-worker: start request to node ready|scenario kill-worker begin|event kill-worker .* fault start|watch node hivemind-soakd-4 ready
+kill-worker: start request to old containers removed|scenario kill-worker begin|event kill-worker .* fault start|event kill-worker .* old-containers-removed
+kill-worker: node ready to its router series back in /metrics|scenario kill-worker begin|watch node hivemind-soakd-4 ready|event metrics-nodes hivemind-soakd-2 hivemind-soakd-3 hivemind-soakd-4 hivemind-soakd-7
+drain-worker: drain to its replicas running elsewhere, converged|scenario drain-worker begin|event drain-worker .* fault drain|event drain-worker converged-yes

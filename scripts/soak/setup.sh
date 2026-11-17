@@ -36,6 +36,11 @@
 #     redis without a port);
 #   - it waits until every router serves both hosts.
 #
+# With SERVER_NAME set (the third soak), the server advertises that name
+# (--advertise NAME --cluster-addr <its address>), the workers join the name,
+# and a line in /etc/hosts on every machine, the outside one included, stands
+# in for its DNS record (lib.sh).
+#
 # It logs the machines' versions and every TCP listener, and fails if a
 # hivemind or app port listens on a wildcard address.
 set -euo pipefail
@@ -128,6 +133,8 @@ main() {
 	if [ "$SOAK_ROUTES" = 1 ]; then
 		for n in "${NAMES[@]}"; do prepare_node "$n"; done
 	fi
+	# the server's name, on the outside machine too
+	if [ -n "$SERVER_NAME" ] && [ -n "$OUT_NAME" ]; then dns_line "$OUT_NAME" "$(dns_ip)"; fi
 	install_server
 	for ((i = 1; i < ${#NAMES[@]}; i++)); do join_worker "${NAMES[$i]}"; done
 	write_ids
@@ -157,7 +164,14 @@ main() {
 	ev kv "write node=$n key=soak:canary value=$val"
 	for n in "${NAMES[@]}"; do
 		ev images "$n $(on "$n" "docker images --digests --format '{{.Repository}}:{{.Tag}}@{{.Digest}}'" | tr '\n' ' ')"
+		# the log options the agent gave each container, and Docker's default driver
+		ev logconfig "$n driver=$(on "$n" "docker info --format '{{.LoggingDriver}}'") $(on "$n" "ids=\$(docker ps -q --filter label=hivemind.app); [ -z \"\$ids\" ] || docker inspect -f '{{index .Config.Labels \"hivemind.app\"}}:{{.HostConfig.LogConfig.Type}}:{{.HostConfig.LogConfig.Config}}' \$ids" | tr ' \n' '_ ')"
+		ev volumes "$n dangling=$(on "$n" "docker volume ls -qf dangling=true | wc -l") all=$(on "$n" "docker volume ls -q | tr '\n' ','")"
 	done
+	# compose must refuse a file that reads a HIVEMIND_ variable
+	n=$(printf 'services:\n  leak:\n    image: busybox:stable\n    environment:\n      T: ${HIVEMIND_TOKEN:-x}\n' | hm "$SERVER" "compose convert -" 2>&1) &&
+		die "compose convert took a file that reads HIVEMIND_TOKEN: $n"
+	ev setup "compose refuses HIVEMIND_: $(tr '\n' ';' <<<"$n" | cut -c1-200)"
 	check_listeners
 	ev setup "end: converged; $(awk -F'\t' '$1 == "R" { printf "%s|%s@%s ", $2, $3, $4 }' "$SOAK_DIR/setup.tsv")"
 	note "setup done"
