@@ -51,7 +51,7 @@ var serviceReasons = map[string]string{
 	"user":            "the container runs as the image's user: set it in the image",
 	"working_dir":     "the container starts in the image's working directory: set it in the image",
 	"stop_signal":     "hivemind stops a container as docker stop does, with the image's stop signal",
-	"logging":         "hivemind uses the engine's default log driver",
+	"logging":         "hivemind uses the engine's default log driver, and keeps a json-file log to 5 files of 10 MB",
 	"pull_policy":     "hivemind pulls an image when the node does not have it",
 }
 

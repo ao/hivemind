@@ -76,6 +76,33 @@ func writeJSON(w http.ResponseWriter, status int, v any) {
 	_ = json.NewEncoder(w).Encode(v)
 }
 
+// withInfo answers GET /info as a daemon whose default log driver is
+// driver, as Create asks it, and passes every other request to h.
+func withInfo(driver string, h handler) handler {
+	return func(w http.ResponseWriter, ex exchange) {
+		if ex.Method == http.MethodGet && ex.Path == "/info" {
+			writeJSON(w, http.StatusOK, map[string]any{"NCPU": 2, "MemTotal": 1 << 30, "LoggingDriver": driver})
+			return
+		}
+		h(w, ex)
+	}
+}
+
+// created returns the one create request the fake received.
+func (f *fakeDaemon) created(t *testing.T) exchange {
+	t.Helper()
+	var out []exchange
+	for _, ex := range f.requests() {
+		if ex.Path == "/containers/create" {
+			out = append(out, ex)
+		}
+	}
+	if len(out) != 1 {
+		t.Fatalf("%d create requests, want 1", len(out))
+	}
+	return out[0]
+}
+
 func requireIs(t *testing.T, err, want error) {
 	t.Helper()
 	if !errors.Is(err, want) {
@@ -266,9 +293,9 @@ func TestPullRejectsBadReferenceWithoutRequest(t *testing.T) {
 }
 
 func TestCreateRequestBody(t *testing.T) {
-	c, fd := newFake(t, func(w http.ResponseWriter, ex exchange) {
+	c, fd := newFake(t, withInfo("journald", func(w http.ResponseWriter, ex exchange) {
 		writeJSON(w, http.StatusCreated, map[string]any{"Id": "c0ffee", "Warnings": []string{}})
-	})
+	}))
 	id, err := c.Create(context.Background(), runtime.ContainerConfig{
 		Name:    "web-1-2",
 		Image:   "nginx",
@@ -288,9 +315,11 @@ func TestCreateRequestBody(t *testing.T) {
 		t.Fatalf("id = %q", id)
 	}
 	reqs := fd.requests()
-	if len(reqs) != 1 || reqs[0].Method != http.MethodPost || reqs[0].Path != "/containers/create" {
-		t.Fatalf("requests = %+v", reqs)
+	if len(reqs) != 2 || reqs[0].Method != http.MethodGet || reqs[0].Path != "/info" ||
+		reqs[1].Method != http.MethodPost || reqs[1].Path != "/containers/create" {
+		t.Fatalf("requests = %+v, want GET /info and POST /containers/create", reqs)
 	}
+	reqs = reqs[1:]
 	if got := reqs[0].Query.Get("name"); got != "web-1-2" {
 		t.Errorf("name = %q", got)
 	}
@@ -309,6 +338,7 @@ func TestCreateRequestBody(t *testing.T) {
 				VolumeOptions        struct{ Labels map[string]string }
 			}
 			RestartPolicy struct{ Name string }
+			LogConfig     *struct{ Type string }
 		}
 	}
 	if err := json.Unmarshal(reqs[0].Body, &body); err != nil {
@@ -338,6 +368,7 @@ func TestCreateRequestBody(t *testing.T) {
 			body.HostConfig.Mounts[0].VolumeOptions.Labels[runtime.LabelApp] == "web" &&
 			body.HostConfig.Mounts[0].VolumeOptions.Labels[runtime.LabelVolume] == "data"},
 		{"restart policy no", body.HostConfig.RestartPolicy.Name == "no"},
+		{"no log config for a driver other than json-file", body.HostConfig.LogConfig == nil},
 	}
 	for _, ck := range checks {
 		if !ck.ok {
@@ -365,9 +396,9 @@ func TestCreateResourceLimits(t *testing.T) {
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			c, fd := newFake(t, func(w http.ResponseWriter, ex exchange) {
+			c, fd := newFake(t, withInfo("json-file", func(w http.ResponseWriter, ex exchange) {
 				writeJSON(w, http.StatusCreated, map[string]any{"Id": "c0ffee"})
-			})
+			}))
 			_, err := c.Create(context.Background(), runtime.ContainerConfig{
 				Name: "web", Image: "nginx", App: "web", CPU: tc.cpu, Memory: tc.memory,
 			})
@@ -375,14 +406,14 @@ func TestCreateResourceLimits(t *testing.T) {
 			var body struct {
 				HostConfig map[string]json.RawMessage
 			}
-			if err := json.Unmarshal(fd.requests()[0].Body, &body); err != nil {
+			if err := json.Unmarshal(fd.created(t).Body, &body); err != nil {
 				t.Fatal(err)
 			}
 			for _, k := range []string{"NanoCpus", "Memory", "MemorySwap"} {
 				raw, present := body.HostConfig[k]
 				want, wantPresent := tc.want[k]
 				if present != wantPresent {
-					t.Errorf("%s present = %v, want %v: %s", k, present, wantPresent, fd.requests()[0].Body)
+					t.Errorf("%s present = %v, want %v: %s", k, present, wantPresent, fd.created(t).Body)
 					continue
 				}
 				if !present {
@@ -473,10 +504,10 @@ func TestCreateErrors(t *testing.T) {
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			c, fd := newFake(t, func(w http.ResponseWriter, ex exchange) {
+			c, fd := newFake(t, withInfo("json-file", func(w http.ResponseWriter, ex exchange) {
 				w.WriteHeader(tc.status)
 				_, _ = io.WriteString(w, tc.body)
-			})
+			}))
 			cfg := valid
 			if tc.cfg != nil {
 				cfg = tc.cfg(cfg)
@@ -690,11 +721,11 @@ func TestListFiltersByLabel(t *testing.T) {
 
 func TestInfoParses(t *testing.T) {
 	c, _ := newFake(t, func(w http.ResponseWriter, ex exchange) {
-		writeJSON(w, http.StatusOK, map[string]any{"NCPU": 4, "MemTotal": int64(8589934592), "ServerVersion": "29.0.1"})
+		writeJSON(w, http.StatusOK, map[string]any{"NCPU": 4, "MemTotal": int64(8589934592), "ServerVersion": "29.0.1", "LoggingDriver": "json-file"})
 	})
 	info, err := c.Info(context.Background())
 	requireNoErr(t, err)
-	if info.NCPU != 4 || info.MemTotal != 8589934592 || info.ServerVersion != "29.0.1" {
+	if info.NCPU != 4 || info.MemTotal != 8589934592 || info.ServerVersion != "29.0.1" || info.LogDriver != "json-file" {
 		t.Fatalf("info = %+v", info)
 	}
 }

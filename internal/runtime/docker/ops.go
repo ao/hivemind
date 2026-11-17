@@ -20,7 +20,8 @@ import (
 	"github.com/ao/hivemind/internal/spec"
 )
 
-// Info returns the daemon's CPU count and memory.
+// Info returns the daemon's CPU count, memory, version and default log
+// driver.
 func (c *Client) Info(ctx context.Context) (runtime.Info, error) {
 	const op = "info"
 	resp, err := c.call(ctx, op, http.MethodGet, "/info", nil, nil)
@@ -32,11 +33,57 @@ func (c *Client) Info(ctx context.Context) (runtime.Info, error) {
 		NCPU          int    `json:"NCPU"`
 		MemTotal      int64  `json:"MemTotal"`
 		ServerVersion string `json:"ServerVersion"`
+		LoggingDriver string `json:"LoggingDriver"`
 	}
 	if err := json.NewDecoder(resp.Body).Decode(&body); err != nil {
 		return runtime.Info{}, c.readError(ctx, op, err)
 	}
-	return runtime.Info{NCPU: body.NCPU, MemTotal: body.MemTotal, ServerVersion: body.ServerVersion}, nil
+	return runtime.Info{NCPU: body.NCPU, MemTotal: body.MemTotal, ServerVersion: body.ServerVersion, LogDriver: body.LoggingDriver}, nil
+}
+
+// Log rotation for the json-file driver: each container keeps at most
+// LogFiles files of LogMaxSize, the current one included. These are the
+// driver's max-size and max-file options.
+const (
+	LogMaxSize = "10m"
+	LogFiles   = "5"
+)
+
+// logDriverTTL is how long the daemon's default log driver is taken as
+// read. A daemon restarted with another driver is seen within it.
+const logDriverTTL = time.Minute
+
+// newLogConfig returns the LogConfig for a new container. With the daemon's
+// default driver json-file, which keeps every line a container writes in
+// one file, it is json-file with LogMaxSize and LogFiles; with any other
+// driver it is nil, which leaves the daemon's choice. The daemon merges the
+// other options of its log-opts into a container's when the driver is the
+// same, so only these two are replaced. The driver is read from /info at
+// most once a logDriverTTL; an older value is used when /info fails, and
+// the error is returned when there is none.
+func (c *Client) newLogConfig(ctx context.Context) (*logConfig, error) {
+	c.logMu.Lock()
+	defer c.logMu.Unlock()
+	now := c.now()
+	if !c.logAt.IsZero() && now.Sub(c.logAt) < logDriverTTL {
+		return logConfigFor(c.logDriver), nil
+	}
+	info, err := c.Info(ctx)
+	if err != nil {
+		if c.logAt.IsZero() {
+			return nil, err
+		}
+		return logConfigFor(c.logDriver), nil
+	}
+	c.logDriver, c.logAt = info.LogDriver, now
+	return logConfigFor(c.logDriver), nil
+}
+
+func logConfigFor(driver string) *logConfig {
+	if driver != "json-file" {
+		return nil
+	}
+	return &logConfig{Type: "json-file", Config: map[string]string{"max-size": LogMaxSize, "max-file": LogFiles}}
 }
 
 // Pull fetches an image and reads the progress stream to the end. The engine
@@ -240,11 +287,16 @@ func unquote(q string) string {
 }
 
 // Create makes a container with the hivemind labels, a restart policy of
-// "no", the requested ports and volumes, and the CPU and memory limits.
-// Ports default to 127.0.0.1.
+// "no", the requested ports and volumes, the CPU and memory limits, and
+// log rotation when the daemon's driver is json-file (newLogConfig). Ports
+// default to 127.0.0.1.
 func (c *Client) Create(ctx context.Context, cfg runtime.ContainerConfig) (string, error) {
 	const op = "create"
 	cfg, err := runtime.Prepare(cfg)
+	if err != nil {
+		return "", err
+	}
+	logs, err := c.newLogConfig(ctx)
 	if err != nil {
 		return "", err
 	}
@@ -301,6 +353,7 @@ func (c *Client) Create(ctx context.Context, cfg runtime.ContainerConfig) (strin
 			NanoCpus:      nanoCPUs(cfg.CPU),
 			Memory:        cfg.Memory,
 			MemorySwap:    cfg.Memory,
+			LogConfig:     logs,
 		},
 	}
 	resp, err := c.call(ctx, op, http.MethodPost, "/containers/create",
@@ -713,6 +766,13 @@ type hostConfig struct {
 	NanoCpus      int64                    `json:"NanoCpus,omitempty"`
 	Memory        int64                    `json:"Memory,omitempty"`
 	MemorySwap    int64                    `json:"MemorySwap,omitempty"`
+	LogConfig     *logConfig               `json:"LogConfig,omitempty"`
+}
+
+// logConfig is HostConfig.LogConfig: the log driver and its options.
+type logConfig struct {
+	Type   string            `json:"Type"`
+	Config map[string]string `json:"Config,omitempty"`
 }
 
 // nanoCPUs converts a CPU limit in CPUs to the engine's units, rounded to the

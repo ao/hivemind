@@ -296,6 +296,12 @@ On a kernel without swap accounting, Docker ignores `MemorySwap` and logs a warn
 
 The totals are what the node reports, and a worker reports its own. Placement trusts those figures. A worker that reports more capacity than it has will be given more replicas.
 
+An app whose spec sets no `resources.memory` has no memory limit, and no app has a PID limit: hivemind sets no `PidsLimit`, and the spec has no field for one, because a 2.1 worker refuses its whole assignment list when a spec has a field it does not know. A replica that uses all the memory, or forks without end, can take down the other replicas on its node, and on the server's node `serve` and its store with them. Set `resources.memory` on every app; see [security](security.md#apps-on-one-node).
+
+## Container logs
+
+A container's output goes to its node's Docker log driver. When the daemon's default driver is `json-file`, Docker's own default, which keeps all of a container's output in one file that grows without end, hivemind creates each container with `json-file`, `max-size` `10m` and `max-file` `5`: at most five files of 10 MB, the oldest dropped first. For hivemind's containers these two options take the place of any `max-size` and `max-file` in the daemon's `log-opts` (`/etc/docker/daemon.json`); the daemon's other `json-file` options still apply. With another default driver, such as `local`, which rotates its files itself, or `journald`, hivemind leaves the log config to the daemon. The agent reads the driver from the daemon at most once a minute. `hivemind logs` reads what the driver keeps, so with `json-file` it shows the last 50 MB at most. A container created by a hivemind older than 2.2 keeps its unrotated log until it is replaced, at its next rollout.
+
 ## Deleting an app
 
 `hivemind delete` marks the app deleted at once, so `status` and the other reads stop showing it. The next reconcile pass on each node removes that node's containers. The app's rows are removed once no node reports a container.

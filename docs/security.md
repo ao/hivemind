@@ -99,6 +99,14 @@ The router ([routing](routing.md)) changes what is exposed in three ways. The tr
 - The routed containers' ports are published on the node's private address, on ports in the ephemeral range, so that the routers on the other nodes can reach them. Any machine that can reach that address reaches the apps directly, without TLS and without the router. Keep the nodes' private network to the nodes, or add a rule that allows those ports from the other nodes only. With Docker's iptables rules, for a node at `10.0.0.5` whose peers are in `10.0.0.0/24`: `iptables -I DOCKER-USER -p tcp -m conntrack --ctorigdst 10.0.0.5 --ctorigdstport 32768:60999 ! -s 10.0.0.0/24 -j DROP`. The rule must still let the other nodes in: a firewall or cloud security group that blocks the range between the nodes leaves each router with only its own node's replicas ([routing](routing.md#ports-and-firewall)).
 - The certificates' private keys and the ACME account key are in the server's database, and every worker can read them through the node API (see above). `hivemind backup` includes them. A worker's router keeps them in memory only.
 
+## Apps on one node
+
+hivemind keeps apps on one node apart no further than Docker does by default. Trust the apps you put on a node with each other, or give an app a node of its own.
+
+- Memory and processes. An app has no memory limit unless its spec sets `resources.memory`, and no CPU limit unless it sets `resources.cpu`. No app has a PID limit. A replica that uses all the memory, or forks without end, can take down every replica on its node, and on the server's node `serve` and its store. Set `resources.memory` on every app, and keep apps you do not trust off the server's node with `hivemind node eligibility <id> --disable`.
+- Disk. With the daemon's default log driver `json-file`, each container's log is rotated at 10 MB, and five files are kept ([concepts](concepts.md#container-logs)); with another driver, the daemon's settings apply. An app's volumes and its containers' own filesystems have no size limit.
+- Labels. hivemind sets its four `hivemind.*` labels on every container, so a label in the image cannot change how the agent treats the container.
+
 ## Registry credentials
 
 `hivemind registry login` ([registries](registries.md)) stores a username and password for an image registry. They are stored like environment values: in plain text, in `hivemind.db`, which is mode 0600 in a 0700 directory, and in every backup. The Docker daemon needs the password as it is, so there is no hash to keep instead.

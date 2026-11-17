@@ -100,6 +100,8 @@ type Info struct {
 	NCPU          int
 	MemTotal      int64 // bytes
 	ServerVersion string
+	// LogDriver is the engine's default log driver, such as "json-file".
+	LogDriver string
 }
 
 // PortBinding publishes a container port on the host.

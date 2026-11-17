@@ -12,9 +12,9 @@ import (
 // An ephemeral binding is sent with an empty HostPort, which asks the engine
 // for a free port, beside a fixed binding of the same container port.
 func TestCreateEphemeralPort(t *testing.T) {
-	c, fd := newFake(t, func(w http.ResponseWriter, ex exchange) {
+	c, fd := newFake(t, withInfo("json-file", func(w http.ResponseWriter, ex exchange) {
 		writeJSON(w, http.StatusCreated, map[string]any{"Id": "c0ffee"})
-	})
+	}))
 	_, err := c.Create(context.Background(), runtime.ContainerConfig{Name: "web-0-1", Image: "nginx", App: "web",
 		Ports: []runtime.PortBinding{
 			{HostPort: 8080, ContainerPort: 80},
@@ -27,7 +27,7 @@ func TestCreateEphemeralPort(t *testing.T) {
 			PortBindings map[string][]struct{ HostIp, HostPort string }
 		}
 	}
-	if err := json.Unmarshal(fd.requests()[0].Body, &body); err != nil {
+	if err := json.Unmarshal(fd.created(t).Body, &body); err != nil {
 		t.Fatal(err)
 	}
 	bs := body.HostConfig.PortBindings["80/tcp"]

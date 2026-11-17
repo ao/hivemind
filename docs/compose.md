@@ -220,7 +220,7 @@ Each refused key gets one of these reasons. A key not listed here gets the gener
 | `cpus`, `mem_limit`, `mem_reservation` | use `deploy.resources.limits` |
 | `user`, `working_dir` | the container uses the image's; set them in the image |
 | `stop_signal` | hivemind stops a container as `docker stop` does, with the image's stop signal |
-| `logging` | hivemind uses the engine's default log driver |
+| `logging` | hivemind uses the engine's default log driver, and keeps a json-file log to 5 files of 10 MB |
 | `pull_policy` | hivemind pulls an image when the node does not have it |
 | `ports[].mode: ingress` | ingress balances a port across a swarm; hivemind publishes it on the node that runs the replica |
 | `ports[].name`, `app_protocol` | the app spec has no port names or application protocols |

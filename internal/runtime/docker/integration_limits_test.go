@@ -67,6 +67,10 @@ type itHostConfigFields struct {
 	NanoCpus   int64
 	Memory     int64
 	MemorySwap int64
+	LogConfig  struct {
+		Type   string
+		Config map[string]string
+	}
 }
 
 // itHostConfig reads the resource fields of a container's HostConfig from
@@ -82,4 +86,24 @@ func itHostConfig(t *testing.T, c *Client, id string) itHostConfigFields {
 		t.Fatal(err)
 	}
 	return b.HostConfig
+}
+
+// docker:dind's default log driver is json-file, so a container gets
+// json-file with max-size 10m and max-file 5.
+func TestIntegrationLogRotationInHostConfig(t *testing.T) {
+	c := itClient(t)
+	info, err := c.Info(itCtx(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if info.LogDriver != "json-file" {
+		t.Skipf("the daemon's default log driver is %q, not json-file", info.LogDriver)
+	}
+	id := itCreate(t, c, runtime.ContainerConfig{
+		Name: itName("logs"), Image: alpineImage, Command: []string{"sleep", "300"}, App: "logs",
+	})
+	lc := itHostConfig(t, c, id).LogConfig
+	if lc.Type != "json-file" || lc.Config["max-size"] != "10m" || lc.Config["max-file"] != "5" {
+		t.Fatalf("LogConfig %+v, want json-file with max-size 10m and max-file 5", lc)
+	}
 }

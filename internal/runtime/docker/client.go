@@ -15,6 +15,7 @@ import (
 	"os"
 	"regexp"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/ao/hivemind/internal/runtime"
@@ -33,6 +34,12 @@ const maxErrorBody = 64 << 10
 type Client struct {
 	base string // scheme and authority for requests, without the API version
 	http *http.Client
+	now  func() time.Time
+
+	// The daemon's default log driver, and when it was read (newLogConfig).
+	logMu     sync.Mutex
+	logDriver string
+	logAt     time.Time
 }
 
 var _ runtime.Runtime = (*Client)(nil)
@@ -61,7 +68,7 @@ func New(host string) (*Client, error) {
 	// would send the request's headers, X-Registry-Auth among them, to
 	// wherever it pointed. The 3xx comes back as the response, and call
 	// reports it as an error.
-	c := &Client{http: &http.Client{Transport: tr, CheckRedirect: func(*http.Request, []*http.Request) error {
+	c := &Client{now: time.Now, http: &http.Client{Transport: tr, CheckRedirect: func(*http.Request, []*http.Request) error {
 		return http.ErrUseLastResponse
 	}}}
 
