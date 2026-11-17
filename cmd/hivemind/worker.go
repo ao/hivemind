@@ -692,24 +692,33 @@ type registrar interface {
 	Register(ctx context.Context, nodeID string, g nodeapi.Register) error
 }
 
-// registerWith registers the node. A server older than 2.2 refuses the
-// address and server fields with 400, as it refuses any field it does not
-// know, so a refusal of a registration with either is tried once more
-// without both: that server places no routed replicas anyway, and does not
-// show what a node dials. addressRefused reports that the node had an
-// address and is registered without it.
+// registerWith registers the node. A server refuses a field it does not
+// know with 400: one from before the server field refuses that, and one
+// older than 2.2 the address field too. So a refusal is tried again without
+// the server address, and if that is refused as well, without the address:
+// that server places no routed replicas anyway, and does not show what a
+// node dials. addressRefused reports that the node had an address and is
+// registered without it.
 func registerWith(ctx context.Context, c registrar, nodeID string, reg nodeapi.Register) (addressRefused bool, err error) {
 	err = c.Register(ctx, nodeID, reg)
-	var refused *nodeapi.RefusedError
-	if !errors.As(err, &refused) || refused.Code != http.StatusBadRequest || (reg.Address == "" && reg.Server == "") {
+	if reg.Server != "" && badRequest(err) {
+		reg.Server = ""
+		err = c.Register(ctx, nodeID, reg)
+	}
+	if reg.Address == "" || !badRequest(err) {
 		return false, err
 	}
-	hadAddress := reg.Address != ""
-	reg.Address, reg.Server = "", ""
+	reg.Address = ""
 	if err := c.Register(ctx, nodeID, reg); err != nil {
 		return false, err
 	}
-	return hadAddress, nil
+	return true, nil
+}
+
+// badRequest reports whether err is the server's 400.
+func badRequest(err error) bool {
+	var refused *nodeapi.RefusedError
+	return errors.As(err, &refused) && refused.Code == http.StatusBadRequest
 }
 
 // addressRetry is how often a worker whose address the server refused
