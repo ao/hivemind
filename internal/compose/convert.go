@@ -49,6 +49,9 @@ type service struct {
 func (c *converter) file(root *node) []App {
 	for _, k := range root.keys {
 		switch {
+		case k == extensionKey:
+			// Ignored as an extension, its routes would route nothing.
+			c.add(k, "x-hivemind goes on a service, as services.<name>.x-hivemind, and applies to that service's app")
 		case isExtension(k), k == "version", k == "name", k == "services", k == "volumes":
 		default:
 			c.refuse(k, reason(topReasons, k, "hivemind reads services and volumes only"))
@@ -174,6 +177,8 @@ func (c *converter) service(name string, n *node) (App, bool) {
 			a.Health = c.healthcheck(p, v)
 		case "restart":
 			c.restart(p, v)
+		case extensionKey:
+			c.hivemindExtension(p, v, &a)
 		default:
 			if !isExtension(k) {
 				c.refuse(p, reason(serviceReasons, k, "the app spec has no equivalent"))

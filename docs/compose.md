@@ -74,6 +74,7 @@ One app reaches another through a published port on an address its containers ca
 | `volumes` | Named volumes. Each is `{}` or empty; any setting is refused (see [refusals](#refusals)). |
 | `version` | Ignored. The Compose specification calls it obsolete. |
 | `name` | The Compose project name, which `deploy` records with each app (see [commands](#commands)). It is 1 to 64 lowercase letters, digits, dashes and underscores, starting with a letter or digit, and may come from a variable. It does not change the app names; use `--prefix` for that. |
+| `x-hivemind` | Refused: it goes on a service (below). |
 | `x-*` | Ignored. |
 
 ### Service keys
@@ -93,6 +94,7 @@ One app reaches another through a published port on an address its containers ca
 | `deploy.restart_policy.condition` | | `any` only. |
 | `healthcheck` | `health` | An exec check (below). |
 | `restart` | | `always` or `unless-stopped`. |
+| `x-hivemind` | `routes` | hivemind's own settings for the app (below). |
 | `x-*` | | Ignored. |
 
 The sections of the specification are [services](https://github.com/compose-spec/compose-spec/blob/main/spec.md#services-top-level-element), [image](https://github.com/compose-spec/compose-spec/blob/main/spec.md#image), [command](https://github.com/compose-spec/compose-spec/blob/main/spec.md#command), [environment](https://github.com/compose-spec/compose-spec/blob/main/spec.md#environment), [ports](https://github.com/compose-spec/compose-spec/blob/main/spec.md#ports), [volumes](https://github.com/compose-spec/compose-spec/blob/main/spec.md#volumes), [healthcheck](https://github.com/compose-spec/compose-spec/blob/main/spec.md#healthcheck), [restart](https://github.com/compose-spec/compose-spec/blob/main/spec.md#restart), and [deploy](https://github.com/compose-spec/compose-spec/blob/main/deploy.md) in its own file.
@@ -158,6 +160,27 @@ Byte values are written as in [the specification](https://github.com/compose-spe
 
 hivemind restarts every replica that exits, whatever its exit code. `always` and `unless-stopped` say the same and are accepted; `no` and `on-failure` are refused. Leaving `restart` out is accepted, though the Compose default is `no`.
 
+#### x-hivemind
+
+Compose has no HTTPS routes, so a service names its app's [routes](routing.md) under `x-hivemind`, an [extension](https://github.com/compose-spec/compose-spec/blob/main/11-extension.md) that Docker Compose ignores:
+
+```yaml
+services:
+  web:
+    image: nginx:1.27
+    x-hivemind:
+      routes:
+        - host: www.example.com
+          port: 80
+  api:
+    image: ghcr.io/example/api:2
+    x-hivemind:
+      routes:
+        - {host: www.example.com, path: /api, port: 8080}
+```
+
+`routes` is a list of routes as in an app spec: `host`, `port` (the container port) and an optional `path` prefix, checked by the same rules (see [paths](routing.md#paths)). Strings in it are interpolated, so `host: ${HOST}` works. `x-hivemind` has `routes` only, and a route has those three keys only: any other key in either is refused, an `x-` key too, since the mapping is hivemind's and a key it does not read is a mistake. `x-hivemind` at the top level is refused, since routes there would route nothing. A route needs no entry in `ports`: the router reaches the container port on an ephemeral host port.
+
 ## Interpolation
 
 Variables are substituted in values, as the [specification](https://github.com/compose-spec/compose-spec/blob/main/12-interpolation.md) describes, and never in keys:
@@ -179,7 +202,7 @@ A file may not use the variables whose names start with `HIVEMIND_`, in any case
 
 Variables come from the CLI's environment first, then from the `.env` file in the compose file's directory. The environment wins, as in Compose. `.env` follows the [env_file format](https://github.com/compose-spec/compose-spec/blob/main/spec.md#env_file-format): `VAR=VALUE` lines, blank lines and `#` comments, an optional `export ` before the name, `'single quotes'` taken literally except for `\'`, `"double quotes"` with the escapes `\n`, `\r`, `\t`, `\\` and `\"`, and a `#` after a space starting a comment in an unquoted value. A line with only a name leaves that variable unset. Unquoted and double-quoted values are interpolated too, from the environment and then the lines above.
 
-Values under `x-` keys are not read, so they are not interpolated there; a value under an `x-` key that a service uses through an alias is interpolated where it is used. Only strings are interpolated; numbers and booleans are used as they are.
+Values under `x-` keys are not read, so they are not interpolated there, apart from a service's `x-hivemind`; a value under an `x-` key that a service uses through an alias is interpolated where it is used. Only strings are interpolated; numbers and booleans are used as they are.
 
 In a flow list or mapping, quote a value that holds `${...}`: in `environment: [A=${B}]` YAML reads the braces as its own syntax, and the file does not parse. Write `environment: ["A=${B}"]`.
 
@@ -189,7 +212,7 @@ The file is one YAML document. Anchors, aliases and merge keys (`<<`) work, as i
 
 Aliases may expand into at most 100,000 values in all, so a small file cannot grow into a large one. yaml.v3 has its own guard against alias expansion, but it applies only when yaml.v3 decodes into Go values, and `hivemind compose` walks the parsed YAML itself. Interpolation may make at most 16 MiB of text for a file and its `.env` together, as a value with a `$` in it is made again at each alias of it, and a `.env` line can hold the one above it twice; past that the file is refused with `variables make more than 16 MiB of text in this file and its .env`. A value without a `$` costs nothing however many aliases it has.
 
-`x-` keys are ignored in every mapping whose keys Compose defines: the top level, a service, `deploy` and its parts, `healthcheck`, a long-syntax port or mount, and a top-level volume. Under `services`, the top-level `volumes` and `environment`, the keys are names, so `x-web` there is a service, a volume or a variable.
+`x-` keys are ignored in every mapping whose keys Compose defines: the top level, a service, `deploy` and its parts, `healthcheck`, a long-syntax port or mount, and a top-level volume. The one exception is `x-hivemind`, which a service's app reads, and which is refused at the top level. Under `services`, the top-level `volumes` and `environment`, the keys are names, so `x-web` there is a service, a volume or a variable.
 
 The Compose tags `!reset` and `!override`, for merging several files, are refused; hivemind reads one file. So are other tags apart from YAML's standard scalar, sequence and mapping tags.
 
