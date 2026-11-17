@@ -92,7 +92,16 @@ Placement never moves a replica that already has a node. Moves come only from no
 
 A replica that cannot be placed gives its reason in the status `DETAIL` column, and in the `pending_reason` field of the API. Reasons include `no node is ready`, `no node has been ready for 30s`, `every ready node is ineligible for new replicas`, `no node has 1 CPU free`, and `host port 127.0.0.1:8080/tcp is in use on every eligible node`.
 
-Two apps that publish the same host port cannot share a node. `deploy` accepts the second app anyway. Its replicas go to the eligible nodes where the port is free, and any replica that has no such node stays `pending` with the host-port reason. It is placed once the first app's containers are gone from a node.
+Two apps that publish the same host port cannot share a node. `deploy` accepts the second app anyway, so that deploying a replacement and then deleting the app that holds the port works. Its replicas go to the eligible nodes where the port is free, and any replica that has no such node stays `pending` with the host-port reason. It is placed once the first app's containers are gone from a node.
+
+A write places its new replicas before it returns, so `deploy`, `scale` and `compose deploy` know which of them no node took. Each one prints a warning on standard error for those, with the reason `status` shows, followed by the app that holds the port when that is the reason, and exits 0:
+
+```
+web: created, generation 1, 1 replica
+web: warning: replica 0 has no node: host port 127.0.0.1:8080/tcp is in use on every eligible node; held by app api
+```
+
+`deploy --wait` and `scale --wait` exit 1 at once, rather than at their timeout, when a replica has no node for a reason that does not change by itself: a host port that a running replica holds on every node that could take it, a bind address no node has, or more CPU or memory than any node has. It takes deleting or changing an app, or adding a node. A port held by a copy being removed, a node not ready yet, an ineligible node that has room, or CPU and memory that are in use but not more than a node has, may change, and `--wait` waits for them. The spec stays deployed either way.
 
 ## Minimum ready time
 

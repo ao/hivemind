@@ -201,7 +201,7 @@ Workers talk to the server over a second API, on the cluster port that `serve --
 | `GET /v1/apps/{name}` | none | 200, `AppView` | Read one app |
 | `PUT /v1/apps/{name}` | app spec | 201 or 200, with `PutResult` | Create or update the app at `{name}`. A `name` in the body must match. The query may name an origin, as `origin=compose:shop` (at most 128 printable characters): an app that exists with another origin, or with none, is refused with `409` unless the query also has `replace=true`, and the app then takes the origin. Without `origin`, the app keeps the one it has. A spec that would take a node's assignments past 15 MiB, on the replicas the node has, is refused with `409` ([placement](concepts.md#placement)) |
 | `DELETE /v1/apps/{name}` | none | 202 `{"name":"...","status":"deleting"}` | Delete the app. The query may name an origin, as the put's does: an app that exists with another origin, or with none, is refused with `409` and kept. `hivemind compose delete` sends `origin=compose:<project>`, and leaves it out with `--force` |
-| `POST /v1/apps/{name}/scale` | `{"replicas": N}` | 200, `AppView` | Set the replica count, 1 to 100 |
+| `POST /v1/apps/{name}/scale` | `{"replicas": N}` | 200, `AppView` with `pending` | Set the replica count, 1 to 100 |
 | `GET /v1/apps/{name}/status` | none | 200, `AppStatus` | Replicas of one app |
 | `GET /v1/apps/{name}/logs` | none | 200, `text/plain` | Log of one replica's container |
 | `GET /v1/status` | none | 200, a list of `AppStatus` | Replicas of every app |
@@ -245,6 +245,23 @@ A write that changes the spec other than the replica count starts a rollout, whi
 `origin` is what deployed the app, as the `origin` of its put named it; `hivemind compose deploy` sends `compose:<project>`. It is absent for an app deployed without one.
 
 `PutResult` wraps it: `{"app": AppView, "created": true}`. `unchanged` is `true` when the app existed with the same spec and origin, so the put changed nothing but its `updated_at`; it is absent otherwise, and from servers older than 2.2.
+
+A put places the app's new replicas in the same transaction, and `pending` lists those that should run and that no node took, by index, at most 10 of them; `pending_count` counts them all. Both are absent when every replica has a node, and from servers older than 2.2. The write succeeds either way, and the replicas wait as `pending` in status:
+
+```json
+{
+  "app": {"name": "web", "...": "..."},
+  "created": true,
+  "pending": [
+    {"replica": 0, "reason": "host port 127.0.0.1:8080/tcp is in use on every eligible node; held by app api", "stuck": true}
+  ],
+  "pending_count": 1
+}
+```
+
+`reason` is the replica's `pending_reason` in status. When a host port in use is what stops it, the apps that hold the port follow it, as `; held by app api`, `; held by apps api, db` or `; held by another replica of web`. `stuck` is `true` when the reason does not change by itself: a host port that a running replica holds on every node that could take this one, a bind address no node has, or more CPU or memory than any of those nodes has. It is absent otherwise, as for a node that is not ready yet or a port held by a copy being removed. `deploy --wait` stops at a stuck replica.
+
+The scale reply is the `AppView` with the same `pending` and `pending_count` beside its fields.
 
 `AppStatus` is one app's replicas:
 
