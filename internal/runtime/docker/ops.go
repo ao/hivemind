@@ -158,23 +158,85 @@ func EncodeRegistryAuth(a runtime.RegistryAuth) (string, error) {
 // which names the user: ?account=<username>&scope=...
 var accountRE = regexp.MustCompile(`account=[^&\s"']*`)
 
-// redact takes the password, the header and the username of a token URL
-// out of an error message.
+// redact takes the password, in each form secretForms lists, the header and
+// the username of a token URL out of an error message.
 func redact(msg string, auth *runtime.RegistryAuth, header string) string {
 	if auth == nil {
 		return msg
 	}
 	const r = "[redacted]"
+	forms := secretForms(auth.Username, auth.Password)
 	if header != "" {
-		msg = strings.ReplaceAll(msg, header, r)
+		forms = append(forms, header)
 	}
-	if auth.Password != "" {
-		msg = strings.ReplaceAll(msg, auth.Password, r)
-		msg = strings.ReplaceAll(msg, url.QueryEscape(auth.Password), r)
-		basic := base64.StdEncoding.EncodeToString([]byte(auth.Username + ":" + auth.Password))
-		msg = strings.ReplaceAll(msg, basic, r)
+	// Longest first, so that a form inside a longer one, as unpadded base64
+	// is inside padded, does not leave the rest of that one behind.
+	slices.SortFunc(forms, func(a, b string) int {
+		if len(a) != len(b) {
+			return len(b) - len(a)
+		}
+		return strings.Compare(a, b)
+	})
+	for _, f := range slices.Compact(forms) {
+		msg = strings.ReplaceAll(msg, f, r)
 	}
 	return accountRE.ReplaceAllString(msg, "account="+r)
+}
+
+// secretForms returns the ways a message from the daemon or a registry may
+// write a password: as it is; percent-escaped for a query or a path, with
+// upper- or lower-case hex; escaped in a JSON string, with and without
+// Go's escapes of <, > and &; escaped as Go's %q and %+q write it; and the
+// Basic credential user:password in base64, standard or URL-safe, padded
+// or not. An empty password has none.
+func secretForms(user, password string) []string {
+	if password == "" {
+		return nil
+	}
+	query, path := url.QueryEscape(password), url.PathEscape(password)
+	forms := []string{password, query, path, lowerHex(query), lowerHex(path),
+		jsonString(password, true), jsonString(password, false),
+		unquote(strconv.Quote(password)), unquote(strconv.QuoteToASCII(password))}
+	basic := []byte(user + ":" + password)
+	for _, enc := range []*base64.Encoding{base64.StdEncoding, base64.RawStdEncoding, base64.URLEncoding, base64.RawURLEncoding} {
+		forms = append(forms, enc.EncodeToString(basic))
+	}
+	return slices.DeleteFunc(forms, func(s string) bool { return s == "" })
+}
+
+// lowerHex lowers the hex digits of each percent escape in s.
+func lowerHex(s string) string {
+	b := []byte(s)
+	for i := 0; i+2 < len(b); i++ {
+		if b[i] == '%' {
+			for j := i + 1; j <= i+2; j++ {
+				if b[j] >= 'A' && b[j] <= 'F' {
+					b[j] += 'a' - 'A'
+				}
+			}
+			i += 2
+		}
+	}
+	return string(b)
+}
+
+// jsonString is s as it is written inside a JSON string, without the quotes.
+func jsonString(s string, escapeHTML bool) string {
+	var b strings.Builder
+	enc := json.NewEncoder(&b)
+	enc.SetEscapeHTML(escapeHTML)
+	if err := enc.Encode(s); err != nil {
+		return ""
+	}
+	return unquote(strings.TrimSuffix(b.String(), "\n"))
+}
+
+// unquote takes the quotes off a quoted string.
+func unquote(q string) string {
+	if len(q) < 2 {
+		return ""
+	}
+	return q[1 : len(q)-1]
 }
 
 // Create makes a container with the hivemind labels, a restart policy of

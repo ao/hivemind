@@ -4,8 +4,10 @@ import (
 	"context"
 	"encoding/base64"
 	"encoding/json"
+	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"strings"
 	"testing"
 
@@ -156,5 +158,73 @@ func TestAnonymousRefusalKeepsTheDaemonsMessage(t *testing.T) {
 	requireNotIs(t, err, runtime.ErrNotFound)
 	if !strings.Contains(err.Error(), "no basic auth credentials") {
 		t.Fatalf("error %q lost the daemon's message", err)
+	}
+}
+
+// redact takes out every form of the password a message may hold, for a
+// password of characters that each encoding writes differently.
+func TestRedactEveryForm(t *testing.T) {
+	const (
+		user = "octocat"
+		// Lower-case letters only, so that strings.ToLower of an escape
+		// changes nothing but its hex digits. The tildes put a + or a / in
+		// the base64 of user:pass, and its 28 bytes need padding, so the
+		// four kinds of base64 differ.
+		pass = `p" \<>&+/% üw~~~~~~`
+	)
+	auth := &runtime.RegistryAuth{Username: user, Password: pass, ServerAddress: "reg.example.com"}
+	header, _ := EncodeRegistryAuth(*auth)
+	quoted := func(format string) string { s := fmt.Sprintf(format, pass); return s[1 : len(s)-1] }
+	inJSON := func(html bool) string {
+		var b strings.Builder
+		enc := json.NewEncoder(&b)
+		enc.SetEscapeHTML(html)
+		_ = enc.Encode(pass)
+		s := strings.TrimSpace(b.String())
+		return s[1 : len(s)-1]
+	}
+	basic := []byte(user + ":" + pass)
+	forms := map[string]string{
+		"as it is":             pass,
+		"query escape":         url.QueryEscape(pass),
+		"query escape, lower":  strings.ToLower(url.QueryEscape(pass)),
+		"path escape":          url.PathEscape(pass),
+		"path escape, lower":   strings.ToLower(url.PathEscape(pass)),
+		"JSON":                 inJSON(true),
+		"JSON without HTML":    inJSON(false),
+		"%q":                   quoted("%q"),
+		"%+q":                  quoted("%+q"),
+		"basic, base64":        base64.StdEncoding.EncodeToString(basic),
+		"basic, unpadded":      base64.RawStdEncoding.EncodeToString(basic),
+		"basic, URL-safe":      base64.URLEncoding.EncodeToString(basic),
+		"basic, URL-safe, raw": base64.RawURLEncoding.EncodeToString(basic),
+		"header":               header,
+	}
+	distinct := map[string]bool{}
+	for name, form := range forms {
+		distinct[form] = true
+		msg := redact("pull failed: <"+form+"> at the end", auth, header)
+		if strings.Contains(msg, form) || msg != "pull failed: <[redacted]> at the end" {
+			t.Errorf("%s (%q): redacted to %q", name, form, msg)
+		}
+	}
+	// JSON without the HTML escapes and %q write this password alike;
+	// every other pair differs.
+	if len(distinct) != len(forms)-1 {
+		t.Fatalf("%d distinct forms of %d: the password does not tell the encodings apart", len(distinct), len(forms))
+	}
+	// Every form in one message, one after another.
+	var all []string
+	for _, form := range forms {
+		all = append(all, form)
+	}
+	msg := redact(strings.Join(all, " | "), auth, header)
+	if got := strings.Count(msg, "[redacted]"); got != len(all) {
+		t.Errorf("%d of %d forms redacted: %q", got, len(all), msg)
+	}
+	for name, form := range forms {
+		if strings.Contains(msg, form) {
+			t.Errorf("%s (%q) is left in %q", name, form, msg)
+		}
 	}
 }
