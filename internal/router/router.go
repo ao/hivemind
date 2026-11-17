@@ -66,7 +66,11 @@ type Config struct {
 	// Routes reads the routing table.
 	Routes func(ctx context.Context) (Table, error)
 	// Storage is the shared TLS storage.
-	Storage certmagic.Storage
+	Storage Storage
+	// ChallengeReadInterval is the least time between two reads of one
+	// host's challenge token from Storage, which challenge requests cause.
+	// Zero means DefaultChallengeReadInterval.
+	ChallengeReadInterval time.Duration
 	// Email is the ACME account's contact. Registering the account agrees
 	// to the CA's subscriber agreement.
 	Email string
@@ -133,6 +137,9 @@ func New(cfg Config) (*Router, error) {
 	if cfg.Poll <= 0 {
 		cfg.Poll = DefaultPoll
 	}
+	if cfg.ChallengeReadInterval <= 0 {
+		cfg.ChallengeReadInterval = DefaultChallengeReadInterval
+	}
 	log := cfg.Logger
 	if log == nil {
 		log = slog.Default()
@@ -162,6 +169,7 @@ func New(cfg Config) (*Router, error) {
 		return nil, fmt.Errorf("router: https listener: %w", err)
 	}
 	rt.proxy.httpsPort = rt.HTTPSPort()
+	rt.ctx, rt.cancel = context.WithCancel(context.Background())
 
 	zl := newZap(log.With("component", "certmagic"))
 	rt.cache = certmagic.NewCache(certmagic.CacheOptions{
@@ -169,8 +177,9 @@ func New(cfg Config) (*Router, error) {
 		Logger:           zl,
 	})
 	rt.magic = certmagic.New(rt.cache, certmagic.Config{
-		Storage: cfg.Storage,
-		Logger:  zl,
+		Storage: challengeStorage{Storage: cfg.Storage,
+			reads: newChallengeReads(rt.ctx, cfg.Storage.Load, cfg.ChallengeReadInterval, log)},
+		Logger: zl,
 		// No OCSP fetches: Let's Encrypt ended its OCSP service in 2025,
 		// and stapling would make every node call out to the responder.
 		OCSP: certmagic.OCSPConfig{DisableStapling: true},
@@ -211,7 +220,6 @@ func New(cfg Config) (*Router, error) {
 			NextProtos:     []string{"h2", "http/1.1"},
 		},
 	}
-	rt.ctx, rt.cancel = context.WithCancel(context.Background())
 	return rt, nil
 }
 
@@ -449,6 +457,9 @@ func (rt *Router) serveHTTP(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "not found", http.StatusNotFound)
 		return
 	}
+	// certmagic reads the challenge token under a key made from Host, so
+	// the table's spelling keeps one key, and one read limit, per host.
+	r.Host = host
 	if rt.issuer.HandleHTTPChallenge(w, r) {
 		return
 	}

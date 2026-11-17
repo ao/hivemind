@@ -22,6 +22,7 @@ import (
 	"slices"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -75,6 +76,21 @@ func newTestRouter(t *testing.T, table Table) *testRouter {
 // newTestRouterPoll is newTestRouter with the table read every poll.
 func newTestRouterPoll(t *testing.T, table Table, poll time.Duration) *testRouter {
 	t.Helper()
+	return newTestRouterWith(t, table, testOptions{poll: poll})
+}
+
+// testOptions change what newTestRouterWith builds.
+type testOptions struct {
+	poll time.Duration
+	// backend, if set, wraps the store's TLS backend.
+	backend func(tlsstore.Backend) tlsstore.Backend
+	// config, if set, changes the router's Config before New.
+	config func(*Config)
+}
+
+// newTestRouterWith is newTestRouter with o.
+func newTestRouterWith(t *testing.T, table Table, o testOptions) *testRouter {
+	t.Helper()
 	st, err := store.Open(context.Background(), filepath.Join(t.TempDir(), "hivemind.db"))
 	if err != nil {
 		t.Fatal(err)
@@ -82,14 +98,22 @@ func newTestRouterPoll(t *testing.T, table Table, poll time.Duration) *testRoute
 	t.Cleanup(func() { st.Close() })
 	logs := &syncBuffer{}
 	log := slog.New(slog.NewTextHandler(logs, &slog.HandlerOptions{Level: slog.LevelDebug}))
-	ts, err := tlsstore.New(tlsstore.StoreBackend{St: st, NodeID: "node-a"}, tlsstore.Options{Logger: log})
+	var backend tlsstore.Backend = tlsstore.StoreBackend{St: st, NodeID: "node-a"}
+	if o.backend != nil {
+		backend = o.backend(backend)
+	}
+	ts, err := tlsstore.New(backend, tlsstore.Options{Logger: log})
 	if err != nil {
 		t.Fatal(err)
 	}
 	tr := &testRouter{st: st, logs: logs}
 	tr.table = func() Table { return table }
-	rt, err := New(Config{Addr: "127.0.0.1", Routes: tr.routes, Storage: ts, Email: "ops@example.com",
-		CA: "https://acme.invalid/dir", Logger: log, Metrics: NewMetrics(), Poll: poll})
+	cfg := Config{Addr: "127.0.0.1", Routes: tr.routes, Storage: ts, Email: "ops@example.com",
+		CA: "https://acme.invalid/dir", Logger: log, Metrics: NewMetrics(), Poll: o.poll}
+	if o.config != nil {
+		o.config(&cfg)
+	}
+	rt, err := New(cfg)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -692,6 +716,125 @@ func TestChallengeForAHostNotReadYet(t *testing.T) {
 	req, _ = http.NewRequest(http.MethodGet, "http://made-up.example.com/", nil)
 	if resp, _, _ := get(t, c, req); resp.StatusCode != http.StatusNotFound || reads() != before {
 		t.Fatalf("a plain request for an unknown host: %d, %d reads", resp.StatusCode, reads()-before)
+	}
+}
+
+// slowBackend is a TLS backend whose reads of challenge tokens take delay, as
+// over the node API, and are counted; with fail set they fail.
+type slowBackend struct {
+	tlsstore.Backend
+	delay time.Duration
+	loads atomic.Int64
+	fail  atomic.Bool
+}
+
+func (b *slowBackend) Load(ctx context.Context, key string) ([]byte, error) {
+	if isChallengeKey(key) {
+		b.loads.Add(1)
+		time.Sleep(b.delay)
+		if b.fail.Load() {
+			return nil, errors.New("server unreachable")
+		}
+	}
+	return b.Backend.Load(ctx, key)
+}
+
+// challenges sends n challenge requests for host at once, and returns their
+// status codes and bodies.
+func challenges(t *testing.T, tr *testRouter, n int, host, token string) (codes map[int]int, bodies map[string]int) {
+	t.Helper()
+	codes, bodies = map[int]int{}, map[string]int{}
+	var mu sync.Mutex
+	var wg sync.WaitGroup
+	start := make(chan struct{})
+	for range n {
+		wg.Go(func() {
+			<-start
+			req, _ := http.NewRequest(http.MethodGet, "http://"+host+"/.well-known/acme-challenge/"+token, nil)
+			resp, err := tr.plain().Do(req)
+			if err != nil {
+				t.Error(err)
+				return
+			}
+			b, _ := io.ReadAll(resp.Body)
+			resp.Body.Close()
+			mu.Lock()
+			codes[resp.StatusCode]++
+			bodies[string(b)]++
+			mu.Unlock()
+		})
+	}
+	close(start)
+	wg.Wait()
+	return codes, bodies
+}
+
+// Challenge requests for a routed host read its token from the shared
+// storage, which on a worker is a request to the server, whatever the token
+// in the path. Many at once cause one read per ChallengeReadInterval, and
+// all of them get its answer. A token stored just after a burst of misses is
+// found at the next request, not hidden by an older result. A storage that
+// fails is logged once, not once a request.
+func TestChallengeReadsAreBounded(t *testing.T) {
+	sb := &slowBackend{delay: 100 * time.Millisecond}
+	const every = 200 * time.Millisecond
+	tr := newTestRouterWith(t, Table{"www.example.com": {}}, testOptions{poll: time.Hour,
+		backend: func(b tlsstore.Backend) tlsstore.Backend { sb.Backend = b; return sb },
+		config:  func(c *Config) { c.ChallengeReadInterval = every }})
+	chal := `{"type":"http-01","url":"https://acme.invalid/chal/1","status":"pending","token":"tok_7",` +
+		`"keyAuthorization":"tok_7.thumbprint","identifier":{"type":"dns","value":"www.example.com"}}`
+	if err := tr.st.TLSStore(context.Background(), "acme/acme.invalid-dir/challenge_tokens/www.example.com.json", []byte(chal)); err != nil {
+		t.Fatal(err)
+	}
+
+	began := time.Now()
+	codes, bodies := challenges(t, tr, 50, "www.example.com", "tok_7")
+	took := time.Since(began)
+	if codes[http.StatusOK] != 50 || bodies["tok_7.thumbprint"] != 50 {
+		t.Fatalf("50 challenges: codes %v, bodies %v, want 50 answers", codes, bodies)
+	}
+	// One read starts at once, and the next one every interval after it.
+	if n, most := sb.loads.Load(), int64(took/every)+1; n > most {
+		t.Fatalf("50 challenges in %v caused %d storage reads, want at most %d", took, n, most)
+	} else {
+		t.Logf("50 challenges in %v: %d storage reads", took, n)
+	}
+
+	// Requests for another token, in any spelling of the host, are
+	// redirected like any other path.
+	codes, _ = challenges(t, tr, 20, "WWW.example.com.", "other")
+	if codes[http.StatusPermanentRedirect] != 20 {
+		t.Fatalf("challenges for another token: %v, want 20 redirects", codes)
+	}
+	// With no token, the requests are misses, which certmagic logs at debug
+	// level; a token stored after them is found by the next request.
+	if err := tr.st.TLSDelete(context.Background(), "acme/acme.invalid-dir/challenge_tokens/www.example.com.json"); err != nil {
+		t.Fatal(err)
+	}
+	if codes, _ := challenges(t, tr, 5, "www.example.com", "tok_7"); codes[http.StatusPermanentRedirect] != 5 {
+		t.Fatalf("challenges after the token was deleted: %v, want 5 redirects", codes)
+	}
+	if err := tr.st.TLSStore(context.Background(), "acme/acme.invalid-dir/challenge_tokens/www.example.com.json", []byte(chal)); err != nil {
+		t.Fatal(err)
+	}
+	if codes, bodies := challenges(t, tr, 1, "www.example.com", "tok_7"); codes[http.StatusOK] != 1 || bodies["tok_7.thumbprint"] != 1 {
+		t.Fatalf("a challenge just after its token was stored: %v %v, want the answer", codes, bodies)
+	}
+
+	// The storage fails: one warning, and none from certmagic. (The test's
+	// self-signed certificate has a warning of its own.)
+	sb.fail.Store(true)
+	if codes, _ := challenges(t, tr, 20, "www.example.com", "tok_7"); codes[http.StatusPermanentRedirect] != 20 {
+		t.Fatalf("challenges while the storage fails: %v, want 20 redirects", codes)
+	}
+	var warns []string
+	for line := range strings.Lines(tr.logs.String()) {
+		if strings.Contains(line, "level=WARN") && strings.Contains(line, "challenge") {
+			warns = append(warns, line)
+		}
+	}
+	if len(warns) != 1 || !strings.Contains(warns[0], "challenge token") {
+		t.Fatalf("warnings while the storage fails, want one:\n%s", strings.Join(warns, ""))
 	}
 }
 
