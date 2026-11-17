@@ -7,6 +7,7 @@ import (
 	"math"
 	"net/http"
 	"slices"
+	"strconv"
 	"sync"
 	"time"
 
@@ -66,11 +67,17 @@ func validRouterHost(h string) error {
 }
 
 // Validate checks a router report's form: its size, hosts, status codes and
-// error kinds. Whether the hosts are routed is the server's check.
+// error kinds, and that no series is there twice, which would make the
+// server's /metrics unreadable to Prometheus. Whether the hosts are routed
+// is the server's check.
 func (r RouterReport) Validate() error {
 	if n := len(r.Requests) + len(r.Upstream) + len(r.Certs); n > maxRouterSeries {
 		return fmt.Errorf("%w: %d series, more than %d", ErrInvalid, n, maxRouterSeries)
 	}
+	type pair struct {
+		host, v string
+	}
+	seen := make(map[pair]bool, len(r.Requests)+len(r.Upstream))
 	for _, x := range r.Requests {
 		if err := validRouterHost(x.Host); err != nil {
 			return fmt.Errorf("%w: requests: %v", ErrInvalid, err)
@@ -78,6 +85,11 @@ func (r RouterReport) Validate() error {
 		if x.Code < 100 || x.Code > 599 {
 			return fmt.Errorf("%w: requests for %s: status code %d", ErrInvalid, x.Host, x.Code)
 		}
+		k := pair{x.Host, strconv.Itoa(x.Code)}
+		if seen[k] {
+			return fmt.Errorf("%w: requests for %s with status %d are there twice", ErrInvalid, x.Host, x.Code)
+		}
+		seen[k] = true
 	}
 	for _, x := range r.Upstream {
 		if err := validRouterHost(x.Host); err != nil {
@@ -86,7 +98,13 @@ func (r RouterReport) Validate() error {
 		if !slices.Contains(routerErrorKinds, x.Kind) {
 			return fmt.Errorf("%w: upstream errors for %s: kind %q", ErrInvalid, x.Host, truncate(x.Kind))
 		}
+		k := pair{x.Host, "kind:" + x.Kind}
+		if seen[k] {
+			return fmt.Errorf("%w: %s errors for %s are there twice", ErrInvalid, x.Kind, x.Host)
+		}
+		seen[k] = true
 	}
+	certs := make(map[string]bool, len(r.Certs))
 	for _, x := range r.Certs {
 		if err := spec.ValidateHost(x.Host); err != nil {
 			return fmt.Errorf("%w: certificates: %v", ErrInvalid, err)
@@ -94,6 +112,10 @@ func (r RouterReport) Validate() error {
 		if x.NotAfter.IsZero() {
 			return fmt.Errorf("%w: certificate for %s has no expiry", ErrInvalid, x.Host)
 		}
+		if certs[x.Host] {
+			return fmt.Errorf("%w: the certificate for %s is there twice", ErrInvalid, x.Host)
+		}
+		certs[x.Host] = true
 	}
 	return nil
 }

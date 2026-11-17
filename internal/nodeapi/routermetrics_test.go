@@ -33,6 +33,9 @@ func TestRouterReportValidate(t *testing.T) {
 		"cert unknown":    {Certs: []RouterCert{{Host: UnknownHost, NotAfter: exp}}},
 		"cert no expiry":  {Certs: []RouterCert{{Host: "a.example.com"}}},
 		"too many series": {Requests: make([]RouterRequests, maxRouterSeries+1)},
+		"twice requests":  {Requests: []RouterRequests{{Host: "a.example.com", Code: 200, Count: 1}, {Host: "a.example.com", Code: 200, Count: 2}}},
+		"twice upstream":  {Upstream: []RouterUpstream{{Host: "a.example.com", Kind: "dial"}, {Host: "a.example.com", Kind: "dial"}}},
+		"twice cert":      {Certs: []RouterCert{{Host: "a.example.com", NotAfter: exp}, {Host: "a.example.com", NotAfter: exp}}},
 	} {
 		if err := bad.Validate(); !errors.Is(err, ErrInvalid) {
 			t.Errorf("%s: %v, want ErrInvalid", name, err)
