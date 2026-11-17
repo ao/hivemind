@@ -20,14 +20,50 @@ import (
 // (ownVariable), default or not.
 //
 // Errors name variables and never hold their values.
+//
+// This form has a budget of its own; Convert shares one budget between a
+// file and its .env (interpolator).
 func interpolate(s string, lookup func(string) (string, bool)) (string, error) {
-	return interpolateDepth(s, lookup, 0)
+	return newInterpolator(lookup).interpolate(s)
 }
 
 // maxNesting caps how deep defaults may nest, as in ${A:-${B:-${C}}}.
 const maxNesting = 16
 
-func interpolateDepth(s string, lookup func(string) (string, bool), depth int) (string, error) {
+// MaxInterpolatedBytes caps the text that interpolation makes for one file
+// and its .env together. A value is interpolated each time it is read, so a
+// value with a $ in it is made again at each alias of it, and a .env line
+// can hold the one above it twice: without a cap a 1 MiB file could make
+// many gigabytes. A value without a $ is used as it is, and costs nothing.
+const MaxInterpolatedBytes = 16 << 20
+
+// errTooMuch is the error once the budget is spent.
+var errTooMuch = fmt.Errorf("variables make more than %d MiB of text in this file and its .env; "+
+	"a value with a $ in it is made again at each alias of it", MaxInterpolatedBytes>>20)
+
+// interpolator substitutes variables from lookup, and counts the bytes it
+// makes against left, which several interpolators may share.
+type interpolator struct {
+	lookup func(string) (string, bool)
+	left   *int
+}
+
+func newInterpolator(lookup func(string) (string, bool)) interpolator {
+	if lookup == nil {
+		lookup = func(string) (string, bool) { return "", false }
+	}
+	left := MaxInterpolatedBytes
+	return interpolator{lookup, &left}
+}
+
+// with returns an interpolator with another lookup and the same budget.
+func (ip interpolator) with(lookup func(string) (string, bool)) interpolator {
+	return interpolator{lookup, ip.left}
+}
+
+func (ip interpolator) interpolate(s string) (string, error) { return ip.depth(s, 0) }
+
+func (ip interpolator) depth(s string, depth int) (string, error) {
 	if depth > maxNesting {
 		return "", fmt.Errorf("variables nest more than %d deep", maxNesting)
 	}
@@ -35,28 +71,35 @@ func interpolateDepth(s string, lookup func(string) (string, bool), depth int) (
 		return s, nil
 	}
 	var b strings.Builder
-	for i := 0; i < len(s); {
-		if s[i] != '$' || i+1 == len(s) {
-			b.WriteByte(s[i])
-			i++
-			continue
+	// add writes v, unless that would spend more than is left.
+	add := func(v string) error {
+		if b.Len()+len(v) > *ip.left {
+			return errTooMuch
 		}
-		switch next := s[i+1]; {
-		case next == '$':
-			b.WriteByte('$')
-			i += 2
-		case next == '{':
+		b.WriteString(v)
+		return nil
+	}
+	for i := 0; i < len(s); {
+		var v string
+		switch {
+		case s[i] != '$' || i+1 == len(s):
+			j := i + 1
+			for j < len(s) && s[j] != '$' {
+				j++
+			}
+			v, i = s[i:j], j
+		case s[i+1] == '$':
+			v, i = "$", i+2
+		case s[i+1] == '{':
 			end, err := closingBrace(s, i+2)
 			if err != nil {
 				return "", err
 			}
-			v, err := braced(s[i+2:end], lookup, depth)
-			if err != nil {
+			if v, err = ip.braced(s[i+2:end], depth); err != nil {
 				return "", err
 			}
-			b.WriteString(v)
 			i = end + 1
-		case isNameStart(next):
+		case isNameStart(s[i+1]):
 			j := i + 2
 			for j < len(s) && isNameChar(s[j]) {
 				j++
@@ -64,17 +107,19 @@ func interpolateDepth(s string, lookup func(string) (string, bool), depth int) (
 			if err := ownVariable(s[i+1 : j]); err != nil {
 				return "", err
 			}
-			v, err := lookupSet(s[i+1:j], lookup)
-			if err != nil {
+			var err error
+			if v, err = lookupSet(s[i+1:j], ip.lookup); err != nil {
 				return "", err
 			}
-			b.WriteString(v)
 			i = j
 		default:
-			b.WriteByte('$')
-			i++
+			v, i = "$", i+1
+		}
+		if err := add(v); err != nil {
+			return "", err
 		}
 	}
+	*ip.left -= b.Len()
 	return b.String(), nil
 }
 
@@ -100,7 +145,7 @@ func closingBrace(s string, start int) (int, error) {
 }
 
 // braced evaluates the text between ${ and }.
-func braced(body string, lookup func(string) (string, bool), depth int) (string, error) {
+func (ip interpolator) braced(body string, depth int) (string, error) {
 	n := 0
 	for n < len(body) && (isNameChar(body[n]) && (n > 0 || isNameStart(body[n]))) {
 		n++
@@ -113,7 +158,7 @@ func braced(body string, lookup func(string) (string, bool), depth int) (string,
 		return "", err
 	}
 	if rest == "" {
-		return lookupSet(name, lookup)
+		return lookupSet(name, ip.lookup)
 	}
 	colon := rest[0] == ':'
 	if colon {
@@ -123,13 +168,13 @@ func braced(body string, lookup func(string) (string, bool), depth int) (string,
 		return "", fmt.Errorf("${%s...}: the forms are ${%[1]s}, ${%[1]s:-default}, ${%[1]s-default}, ${%[1]s:?message} and ${%[1]s?message}", name)
 	}
 	op, arg := rest[0], rest[1:]
-	v, set := lookup(name)
+	v, set := ip.lookup(name)
 	missing := !set || (colon && v == "")
 	if !missing {
 		return v, nil
 	}
 	if op == '-' {
-		return interpolateDepth(arg, lookup, depth+1)
+		return ip.depth(arg, depth+1)
 	}
 	if arg != "" {
 		return "", fmt.Errorf("variable %s: %s", name, arg)

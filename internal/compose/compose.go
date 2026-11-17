@@ -152,21 +152,21 @@ func Convert(data []byte, opts Options) (*Result, error) {
 			return look(k)
 		}
 	}
+	// One budget for the .env and the file (MaxInterpolatedBytes).
+	ip := newInterpolator(opts.Lookup)
 	env := map[string]string{}
 	if opts.DotEnv != nil {
-		if env, err = parseDotEnv(opts.DotEnv, opts.Lookup); err != nil {
+		if env, err = parseDotEnv(opts.DotEnv, ip); err != nil {
 			return nil, err
 		}
 	}
-	c := &converter{prefix: opts.Prefix, lookup: func(k string) (string, bool) {
-		if opts.Lookup != nil {
-			if v, ok := opts.Lookup(k); ok {
-				return v, true
-			}
+	c := &converter{prefix: opts.Prefix, ip: ip.with(func(k string) (string, bool) {
+		if v, ok := ip.lookup(k); ok {
+			return v, true
 		}
 		v, ok := env[k]
 		return v, ok
-	}, volumeUser: map[string]string{}}
+	}), volumeUser: map[string]string{}}
 	apps := c.file(root)
 	name := c.projectName(root)
 	if len(c.problems) > 0 {

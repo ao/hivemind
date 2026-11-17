@@ -185,7 +185,7 @@ In a flow list or mapping, quote a value that holds `${...}`: in `environment: [
 
 The file is one YAML document. Anchors, aliases and merge keys (`<<`) work, as in Compose: a key written in a mapping wins over a merged one, and an earlier mapping in a merge list wins over a later one. A duplicate key is an error. So is an alias inside the value it names.
 
-Aliases may expand into at most 100,000 values in all, so a small file cannot grow into a large one. yaml.v3 has its own guard against alias expansion, but it applies only when yaml.v3 decodes into Go values, and `hivemind compose` walks the parsed YAML itself.
+Aliases may expand into at most 100,000 values in all, so a small file cannot grow into a large one. yaml.v3 has its own guard against alias expansion, but it applies only when yaml.v3 decodes into Go values, and `hivemind compose` walks the parsed YAML itself. Interpolation may make at most 16 MiB of text for a file and its `.env` together, as a value with a `$` in it is made again at each alias of it, and a `.env` line can hold the one above it twice; past that the file is refused with `variables make more than 16 MiB of text in this file and its .env`. A value without a `$` costs nothing however many aliases it has.
 
 `x-` keys are ignored in every mapping whose keys Compose defines: the top level, a service, `deploy` and its parts, `healthcheck`, a long-syntax port or mount, and a top-level volume. Under `services`, the top-level `volumes` and `environment`, the keys are names, so `x-web` there is a service, a volume or a variable.
 

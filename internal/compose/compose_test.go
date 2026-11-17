@@ -187,14 +187,14 @@ func TestConvertMemoryUnits(t *testing.T) {
 		"2b": 2, "1024kb": 1 << 20, "2048k": 2 << 20, "300m": 300 << 20, "300MB": 300 << 20, "1gb": 1 << 30, "1G": 1 << 30,
 		"1.5g": 3 << 29, "1073741824": 1 << 30, "6291456": 6 << 20, "0": 0,
 	} {
-		c := &converter{lookup: env(nil)}
+		c := &converter{ip: newInterpolator(nil)}
 		got, ok := c.memory("m", &node{kind: scalarKind, tag: "!!str", text: in})
 		if !ok || got != want {
 			t.Errorf("%s: %d bytes, %v; want %d", in, got, c.problems, want)
 		}
 	}
 	for _, bad := range []string{"512Mi", "1tb", "1.2.3g", "-1m", "1 g", "g", "1e3", "999999999999999999999g"} {
-		c := &converter{lookup: env(nil)}
+		c := &converter{ip: newInterpolator(nil)}
 		if got, ok := c.memory("m", &node{kind: scalarKind, tag: "!!str", text: bad}); ok {
 			t.Errorf("%s: %d bytes, want an error", bad, got)
 		}
@@ -830,5 +830,54 @@ func TestOwnVariablesRefused(t *testing.T) {
 	res, err = Convert([]byte(file), Options{Lookup: look, DotEnv: []byte("T=from-dotenv\n")})
 	if err != nil || res.Apps[0].Spec.Env["T"] != "from-dotenv" {
 		t.Fatalf(".env with another variable: %v %+v", err, res)
+	}
+}
+
+// A value with a $ in it is interpolated at each alias of it, and a .env
+// line can hold the line above twice, so a small file could make
+// gigabytes. Interpolation stops at MaxInterpolatedBytes for a file and
+// its .env together, with one problem that says why.
+func TestInterpolationBudget(t *testing.T) {
+	// An aliased 512 KiB scalar with a $$ in it, 40 times: 20 MiB.
+	aliased := func(n int) string {
+		var b strings.Builder
+		b.WriteString("x-v: &v '" + strings.Repeat("a", 512<<10) + "$$'\nservices:\n  web:\n    image: nginx\n    environment:\n")
+		for i := 0; i < n; i++ {
+			fmt.Fprintf(&b, "      A%d: *v\n", i)
+		}
+		return b.String()
+	}
+	const want = "variables make more than 16 MiB of text in this file and its .env"
+	file := aliased(40)
+	if len(file) > MaxFileBytes {
+		t.Fatalf("the file is %d bytes, over the limit", len(file))
+	}
+	_, err := Convert([]byte(file), Options{})
+	if err == nil || strings.Count(err.Error(), want) != 1 {
+		t.Fatalf("40 aliases: %v, want one %q", err, want)
+	}
+	// 20 of them, 10 MiB, are within the budget; the spec's environment
+	// limit refuses them later.
+	if _, err := Convert([]byte(aliased(20)), Options{}); err == nil || strings.Contains(err.Error(), want) {
+		t.Fatalf("20 aliases: %v, want an error other than the budget", err)
+	}
+
+	// .env lines that each hold the one above twice: 1 KiB, doubled 20
+	// times, would be 1 GiB.
+	var dotenv strings.Builder
+	dotenv.WriteString("V0=" + strings.Repeat("b", 1<<10) + "\n")
+	for i := 1; i <= 20; i++ {
+		fmt.Fprintf(&dotenv, "V%d=$V%d$V%d\n", i, i-1, i-1)
+	}
+	_, err = Convert([]byte(web("environment: {A: x}")), Options{DotEnv: []byte(dotenv.String())})
+	if err == nil || strings.Count(err.Error(), want) != 1 || !strings.Contains(err.Error(), ".env line 15:") {
+		t.Fatalf(".env: %v, want one %q at line 15", err, want)
+	}
+
+	// The .env and the file share the budget: a .env that spends all but 2
+	// KiB of it, in its first 14 lines, leaves too little for the aliases.
+	_, err = Convert([]byte(aliased(20)), Options{DotEnv: []byte(strings.Join(strings.Split(dotenv.String(), "\n")[:14], "\n"))})
+	if err == nil || strings.Count(err.Error(), want) != 1 || strings.Contains(err.Error(), ".env line") {
+		t.Fatalf(".env and file: %v, want one %q in the file", err, want)
 	}
 }

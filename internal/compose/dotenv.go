@@ -22,21 +22,21 @@ import (
 // as a reference to one is.
 //
 // Errors give line numbers, never values.
-func parseDotEnv(data []byte, lookup func(string) (string, bool)) (map[string]string, error) {
+func parseDotEnv(data []byte, ip interpolator) (map[string]string, error) {
 	if len(data) > MaxFileBytes {
 		return nil, fail(".env", "the file is larger than %d bytes", MaxFileBytes)
 	}
 	env := map[string]string{}
-	look := func(k string) (string, bool) {
-		if lookup != nil {
-			if v, ok := lookup(k); ok {
-				return v, true
-			}
+	outer := ip.lookup
+	ip = ip.with(func(k string) (string, bool) {
+		if v, ok := outer(k); ok {
+			return v, true
 		}
 		v, ok := env[k]
 		return v, ok
-	}
+	})
 	var problems []Problem
+	tooMuch := false
 	for i, line := range strings.Split(string(data), "\n") {
 		path := fmt.Sprintf(".env line %d", i+1)
 		t := strings.TrimLeft(strings.TrimSuffix(line, "\r"), " \t")
@@ -59,9 +59,13 @@ func parseDotEnv(data []byte, lookup func(string) (string, bool)) (map[string]st
 		if !hasEq {
 			continue
 		}
-		v, err := dotEnvValue(strings.TrimLeft(val, " \t"), look)
+		v, err := dotEnvValue(strings.TrimLeft(val, " \t"), ip)
 		if err != nil {
-			problems = append(problems, Problem{path, err.Error()})
+			// The budget is spent once; every line after it would say so.
+			if !errors.Is(err, errTooMuch) || !tooMuch {
+				problems = append(problems, Problem{path, err.Error()})
+			}
+			tooMuch = tooMuch || errors.Is(err, errTooMuch)
 			continue
 		}
 		env[key] = v
@@ -72,7 +76,7 @@ func parseDotEnv(data []byte, lookup func(string) (string, bool)) (map[string]st
 	return env, nil
 }
 
-func dotEnvValue(v string, lookup func(string) (string, bool)) (string, error) {
+func dotEnvValue(v string, ip interpolator) (string, error) {
 	if v == "" {
 		return "", nil
 	}
@@ -117,7 +121,7 @@ func dotEnvValue(v string, lookup func(string) (string, bool)) (string, error) {
 				if !onlyComment(v[j+1:]) {
 					return "", errors.New("text after the closing quote")
 				}
-				return interpolate(b.String(), lookup)
+				return ip.interpolate(b.String())
 			default:
 				b.WriteByte(v[j])
 			}
@@ -130,7 +134,7 @@ func dotEnvValue(v string, lookup func(string) (string, bool)) (string, error) {
 			break
 		}
 	}
-	return interpolate(strings.TrimRight(v, " \t"), lookup)
+	return ip.interpolate(strings.TrimRight(v, " \t"))
 }
 
 func onlyComment(s string) bool {

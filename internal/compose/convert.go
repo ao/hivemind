@@ -1,6 +1,7 @@
 package compose
 
 import (
+	"errors"
 	"fmt"
 	"math"
 	"regexp"
@@ -13,8 +14,11 @@ import (
 )
 
 type converter struct {
-	prefix   string
-	lookup   func(string) (string, bool)
+	prefix string
+	// ip reads the variables of the environment, then those of the .env.
+	ip interpolator
+	// tooMuch is set once the interpolation budget is spent and said.
+	tooMuch  bool
 	problems []Problem
 	notes    []Note
 	// declared holds the names under the top-level volumes.
@@ -204,9 +208,13 @@ func (c *converter) str(path string, v *node) (string, bool) {
 	if v.tag != "!!str" {
 		return v.text, true
 	}
-	s, err := interpolate(v.text, c.lookup)
+	s, err := c.ip.interpolate(v.text)
 	if err != nil {
-		c.add(path, "%v", err)
+		// The budget is spent once; every value after it would say so.
+		if !errors.Is(err, errTooMuch) || !c.tooMuch {
+			c.add(path, "%v", err)
+		}
+		c.tooMuch = c.tooMuch || errors.Is(err, errTooMuch)
 		return "", false
 	}
 	return s, true
