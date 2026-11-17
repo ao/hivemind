@@ -90,8 +90,8 @@ func printNodes(out io.Writer, nodes []nodeRow) {
 			role = "server"
 		}
 		age := leaseAge(time.Duration(n.LeaseAgeSeconds * float64(time.Second)))
-		fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%s\t%d\t%s\t%s\t%s\t%s\t%d\t%s\n", n.ID, firstNonEmpty(n.Name, "-"), role,
-			firstNonEmpty(n.Address, "-"), firstNonEmpty(n.Version, "-"), n.CPU, bytesIEC(n.Memory), age, n.State,
+		fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%s\t%d\t%s\t%s\t%s\t%s\t%d\t%s\n", termSafe(n.ID), termSafe(firstNonEmpty(n.Name, "-")), role,
+			termSafe(firstNonEmpty(n.Address, "-")), termSafe(firstNonEmpty(n.Version, "-")), n.CPU, bytesIEC(n.Memory), age, termSafe(n.State),
 			eligibility(n), n.Replicas, certExpiry(n.CertNotAfter, n.CertNotRenewing, now))
 	}
 	tw.Flush()
@@ -220,7 +220,7 @@ https://developer.hashicorp.com/nomad/docs/commands/node/eligibility`,
 			return printJSON(cmd.OutOrStdout(), reply)
 		}
 		out := cmd.OutOrStdout()
-		name := firstNonEmpty(reply.Name, "-")
+		name := termSafe(firstNonEmpty(reply.Name, "-"))
 		switch {
 		case !reply.Eligible:
 			fmt.Fprintf(out, "%s (%s): ineligible; it keeps its replicas and takes no new ones\n", reply.ID, name)
@@ -357,7 +357,7 @@ func (p *drainPrinter) line(format string, args ...any) {
 	if p.quiet {
 		return
 	}
-	s := fmt.Sprintf(format, args...)
+	s := termSafe(fmt.Sprintf(format, args...))
 	if p.seen[s] {
 		return
 	}
@@ -407,7 +407,7 @@ func (p *drainPrinter) finish(d server.DrainView) {
 	}
 	if d.Remaining > 0 {
 		for _, b := range d.Blocked {
-			fmt.Fprintf(p.out, "  %s/%d: %s\n", b.App, b.Index, b.Reason)
+			fmt.Fprintf(p.out, "  %s/%d: %s\n", termSafe(b.App), b.Index, termSafe(b.Reason))
 		}
 	}
 	if d.OldContainers > 0 {
@@ -458,7 +458,7 @@ it again with an empty data directory and a new join token.`,
 			return printJSON(cmd.OutOrStdout(), reply)
 		}
 		out := cmd.OutOrStdout()
-		fmt.Fprintf(out, "%s (%s): removed; %d %s placed again\n", reply.ID, firstNonEmpty(reply.Name, "-"),
+		fmt.Fprintf(out, "%s (%s): removed; %d %s placed again\n", reply.ID, termSafe(firstNonEmpty(reply.Name, "-")),
 			reply.Rescheduled, plural(reply.Rescheduled, "replica", "replicas"))
 		if reply.Held > 0 {
 			fmt.Fprintf(out, "%d volume %s had data on the node and wait with no node; see hivemind status\n",

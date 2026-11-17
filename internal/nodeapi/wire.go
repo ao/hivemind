@@ -17,6 +17,7 @@ import (
 	"strings"
 	"time"
 	"unicode"
+	"unicode/utf8"
 
 	"github.com/ao/hivemind/internal/spec"
 	"github.com/ao/hivemind/internal/store"
@@ -494,7 +495,11 @@ func FromStore(as []store.Assignment, withAuth bool) []Assignment {
 }
 
 // ToStore converts the report to the store's statuses. The caller sets the
-// node ID on each one.
+// node ID on each one. Each control character in the report's text, the
+// container ID, app, state and error, becomes a space (Printable): a
+// worker's error can hold a Docker message with a newline in it, and an
+// escape sequence would reach an admin's terminal through hivemind status.
+// Refusing the report instead would also stop its lease.
 func (s StatusReport) ToStore() []store.Status {
 	out := make([]store.Status, 0, len(s.Containers))
 	for _, c := range s.Containers {
@@ -502,8 +507,8 @@ func (s StatusReport) ToStore() []store.Status {
 		for _, p := range c.RoutePorts {
 			rp = append(rp, store.RoutePort{Port: p.Port, HostPort: p.HostPort})
 		}
-		out = append(out, store.Status{Name: c.Name, ContainerID: c.ContainerID, App: c.App, Replica: c.Replica,
-			Generation: c.Generation, State: c.State, Error: c.Error, RestartCount: c.RestartCount,
+		out = append(out, store.Status{Name: c.Name, ContainerID: Printable(c.ContainerID), App: Printable(c.App), Replica: c.Replica,
+			Generation: c.Generation, State: Printable(c.State), Error: Printable(c.Error), RestartCount: c.RestartCount,
 			Health: c.Health, Ready: c.Ready, CrashLooping: c.CrashLooping, NextRestart: c.NextRestart, RoutePorts: rp})
 	}
 	return out
@@ -540,6 +545,21 @@ func RouteTableFromStore(rt []store.Route) RouteTable {
 
 func hasControl(s string) bool {
 	return strings.IndexFunc(s, unicode.IsControl) >= 0
+}
+
+// Printable returns s with each control character, C0 and C1 (ESC and CSI
+// among them), replaced by a space, and each byte that is not UTF-8 by
+// U+FFFD.
+func Printable(s string) string {
+	if !hasControl(s) && utf8.ValidString(s) {
+		return s
+	}
+	return strings.Map(func(r rune) rune {
+		if unicode.IsControl(r) {
+			return ' '
+		}
+		return r
+	}, s)
 }
 
 func truncate(s string) string {

@@ -411,15 +411,15 @@ func printStatus(out io.Writer, apps []server.AppStatus, readyKnown bool) {
 		if readyKnown {
 			ready = strconv.Itoa(a.Ready)
 		}
-		fmt.Fprintf(tw, "%s\t%s\t%d\t%d\t%d\t%s\n", a.Name, a.Image, a.Generation, a.Desired, a.Running, ready)
+		fmt.Fprintf(tw, "%s\t%s\t%d\t%d\t%d\t%s\n", termSafe(a.Name), termSafe(a.Image), a.Generation, a.Desired, a.Running, ready)
 	}
 	tw.Flush()
 	for _, a := range apps {
 		if ro := a.Rollout; ro != nil {
 			if ro.Reason != "" {
-				fmt.Fprintf(out, "%s: %s\n", a.Name, ro.Reason)
+				fmt.Fprintf(out, "%s: %s\n", termSafe(a.Name), termSafe(ro.Reason))
 			} else {
-				fmt.Fprintf(out, "%s: rolling out generation %d\n", a.Name, ro.Target)
+				fmt.Fprintf(out, "%s: rolling out generation %d\n", termSafe(a.Name), ro.Target)
 			}
 		}
 	}
@@ -445,8 +445,8 @@ func printStatus(out io.Writer, apps []server.AppStatus, readyKnown bool) {
 					detail += ", next restart in " + max(time.Until(*r.NextRestart), 0).Round(time.Second).String()
 				}
 			}
-			fmt.Fprintf(tw, "%s\t%d\t%s\t%d\t%s\t%s\t%d\t%s\t%s\n", a.Name, r.Index, firstNonEmpty(r.NodeID, "-"), r.Generation,
-				state, firstNonEmpty(r.Health, "-"), r.Restarts, firstNonEmpty(shortID(r.ContainerID), "-"), detail)
+			fmt.Fprintf(tw, "%s\t%d\t%s\t%d\t%s\t%s\t%d\t%s\t%s\n", termSafe(a.Name), r.Index, termSafe(firstNonEmpty(r.NodeID, "-")), r.Generation,
+				termSafe(state), termSafe(firstNonEmpty(r.Health, "-")), r.Restarts, termSafe(firstNonEmpty(shortID(r.ContainerID), "-")), termSafe(detail))
 		}
 	}
 	tw.Flush()

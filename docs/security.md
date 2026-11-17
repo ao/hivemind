@@ -66,7 +66,7 @@ A backup file (`hivemind backup`) is written with mode 0600. It holds `hivemind.
 Assume an attacker has the worker's data directory, or root on the worker. The code allows the following.
 
 - Read the assignment of every replica placed on the worker. That is the full spec, including environment values and volume names, and the registry credential for the replica's image. Treat every environment value as exposed to each machine that runs the app, and every registry credential as exposed to each machine that runs an image from that registry.
-- Report false container states for its own node. The server takes the report as given, and the scheduler and rollouts act on it.
+- Report false container states for its own node. The server takes the report as given, and the scheduler and rollouts act on it. The report's text, a container's state and error among it, is stored with each control character made a space, so it cannot carry terminal escapes to `hivemind status`; the CLI also escapes, as `\x1b`, any control character in the server's text it prints in `status`, `nodes`, `node drain` and error messages. `hivemind logs` copies a container's output as it is.
 - Renew or stop renewing its own lease. Stopping makes the server move its replicas.
 - Register any name of up to 253 printable characters, and any capacity up to the limits the server checks: 1,048,576 CPUs and 2^50 bytes of memory. Placement trusts these figures, so the worker can attract more replicas, and so more environment values and registry credentials, than it has room for.
 - Run whatever its Docker daemon will run, which is the worker's own host.

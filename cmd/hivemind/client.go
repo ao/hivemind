@@ -292,7 +292,7 @@ func (c *apiClient) send(ctx context.Context, method, path string, body any) (*h
 	}
 	v := nodeapi.CleanVersion(resp.Header.Get(nodeapi.VersionHeader))
 	if json.Unmarshal(b, &e) == nil && e.Error != "" {
-		return nil, &apiError{status: resp.StatusCode, msg: e.Error, version: v}
+		return nil, &apiError{status: resp.StatusCode, msg: termSafe(e.Error), version: v}
 	}
 	return nil, &apiError{status: resp.StatusCode, msg: "server returned " + resp.Status, version: v}
 }

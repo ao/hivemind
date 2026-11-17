@@ -7,6 +7,7 @@ import (
 	"strings"
 	"testing"
 	"time"
+	"unicode/utf8"
 
 	"github.com/ao/hivemind/internal/spec"
 	"github.com/ao/hivemind/internal/store"
@@ -207,4 +208,34 @@ func FuzzDecodeRegister(f *testing.F) {
 			_ = g.Validate()
 		}
 	})
+}
+
+// A report whose text holds terminal escapes, as a compromised worker's
+// could, is taken, with each control character a space, so that hivemind
+// status prints none of them; a newline in a Docker error is kept as a
+// space too, and the lease is renewed. A control character in the
+// container's name is still refused.
+func TestStatusTextIsMadePrintable(t *testing.T) {
+	const esc = "\x1b]0;owned\x07\x1b[2J\u009b31m"
+	rep := StatusReport{Containers: []Container{{Name: "hivemind-web-0-g1", ContainerID: "abc" + esc, App: "web" + esc,
+		Generation: 1, State: "running" + esc, Error: "pull failed:\n" + esc + "\xff"}}}
+	if err := rep.Validate(); err != nil {
+		t.Fatalf("Validate: %v", err)
+	}
+	got := rep.ToStore()[0]
+	for field, s := range map[string]string{"container ID": got.ContainerID, "app": got.App, "state": got.State, "error": got.Error} {
+		if strings.ContainsAny(s, "\x1b\x07\n\u009b") || !utf8.ValidString(s) {
+			t.Errorf("%s %q holds a control character", field, s)
+		}
+	}
+	if got.Error != "pull failed:  ]0;owned  [2J 31m�" || got.State != "running ]0;owned  [2J 31m" {
+		t.Errorf("error %q, state %q", got.Error, got.State)
+	}
+	rep.Containers[0].Name += "\x1b"
+	if err := rep.Validate(); !errors.Is(err, ErrInvalid) {
+		t.Errorf("a name with ESC: %v, want ErrInvalid", err)
+	}
+	if Printable("plain text, ü") != "plain text, ü" {
+		t.Error("Printable changed printable text")
+	}
 }
