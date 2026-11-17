@@ -172,9 +172,45 @@ func (p *proxy) rewrite(pr *httputil.ProxyRequest) {
 			delete(pr.Out.Header, name)
 		}
 	}
+	dropH2C(pr.Out.Header)
 	pr.SetXForwarded()
 	pr.Out.Header.Set("X-Forwarded-Host", authority)
 	pr.Out.Header.Set("X-Forwarded-Port", strconv.Itoa(p.httpsPort))
+}
+
+// dropH2C takes the h2c token out of an outbound request's Upgrade header,
+// and removes the header, with its Connection: Upgrade, when no other
+// protocol is left; HTTP2-Settings goes too. h2c is HTTP/2 over cleartext
+// TCP (RFC 9113, 3.1), which has no place on a TLS connection, and a replica
+// that switched to it would speak HTTP/2 with the client directly, past the
+// router's host check and header rewriting, for the rest of the connection.
+// RFC 9110 (7.8) lets a server ignore Upgrade, so the request goes on as
+// HTTP/1.1, as it would to a server without h2c; a client is not refused for
+// asking. A replica that answers 101 for a protocol the request no longer
+// names gets the client a 502 from ReverseProxy. Other upgrades, such as
+// WebSocket, pass.
+func dropH2C(h http.Header) {
+	h.Del("Http2-Settings")
+	vals := h.Values("Upgrade")
+	if len(vals) == 0 {
+		return
+	}
+	var keep []string
+	for _, v := range vals {
+		for tok := range strings.SplitSeq(v, ",") {
+			tok = strings.TrimSpace(tok)
+			name, _, _ := strings.Cut(tok, "/")
+			if tok != "" && !strings.EqualFold(name, "h2c") {
+				keep = append(keep, tok)
+			}
+		}
+	}
+	if len(keep) == 0 {
+		h.Del("Upgrade")
+		h.Del("Connection")
+		return
+	}
+	h.Set("Upgrade", strings.Join(keep, ", "))
 }
 
 // setTable replaces the routing table. Endpoints that stay keep their

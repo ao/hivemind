@@ -324,6 +324,117 @@ func TestForwardedHeadersAreReplaced(t *testing.T) {
 	}
 }
 
+// switcher is a replica that switches protocols when a request asks, and
+// then echoes what it reads; with h2c set, it switches to h2c whatever the
+// request asks, and closes. A request that asks for nothing gets what it
+// sent, as upstream answers.
+func switcher(t *testing.T, h2c bool) string {
+	t.Helper()
+	s := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		proto := r.Header.Get("Upgrade")
+		if h2c {
+			proto = "h2c"
+		}
+		if proto == "" {
+			_ = json.NewEncoder(w).Encode(seen{Name: "switcher", Host: r.Host, Header: r.Header})
+			return
+		}
+		c, brw, err := http.NewResponseController(w).Hijack()
+		if err != nil {
+			return
+		}
+		defer c.Close()
+		fmt.Fprintf(brw, "HTTP/1.1 101 Switching Protocols\r\nConnection: Upgrade\r\nUpgrade: %s\r\n\r\n", proto)
+		if brw.Flush() != nil || h2c {
+			return
+		}
+		buf := make([]byte, 64)
+		for {
+			n, err := brw.Read(buf)
+			if err != nil {
+				return
+			}
+			_, _ = brw.Write(buf[:n])
+			if brw.Flush() != nil {
+				return
+			}
+		}
+	}))
+	t.Cleanup(s.Close)
+	return s.Listener.Addr().String()
+}
+
+// upgrade sends an HTTP/1.1 request that asks to switch to protos.
+func upgrade(t *testing.T, c *http.Client, host string, protos string) *http.Response {
+	t.Helper()
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	t.Cleanup(cancel)
+	req, _ := http.NewRequestWithContext(ctx, http.MethodGet, "https://"+host+"/", nil)
+	req.Header.Set("Connection", "Upgrade, HTTP2-Settings")
+	req.Header.Set("Upgrade", protos)
+	req.Header.Set("HTTP2-Settings", "AAMAAABkAARAAAAAAAIAAAAA")
+	resp, err := c.Do(req)
+	if err != nil {
+		t.Fatalf("upgrade to %s: %v", protos, err)
+	}
+	return resp
+}
+
+// An h2c upgrade does not reach the replica: the router drops the token, and
+// the request goes on as HTTP/1.1. A replica that switched to h2c would speak
+// HTTP/2 with the client directly, past the router. WebSocket upgrades pass,
+// alone or beside h2c.
+func TestH2CUpgradeIsDroppedAndWebSocketsWork(t *testing.T) {
+	tr := newTestRouter(t, Table{"www.example.com": {switcher(t, false)}, "api.example.com": {switcher(t, true)}})
+	c := tr.client(true)
+
+	resp := upgrade(t, c, "www.example.com", "h2c")
+	if resp.StatusCode == http.StatusSwitchingProtocols {
+		resp.Body.Close()
+		t.Fatalf("the router switched the connection to %q with the replica", resp.Header.Get("Upgrade"))
+	}
+	b, _ := io.ReadAll(resp.Body)
+	resp.Body.Close()
+	var s seen
+	_ = json.Unmarshal(b, &s)
+	if resp.StatusCode != http.StatusOK || s.Name != "switcher" {
+		t.Fatalf("h2c upgrade: %d %q, want 200 from the replica as plain HTTP/1.1", resp.StatusCode, b)
+	}
+	for _, k := range []string{"Upgrade", "Connection", "Http2-Settings"} {
+		if v := s.Header.Values(k); len(v) > 0 {
+			t.Errorf("the replica got %s %q", k, v)
+		}
+	}
+
+	// A replica that switches to h2c though the request no longer asks gets
+	// the client a 502, not a 101.
+	resp = upgrade(t, c, "api.example.com", "h2c")
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusBadGateway {
+		t.Fatalf("a replica that switched to h2c unasked: %d, want 502", resp.StatusCode)
+	}
+
+	// A client with a timeout wraps the body, which then cannot be written.
+	ws := *c
+	ws.Timeout = 0
+	for _, protos := range []string{"websocket", "h2c, websocket"} {
+		resp = upgrade(t, &ws, "www.example.com", protos)
+		if resp.StatusCode != http.StatusSwitchingProtocols || !strings.EqualFold(resp.Header.Get("Upgrade"), "websocket") {
+			resp.Body.Close()
+			t.Fatalf("Upgrade: %s: %d %q, want 101 websocket", protos, resp.StatusCode, resp.Header.Get("Upgrade"))
+		}
+		rwc := resp.Body.(io.ReadWriteCloser)
+		if _, err := rwc.Write([]byte("ping")); err != nil {
+			t.Fatal(err)
+		}
+		buf := make([]byte, 4)
+		if _, err := io.ReadFull(rwc, buf); err != nil || string(buf) != "ping" {
+			t.Fatalf("Upgrade: %s: echo %q, %v", protos, buf, err)
+		}
+		rwc.Close()
+	}
+}
+
 func TestAuthorityHasThePortOnlyWhenNot443(t *testing.T) {
 	for port, want := range map[int]string{443: "www.example.com", 8443: "www.example.com:8443"} {
 		if got := (&proxy{httpsPort: port}).authority("www.example.com"); got != want {

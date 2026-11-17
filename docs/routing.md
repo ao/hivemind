@@ -32,6 +32,8 @@ These were made by the owner on 2026-11-14.
 
 The router removes every request header whose name starts with `X-Forwarded-`, and `Forwarded`, `X-Real-Ip`, `True-Client-Ip`, `X-Client-Ip`, `X-Cluster-Client-Ip` and `Cf-Connecting-Ip`, comparing names without case and with `_` read as `-` (a CGI-style server turns `X_Forwarded_For` and `X-Forwarded-For` into the same variable). Then it sets `X-Forwarded-For` to the address the connection came from, `X-Forwarded-Proto` to `https`, `X-Forwarded-Port` to the https port, and `Host` and `X-Forwarded-Host` to the host as the routing table has it: in lower case, without a trailing dot, and with `:<port>` only when `--route-https-port` is not 443, as in the router's redirects to https. Whatever case, trailing dot or port the client wrote in `Host`, the app sees the same value, so the links it builds from `Host` point at the routed host. Clients can use HTTP/1.1 or HTTP/2; the router speaks HTTP/1.1 to the replicas.
 
+WebSocket and other HTTP/1.1 upgrades pass through to the replica. An upgrade to `h2c` does not: h2c is HTTP/2 without TLS, and a replica that switched to it would speak HTTP/2 with the client directly, past the router's checks and header rewriting. The router takes the `h2c` token out of `Upgrade` and drops `HTTP2-Settings`, so the request reaches the replica as plain HTTP/1.1, as RFC 9110 allows a server to ignore an upgrade. A replica that answers `101` for a protocol the request did not name gets the client a `502`.
+
 | Request | Reply |
 |---|---|
 | A host in the table, with a Ready replica | The replica's reply |
