@@ -583,7 +583,7 @@ func TestReplicaReleasedDuringRolloutTakesTheTarget(t *testing.T) {
 	// node1 is lost; its replicas lose it, and no eligible node takes them.
 	e.clock.Advance(20 * time.Second)
 	e.renew(nodeB)
-	if lost, err := e.s.ReconcileNodes(e.ctx, time.Time{}); err != nil || len(lost) != 1 || lost[0] != node1 {
+	if lost, err := e.s.ReconcileNodes(e.ctx); err != nil || len(lost) != 1 || lost[0] != node1 {
 		t.Fatalf("sweep: lost %v, %v", lost, err)
 	}
 	if n := e.nodesOf("web"); !eqStrings(n, []string{"", ""}) {

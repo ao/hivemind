@@ -47,8 +47,9 @@ type Config struct {
 	// Started is when serve started. A container report older than it was
 	// made to an earlier server process, perhaps on another machine before a
 	// restore, so the status shows its replica as "unknown" until the node
-	// reports again; a node that has not reported since is "waiting" for one
-	// lease timeout rather than "lost". The zero time turns this off.
+	// reports again. The zero time turns this off. Whether a node that has
+	// not reported since is "waiting" rather than "lost" is the store's
+	// start grace (store.SetStarted).
 	Started time.Time
 	// NodeID is the local node. Logs of its replicas are read from Runtime.
 	NodeID string

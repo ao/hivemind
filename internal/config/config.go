@@ -66,9 +66,12 @@ type Config struct {
 	MetricsAddr       string        `json:"metrics_addr"`
 	ReconcileInterval time.Duration `json:"reconcile_interval"`
 	MinReady          time.Duration `json:"min_ready"`
-	RouteAddr         string        `json:"route_addr"`
-	RouteHTTPPort     int           `json:"route_http_port"`
-	RouteHTTPSPort    int           `json:"route_https_port"`
+	// StartGrace is how long after serve starts a worker that was up before
+	// the start, and has not reported since, waits rather than being lost.
+	StartGrace     time.Duration `json:"start_grace"`
+	RouteAddr      string        `json:"route_addr"`
+	RouteHTTPPort  int           `json:"route_http_port"`
+	RouteHTTPSPort int           `json:"route_https_port"`
 	// RouteMaxConnsPerIP caps the router's connections from one client
 	// address; 0 means no cap.
 	RouteMaxConnsPerIP int    `json:"route_max_conns_per_ip"`
@@ -303,6 +306,10 @@ func settings(opts Options) []setting {
 		dur("min-ready", "how long a node must be ready before it gets new replicas; 0s means no wait", "30s",
 			func(c *Config) *time.Duration { return &c.MinReady },
 			func(f *fileConfig) *string { return f.MinReady }),
+		// The default is store.DefaultStartGrace.
+		dur("start-grace", "how long after serve starts a worker that was up before it waits for its first report, keeping its replicas, before it is lost; at least 15s", "2m",
+			func(c *Config) *time.Duration { return &c.StartGrace },
+			func(f *fileConfig) *string { return f.StartGrace }),
 		str("route-addr", "IP address the HTTPS router listens on, such as 0.0.0.0 for every interface; empty means no router on this node", "",
 			func(c *Config) *string { return &c.RouteAddr },
 			func(f *fileConfig) *string { return f.RouteAddr }),

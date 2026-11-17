@@ -126,38 +126,57 @@ func TestReportsFromBeforeTheStartAreUnknown(t *testing.T) {
 	}
 }
 
-// In the first lease timeout after the start, a node that has not reported to
-// this process is "waiting", as the sweep does not count it lost yet. After
-// that it is lost, and a node that has reported is ready.
+// In the start grace after serve starts, a node that was up before the start
+// and has not reported to this process is "waiting", as the sweep does not
+// count it lost. When the grace ends it is lost; a node that reports is
+// ready at once; a node whose lease had lapsed before the server went down
+// is lost at once.
 func TestNodesWaitForTheirFirstReportAfterTheStart(t *testing.T) {
 	e := newStartedEnv(t)
 	ctx := context.Background()
+	// The server went down ten minutes ago. node-b had stopped renewing 20 s
+	// before that, so it was lost already.
+	down := time.Now().Add(-10 * time.Minute)
+	e.set(down.Add(-20 * time.Second))
+	if err := e.st.UpsertNode(ctx, store.Node{ID: "node-b", Name: "b", CPU: 2, Memory: 1 << 30}); err != nil {
+		t.Fatal(err)
+	}
+	e.set(down)
 	if err := e.st.UpsertNode(ctx, store.Node{ID: "node-a", Name: "a", CPU: 2, Memory: 1 << 30}); err != nil {
 		t.Fatal(err)
 	}
-	stateOf := func(started time.Time) string {
+	states := func(started time.Time) map[string]string {
+		t.Helper()
+		if !started.IsZero() {
+			if err := e.st.SetStarted(ctx, started, 2*time.Minute); err != nil {
+				t.Fatal(err)
+			}
+		}
 		var nodes []NodeView
 		e.get(started, "/v1/nodes", &nodes)
-		if len(nodes) != 1 {
-			t.Fatalf("nodes: %+v", nodes)
+		out := map[string]string{}
+		for _, n := range nodes {
+			out[n.ID] = n.State
 		}
-		return nodes[0].State
+		return out
 	}
-	if s := stateOf(time.Time{}); s != "lost" {
-		t.Fatalf("a lease a minute old with no start time: %q, want lost", s)
+	if s := states(time.Time{}); s["node-a"] != "lost" || s["node-b"] != "lost" {
+		t.Fatalf("leases ten minutes old with no start: %v, want both lost", s)
 	}
-	if s := stateOf(time.Now().Add(-5 * time.Second)); s != "waiting" {
-		t.Fatalf("5 s after the start, no report since: %q, want waiting", s)
+	for _, after := range []time.Duration{5 * time.Second, 20 * time.Second, 115 * time.Second} {
+		if s := states(time.Now().Add(-after)); s["node-a"] != "waiting" || s["node-b"] != "lost" {
+			t.Fatalf("%s after the start, no report since: %v; want node-a waiting, node-b lost", after, s)
+		}
 	}
-	if s := stateOf(time.Now().Add(-20 * time.Second)); s != "lost" {
-		t.Fatalf("20 s after the start, no report since: %q, want lost", s)
+	if s := states(time.Now().Add(-125 * time.Second)); s["node-a"] != "lost" {
+		t.Fatalf("125 s after a start with a 2-minute grace: %v, want node-a lost", s)
 	}
 	e.set(time.Now())
 	if err := e.st.RenewLease(ctx, "node-a"); err != nil {
 		t.Fatal(err)
 	}
-	if s := stateOf(time.Now().Add(-5 * time.Second)); s != "ready" {
-		t.Fatalf("after a report to this process: %q, want ready", s)
+	if s := states(time.Now().Add(-5 * time.Second)); s["node-a"] != "ready" {
+		t.Fatalf("after a report to this process: %v, want node-a ready", s)
 	}
 }
 
@@ -230,7 +249,7 @@ func TestALostNodesReportIsNotCurrent(t *testing.T) {
 	if err := e.st.RenewLease(ctx, other); err != nil {
 		t.Fatal(err)
 	}
-	if lost, err := e.st.ReconcileNodes(ctx, time.Time{}); err != nil || len(lost) != 1 || lost[0] != on {
+	if lost, err := e.st.ReconcileNodes(ctx); err != nil || len(lost) != 1 || lost[0] != on {
 		t.Fatalf("sweep: lost %v, %v; want [%s]", lost, err, on)
 	}
 	e.get(time.Time{}, "/v1/apps/db/status", &got)

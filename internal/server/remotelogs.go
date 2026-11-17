@@ -62,7 +62,15 @@ func (s *Server) remoteLogs(w http.ResponseWriter, r *http.Request, node string,
 		s.fail(w, r, err)
 		return
 	}
-	if age := timeNow().Sub(n.LastLease); age > scheduler.DefaultLeaseTimeout {
+	now := timeNow()
+	switch age := now.Sub(n.LastLease); {
+	case age <= scheduler.DefaultLeaseTimeout:
+	case s.cfg.Store.Waiting(n, now):
+		writeError(w, http.StatusServiceUnavailable, fmt.Sprintf(
+			"%s runs on node %s, which has not reported to this server since it started (it last reported %s ago), so its logs cannot be read yet",
+			what, node, age.Round(time.Second)))
+		return
+	default:
 		writeError(w, http.StatusServiceUnavailable, fmt.Sprintf(
 			"%s runs on node %s, which is lost: it last reported %s ago, so its logs cannot be read",
 			what, node, age.Round(time.Second)))

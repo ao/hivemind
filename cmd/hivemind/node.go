@@ -31,6 +31,7 @@ import (
 	"github.com/ao/hivemind/internal/router"
 	"github.com/ao/hivemind/internal/runtime"
 	"github.com/ao/hivemind/internal/runtime/docker"
+	"github.com/ao/hivemind/internal/scheduler"
 	"github.com/ao/hivemind/internal/server"
 	"github.com/ao/hivemind/internal/store"
 	"github.com/ao/hivemind/internal/tlsstore"
@@ -49,10 +50,11 @@ const sweepInterval = 5 * time.Second
 
 // sweep runs the server's periodic work until ctx ends. A node whose lease
 // has lapsed is released: its replicas are placed on other nodes, and volume
-// replicas wait for it. Each node is logged once when it is lost. Leases count
-// from started at the earliest (see store.ReconcileNodes), so a server that
-// was down gives every node a lease timeout to report. Drains count the start
-// of their moves the same way (see store.AdvanceDrains).
+// replicas wait for it. Each node is logged once when it is lost. A node that
+// was up before serve started waits for its first report for the start grace
+// (see store.Waiting), so a server that was down gives the workers that
+// time to reach it. Drains count the start of their moves from started at
+// the earliest (see store.AdvanceDrains).
 func sweep(ctx context.Context, st *store.Store, log *slog.Logger, every time.Duration, started time.Time) {
 	t := time.NewTicker(every)
 	defer t.Stop()
@@ -63,7 +65,7 @@ func sweep(ctx context.Context, st *store.Store, log *slog.Logger, every time.Du
 			return
 		case <-t.C:
 		}
-		nodes, err := st.ReconcileNodes(ctx, started)
+		nodes, err := st.ReconcileNodes(ctx)
 		if err != nil {
 			// Nothing was released, as on a full disk: a loss is logged
 			// when a sweep releases the node.
@@ -91,6 +93,25 @@ func sweep(ctx context.Context, st *store.Store, log *slog.Logger, every time.Du
 			log.Warn("advance rollouts", "err", err)
 		}
 		advanceDrains(ctx, st, log, started)
+	}
+}
+
+// noteWaiting logs, when serve starts, how many workers wait for their first
+// report, and for how long at most. None is nothing.
+func noteWaiting(ctx context.Context, st *store.Store, grace time.Duration, log *slog.Logger) {
+	nodes, err := st.ListNodes(ctx)
+	if err != nil {
+		return
+	}
+	now, waiting := st.Now(), 0
+	for _, n := range nodes {
+		if st.Waiting(n, now) {
+			waiting++
+		}
+	}
+	if waiting > 0 {
+		log.Info("workers that were up before this start wait for their first report; any that has not reported when the start grace ends is lost",
+			"waiting", waiting, "start_grace", max(grace, scheduler.DefaultLeaseTimeout))
 	}
 }
 
@@ -521,11 +542,19 @@ func runServe(ctx context.Context, cfg *config.Config, log *slog.Logger, rt runt
 		return err
 	}
 	noteAddressChange(ctx, st, cfg, cl.NodeID, nodeAddr, log)
+	// The start is recorded before this process renews any lease, its own
+	// node's included: the workers that were up before it wait for their
+	// first report for the start grace.
+	started := time.Now()
+	if err := st.SetStarted(ctx, started, cfg.StartGrace); err != nil {
+		return err
+	}
 	hostname, _ := os.Hostname()
 	if err := st.UpsertNode(ctx, store.Node{ID: cl.NodeID, Name: hostname, CPU: info.NCPU, Memory: info.MemTotal, Address: nodeAddr,
 		Version: nodeapi.CleanVersion(version)}); err != nil {
 		return err
 	}
+	noteWaiting(ctx, st, cfg.StartGrace, log)
 
 	sessions, err := auth.NewSessions(12 * time.Hour)
 	if err != nil {
@@ -541,8 +570,6 @@ func runServe(ctx context.Context, cfg *config.Config, log *slog.Logger, rt runt
 	// passes on every interval, so deadlines are checked even when nothing
 	// reports.
 	agentLog := log.With("component", "agent")
-	started := time.Now()
-	st.SetStarted(started)
 	onPass := func(d time.Duration, err error) {
 		m.ObserveReconcile(d, err)
 		if aerr := st.AdvanceRollouts(context.Background()); aerr != nil {

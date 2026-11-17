@@ -2,6 +2,7 @@ package store
 
 import (
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -39,7 +40,7 @@ func (e *schedEnv) renew(id string) {
 // sweep runs the server's node sweep and returns the nodes it found lost.
 func (e *schedEnv) sweep() []string {
 	e.t.Helper()
-	lost, err := e.s.ReconcileNodes(ctxT(e.t), time.Time{})
+	lost, err := e.s.ReconcileNodes(ctxT(e.t))
 	if err != nil {
 		e.t.Fatal(err)
 	}
@@ -75,54 +76,156 @@ func TestRenewLeaseKeepsANodeWithoutAReport(t *testing.T) {
 }
 
 // A server that has just started, after an outage or a restore, finds every
-// lease as old as the outage. It gives each node a whole lease timeout from
-// its start to report, and only a node that stays quiet is lost.
-func TestReconcileNodesCountsLeasesFromTheServerStart(t *testing.T) {
-	e := newSchedEnv(t, 0, "node-1", "node-2")
-	mustPut(t, e.s, web(2))
-	on := map[string]int{}
-	for _, r := range replicasOf(t, e.s, "web") {
-		on[r.NodeID] = r.Index
+// lease as old as the outage. A node that was up when the server went down
+// waits for its first report for the start grace: it is not lost, and its
+// replicas stay on it, though its lease is far older than the lease
+// timeout. A node that reports in the grace is live at once, and from then
+// on is lost as any node is, 15 s after its last renewal. A node that stays
+// quiet is lost when the grace ends, and only then are its replicas placed
+// again. A node whose lease had lapsed before the server went down is lost
+// at once. In the third soak, a server restored at a new address, whose
+// workers reached it 31 s after it started, lost all three at 15 s and ran
+// their replicas a second time.
+func TestStartGraceKeepsTheNodesThatWereUp(t *testing.T) {
+	e := newSchedEnv(t, 0, "node-1", "node-2", "node-3")
+	mustPut(t, e.s, web(3))
+	if got := e.nodesOfWeb(); len(got) != 3 || got[0] == got[1] || got[1] == got[2] || got[0] == got[2] {
+		t.Fatalf("web on %v, want one replica on each node", got)
 	}
-	if len(on) != 2 {
-		t.Fatalf("replicas on %v, want one on each node", on)
+	// node-3 stops renewing, and the server finds it lost before it goes
+	// down; its replica moves to node-1 or node-2.
+	e.clock.Advance(10 * time.Second)
+	e.renew("node-1")
+	e.renew("node-2")
+	e.clock.Advance(10 * time.Second)
+	e.renew("node-1")
+	e.renew("node-2")
+	if lost := e.sweep(); !slices.Equal(lost, []string{"node-3"}) {
+		t.Fatalf("before the outage: lost %v, want [node-3]", lost)
+	}
+	before := e.nodesOfWeb()
+	if slices.Contains(before, "node-3") || slices.Contains(before, "") {
+		t.Fatalf("web on %v after node-3 was lost", before)
 	}
 
-	// The server is down for a minute, then starts. Its first sweep comes 5 s
-	// later, before either node has reported.
-	e.clock.Advance(time.Minute)
+	// The server is down for ten minutes, then starts with a 2-minute grace.
+	e.clock.Advance(10 * time.Minute)
 	started := e.clock.Now()
-	e.clock.Advance(5 * time.Second)
-	if lost, err := e.s.ReconcileNodes(ctxT(t), started); err != nil || len(lost) != 0 {
-		t.Fatalf("first sweep after the start: lost %v, %v; want none", lost, err)
+	if err := e.s.SetStarted(ctxT(t), started, 2*time.Minute); err != nil {
+		t.Fatal(err)
 	}
-	// Without the start time, the same sweep loses both.
-	if lost, err := e.s.ReconcileNodes(ctxT(t), time.Time{}); err != nil || len(lost) != 2 {
-		t.Fatalf("sweep with no start time: lost %v, %v; want both nodes", lost, err)
+	at := func(d time.Duration) { e.clock.t = started.Add(d) }
+	waiting := func() []string {
+		t.Helper()
+		nodes, err := e.s.ListNodes(ctxT(t))
+		if err != nil {
+			t.Fatal(err)
+		}
+		var out []string
+		for _, n := range nodes {
+			if e.s.Waiting(n, e.clock.Now()) {
+				out = append(out, n.ID)
+			}
+		}
+		return out
+	}
+	for _, d := range []time.Duration{0, 5 * time.Second, 16 * time.Second, 30 * time.Second} {
+		at(d)
+		if lost := e.sweep(); !slices.Equal(lost, []string{"node-3"}) {
+			t.Fatalf("%s after the start: lost %v, want only node-3, lost before the start", d, lost)
+		}
+		if w := waiting(); !slices.Equal(w, []string{"node-1", "node-2"}) {
+			t.Fatalf("%s after the start: waiting %v, want node-1 and node-2", d, w)
+		}
+		if got := e.nodesOfWeb(); !slices.Equal(got, before) {
+			t.Fatalf("%s after the start: web on %v, want it where it was, %v", d, got, before)
+		}
 	}
 
-	e2 := newSchedEnv(t, 0, "node-1", "node-2")
-	mustPut(t, e2.s, web(2))
-	on = map[string]int{}
-	for _, r := range replicasOf(t, e2.s, "web") {
-		on[r.NodeID] = r.Index
+	// node-1 reports 31 s after the start: it is live, not waiting.
+	at(31 * time.Second)
+	e.renew("node-1")
+	if w := waiting(); !slices.Equal(w, []string{"node-2"}) {
+		t.Fatalf("after node-1's report: waiting %v, want node-2", w)
 	}
-	e2.clock.Advance(time.Minute)
-	started = e2.clock.Now()
-	e2.clock.Advance(5 * time.Second)
-	if lost, err := e2.s.ReconcileNodes(ctxT(t), started); err != nil || len(lost) != 0 {
-		t.Fatalf("first sweep after the start: lost %v, %v; want none", lost, err)
+	at(45 * time.Second)
+	if lost := e.sweep(); !slices.Equal(lost, []string{"node-3"}) {
+		t.Fatalf("14 s after node-1's report: lost %v, want only node-3", lost)
 	}
-	// node-1 reports; node-2 stays quiet. 16 s after the start, node-2 is
-	// lost, and node-1's replica has not moved.
-	e2.renew("node-1")
-	e2.clock.Advance(11 * time.Second)
-	if lost, err := e2.s.ReconcileNodes(ctxT(t), started); err != nil || len(lost) != 1 || lost[0] != "node-2" {
-		t.Fatalf("16 s after the start: lost %v, %v; want [node-2]", lost, err)
+	// It then stops: 15 s later it is lost, in the grace, as any node is.
+	at(47 * time.Second)
+	if lost := e.sweep(); !slices.Equal(lost, []string{"node-1", "node-3"}) {
+		t.Fatalf("16 s after node-1's report: lost %v, want node-1 and node-3", lost)
 	}
-	if got := e2.nodeOf("web", on["node-1"]); got != "node-1" {
-		t.Fatalf("node-1's replica is on %q after the sweep, want node-1", got)
+
+	// node-2 never reports. It waits to the end of the grace, then is lost.
+	at(2*time.Minute - time.Second)
+	if lost := e.sweep(); !slices.Equal(lost, []string{"node-1", "node-3"}) {
+		t.Fatalf("at the end of the grace: lost %v, want node-1 and node-3", lost)
 	}
+	for i, n := range before {
+		if n == "node-2" && e.nodeOf("web", i) != "node-2" {
+			t.Fatalf("web %d left node-2 in the grace", i)
+		}
+	}
+	at(2 * time.Minute)
+	if lost := e.sweep(); !slices.Equal(lost, []string{"node-1", "node-2", "node-3"}) {
+		t.Fatalf("when the grace ended: lost %v, want all three", lost)
+	}
+	if w := waiting(); len(w) != 0 {
+		t.Fatalf("after the grace: waiting %v", w)
+	}
+	for i, n := range e.nodesOfWeb() {
+		if n == "node-2" {
+			t.Fatalf("web %d is still on node-2 after the grace", i)
+		}
+	}
+}
+
+// The start grace takes when the server went down from the workers' leases:
+// the server's own node renews its lease as serve starts, before or after
+// SetStarted, and must not move that time. serve renewed it first in the
+// third soak's build, and the routing table then dropped every worker.
+func TestStartGraceLeavesOutTheServersOwnLease(t *testing.T) {
+	for _, upsertFirst := range []bool{true, false} {
+		e := newSchedEnv(t, 0, "node-s", "node-1")
+		if err := e.s.InitCluster(ctxT(t), Cluster{AdminTokenHash: [32]byte{1}, NodeID: "node-s"}); err != nil {
+			t.Fatal(err)
+		}
+		e.clock.Advance(2 * time.Minute)
+		if upsertFirst {
+			// As serve did: a moment before it took the start time.
+			e.renew("node-s")
+			e.clock.Advance(time.Millisecond)
+		}
+		started := e.clock.Now()
+		if err := e.s.SetStarted(ctxT(t), started, 2*time.Minute); err != nil {
+			t.Fatal(err)
+		}
+		if !upsertFirst {
+			e.renew("node-s")
+		}
+		for range 2 {
+			e.clock.Advance(10 * time.Second)
+			e.renew("node-s")
+		}
+		if lost := e.sweep(); len(lost) != 0 {
+			t.Fatalf("server's lease renewed first %v: lost %v 20 s after the start, want none", upsertFirst, lost)
+		}
+	}
+}
+
+// nodesOfWeb returns the node of each replica of web, by index.
+func (e *schedEnv) nodesOfWeb() []string {
+	e.t.Helper()
+	var out []string
+	for _, r := range replicasOf(e.t, e.s, "web") {
+		for len(out) <= r.Index {
+			out = append(out, "")
+		}
+		out[r.Index] = r.NodeID
+	}
+	return out
 }
 
 // nodeOf returns the node of one replica, or "" when it is pending.

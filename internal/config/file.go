@@ -29,6 +29,7 @@ type fileConfig struct {
 	MetricsAddr        *string `yaml:"metrics-addr"`
 	ReconcileInterval  *string `yaml:"reconcile-interval"`
 	MinReady           *string `yaml:"min-ready"`
+	StartGrace         *string `yaml:"start-grace"`
 	RouteAddr          *string `yaml:"route-addr"`
 	RouteHTTPPort      *string `yaml:"route-http-port"`
 	RouteHTTPSPort     *string `yaml:"route-https-port"`

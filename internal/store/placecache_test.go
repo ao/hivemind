@@ -136,7 +136,7 @@ func TestPlacementNotSkippedWithAnotherPlaceFunc(t *testing.T) {
 	mustPut(t, s, web(1))
 	before := calls
 	for range 3 {
-		if _, err := s.ReconcileNodes(ctx, time.Time{}); err != nil {
+		if _, err := s.ReconcileNodes(ctx); err != nil {
 			t.Fatal(err)
 		}
 	}

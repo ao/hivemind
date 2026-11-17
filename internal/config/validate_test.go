@@ -17,6 +17,7 @@ func validConfig() *Config {
 		LogLevel:          "info",
 		LogFormat:         "text",
 		ReconcileInterval: 2 * time.Second,
+		StartGrace:        2 * time.Minute,
 		RouteHTTPPort:     80,
 		RouteHTTPSPort:    443,
 		ACMECA:            DefaultACMECA,
@@ -124,6 +125,11 @@ func TestValidate(t *testing.T) {
 		{"reconcile negative rejected", func(c *Config) { c.ReconcileInterval = -time.Second }, "must be positive"},
 		{"reconcile 5s ok", func(c *Config) { c.ReconcileInterval = 5 * time.Second }, ""},
 		{"reconcile above the lease budget rejected", func(c *Config) { c.ReconcileInterval = 6 * time.Second }, "longer than 5s"},
+		{"start grace 15s ok", func(c *Config) { c.StartGrace = 15 * time.Second }, ""},
+		{"start grace 1h ok", func(c *Config) { c.StartGrace = time.Hour }, ""},
+		{"start grace under the lease timeout rejected", func(c *Config) { c.StartGrace = 14 * time.Second },
+			"--start-grace 14s is shorter than 15s, the lease timeout"},
+		{"start grace zero rejected", func(c *Config) { c.StartGrace = 0 }, "--start-grace 0s is shorter than 15s"},
 		{"cluster port 65534 ok", func(c *Config) { c.ClusterPort = 65534 }, ""},
 		{"cluster port 65535 leaves no join port", func(c *Config) { c.ClusterPort = 65535 }, "not in 1-65534"},
 
@@ -200,6 +206,14 @@ func TestLoadRejectsInvalid(t *testing.T) {
 	if _, err := Load(nil, opts); err == nil || !strings.Contains(err.Error(),
 		"--api-addr 0.0.0.0:4483 needs --api-tls-cert and --api-tls-key, or bind 127.0.0.1") {
 		t.Fatalf("Load should fail with the fix-it message, got %v", err)
+	}
+}
+
+// The start grace is never shorter than the lease timeout, the time every
+// node had to reach a server that had just started before there was a grace.
+func TestMinStartGraceIsTheLeaseTimeout(t *testing.T) {
+	if MinStartGrace != scheduler.DefaultLeaseTimeout {
+		t.Fatalf("MinStartGrace %s, lease timeout %s", MinStartGrace, scheduler.DefaultLeaseTimeout)
 	}
 }
 

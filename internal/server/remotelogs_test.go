@@ -250,6 +250,16 @@ func TestRemoteLogsOfALostNode(t *testing.T) {
 	if time.Since(start) > 200*time.Millisecond {
 		t.Fatal("a lost node's request waited for the pickup timeout")
 	}
+	// The server started 30 s after the worker's last report: the worker
+	// waits for its first report, and is not called lost.
+	if err := rh.store.SetStarted(context.Background(), time.Now().Add(30*time.Second), 2*time.Minute); err != nil {
+		t.Fatal(err)
+	}
+	rec = rh.logs(t, "")
+	wantStatus(t, rec, http.StatusServiceUnavailable)
+	if got := errorOf(t, rec); !strings.Contains(got, "node "+workerNode+", which has not reported to this server since it started") {
+		t.Fatalf("error for a waiting node %q", got)
+	}
 }
 
 func TestRemoteLogsWithoutTheClusterListener(t *testing.T) {

@@ -33,7 +33,7 @@ The trust rests on the token:
 
 The address in `serve --advertise <address>` is the one workers dial. `hivemind join <address>` stores it in the worker's `node.json`, and the worker checks, at every connection, that the server's certificate names it. It can be an IP address or a DNS name.
 
-A DNS name is the recommended set-up. A server replaced by a machine with another IP address, as a replaced cloud instance usually is, then needs only the name's record updated: the workers reconnect without joining again, with their certificates ([backup](backup.md#replacing-a-lost-server)). A worker looks the name up at each new connection, so it follows the record as soon as its resolver does; a TTL of a minute or so keeps that short. With an IP address, the new machine needs the old address, or each worker is moved to the new one with `hivemind node set-server`, which first checks that the new address serves this cluster ([backup](backup.md#at-a-new-ip-address)).
+A DNS name is the recommended set-up. A server replaced by a machine with another IP address, as a replaced cloud instance usually is, then needs only the name's record updated: the workers reconnect without joining again, with their certificates ([backup](backup.md#replacing-a-lost-server)). A worker looks the name up at each new connection, so it follows the record as soon as its resolver does; a TTL of a minute or so keeps that short, and inside the 2-minute start grace in which a restored server waits for the workers ([leases](#leases-and-node-loss)). With a longer TTL, lower it well before you need it, or raise `--start-grace` to more than the TTL. With an IP address, the new machine needs the old address, or each worker is moved to the new one with `hivemind node set-server`, which first checks that the new address serves this cluster ([backup](backup.md#at-a-new-ip-address)).
 
 ```sh
 hivemind serve --advertise hivemind.example.internal
@@ -69,9 +69,11 @@ A worker of version 2.0.0 does not poll for log requests, so its replicas get th
 
 Each pass of a worker's agent reports its containers to the server. That report renews the node's lease. A pass runs every `--reconcile-interval` (2 s by default), and joining and registering also renew the lease. The agent also renews the lease every 5 s on its own, apart from its passes, because a pass reports only at its end, and a pass can be slow when its Docker daemon or the server is. Pulls and container removals do not hold a pass up: a pull goes on in the background after 2 s, and extra containers are stopped and removed in the background, 8 at a time, each with up to 10 s for a process that ignores SIGTERM. A container that needs a host port, the volumes or the name of one being removed starts once that one is gone. Nomad clients heartbeat apart from their work in the same way. The server's own node does the same. The other side of this is that a node whose agent is stuck in a pass still counts as up; the status it last reported stays as it was until the pass ends.
 
-A node is lost when its lease is more than 15 s old. The 15 s is fixed. The server checks leases every 5 s, so a lost node is noticed 15 to 20 s after its last renewal. The server logs one line for each node it marks as lost. When `serve` starts, every lease it finds is as old as the time it was down, so it counts each lease from its own start instead: every node gets 15 s to report to a server that has just started, or been restored from a backup, before it can be lost.
+A node is lost when its lease is more than 15 s old. The 15 s is fixed. The server checks leases every 5 s, so a lost node is noticed 15 to 20 s after its last renewal. The server logs one line for each node it marks as lost.
 
-Two things follow from that:
+When `serve` starts, every lease it finds is as old as the time it was down. A worker that was up when the server went down is then `waiting` for the start grace, 2 minutes after the start by default (`--start-grace`, at least 15 s): it is not lost, and its replicas stay on it. It is `ready` as soon as it reports. One that has not reported when the grace ends is lost then, and its replicas are placed again. The grace is for a server restored at a new address: the workers reach it only once their resolvers have the name's new record, which can take as long as the record's TTL, or once each is moved with `hivemind node set-server`. What it costs: a worker that died while the server was down has its replicas placed again only when the grace ends, that much later than a worker lost while the server runs. A worker whose lease had already lapsed when the server went down is lost at once. The server takes the time it went down to be the latest lease a worker renewed before the start, and logs how many workers wait.
+
+Two things follow from the 15 s:
 
 - `--reconcile-interval` is at most 5 s, so a worker can miss two passes before its 15 s lease runs out. A longer value is refused at start-up.
 - A worker that cannot reach the server for 15 s is treated as lost, and its replicas are placed again.
@@ -123,7 +125,7 @@ Fencing does not reach a node that is cut off but still running. Hivemind cannot
 
 ## Removing a node
 
-`hivemind nodes` lists the nodes, with each one's lease age and state: `ready` while its lease is current, `lost` after 15 s without renewal. `hivemind node remove <id>` takes a node out of the cluster for good. [Drain](#draining-a-node) the node, or stop hivemind on the machine, first.
+`hivemind nodes` lists the nodes, with each one's lease age and state: `ready` while its lease is current, `lost` after 15 s without renewal, and `waiting` for a worker that has not reported to a server that has just started ([leases](#leases-and-node-loss)). `hivemind node remove <id>` takes a node out of the cluster for good. [Drain](#draining-a-node) the node, or stop hivemind on the machine, first.
 
 - The server's own node cannot be removed.
 - A node that still renews its lease is refused, unless `--force` is given, or the node is ineligible and nothing runs on it, as after a drain. This follows `docker node rm`, which refuses a node that is not down. A running node that is removed with replicas on it keeps their containers running beside the copies placed elsewhere, so the refusal keeps that from happening by mistake.

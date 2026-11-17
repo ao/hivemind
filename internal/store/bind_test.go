@@ -46,7 +46,7 @@ func (e *bindEnv) register(id string) {
 
 func (e *bindEnv) sweep() {
 	e.t.Helper()
-	if _, err := e.s.ReconcileNodes(e.ctx, time.Time{}); err != nil {
+	if _, err := e.s.ReconcileNodes(e.ctx); err != nil {
 		e.t.Fatal(err)
 	}
 }

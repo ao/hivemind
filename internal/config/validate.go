@@ -89,6 +89,9 @@ func (c *Config) Validate() error {
 	if c.MinReady < 0 {
 		fail("--min-ready must not be negative, got %s", c.MinReady)
 	}
+	if c.StartGrace < MinStartGrace {
+		fail("--start-grace %s is shorter than %s, the lease timeout: every node gets at least that long to reach a server that has just started", c.StartGrace, MinStartGrace)
+	}
 
 	// The router is the one listener that may bind every address: it serves
 	// the apps' public traffic. It has no default address.
@@ -190,3 +193,8 @@ func validHostname(s string) bool {
 // without a renewal (scheduler.DefaultLeaseTimeout), so a pass at most every
 // 5 s survives two missed passes.
 const MaxReconcileInterval = 5 * time.Second
+
+// MinStartGrace bounds --start-grace from below: the lease timeout
+// (scheduler.DefaultLeaseTimeout), the time any node has to reach a server
+// that has just started.
+const MinStartGrace = 15 * time.Second

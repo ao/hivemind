@@ -217,11 +217,6 @@ func WithClock(now func() time.Time) Option { return func(s *Store) { s.now = no
 // the time to judge their age by.
 func (s *Store) Now() time.Time { return s.now() }
 
-// SetStarted records when serve started. The routing table then leaves out
-// the server's own node's reports from before it, and counts other nodes'
-// leases from it at the earliest (see RouteTable). serve calls it once.
-func (s *Store) SetStarted(t time.Time) { s.started.Store(t.UnixNano()) }
-
 // WithMinReady sets how long a node must have been ready before it gets new
 // replicas. The default is scheduler.DefaultMinReady (30 s). Zero means no
 // wait; tests that place replicas straight after registering a node use it.
@@ -246,9 +241,9 @@ type Store struct {
 	rdb   *sql.DB
 	place PlaceFunc
 	now   func() time.Time
-	// started is when serve started, in Unix nanoseconds (SetStarted); 0
+	// start is serve's start and its grace (SetStarted, start.go); nil
 	// before it is set.
-	started     atomic.Int64
+	start       atomic.Pointer[startState]
 	minReady    time.Duration
 	minReadySet bool
 	log         *slog.Logger

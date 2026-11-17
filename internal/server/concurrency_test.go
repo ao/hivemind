@@ -108,7 +108,7 @@ func TestConcurrentWriters(t *testing.T) {
 				return
 			default:
 			}
-			_, _ = h.store.ReconcileNodes(ctx, started)
+			_, _ = h.store.ReconcileNodes(ctx)
 			_ = h.store.AdvanceRollouts(ctx)
 			_, _ = h.store.AdvanceDrains(ctx, started)
 			time.Sleep(5 * time.Millisecond)

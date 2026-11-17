@@ -17,8 +17,9 @@ import (
 // the store, and runs the sweep that finds lost nodes. The sweep is
 // ReconcileNodes; the server calls it every few seconds.
 //
-// A node is lost when its lease has not renewed for scheduler.DefaultLeaseTimeout.
-// Its replicas then give up their node, and are placed again, except replicas
+// A node is lost when its lease has not renewed for scheduler.DefaultLeaseTimeout,
+// except a node that waits for its first report after serve starts (the
+// start grace, start.go). Its replicas then give up their node, and are placed again, except replicas
 // with a volume: a volume lives on one node, so those stay pinned to it and
 // are reported unavailable until it returns. A returning node gets only the
 // assignments it still holds, so a replica that moved is not started there
@@ -122,14 +123,13 @@ func placedOn(ctx context.Context, q querier) ([]Assignment, error) {
 // It returns the IDs of the
 // lost nodes, sorted. It is safe to call at any time.
 //
-// A lease counts from the node's last renewal or from since, whichever is
-// later. serve passes the time it started: a server that was down, or was
-// restored from a backup, finds every lease as old as its outage, and without
-// this its first sweep would move the replicas of nodes that are fine and
-// simply have not reported to it yet. Each node gets a whole lease timeout to
-// do so, as a new Nomad leader resets every node's heartbeat timer. The zero
-// time means no such floor.
-func (s *Store) ReconcileNodes(ctx context.Context, since time.Time) ([]string, error) {
+// A node that is waiting for its first report after serve started (see
+// Waiting) is not lost: a server that was down, or was restored from a
+// backup, finds every lease as old as its outage, and without the start
+// grace its first sweep would move the replicas of nodes that are fine and
+// have not reached it yet, as when their resolvers still have the old
+// record of the server's name.
+func (s *Store) ReconcileNodes(ctx context.Context) ([]string, error) {
 	var lost []string
 	err := s.tx(ctx, func(tx *sql.Tx) error {
 		now := s.now()
@@ -139,11 +139,10 @@ func (s *Store) ReconcileNodes(ctx context.Context, since time.Time) ([]string, 
 		}
 		leases := make([]scheduler.NodeLease, 0, len(nodes))
 		for _, n := range nodes {
-			renewed := n.LastLease
-			if since.After(renewed) {
-				renewed = since
+			if s.Waiting(n, now) {
+				continue
 			}
-			leases = append(leases, scheduler.NodeLease{NodeID: n.ID, RenewedAt: renewed})
+			leases = append(leases, scheduler.NodeLease{NodeID: n.ID, RenewedAt: n.LastLease})
 		}
 		lost = scheduler.LostNodes(leases, now, scheduler.DefaultLeaseTimeout)
 		for _, id := range lost {

@@ -144,7 +144,7 @@ func (s *Store) RouteTable(ctx context.Context) ([]Route, error) {
 	// after a restore, from the restored machine's stale endpoints.
 	timeout := int64(scheduler.DefaultLeaseTimeout)
 	cutoff := s.now().UnixNano() - timeout
-	started := s.started.Load()
+	started := s.startedAt()
 	rows, err = s.rdb.QueryContext(ctx, `SELECT c.app, c.route_ports, n.address FROM container_status c JOIN nodes n ON n.id = c.node_id
 		WHERE c.ready = 1 AND c.route_ports != '' AND n.address != ''
 		AND (n.last_lease >= ? OR (? >= ? AND n.last_lease >= (SELECT max(last_lease) FROM nodes WHERE last_lease < ?) - ?))

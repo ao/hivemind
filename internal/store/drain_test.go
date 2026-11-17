@@ -643,14 +643,14 @@ func TestDrainCountsTheReplicasANodeLossTook(t *testing.T) {
 	e.clock.Advance(16 * time.Second)
 	e.renew(nodeA)
 	lostAt := e.clock.Now()
-	if lost, err := e.s.ReconcileNodes(e.ctx, time.Time{}); err != nil || len(lost) != 1 || lost[0] != nodeB {
+	if lost, err := e.s.ReconcileNodes(e.ctx); err != nil || len(lost) != 1 || lost[0] != nodeB {
 		t.Fatalf("sweep: lost %v, %v; want node-b", lost, err)
 	}
 	e.step()
 	for range 3 {
 		e.clock.Advance(5 * time.Second)
 		e.renew(nodeA)
-		if _, err := e.s.ReconcileNodes(e.ctx, time.Time{}); err != nil {
+		if _, err := e.s.ReconcileNodes(e.ctx); err != nil {
 			t.Fatal(err)
 		}
 		e.step()

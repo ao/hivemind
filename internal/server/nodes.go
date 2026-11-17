@@ -21,9 +21,10 @@ type NodeView struct {
 	LastLease       time.Time `json:"last_lease"`
 	LeaseAgeSeconds float64   `json:"lease_age_seconds"`
 	// State is "ready" while the lease is current, and "lost" after it has
-	// gone 15 s without renewal. In the first 15 s after serve starts, a
-	// node that has not reported to it yet is "waiting": the server counts
-	// its lease from its own start.
+	// gone 15 s without renewal. In the start grace after serve starts (2
+	// minutes by default, --start-grace), a node that was up before the
+	// start and has not reported to this process yet is "waiting": it is
+	// not lost, and its replicas stay where they are.
 	State string `json:"state"`
 	// Server is true for the node that runs the server, which cannot be
 	// removed.
@@ -187,10 +188,10 @@ func (s *Server) listNodes(w http.ResponseWriter, r *http.Request) {
 		state := "ready"
 		switch {
 		case age <= scheduler.DefaultLeaseTimeout:
-		case !s.cfg.Started.IsZero() && n.LastLease.Before(s.cfg.Started) && now.Sub(s.cfg.Started) <= scheduler.DefaultLeaseTimeout:
-			// The sweep counts this lease from the server's start (see
-			// store.ReconcileNodes), so the node is not lost yet: the server
-			// is waiting for its first report.
+		case s.cfg.Store.Waiting(n, now):
+			// The node was up before serve started, and the start grace
+			// has not ended: the sweep does not count it lost (see
+			// store.Waiting), and the server waits for its first report.
 			state = "waiting"
 		default:
 			state = "lost"

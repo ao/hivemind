@@ -303,6 +303,7 @@ hivemind init [flags]
 | `--route-http-port` | string | `80` | `HIVEMIND_ROUTE_HTTP_PORT` | port of the router's HTTP listener, for ACME HTTP-01 challenges and redirects to https |
 | `--route-https-port` | string | `443` | `HIVEMIND_ROUTE_HTTPS_PORT` | port of the router's HTTPS listener |
 | `--route-max-conns-per-ip` | string | `256` | `HIVEMIND_ROUTE_MAX_CONNS_PER_IP` | most connections the router keeps open from one client IP address (an IPv6 /64), over both its ports; 0 means no limit, for a router behind a proxy that does not pass client addresses |
+| `--start-grace` | string | `2m` | `HIVEMIND_START_GRACE` | how long after serve starts a worker that was up before it waits for its first report, keeping its replicas, before it is lost; at least 15s |
 
 ### hivemind join
 
@@ -357,6 +358,7 @@ hivemind join <server> [flags]
 | `--route-http-port` | string | `80` | `HIVEMIND_ROUTE_HTTP_PORT` | port of the router's HTTP listener, for ACME HTTP-01 challenges and redirects to https |
 | `--route-https-port` | string | `443` | `HIVEMIND_ROUTE_HTTPS_PORT` | port of the router's HTTPS listener |
 | `--route-max-conns-per-ip` | string | `256` | `HIVEMIND_ROUTE_MAX_CONNS_PER_IP` | most connections the router keeps open from one client IP address (an IPv6 /64), over both its ports; 0 means no limit, for a router behind a proxy that does not pass client addresses |
+| `--start-grace` | string | `2m` | `HIVEMIND_START_GRACE` | how long after serve starts a worker that was up before it waits for its first report, keeping its replicas, before it is lost; at least 15s |
 | `--token` | string | - | - | join token from hivemind join-token on the server |
 
 ### hivemind join-token
@@ -585,8 +587,11 @@ hivemind node set-server <address> [flags]
 
 List the nodes: ID, name, CPU and memory as each node's Docker daemon reports
 them, the age of its lease, whether it is ready or lost, and how many replicas
-are placed on it. A node is lost when its lease is more than 15 s old. A lease
-age of 48 hours or more is printed in days.
+are placed on it. A node is lost when its lease is more than 15 s old. After
+the server starts, a worker that was up before the start and has not reported
+since is waiting, not lost, for the start grace (serve --start-grace, 2
+minutes by default), and keeps its replicas. A lease age of 48 hours or more
+is printed in days.
 
 ADDRESS is the node's private address, where its routed replicas publish
 their ports. "-" means it reported none: such a node takes no routed replicas.
@@ -861,6 +866,7 @@ hivemind serve [flags]
 | `--route-http-port` | string | `80` | `HIVEMIND_ROUTE_HTTP_PORT` | port of the router's HTTP listener, for ACME HTTP-01 challenges and redirects to https |
 | `--route-https-port` | string | `443` | `HIVEMIND_ROUTE_HTTPS_PORT` | port of the router's HTTPS listener |
 | `--route-max-conns-per-ip` | string | `256` | `HIVEMIND_ROUTE_MAX_CONNS_PER_IP` | most connections the router keeps open from one client IP address (an IPv6 /64), over both its ports; 0 means no limit, for a router behind a proxy that does not pass client addresses |
+| `--start-grace` | string | `2m` | `HIVEMIND_START_GRACE` | how long after serve starts a worker that was up before it waits for its first report, keeping its replicas, before it is lost; at least 15s |
 
 ### hivemind status
 

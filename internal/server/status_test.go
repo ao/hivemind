@@ -62,7 +62,7 @@ func TestLostNodesLastReportDoesNotDescribeAReplica(t *testing.T) {
 		t.Fatal(err)
 	}
 	placeOK = false
-	if lost, err := st.ReconcileNodes(ctx, time.Time{}); err != nil || len(lost) != 1 || lost[0] != "node-a" {
+	if lost, err := st.ReconcileNodes(ctx); err != nil || len(lost) != 1 || lost[0] != "node-a" {
 		t.Fatalf("sweep: lost %v, err %v", lost, err)
 	}
 	if r := replicasFor(t, st, "web")[0]; r.NodeID != "" {

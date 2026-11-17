@@ -173,7 +173,7 @@ func BenchmarkScaleSweep(b *testing.B) {
 				ctx := context.Background()
 				b.ResetTimer()
 				for i := 0; i < b.N; i++ {
-					if _, err := e.st.ReconcileNodes(ctx, time.Time{}); err != nil {
+					if _, err := e.st.ReconcileNodes(ctx); err != nil {
 						b.Fatal(err)
 					}
 					if err := e.st.AdvanceRollouts(ctx); err != nil {

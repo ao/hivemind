@@ -367,7 +367,9 @@ func TestRouteTableAfterAStart(t *testing.T) {
 	// The server is down for a minute and starts again. Its own node renews
 	// its lease at once; the worker has not reported yet.
 	e.clock.Advance(time.Minute)
-	e.s.SetStarted(e.clock.Now())
+	if err := e.s.SetStarted(e.ctx, e.clock.Now(), DefaultStartGrace); err != nil {
+		t.Fatal(err)
+	}
 	e.renewAt(node1, "10.0.0.1")
 	e.clock.Advance(time.Second)
 	tab := e.table()
