@@ -179,7 +179,7 @@ A change affects the next pull only; running containers keep running. How a cred
 
 ## Node API (internal)
 
-Workers talk to the server over a second API, on the cluster port that `serve --advertise` opens. It has routes for a worker to join, register, read its assignments, report its containers, renew its certificate, take and answer log requests, read the routing table, and use the routers' shared TLS storage. It is internal. Its routes, bodies and errors may change in any release, so this document does not describe them, except that a removed node gets `403` on every one of them, and a certificate that has expired by the server's clock gets `401`. The listeners and the trust model are in [security](security.md).
+Workers talk to the server over a second API, on the cluster port that `serve --advertise` opens. It has routes for a worker to join, register, read its assignments, report its containers, renew its certificate, take and answer log requests, read the routing table, use the routers' shared TLS storage, and post its router's counters. It is internal. Its routes, bodies and errors may change in any release, so this document does not describe them, except that a removed node gets `403` on every one of them, and a certificate that has expired by the server's clock gets `401`. The listeners and the trust model are in [security](security.md).
 
 ## Routes
 
@@ -327,11 +327,11 @@ With `follow`, closing the request ends the worker's stream and the log read on 
 | `hivemind_reconcile_duration_seconds` | histogram | none | Wall time of the local agent's passes |
 | `hivemind_reconcile_errors_total` | counter | none | Passes that returned an error |
 | `hivemind_http_requests_total` | counter | `method`, `route`, `code` | Requests by method, route pattern and status |
-| `hivemind_router_requests_total` | counter | `host`, `code` | Requests to the server's router, with `--route-addr`. A host not in the routing table is `unknown` |
-| `hivemind_router_upstream_errors_total` | counter | `host`, `kind` | Requests from the server's router to a replica that failed: `dial` (it tried the next replica), `connection` (the connection failed before a reply, and a GET, HEAD or OPTIONS request with no body went to the next replica) or `proxy` (any other failure after it reached one) |
-| `hivemind_router_cert_expiry_timestamp_seconds` | gauge | `host` | Unix time at which the certificate the server's router serves for the host expires. A host without a certificate yet has no sample |
+| `hivemind_router_requests_total` | counter | `node`, `host`, `code` | Requests to each node's router, on every node with `--route-addr`. A host not in the routing table is `unknown` |
+| `hivemind_router_upstream_errors_total` | counter | `node`, `host`, `kind` | Requests from each node's router to a replica that failed: `dial` (it tried the next replica), `connection` (the connection failed before a reply, and a GET, HEAD or OPTIONS request with no body went to the next replica) or `proxy` (any other failure after it reached one) |
+| `hivemind_router_cert_expiry_timestamp_seconds` | gauge | `node`, `host` | Unix time at which the certificate each node's router serves for the host expires. A host without a certificate yet has no sample |
 
-`route` is the route pattern, such as `/v1/apps/{name}`, or `unmatched`. A client cannot make the label set grow. The router's `host` label is a host in the routing table or `unknown`, so a client cannot grow it either. A worker's router is not in these metrics.
+`route` is the route pattern, such as `/v1/apps/{name}`, or `unmatched`. A client cannot make the label set grow. The router's `host` label is a host in the routing table or `unknown`, so a client cannot grow it either. `node` is the ID of the node whose router counted: the server's own router's counters are read at each scrape, and a worker posts its router's every 15 seconds over the node API, so its series lag by up to that. The server keeps only hosts it routes from a worker's report, and shows a report for 2 minutes after it arrives: a worker that stops, or is removed, drops out. The counters are a router's since it started, so a restart of the node resets its series, as Prometheus expects of a counter.
 
 There are no metrics for rollouts yet. `GET /v1/apps/{name}/status` reports them.
 

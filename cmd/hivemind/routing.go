@@ -2,10 +2,12 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"net"
 	"net/netip"
+	"time"
 
 	"github.com/ao/hivemind/internal/config"
 	"github.com/ao/hivemind/internal/nodeapi"
@@ -127,4 +129,53 @@ func workerAddress(ctx context.Context, c *nodeapi.Client, nodeID string, log *s
 		return "", nil
 	}
 	return addr, nil
+}
+
+// routerReportEvery is how often a worker posts its router's counters to the
+// server, whose /metrics shows them. The server shows a report for two
+// minutes after it arrives.
+const routerReportEvery = 15 * time.Second
+
+// routerReporter is the part of the node API client that takes a router's
+// counters.
+type routerReporter interface {
+	ReportRouter(ctx context.Context, nodeID string, r nodeapi.RouterReport) error
+}
+
+// reportRouter posts report() to the server every period until ctx ends. A
+// server older than 2.2 has no route for it; missing logs that once, and
+// holds the posts off until the server changes. Other failures are logged
+// once until a post works again: the counters are cumulative, so a lost post
+// loses nothing.
+func reportRouter(ctx context.Context, c routerReporter, nodeID string, report func() nodeapi.RouterReport,
+	every time.Duration, missing *nodeapi.MissingRoute, log *slog.Logger) {
+	t := time.NewTicker(every)
+	defer t.Stop()
+	failing := false
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-t.C:
+		}
+		if missing.Skip() {
+			continue
+		}
+		pctx, cancel := context.WithTimeout(ctx, every)
+		err := missing.Check(c.ReportRouter(pctx, nodeID, report()))
+		cancel()
+		switch {
+		case ctx.Err() != nil:
+			return
+		case err == nil:
+			if failing {
+				log.Info("router metrics reach the server again")
+			}
+			failing = false
+		case errors.Is(err, nodeapi.ErrNoRoute):
+		case !failing:
+			log.Warn("post router metrics to the server; retrying", "err", err)
+			failing = true
+		}
+	}
 }

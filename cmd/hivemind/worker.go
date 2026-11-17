@@ -573,6 +573,11 @@ func runWorker(ctx context.Context, cfg *config.Config, log *slog.Logger, rt run
 				stop(fmt.Errorf("router: %w", err))
 			}
 		}()
+		// A worker has no metrics listener: the server's /metrics shows its
+		// router's counters.
+		rlog := log.With("component", "router")
+		go reportRouter(runCtx, client, w.state.NodeID, rtr.Report, routerReportEvery,
+			nodeapi.NewMissingRoute(client, "router metrics", rlog), rlog)
 	}
 	// After a workers-first upgrade, the server that refused the address is
 	// upgraded under the running worker, which then registers it.

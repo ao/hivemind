@@ -22,6 +22,8 @@
 #     for it at the same time (the storage lock), and every router serves it
 #   - through each node's router, with SNI, replies come from both replicas;
 #     http redirects to https with 308, and an unknown host gets a 404
+#   - the server's /metrics has every router's counters and certificate
+#     expiry, by node (the workers post theirs through the node API)
 #   - a rolling update: every response during it, through all three routers,
 #     is a 200
 #   - a node that runs a replica is killed: requests through the other two
@@ -254,6 +256,28 @@ unknown=$(docker exec "$CLIENT" curl -s -o /dev/null -w '%{http_code}' --resolve
 body=$(docker exec "$CLIENT" curl -s --resolve "nope.routing.test:$HTTP_PORT:$W2_IP" "http://nope.routing.test:$HTTP_PORT/")
 [ "$unknown" = 404 ] && [ "$body" = "not found" ] || cl_fail "an unknown host got: $unknown $body"
 cl_note "http redirects to https with 308; an unknown host gets a plain 404"
+
+# Every router's counters reach the server's /metrics, each under its node's
+# ID: the server's own at once, the workers' through the node API every 15 s.
+server_metrics() {
+	docker exec "$S" sh -c 'wget -qO- --header "Authorization: Bearer $(cat /var/lib/hivemind/admin.token)" http://127.0.0.1:4483/metrics'
+}
+router_reported() { # router_reported NODE_ID: /metrics has 200s for $HOST from the node's router
+	server_metrics | grep -qE "^hivemind_router_requests_total\{node=\"$1\",host=\"${HOST//./\\.}\",code=\"200\"\} [1-9]"
+}
+for i in 0 1 2; do
+	wait_for 45 router_reported "${CL_IDS[$i]}" ||
+		cl_fail "/metrics has no requests from ${CL_IDS[$i]}'s router: $(server_metrics | grep '^hivemind_router_requests_total' | tr '\n' ';')"
+done
+m=$(server_metrics)
+grep -qE "^hivemind_router_requests_total\{node=\"${CL_IDS[2]}\",host=\"unknown\",code=\"404\"\} [1-9]" <<<"$m" ||
+	cl_fail "/metrics does not have ${CL_IDS[2]}'s 404 for an unknown host: $(grep '^hivemind_router_requests_total' <<<"$m" | tr '\n' ';')"
+for id in "${CL_IDS[@]}"; do
+	grep -q "^hivemind_router_cert_expiry_timestamp_seconds{node=\"$id\",host=\"$HOST\"} " <<<"$m" ||
+		cl_fail "/metrics has no certificate expiry from $id's router: $(grep '^hivemind_router_cert' <<<"$m" | tr '\n' ';')"
+done
+[ "$(grep -c '^# TYPE hivemind_router_requests_total ' <<<"$m")" -eq 1 ] || cl_fail "/metrics repeats the router request family"
+cl_note "the server's /metrics has every router's requests and certificate, by node"
 
 # count_loop starts requests through the given routers in the client, one
 # after another, each code on a line of FILE, until FILE.stop exists.

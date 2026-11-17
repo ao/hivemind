@@ -8,5 +8,4 @@ Every task in [PLAN.md](docs/PLAN.md) has an implementation on this branch. Thes
 4. Cluster CA rotation. The CA lasts ten years from `init`, node certificates end with it, and the server warns in its last year. Rotating it needs a period in which nodes trust the old and the new CA, then a renewal of every node certificate under the new one. Until then, a cluster near its CA's end must be rebuilt with `init` and every machine joined again. See [security](docs/security.md#certificate-renewal).
 5. Restoring a server at a new address. Workers keep the server's address in `node.json`, and the server's certificate names it. A restore at another address needs a way to tell the workers, and today they must join again.
 6. A web UI, if one is wanted. The API has what a browser needs for Task 6: login and logout at `/v1/session`, a session cookie, and CSRF checks on unsafe requests. There are no pages.
-7. Router metrics from workers. A worker has no metrics listener, so only the server's router counters are in `/metrics`. The workers could send theirs with their status reports.
-8. Routing beyond exact hosts: path prefixes, HTTP/2 or gRPC to the replicas, and TCP routes. Each is refused today.
+7. Routing beyond exact hosts: path prefixes, HTTP/2 or gRPC to the replicas, and TCP routes. Each is refused today.

@@ -28,7 +28,6 @@ import (
 	"github.com/caddyserver/certmagic"
 	"go.uber.org/zap"
 
-	"github.com/ao/hivemind/internal/metrics"
 	"github.com/ao/hivemind/internal/store"
 	"github.com/ao/hivemind/internal/tlsstore"
 )
@@ -149,13 +148,23 @@ func (tr *testRouter) plain() *http.Client {
 	}
 }
 
+// metrics is the router's report, checked as the server checks it, one
+// series a line in the form /metrics shows it, without the node label.
 func (tr *testRouter) metrics(t *testing.T) string {
 	t.Helper()
-	var b bytes.Buffer
-	w := metrics.NewWriter(&b)
-	tr.rt.WriteMetrics(w)
-	if err := w.Flush(); err != nil {
-		t.Fatal(err)
+	r := tr.rt.Report()
+	if err := r.Validate(); err != nil {
+		t.Fatalf("the router's report is invalid: %v", err)
+	}
+	var b strings.Builder
+	for _, x := range r.Requests {
+		fmt.Fprintf(&b, "hivemind_router_requests_total{host=%q,code=\"%d\"} %d\n", x.Host, x.Code, x.Count)
+	}
+	for _, x := range r.Upstream {
+		fmt.Fprintf(&b, "hivemind_router_upstream_errors_total{host=%q,kind=%q} %d\n", x.Host, x.Kind, x.Count)
+	}
+	for _, x := range r.Certs {
+		fmt.Fprintf(&b, "hivemind_router_cert_expiry_timestamp_seconds{host=%q} %d\n", x.Host, x.NotAfter.Unix())
 	}
 	return b.String()
 }

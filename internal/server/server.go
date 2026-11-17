@@ -16,7 +16,6 @@ import (
 
 	"github.com/ao/hivemind/internal/auth"
 	"github.com/ao/hivemind/internal/logrelay"
-	"github.com/ao/hivemind/internal/metrics"
 	"github.com/ao/hivemind/internal/nodeapi"
 	"github.com/ao/hivemind/internal/ratelimit"
 	"github.com/ao/hivemind/internal/runtime"
@@ -75,9 +74,11 @@ type Config struct {
 	// Backup writes a backup archive of the data directory to w. Nil means
 	// POST /v1/backup answers 503.
 	Backup func(ctx context.Context, w io.Writer) error
-	// RouterMetrics, if set, adds the metrics of this node's router to
-	// GET /metrics.
-	RouterMetrics func(w *metrics.Writer)
+	// RouterReport, if set, gives this node's router's counters, and
+	// RouterReports keeps the ones workers post (the cluster listener must
+	// share it). GET /metrics shows them all, labelled by node.
+	RouterReport  func() nodeapi.RouterReport
+	RouterReports *nodeapi.RouterReports
 	// Version is the server's hivemind version. Every reply to an
 	// authenticated request carries it in nodeapi.VersionHeader; GET
 	// /healthz, which needs no token, does not. Empty sends none.

@@ -2,13 +2,16 @@ package server
 
 import (
 	"bytes"
+	"maps"
 	"net/http"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
 
 	"github.com/ao/hivemind/internal/auth"
 	"github.com/ao/hivemind/internal/metrics"
+	"github.com/ao/hivemind/internal/nodeapi"
 	"github.com/ao/hivemind/internal/store"
 )
 
@@ -205,8 +208,49 @@ func (s *Server) writeMetrics(r *http.Request, b *bytes.Buffer) error {
 
 	w.Family("hivemind_http_requests_total", "HTTP requests by method, route pattern and status code.", metrics.TypeCounter)
 	s.metrics.requests.Write(w, "hivemind_http_requests_total")
-	if s.cfg.RouterMetrics != nil {
-		s.cfg.RouterMetrics(w)
-	}
+	s.writeRouterMetrics(w)
 	return w.Flush()
+}
+
+// routerReportAge is how long a worker's router report is shown after it
+// arrived. Workers post every 15 s, so a worker that stopped, or was
+// removed, drops out within two minutes.
+const routerReportAge = 2 * time.Minute
+
+// writeRouterMetrics writes every router's counters, this node's and the
+// workers', with a node label. There are no router families when no node
+// routes.
+func (s *Server) writeRouterMetrics(w *metrics.Writer) {
+	reports := s.cfg.RouterReports.Fresh(time.Now(), routerReportAge)
+	if s.cfg.RouterReport != nil {
+		if reports == nil {
+			reports = map[string]nodeapi.RouterReport{}
+		}
+		reports[s.cfg.NodeID] = s.cfg.RouterReport()
+	}
+	if len(reports) == 0 {
+		return
+	}
+	nodes := slices.Sorted(maps.Keys(reports))
+	w.Family("hivemind_router_requests_total",
+		"Requests to each node's router, by node, host and status code. Hosts not in the routing table count as unknown. Workers report every 15 s.", metrics.TypeCounter)
+	for _, n := range nodes {
+		for _, x := range reports[n].Requests {
+			w.Sample("hivemind_router_requests_total", metrics.L("node", n, "host", x.Host, "code", strconv.Itoa(x.Code)), float64(x.Count))
+		}
+	}
+	w.Family("hivemind_router_upstream_errors_total",
+		"Requests from each node's router to a replica that failed, by node, host and kind: dial (the router tried the next replica), connection (the connection failed before a reply, and a safe request went to the next replica) or proxy (any other failure after it reached one).", metrics.TypeCounter)
+	for _, n := range nodes {
+		for _, x := range reports[n].Upstream {
+			w.Sample("hivemind_router_upstream_errors_total", metrics.L("node", n, "host", x.Host, "kind", x.Kind), float64(x.Count))
+		}
+	}
+	w.Family("hivemind_router_cert_expiry_timestamp_seconds",
+		"Unix time at which the certificate each node's router serves for the host expires. Hosts without a certificate yet are left out.", metrics.TypeGauge)
+	for _, n := range nodes {
+		for _, x := range reports[n].Certs {
+			w.Sample("hivemind_router_cert_expiry_timestamp_seconds", metrics.L("node", n, "host", x.Host), float64(x.NotAfter.Unix()))
+		}
+	}
 }

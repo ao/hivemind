@@ -174,6 +174,25 @@ func (c *CounterVec) Get(values ...string) float64 {
 	return 0
 }
 
+// CounterSample is one series of a CounterVec: its label values, in the
+// order of the names, and its count.
+type CounterSample struct {
+	Values []string
+	N      float64
+}
+
+// Snapshot returns every series, sorted by label values.
+func (c *CounterVec) Snapshot() []CounterSample {
+	c.mu.Lock()
+	out := make([]CounterSample, 0, len(c.m))
+	for _, s := range c.m {
+		out = append(out, CounterSample{Values: slices.Clone(s.values), N: s.n})
+	}
+	c.mu.Unlock()
+	slices.SortFunc(out, func(a, b CounterSample) int { return slices.Compare(a.Values, b.Values) })
+	return out
+}
+
 // Write writes the counter's series, sorted by label values.
 func (c *CounterVec) Write(w *Writer, name string) {
 	c.mu.Lock()

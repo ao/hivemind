@@ -267,13 +267,104 @@ func TestServeRunsTheRouter(t *testing.T) {
 		t.Fatalf("unknown host: %d %q", resp.StatusCode, body)
 	}
 	_, metrics := do(http.MethodGet, api+"/metrics", "", "")
-	for _, want := range []string{`hivemind_router_requests_total{host="www.example.com",code="308"}`,
-		`hivemind_router_requests_total{host="unknown",code="404"}`} {
+	// The server's own router, under its node ID.
+	for _, want := range []string{`hivemind_router_requests_total{node="node-`, `,host="www.example.com",code="308"}`,
+		`,host="unknown",code="404"}`} {
 		if !strings.Contains(metrics, want) {
-			t.Errorf("metrics have no %s", want)
+			t.Errorf("metrics have no %s:\n%s", want, metrics)
 		}
 	}
 	if s := logs.String(); !strings.Contains(s, "router listening") {
 		t.Errorf("no router line in the log:\n%s", s)
 	}
+}
+
+type fakeRouterReporter struct {
+	mu    sync.Mutex
+	posts []nodeapi.RouterReport
+	errs  []error // returned in turn; nil once used up
+}
+
+func (f *fakeRouterReporter) ReportRouter(_ context.Context, id string, r nodeapi.RouterReport) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if id != "node-w" {
+		return fmt.Errorf("posted for %q", id)
+	}
+	f.posts = append(f.posts, r)
+	if len(f.errs) > 0 {
+		err := f.errs[0]
+		f.errs = f.errs[1:]
+		return err
+	}
+	return nil
+}
+
+func (f *fakeRouterReporter) count() int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return len(f.posts)
+}
+
+type fakeWatcher struct{ changed chan struct{} }
+
+func (fakeWatcher) ServerVersion() string            { return "" }
+func (w fakeWatcher) ServerChanged() <-chan struct{} { return w.changed }
+
+// The worker posts its router's report every period, keeps going after a
+// failure, and stops posting to a server without the route.
+func TestReportRouterPostsEveryPeriod(t *testing.T) {
+	var logs strings.Builder
+	var mu sync.Mutex
+	log := slog.New(slog.NewTextHandler(&lockedWriter{mu: &mu, w: &logs}, nil))
+	f := &fakeRouterReporter{errs: []error{fmt.Errorf("connection refused"), fmt.Errorf("connection refused")}}
+	var n atomic.Int64
+	report := func() nodeapi.RouterReport {
+		return nodeapi.RouterReport{Requests: []nodeapi.RouterRequests{{Host: "www.example.com", Code: 200, Count: uint64(n.Add(1))}}}
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() { defer close(done); reportRouter(ctx, f, "node-w", report, 10*time.Millisecond, nil, log) }()
+	deadline := time.Now().Add(5 * time.Second)
+	for f.count() < 5 && time.Now().Before(deadline) {
+		time.Sleep(5 * time.Millisecond)
+	}
+	cancel()
+	<-done
+	if f.count() < 5 {
+		t.Fatalf("%d posts", f.count())
+	}
+	mu.Lock()
+	out := logs.String()
+	mu.Unlock()
+	if c := strings.Count(out, "post router metrics"); c != 1 {
+		t.Errorf("%d failure lines, want 1 for two failures in a row:\n%s", c, out)
+	}
+	if !strings.Contains(out, "reach the server again") {
+		t.Errorf("no recovery line:\n%s", out)
+	}
+
+	// An old server: one post, then nothing until the server changes.
+	old := &fakeRouterReporter{errs: []error{nodeapi.ErrNoRoute}}
+	missing := nodeapi.NewMissingRoute(fakeWatcher{changed: make(chan struct{})}, "router metrics", log)
+	ctx, cancel = context.WithCancel(context.Background())
+	done = make(chan struct{})
+	go func() { defer close(done); reportRouter(ctx, old, "node-w", report, 10*time.Millisecond, missing, log) }()
+	time.Sleep(200 * time.Millisecond)
+	cancel()
+	<-done
+	if old.count() != 1 {
+		t.Errorf("%d posts to a server without the route, want 1", old.count())
+	}
+}
+
+type lockedWriter struct {
+	mu *sync.Mutex
+	w  io.Writer
+}
+
+func (l *lockedWriter) Write(p []byte) (int, error) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return l.w.Write(p)
 }

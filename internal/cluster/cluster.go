@@ -29,6 +29,7 @@ import (
 	"time"
 
 	"github.com/ao/hivemind/internal/logrelay"
+	"github.com/ao/hivemind/internal/nodeapi"
 	"github.com/ao/hivemind/internal/pki"
 	"github.com/ao/hivemind/internal/ratelimit"
 	"github.com/ao/hivemind/internal/store"
@@ -76,6 +77,9 @@ type Config struct {
 	// Logs relays log requests to workers and their streams back. The API
 	// server must share it. Nil means a private relay, which no API uses.
 	Logs *logrelay.Relay
+	// RouterReports keeps the router counters workers post, for the API's
+	// /metrics, which must share it. Nil drops them.
+	RouterReports *nodeapi.RouterReports
 	// NodeCertLifetime is the lifetime of the certificates the server
 	// issues: at join, at renewal, and its own. Zero means
 	// pki.NodeCertLifetime. Only tests set it.

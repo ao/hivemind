@@ -117,13 +117,13 @@ The settings have `HIVEMIND_` variables and config file keys, as the other setti
 
 ## Metrics
 
-The server's `/metrics` has its own router's counters, and the expiry of the certificate it serves for each host:
+The server's `/metrics` has every router's counters, and the expiry of the certificate each one serves for each host, labelled with the node's ID:
 
-- `hivemind_router_requests_total{host,code}`, where a host not in the table counts as `unknown`;
-- `hivemind_router_upstream_errors_total{host,kind}`, with `kind` `dial` (the router tried the next replica) or `proxy` (the request failed after it reached one);
-- `hivemind_router_cert_expiry_timestamp_seconds{host}`.
+- `hivemind_router_requests_total{node,host,code}`, where a host not in the table counts as `unknown`;
+- `hivemind_router_upstream_errors_total{node,host,kind}`, with `kind` `dial` (the router tried the next replica), `connection` (the connection failed before a reply, and a GET, HEAD or OPTIONS request with no body went to the next replica) or `proxy` (any other failure after it reached one);
+- `hivemind_router_cert_expiry_timestamp_seconds{node,host}`.
 
-A worker has no metrics listener, so its router's counters are not exported yet.
+A worker has no metrics listener. It posts its router's counters to the server over the node API every 15 seconds, so its series lag by up to that. The server keeps only the hosts it routes from a worker's report, and shows a report for 2 minutes after it arrives, so a worker that stops drops out. Sum over `node` for a host's totals across the routers, for example `sum by (host, code) (rate(hivemind_router_requests_total[5m]))`. A server older than 2.2 has no route for the counters; a 2.2 worker logs that once and keeps routing.
 
 ## Limits
 

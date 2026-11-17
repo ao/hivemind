@@ -141,3 +141,28 @@ func TestCounterVecConcurrent(t *testing.T) {
 		t.Fatalf("count %v, want 8000", got)
 	}
 }
+
+func TestCounterVecSnapshot(t *testing.T) {
+	c := NewCounterVec("host", "code")
+	c.Inc("b", "200")
+	c.Add(2, "a", "404")
+	c.Inc("a", "200")
+	got := c.Snapshot()
+	want := []CounterSample{{[]string{"a", "200"}, 1}, {[]string{"a", "404"}, 2}, {[]string{"b", "200"}, 1}}
+	if len(got) != len(want) {
+		t.Fatalf("snapshot: %+v", got)
+	}
+	for i := range want {
+		if strings.Join(got[i].Values, ",") != strings.Join(want[i].Values, ",") || got[i].N != want[i].N {
+			t.Errorf("sample %d: %+v, want %+v", i, got[i], want[i])
+		}
+	}
+	// The snapshot is a copy.
+	got[0].Values[0] = "z"
+	if c.Get("a", "200") != 1 || c.Snapshot()[0].Values[0] != "a" {
+		t.Error("changing a snapshot changed the counter")
+	}
+	if len(NewCounterVec("x").Snapshot()) != 0 {
+		t.Error("an empty counter has samples")
+	}
+}

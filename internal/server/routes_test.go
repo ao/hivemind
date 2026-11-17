@@ -5,10 +5,12 @@ import (
 	"encoding/json"
 	"net/http"
 	"slices"
+	"strconv"
 	"strings"
 	"testing"
+	"time"
 
-	"github.com/ao/hivemind/internal/metrics"
+	"github.com/ao/hivemind/internal/nodeapi"
 	"github.com/ao/hivemind/internal/store"
 )
 
@@ -68,14 +70,61 @@ func TestListRoutes(t *testing.T) {
 }
 
 func TestRouterMetricsAreServed(t *testing.T) {
+	reports := nodeapi.NewRouterReports()
+	now := time.Now()
+	reports.Put("node-w", nodeapi.RouterReport{
+		Requests: []nodeapi.RouterRequests{{Host: "www.example.com", Code: 502, Count: 4}},
+		Upstream: []nodeapi.RouterUpstream{{Host: "www.example.com", Kind: "dial", Count: 2}},
+	}, now)
+	// A worker that stopped reporting drops out.
+	reports.Put("node-gone", nodeapi.RouterReport{
+		Requests: []nodeapi.RouterRequests{{Host: "www.example.com", Code: 200, Count: 9}},
+	}, now.Add(-routerReportAge-time.Second))
+	expiry := time.Date(2027, 1, 2, 3, 4, 5, 0, time.UTC)
 	h := newHarness(t, func(c *Config) {
-		c.RouterMetrics = func(w *metrics.Writer) {
-			w.Family("hivemind_router_requests_total", "test", metrics.TypeCounter)
-			w.Sample("hivemind_router_requests_total", metrics.L("host", "www.example.com", "code", "200"), 3)
+		c.RouterReports = reports
+		c.RouterReport = func() nodeapi.RouterReport {
+			return nodeapi.RouterReport{
+				Requests: []nodeapi.RouterRequests{{Host: "www.example.com", Code: 200, Count: 3}},
+				Certs:    []nodeapi.RouterCert{{Host: "www.example.com", NotAfter: expiry}},
+			}
 		}
 	})
-	rec := h.do(t, http.MethodGet, "/metrics", "")
-	if !strings.Contains(rec.Body.String(), `hivemind_router_requests_total{host="www.example.com",code="200"} 3`) {
-		t.Fatalf("router metrics missing:\n%s", rec.Body)
+	body := h.do(t, http.MethodGet, "/metrics", "").Body.String()
+	for _, want := range []string{
+		`hivemind_router_requests_total{node="` + testNode + `",host="www.example.com",code="200"} 3`,
+		`hivemind_router_requests_total{node="node-w",host="www.example.com",code="502"} 4`,
+		`hivemind_router_upstream_errors_total{node="node-w",host="www.example.com",kind="dial"} 2`,
+		`hivemind_router_cert_expiry_timestamp_seconds{node="` + testNode + `",host="www.example.com"} ` + strconv.FormatInt(expiry.Unix(), 10),
+		"# TYPE hivemind_router_requests_total counter",
+	} {
+		if !strings.Contains(body, want) {
+			t.Errorf("/metrics has no %s:\n%s", want, body)
+		}
+	}
+	if strings.Contains(body, "node-gone") {
+		t.Errorf("a stale report is shown:\n%s", body)
+	}
+	if n := strings.Count(body, "# TYPE hivemind_router_requests_total"); n != 1 {
+		t.Errorf("%d request families, want 1", n)
+	}
+}
+
+// Without a router on any node, /metrics has no router families.
+func TestNoRouterNoRouterMetrics(t *testing.T) {
+	h := newHarness(t, func(c *Config) { c.RouterReports = nodeapi.NewRouterReports() })
+	if body := h.do(t, http.MethodGet, "/metrics", "").Body.String(); strings.Contains(body, "hivemind_router_") {
+		t.Fatalf("router families without a router:\n%s", body)
+	}
+}
+
+// A worker's report alone, with no router on the server, is shown.
+func TestWorkerRouterMetricsWithoutALocalRouter(t *testing.T) {
+	reports := nodeapi.NewRouterReports()
+	reports.Put("node-w", nodeapi.RouterReport{Requests: []nodeapi.RouterRequests{{Host: nodeapi.UnknownHost, Code: 404, Count: 1}}}, time.Now())
+	h := newHarness(t, func(c *Config) { c.RouterReports = reports })
+	body := h.do(t, http.MethodGet, "/metrics", "").Body.String()
+	if !strings.Contains(body, `hivemind_router_requests_total{node="node-w",host="unknown",code="404"} 1`) {
+		t.Fatalf("worker series missing:\n%s", body)
 	}
 }

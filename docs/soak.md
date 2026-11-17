@@ -457,7 +457,7 @@ The workers' RSS rose 0.6 to 0.8 MiB over the three hours, most of it in the fir
 - The clients' timestamps are the outside machine's clock and the harness's the control machine's. Both were synchronised by chrony; differences between them below a few milliseconds are not meaningful.
 - curl writes its lines in 4 KiB blocks, so a log read while curl runs ends in a partial line; the report skips such lines and counts them.
 - The 1 s watcher ran during the faults and was stopped for the steady state, as in the first soak; the probe loop ran throughout.
-- `/metrics` exists only on the server, so the routers' `502` counts are the server's router's; the workers' routers export none.
+- `/metrics` exists only on the server, so the routers' `502` counts are the server's router's; the workers' routers exported none then (since this soak, workers post theirs to the server).
 - One-hour certificates are much shorter than any public CA's. certmagic renews a certificate once less than five times its 10-minute check interval is left, so here every router renewed at its start and each host was renewed every 10 to 20 minutes. That exercises renewal far more often than 90-day or 6-day certificates would, but it is not how a production CA behaves.
 - The scenarios ran on 9597d90, the steady state on b4b7102. b4b7102 changes what status and the metrics report for a lost node's replicas, not routing or the agents, so the routing results above should not depend on it; they were not run again on it.
 

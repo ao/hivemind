@@ -26,7 +26,6 @@ import (
 	"github.com/ao/hivemind/internal/config"
 	"github.com/ao/hivemind/internal/logging"
 	"github.com/ao/hivemind/internal/logrelay"
-	"github.com/ao/hivemind/internal/metrics"
 	"github.com/ao/hivemind/internal/nodeapi"
 	"github.com/ao/hivemind/internal/pki"
 	"github.com/ao/hivemind/internal/router"
@@ -566,15 +565,21 @@ func runServe(ctx context.Context, cfg *config.Config, log *slog.Logger, rt runt
 	if cfg.Advertise != "" {
 		logs = logrelay.New(logrelay.Options{})
 	}
+	// Workers post their routers' counters through the cluster listener, and
+	// /metrics shows them.
+	var routerReports *nodeapi.RouterReports
+	if cfg.Advertise != "" {
+		routerReports = nodeapi.NewRouterReports()
+	}
 	// The router opens only with --route-addr. It is the one listener that
 	// may bind every address: it serves the apps' public traffic.
 	var rtr *router.Router
-	var routerMetrics func(*metrics.Writer)
+	var routerReport func() nodeapi.RouterReport
 	if cfg.RouteAddr != "" {
 		if rtr, err = newRouter(cfg, log, storeRoutes(st), tlsstore.StoreBackend{St: st, NodeID: cl.NodeID}); err != nil {
 			return err
 		}
-		routerMetrics = rtr.WriteMetrics
+		routerReport = rtr.Report
 	}
 	closeRouter := func() {
 		if rtr != nil {
@@ -583,7 +588,8 @@ func runServe(ctx context.Context, cfg *config.Config, log *slog.Logger, rt runt
 	}
 	api, err := server.New(server.Config{Store: st, Runtime: rt, NodeID: cl.NodeID, Auth: authn,
 		Trigger: ag.Trigger, Logger: log.With("component", "api"), Metrics: m, IssueJoinToken: issue,
-		Backup: writeBackup, Logs: logs, RouterMetrics: routerMetrics, Started: started, Version: version})
+		Backup: writeBackup, Logs: logs, RouterReport: routerReport, RouterReports: routerReports,
+		Started: started, Version: version})
 	if err != nil {
 		closeRouter()
 		return err
@@ -627,7 +633,8 @@ func runServe(ctx context.Context, cfg *config.Config, log *slog.Logger, rt runt
 		}
 		c, err := cluster.Listen(cluster.Config{Store: st, CA: ca, Tokens: pki.NewTokens(st.JoinTokens()),
 			Advertise: cfg.Advertise, Port: cfg.ClusterPort, LocalNodeID: cl.NodeID,
-			Logger: log.With("component", "cluster"), NodeCertLifetime: lifetime, Logs: logs, Version: version})
+			Logger: log.With("component", "cluster"), NodeCertLifetime: lifetime, Logs: logs,
+			RouterReports: routerReports, Version: version})
 		if err == nil {
 			if err = checkBoundAddress(c.NodeAddr(), nodeAddr); err != nil {
 				_ = c.Shutdown()

@@ -1,16 +1,19 @@
 package router
 
 import (
+	"maps"
 	"net/http"
+	"slices"
 	"strconv"
 	"time"
 
 	"github.com/ao/hivemind/internal/metrics"
+	"github.com/ao/hivemind/internal/nodeapi"
 )
 
 // unknownHost is the host label of requests for a host the table does not
 // have, so that clients cannot grow the label set.
-const unknownHost = "unknown"
+const unknownHost = nodeapi.UnknownHost
 
 // Metrics counts a router's requests and upstream errors. It is safe for
 // concurrent use. A nil *Metrics counts nothing.
@@ -36,28 +39,6 @@ func (m *Metrics) request(host string, code int) {
 func (m *Metrics) upstreamError(host, kind string) {
 	if m != nil {
 		m.upstream.Inc(host, kind)
-	}
-}
-
-// write adds the router's families to w. expiry is the expiry of the
-// certificate each host serves now.
-func (m *Metrics) write(w *metrics.Writer, expiry map[string]time.Time, hosts []string) {
-	w.Family("hivemind_router_requests_total",
-		"Requests to this node's router, by host and status code. Hosts not in the routing table count as unknown.", metrics.TypeCounter)
-	if m != nil {
-		m.requests.Write(w, "hivemind_router_requests_total")
-	}
-	w.Family("hivemind_router_upstream_errors_total",
-		"Requests to a replica that failed, by host: dial (the router tried the next replica) or proxy (the request failed after it reached one).", metrics.TypeCounter)
-	if m != nil {
-		m.upstream.Write(w, "hivemind_router_upstream_errors_total")
-	}
-	w.Family("hivemind_router_cert_expiry_timestamp_seconds",
-		"Unix time at which the certificate this router serves for the host expires. Hosts without a certificate yet are left out.", metrics.TypeGauge)
-	for _, h := range hosts {
-		if t, ok := expiry[h]; ok {
-			w.Sample("hivemind_router_cert_expiry_timestamp_seconds", metrics.L("host", h), float64(t.Unix()))
-		}
 	}
 }
 
@@ -108,4 +89,25 @@ func counted(m *Metrics, known func(string) bool, h http.Handler) http.Handler {
 		}
 		m.request(host, code)
 	})
+}
+
+// report is the counters and certificate expiries as a node API report.
+func (m *Metrics) report(expiry map[string]time.Time) nodeapi.RouterReport {
+	var r nodeapi.RouterReport
+	if m != nil {
+		for _, s := range m.requests.Snapshot() {
+			code, err := strconv.Atoi(s.Values[1])
+			if err != nil {
+				continue
+			}
+			r.Requests = append(r.Requests, nodeapi.RouterRequests{Host: s.Values[0], Code: code, Count: nodeapi.CountOf(s.N)})
+		}
+		for _, s := range m.upstream.Snapshot() {
+			r.Upstream = append(r.Upstream, nodeapi.RouterUpstream{Host: s.Values[0], Kind: s.Values[1], Count: nodeapi.CountOf(s.N)})
+		}
+	}
+	for _, h := range slices.Sorted(maps.Keys(expiry)) {
+		r.Certs = append(r.Certs, nodeapi.RouterCert{Host: h, NotAfter: expiry[h].UTC()})
+	}
+	return r
 }

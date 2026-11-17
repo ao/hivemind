@@ -37,7 +37,7 @@ import (
 
 	"github.com/caddyserver/certmagic"
 
-	"github.com/ao/hivemind/internal/metrics"
+	"github.com/ao/hivemind/internal/nodeapi"
 )
 
 // Server limits for the router's listeners.
@@ -427,24 +427,30 @@ func (rt *Router) serveHTTP(w http.ResponseWriter, r *http.Request) {
 	http.Redirect(w, r, target+r.URL.RequestURI(), http.StatusPermanentRedirect)
 }
 
-// WriteMetrics adds the router's metrics to w: its counters, and the expiry
-// of the certificate it holds for each host.
-func (rt *Router) WriteMetrics(w *metrics.Writer) {
-	hosts := rt.proxy.hosts()
+// Managed returns the hosts whose certificates the router manages, sorted.
+func (rt *Router) Managed() []string {
+	rt.mu.Lock()
+	defer rt.mu.Unlock()
+	return slices.Sorted(maps.Keys(rt.managed))
+}
+
+// Report returns the router's counters since it started, and the expiry of
+// the certificate it serves for each host, for a worker to send to the
+// server, whose /metrics shows every router's.
+func (rt *Router) Report() nodeapi.RouterReport {
+	return rt.cfg.Metrics.report(rt.certExpiry())
+}
+
+// certExpiry is the expiry of the latest certificate the router holds for
+// each host in its table.
+func (rt *Router) certExpiry() map[string]time.Time {
 	expiry := map[string]time.Time{}
-	for _, h := range hosts {
+	for _, h := range rt.proxy.hosts() {
 		for _, c := range rt.cache.AllMatchingCertificates(h) {
 			if c.Leaf != nil && c.Leaf.NotAfter.After(expiry[h]) {
 				expiry[h] = c.Leaf.NotAfter
 			}
 		}
 	}
-	rt.cfg.Metrics.write(w, expiry, hosts)
-}
-
-// Managed returns the hosts whose certificates the router manages, sorted.
-func (rt *Router) Managed() []string {
-	rt.mu.Lock()
-	defer rt.mu.Unlock()
-	return slices.Sorted(maps.Keys(rt.managed))
+	return expiry
 }
