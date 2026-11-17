@@ -279,7 +279,7 @@ Replicas that publish the same host port cannot share a node. The scheduler enfo
 
 ## Routing
 
-An app can name HTTPS routes: `routes: [{host: www.example.com, port: 80}]`. A node started with `--route-addr` runs a router, which serves each routed host on ports 80 and 443 with a certificate from an ACME CA, and sends each request to a Ready replica of its app on any node. A route's container port is published on an ephemeral host port on the node's private address, which the agent reports, and the server builds the routing table from those reports. A host belongs to one app at a time. This is the one place hivemind proxies traffic, and its one listener that may bind `0.0.0.0`. See [routing](routing.md).
+An app can name HTTPS routes: `routes: [{host: www.example.com, port: 80}]`. A node started with `--route-addr` runs a router, which serves each routed host on ports 80 and 443 with a certificate from an ACME CA, and sends each request to a Ready replica of its app on any node. A route's container port is published on an ephemeral host port on the node's private address, which the agent reports, and the server builds the routing table from those reports. A route can take only a path prefix of its host, such as `/api`, so several apps can share a host; each host and path belongs to one app ([paths](routing.md#paths)). This is the one place hivemind proxies traffic, and its one listener that may bind `0.0.0.0`. See [routing](routing.md).
 
 ## Volumes
 

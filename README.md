@@ -103,7 +103,7 @@ In the unreleased 2.2.0, `hivemind compose deploy compose.yaml` makes an app of 
 
 ## HTTPS routing
 
-In the unreleased 2.2.0, an app can name `routes: [{host: www.example.com, port: 80}]`, and a node started with `--route-addr 0.0.0.0 --acme-email you@example.com` runs a router on ports 80 and 443. It gets a certificate for each routed host from Let's Encrypt (or the CA in `--acme-ca`), and sends each request to a Ready replica of the app on any node. Any node can run a router, and DNS can list any of them; the routers share their certificates through the server. A rolling update of a routed app keeps it serving, on one machine too. Hosts are exact names: no wildcards, no path routing, and no TCP or UDP routing. See [docs/routing.md](docs/routing.md).
+In the unreleased 2.2.0, an app can name `routes: [{host: www.example.com, port: 80}]`, and a node started with `--route-addr 0.0.0.0 --acme-email you@example.com` runs a router on ports 80 and 443. It gets a certificate for each routed host from Let's Encrypt (or the CA in `--acme-ca`), and sends each request to a Ready replica of the app on any node. Any node can run a router, and DNS can list any of them; the routers share their certificates through the server. A rolling update of a routed app keeps it serving, on one machine too. A route can take only a path prefix of its host, such as `/api`, so several apps can share a host, and `hivemind routes` prints the table. Hosts are exact names: no wildcards, and no TCP or UDP routing. See [docs/routing.md](docs/routing.md).
 
 ## Network and authentication
 
