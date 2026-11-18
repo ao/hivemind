@@ -145,6 +145,8 @@ Certificates, their private keys, the ACME account and its key, and the challeng
 
 Point each routed host at the public address of one or more nodes that run a router: an `A` record (and an `AAAA` record for a router on an IPv6 address) per node. Every listed node must accept connections on ports 80 and 443, because the CA's validation and clients may reach any of them. A node that is down and still listed fails the requests that reach it; take it out of DNS, or put the routers behind a load balancer that checks them.
 
+It can fail renewals too. The CA validates an HTTP-01 challenge by connecting to an address of the host's record, which can be the dead node's, and the challenge then fails whichever router asked for it. Pebble, the test CA, takes the first address listed: in the [fourth soak](soak.md#certificates-and-the-harnesss-dns-answers), with a lost server's address still first in each host's answers, every renewal failed with `dial tcp 10.0.0.1:80: connect: no route to host` until the answers were put right. So when a node that runs a router is replaced or removed, as after a [restore at a new address](backup.md#replacing-a-lost-server), change the records of every routed host it was in. An alert on `hivemind_router_cert_expiry_timestamp_seconds - time()` ([metrics](#metrics)) catches renewals that keep failing well before a certificate expires: certmagic renews in the last third of a certificate's lifetime, so with 90-day certificates anything under about 25 days left means the renewals have failed for days.
+
 ## Ports and firewall
 
 | Port | Bind | Reachable from |

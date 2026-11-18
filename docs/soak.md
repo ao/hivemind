@@ -905,6 +905,8 @@ The restored server kept the cluster: the other two workers stayed `ready` on it
 
 Nothing on the old server said that it was the old copy until a worker of the restored cluster reached it: from its own view, three workers did not report within its grace and were lost. Its router served certificates from its own store, the ones of 13:15:56, still valid.
 
+Since this run, a worker closes the connection a refused reply came on and opens new ones, so each ask looks the name up again; it keeps its refusal by the address that answered, and logs it once for each; and a server whose start grace ends with no report from any worker that was waiting keeps them all waiting, places none of their replicas, and logs at error that no worker has reported since it started ([backup](backup.md#replacing-a-lost-server)). `scripts/integration-newaddr.sh` checks all three. The soak was not run again on that build.
+
 ### Rolling updates of the path apps
 
 | | Deploy to converged | Failed requests, 16 streams | Misrouted | Requests of 1.5 s or more |
@@ -950,6 +952,8 @@ Its streams lost one refused request each during the restart. The other routers 
 Pebble issued the first three certificates at 13:15:57 to 13:16:01. The restored server's router began renewing them at 13:29:06, and hivemind-soakf-4's router at its start, 13:31:43, as the new build does for a certificate already due. Every attempt failed: Pebble's HTTP-01 validation dialled 10.0.0.1, the dead old server (`dial tcp 10.0.0.1:80: connect: no route to host`). The cause was the harness: pebble-challtestsrv's `add-a` adds to the host's addresses rather than replacing them, so after the move each host answered eight addresses, the old server's first, and Pebble validates against the first. In the third soak this is what kept Pebble on the old address after the answers were "corrected" at 09:20, until they were cleared at 09:29, and the certificates expired. `chall-update` now clears each host first; it was run again at 13:33:31, and from then on every validation went to a live router. With a real DNS provider the same thing happens if a routed host's record still lists a dead node first: a CA that validates against one address fails while that node is down.
 
 hivemind-soakf-2's second renewal of `paths.soak.test`, 88 s after hivemind-soakf-3's (Pebble's issuances at 13:33:50 and 13:35:18), came from Pebble's renewal information (ARI). Pebble suggests a window that spans the whole lifetime, from issuance; certmagic picks a random time in it and renews at any check from 10 minutes before that time, so a new certificate is now and then due at once. soakf-2 renewed under the storage lock with the stored certificate's 58 minutes left. That is Pebble's choice of window, not how a public CA sets it.
+
+Every 10-minute check also logged, for each host, certmagic's warning `certificate is in emergency renewal window; expiration imminent`, with 40 minutes or more left. That is expected with one-hour certificates, and was left as it is: certmagic (v0.25.6) counts a certificate as in its emergency window when less than 1/50 of its lifetime, or less than five of its 10-minute checks, 50 minutes, is left, and a one-hour certificate has less than 50 minutes left from 10 minutes after its issuance. A 90-day certificate reaches that window only in its last 43 hours, after about four weeks of failed renewals.
 
 ## Steady state
 
