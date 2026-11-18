@@ -13,6 +13,7 @@ import (
 	"net"
 	"net/http"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"time"
 
@@ -118,6 +119,13 @@ type swapTransport struct {
 	epoch   *EpochGuard
 	// answered, if set, is called after each reply (OnAnswer).
 	answered atomic.Pointer[func()]
+	// trust, if set, gives the CATrustHeader of each request, and caSeen
+	// is called with each reply's CAHeader (WithCATrust, OnCA).
+	trust  func() string
+	caSeen atomic.Pointer[func(string)]
+	// swap serialises the changes of cur, so that a reset and a new TLS
+	// config cannot undo each other.
+	swap sync.Mutex
 }
 
 func (s *swapTransport) RoundTrip(r *http.Request) (*http.Response, error) {
@@ -130,7 +138,7 @@ func (s *swapTransport) RoundTrip(r *http.Request) (*http.Response, error) {
 			return nil, err
 		}
 	}
-	if s.version != "" || s.epoch != nil {
+	if s.version != "" || s.epoch != nil || s.trust != nil {
 		// A RoundTripper must not change the request it is given.
 		r = r.Clone(r.Context())
 		if s.version != "" {
@@ -138,6 +146,11 @@ func (s *swapTransport) RoundTrip(r *http.Request) (*http.Response, error) {
 		}
 		if s.epoch != nil {
 			r.Header.Set(EpochHeader, FormatEpoch(s.epoch.Highest()))
+		}
+		if s.trust != nil {
+			if v := s.trust(); v != "" {
+				r.Header.Set(CATrustHeader, v)
+			}
 		}
 	}
 	sent := time.Now()
@@ -156,10 +169,43 @@ func (s *swapTransport) RoundTrip(r *http.Request) (*http.Response, error) {
 	}
 	s.server.see(resp.Header.Get(VersionHeader))
 	s.clock.observe(sent, time.Now(), resp)
+	if f := s.caSeen.Load(); f != nil {
+		if v := resp.Header.Get(CAHeader); ValidCADigest(v) {
+			(*f)(v)
+		}
+	}
 	if f := s.answered.Load(); f != nil {
 		(*f)()
 	}
 	return resp, nil
+}
+
+// WithCATrust makes the client send f's value, the CAs the node trusts
+// (FormatCATrust), in CATrustHeader on every request. f must not block.
+func WithCATrust(f func() string) ClientOption {
+	return func(c *Client) { c.tr.trust = f }
+}
+
+// OnCA makes the client call f with the CAHeader of each reply that has
+// one, after the epoch check. f must not block. Nil removes it.
+func (c *Client) OnCA(f func(digest string)) {
+	if f == nil {
+		c.tr.caSeen.Store(nil)
+		return
+	}
+	c.tr.caSeen.Store(&f)
+}
+
+// SetTLSConfig makes every later request use cfg, on new connections, as
+// after ResetConnections. A worker calls it when it trusts another set of
+// CAs. Requests in flight finish on their old connections.
+func (c *Client) SetTLSConfig(cfg *tls.Config) {
+	c.tr.swap.Lock()
+	defer c.tr.swap.Unlock()
+	next := c.tr.cur.Load().Clone()
+	next.TLSClientConfig = cfg
+	old := c.tr.cur.Swap(next)
+	old.CloseIdleConnections()
 }
 
 // OnAnswer makes the client call f after each reply from the server, of any
@@ -190,6 +236,8 @@ func (c *Client) CloseIdleConnections() { c.http.CloseIdleConnections() }
 // flight finish on their old connections, which are never reused and close
 // after idleConnTimeout.
 func (c *Client) ResetConnections() {
+	c.tr.swap.Lock()
+	defer c.tr.swap.Unlock()
 	old := c.tr.cur.Swap(c.tr.cur.Load().Clone())
 	old.CloseIdleConnections()
 }
@@ -325,6 +373,12 @@ func statusError(resp *http.Response) error {
 	}
 	if resp.StatusCode == http.StatusUnauthorized && e.Error == CertInvalidMessage {
 		return ErrCertInvalid
+	}
+	if resp.StatusCode == http.StatusForbidden && e.Error == CAUntrustedMessage {
+		return ErrCAUntrusted
+	}
+	if resp.StatusCode == http.StatusForbidden && e.Error == CASupersededMessage {
+		return ErrCASuperseded
 	}
 	return &RefusedError{Code: resp.StatusCode, Status: resp.Status, Message: msg}
 }
