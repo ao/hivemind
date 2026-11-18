@@ -1,9 +1,10 @@
 # Shared helpers for the scripts that run a hivemind cluster in Docker: one
 # server and N-1 workers, each a docker:dind container on a private network.
-# Sourced by scripts/integration-cluster.sh, scripts/integration-newaddr.sh
-# and scripts/fault-suite.sh. The caller sets REPO before sourcing, and calls
-# cl_init, then cl_start_nodes, and cl_trap_cleanup. Written for bash 3.2
-# (macOS) as well as bash 5.
+# Sourced by the integration scripts, scripts/fault-suite.sh and
+# scripts/edge-suite.sh; scripts/lib/restore.sh adds the helpers for losing
+# the server's machine and restoring it. The caller sets REPO before
+# sourcing, and calls cl_init, then cl_start_nodes, and cl_trap_cleanup.
+# Written for bash 3.2 (macOS) as well as bash 5.
 #
 # Node names: index 0 is the server, 1.. are workers. CL_NAMES and CL_IDS are
 # parallel arrays; CL_IDS is filled by cl_join.
