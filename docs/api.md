@@ -63,7 +63,7 @@ Every error is a JSON object with one field:
 | 400 | Invalid JSON, an unknown field, an empty body, an invalid app spec, an invalid name or query value |
 | 401 | No valid token or session |
 | 403 | A cookie request to an unsafe method without the session's CSRF token: `{"error":"csrf_token_invalid"}` |
-| 404 | No such app or node, no drain of the node, or no container for the replica on its node. Unknown routes give `{"error":"not found"}` |
+| 404 | No such app or node, no drain of the node, no container for the replica on its node, or no such CA rotation step (`no such step: the steps are start, renew, finish and abort`). Unknown routes give `{"error":"not found"}` |
 | 405 | Wrong method for a known path: `{"error":"method not allowed"}` |
 | 409 | Removing the server's own node, or a node that still renews its lease without `force=true`. An ineligible node that runs nothing needs no `force`. A put whose `routes` name a host that another app routes: `{"error":"conflict: host www.example.com is routed by app web; remove it there first"}`, or a host and path: `conflict: host www.example.com with path /api is routed by app api; ...` |
 | 413 | Request body over 1 MiB |
