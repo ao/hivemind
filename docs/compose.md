@@ -186,6 +186,8 @@ services:
 
 `routes` is a list of routes as in an app spec: `host`, `port` (the container port), an optional `path` prefix and an optional `protocol`, `http` (the default) or `h2c` for a gRPC server or another that speaks HTTP/2 without TLS, checked by the same rules (see [paths](routing.md#paths) and [protocols](routing.md#protocols)). Strings in it are interpolated, so `host: ${HOST}` works. `x-hivemind` has `routes` only, and a route has those four keys only: any other key in either is refused, an `x-` key too, since the mapping is hivemind's and a key it does not read is a mistake. `x-hivemind` at the top level is refused, since routes there would route nothing. A route needs no entry in `ports`: the router reaches the container port on an ephemeral host port.
 
+A server that speaks only h2c fails the agent's HTTP check, and [routing](routing.md#health-checks) recommends a TCP check for it. A compose file cannot give one: `healthcheck` becomes an exec check, which needs a shell or a probe such as `grpc_health_probe` in the image, and `x-hivemind` has routes only. For an image without either, as `cart` above may be, leave `healthcheck` out, and the replica is ready as soon as its container runs; or run `hivemind compose convert`, add `health: {tcp: {port: 50051}}` to that app's spec, and deploy it with `hivemind deploy -f`.
+
 ## Interpolation
 
 Variables are substituted in values, as the [specification](https://github.com/compose-spec/compose-spec/blob/main/12-interpolation.md) describes, and never in keys:

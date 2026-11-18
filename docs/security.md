@@ -1,6 +1,6 @@
 # Security
 
-This lists every listener the code opens, what each one exposes, and the files hivemind writes. The claims come from the code in `cmd/hivemind`, `internal/agent`, `internal/auth`, `internal/cluster`, `internal/pki`, `internal/router`, `internal/runtime/docker`, `internal/tlsstore` and `internal/store`. The concepts are in [concepts](concepts.md).
+This lists every listener the code opens, what each one exposes, and the files hivemind writes. The claims come from the code in `cmd/hivemind`, `internal/agent`, `internal/auth`, `internal/carotate`, `internal/cluster`, `internal/nodeapi`, `internal/pki`, `internal/router`, `internal/runtime/docker`, `internal/tlsstore` and `internal/store`. The concepts are in [concepts](concepts.md).
 
 ## Listeners
 
@@ -59,6 +59,7 @@ A worker's data directory is created with mode 0700.
 | `cluster-epoch` | 0600 | The highest cluster epoch the worker has seen from a server of its cluster, once one has sent more than 0. `cluster-epoch.next` is there only while it is replaced |
 | `node.key.next`, `node.crt.next` | 0600 | Only during a renewal: the new pair, before it is renamed into place |
 | `hivemind.lock` | 0600 | The pid of the `join` or `serve --role worker` that holds it locked |
+| `hivemind.yaml` | as you create it | Optional settings for `serve --role worker`, such as the router's. `join` does not write it |
 
 A worker has no CA key, no database and no admin token.
 
