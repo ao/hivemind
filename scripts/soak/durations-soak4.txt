@@ -20,8 +20,8 @@ kill-worker: port 22 closed to converged (volume replica held)|scenario kill-wor
 kill-worker: start request to port 22 open|scenario kill-worker begin|event kill-worker .* fault start|watch port22 hivemind-soakf-4 up
 kill-worker: start request to node ready|scenario kill-worker begin|event kill-worker .* fault start|watch node hivemind-soakf-4 ready
 kill-worker: start request to old containers removed|scenario kill-worker begin|event kill-worker .* fault start|event kill-worker .* old-containers-removed
-kill-worker: start request to converged|scenario kill-worker begin|event kill-worker .* fault start|event kill-worker converged-yes
+kill-worker: start request to converged (its old containers gone)|scenario kill-worker begin|event kill-worker .* fault start|event kill-worker .* old-containers-removed
 rollout-papi: deploy to converged|scenario rollout-papi begin|event rollout-papi .* fault deploy|event rollout-papi converged-yes
 rollout-proot: deploy to converged|scenario rollout-proot begin|event rollout-proot .* fault deploy|event rollout-proot converged-yes
-rollout-proot+papi: deploy to converged|scenario rollout-proot\+papi begin|event rollout-proot\+papi .* fault deploy|event rollout-proot\+papi converged-yes
-cert-restart: restart to the router serving a new certificate|scenario cert-restart begin|event cert-restart .* fault restart|event cert-restart .* certs .*
+rollout-proot+papi: deploy to converged|scenario rollout-proot.papi begin|event rollout-proot.papi .* fault deploy|event rollout-proot.papi converged-yes
+cert-restart: restart to the router serving new certificates (5 s polls)|scenario cert-restart begin|event cert-restart .* fault restart|event cert-restart .* certs www[^ ]*:left=3[0-9][0-9][0-9]s
