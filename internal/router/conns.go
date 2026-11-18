@@ -24,7 +24,8 @@ const (
 	// no progress before the connection ends.
 	DefaultWriteTimeout = 60 * time.Second
 	// DefaultUpgradeIdleTimeout is how long an upgraded connection, such as
-	// a WebSocket, may carry no data either way before it is closed.
+	// a WebSocket, or a request on an h2c route, may carry no data either
+	// way before it is closed.
 	DefaultUpgradeIdleTimeout = 10 * time.Minute
 
 	// fdReserve is the file descriptors DefaultMaxConns leaves to the rest
@@ -282,7 +283,14 @@ var errWrongUpgrade = errors.New("router: the replica switched to another protoc
 // modifyResponse is the proxy's ModifyResponse. A 101 for the protocol the
 // request asked for gets the idle limit; one for another protocol, or for
 // none, is refused, which closes the replica's connection and answers 502.
+// The reply to a request on an h2c route, which HTTP/2 never makes a 101,
+// counts towards that request's idle limit as it is read.
 func (p *proxy) modifyResponse(res *http.Response) error {
+	if info, _ := res.Request.Context().Value(ctxKey{}).(reqInfo); info.stream != nil {
+		info.stream.touch()
+		res.Body = &touchBody{ReadCloser: res.Body, s: info.stream}
+		return nil
+	}
 	if res.StatusCode != http.StatusSwitchingProtocols {
 		return nil
 	}

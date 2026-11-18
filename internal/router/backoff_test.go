@@ -14,7 +14,7 @@ import (
 // then 6, 12, 24, and 30 from then on. A failure while it is marked down
 // does not lengthen the mark. A request that gets through ends the run.
 func TestEndpointBackoff(t *testing.T) {
-	e := newEndpoint("10.0.0.9:1")
+	e := newEndpoint("10.0.0.9:1", false, upstreamResponseTimeout)
 	t0 := time.Unix(1000, 0)
 	at := t0
 	for i, want := range []time.Duration{3, 6, 12, 24, 30, 30} {
@@ -108,7 +108,7 @@ func TestADeadEndpointIsDialledLessAndLess(t *testing.T) {
 		}
 	}
 	p.mu.RLock()
-	e := p.endpoints[dead]
+	e := p.endpoints[epKey{addr: dead}]
 	p.mu.RUnlock()
 	if got := time.Duration(e.downUntil.Load() - clock.Now().UnixNano()); got != downFor {
 		t.Fatalf("the endpoint that came back is skipped for %s, want %s", got, downFor)

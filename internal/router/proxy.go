@@ -17,6 +17,8 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
+
+	"github.com/ao/hivemind/internal/spec"
 )
 
 // Upstream limits. The routers reach the replicas over the nodes' private
@@ -46,21 +48,37 @@ const (
 // path none of its routes takes gets 404.
 type Table map[string][]Route
 
-// Route is one route of a host: a path prefix, and the address:port of
-// every replica that takes its traffic now. Path "" is the whole host; any
-// other path is a prefix as spec.ValidatePath allows, such as "/api", which
-// takes "/api" and "/api/..." but not "/apix". A route with no endpoints is
+// Route is one route of a host: a path prefix, the protocol its replicas
+// speak, and the address:port of every replica that takes its traffic now.
+// Path "" is the whole host; any other path is a prefix as spec.ValidatePath
+// allows, such as "/api", which takes "/api" and "/api/..." but not "/apix".
+// Protocol "" is HTTP/1.1, and ProtocolH2C is HTTP/2 without TLS; a route
+// with any other protocol gets no endpoints. A route with no endpoints is
 // answered with 503.
 type Route struct {
 	Path      string
+	Protocol  string
 	Endpoints []string
+}
+
+// ProtocolH2C is the protocol of a route whose replicas speak HTTP/2 over
+// cleartext TCP with prior knowledge (RFC 9113, 3.3), as a gRPC server does.
+const ProtocolH2C = spec.RouteH2C
+
+// epKey is what an endpoint is known by: its address, and whether it speaks
+// h2c. Two routes can name one container port with different protocols, and
+// each gets its own endpoint, with its own connections and down mark.
+type epKey struct {
+	addr string
+	h2c  bool
 }
 
 // endpoint is one replica's address, with its own connection pool and the
 // time until which it is skipped after a failed dial. An endpoint is shared
-// by every host that routes to it.
+// by every host that routes to it with the same protocol.
 type endpoint struct {
 	addr      string
+	h2c       bool
 	tr        *http.Transport
 	downUntil atomic.Int64 // unix nanoseconds
 	// fails is the failures in a row, each counted once per down mark.
@@ -104,22 +122,34 @@ func (e *endpoint) ok() {
 	e.mu.Unlock()
 }
 
-func newEndpoint(addr string) *endpoint {
+// newEndpoint returns the endpoint for addr. Its transport speaks HTTP/1.1,
+// or, with h2c, HTTP/2 with prior knowledge and nothing else: an h2c route's
+// replicas, such as gRPC servers, may not speak HTTP/1.1 at all. Both dial
+// alike, with the dial timeout, keepalives and TCP_USER_TIMEOUT, and wait
+// responseTimeout for a reply's headers once the whole request is sent.
+// Over HTTP/2 one connection carries many requests at once; the transport
+// opens another when the replica's stream limit is reached.
+func newEndpoint(addr string, h2c bool, responseTimeout time.Duration) *endpoint {
 	d := &net.Dialer{Timeout: upstreamDialTimeout, KeepAlive: 30 * time.Second, Control: setUserTimeout}
-	return &endpoint{addr: addr, tr: &http.Transport{
+	tr := &http.Transport{
 		// Never an HTTP proxy from the environment: replicas are on the
 		// private network.
 		Proxy:                  nil,
 		DialContext:            d.DialContext,
 		MaxIdleConnsPerHost:    upstreamMaxIdlePerHost,
 		IdleConnTimeout:        upstreamIdleTimeout,
-		ResponseHeaderTimeout:  upstreamResponseTimeout,
+		ResponseHeaderTimeout:  responseTimeout,
 		ExpectContinueTimeout:  time.Second,
 		MaxResponseHeaderBytes: maxResponseHeaderBytes,
 		// The client's Accept-Encoding goes to the app, and its reply comes
 		// back as it is.
 		DisableCompression: true,
-	}}
+	}
+	if h2c {
+		tr.Protocols = new(http.Protocols)
+		tr.Protocols.SetUnencryptedHTTP2(true)
+	}
+	return &endpoint{addr: addr, h2c: h2c, tr: tr}
 }
 
 // pool is one route's endpoints, in table order, and its round-robin
@@ -164,6 +194,7 @@ type hostRoutes struct {
 type route struct {
 	path string
 	pool *pool
+	h2c  bool
 }
 
 // find returns the route with path p, or nil.
@@ -274,28 +305,45 @@ type proxy struct {
 	log     *slog.Logger
 	metrics *Metrics
 	now     func() time.Time
-	rp      *httputil.ReverseProxy
+	// rp proxies the requests of http routes, and rpH2C those of h2c
+	// routes, which it flushes to the client after every write.
+	rp, rpH2C *httputil.ReverseProxy
 	// httpsPort is the port of the https listener, which clients connect
-	// to, and upgradeIdle the idle limit of upgraded connections. New sets
-	// them before anything is served.
+	// to, and upgradeIdle the idle limit of upgraded connections and of
+	// requests on h2c routes. New sets them before anything is served.
 	httpsPort   int
 	upgradeIdle time.Duration
+	// responseTimeout is how long a replica has to send a reply's headers
+	// once the whole request is sent: upstreamResponseTimeout, but for
+	// tests. Endpoints take it when they are made.
+	responseTimeout time.Duration
 
 	mu        sync.RWMutex
 	table     map[string]*hostRoutes
-	endpoints map[string]*endpoint
+	endpoints map[epKey]*endpoint
 }
 
 func newProxy(log *slog.Logger, m *Metrics) *proxy {
-	p := &proxy{log: log, metrics: m, now: time.Now, table: map[string]*hostRoutes{}, endpoints: map[string]*endpoint{}}
-	p.rp = &httputil.ReverseProxy{
+	p := &proxy{log: log, metrics: m, now: time.Now, responseTimeout: upstreamResponseTimeout,
+		table: map[string]*hostRoutes{}, endpoints: map[epKey]*endpoint{}}
+	p.rp = p.reverseProxy(0)
+	// A negative FlushInterval flushes after every write. ReverseProxy
+	// does that for a reply without a Content-Length anyway, which a gRPC
+	// reply is; for h2c it is set whatever the reply, so a stream never
+	// waits in the router for a buffer to fill.
+	p.rpH2C = p.reverseProxy(-1)
+	return p
+}
+
+func (p *proxy) reverseProxy(flush time.Duration) *httputil.ReverseProxy {
+	return &httputil.ReverseProxy{
 		Rewrite:        p.rewrite,
 		Transport:      balancer{p},
+		FlushInterval:  flush,
 		ModifyResponse: p.modifyResponse,
 		ErrorHandler:   p.upstreamFailed,
-		ErrorLog:       slog.NewLogLogger(log.Handler(), slog.LevelWarn),
+		ErrorLog:       slog.NewLogLogger(p.log.Handler(), slog.LevelWarn),
 	}
-	return p
 }
 
 // clientHeaders are the request headers, other than X-Forwarded-*, in which
@@ -338,6 +386,11 @@ func (p *proxy) authority(host string) string {
 // https port, and Host and X-Forwarded-Host to the table's host (see
 // authority), not the client's spelling of it: its case, a trailing dot and
 // any port it wrote are gone. The balancer fills in the endpoint.
+//
+// On an h2c route the request goes to the replica over HTTP/2, which has no
+// Upgrade (RFC 9113, 8.2.2), so Upgrade and Connection are removed too, and
+// an upgrade such as a WebSocket reaches the replica as a plain request, as
+// a server may ignore an upgrade (RFC 9110, 7.8).
 func (p *proxy) rewrite(pr *httputil.ProxyRequest) {
 	info, _ := pr.In.Context().Value(ctxKey{}).(reqInfo)
 	authority := p.authority(info.host)
@@ -350,6 +403,10 @@ func (p *proxy) rewrite(pr *httputil.ProxyRequest) {
 		}
 	}
 	dropH2C(pr.Out.Header)
+	if info.h2c {
+		pr.Out.Header.Del("Upgrade")
+		pr.Out.Header.Del("Connection")
+	}
 	pr.SetXForwarded()
 	pr.Out.Header.Set("X-Forwarded-Host", authority)
 	pr.Out.Header.Set("X-Forwarded-Port", strconv.Itoa(p.httpsPort))
@@ -395,10 +452,12 @@ func dropH2C(h http.Header) {
 // that stays keeps its place in the round-robin; endpoints that leave close
 // their idle connections, and come back with no failures. A
 // request in flight to one finishes. A path listed twice for one host keeps
-// its first entry; the table's validation refuses that before it gets here.
+// its first entry; the table's validation refuses that before it gets here,
+// and a protocol other than HTTP/1.1 and h2c, which leaves the route without
+// endpoints.
 func (p *proxy) setTable(t Table) {
 	hosts := make(map[string]*hostRoutes, len(t))
-	eps := make(map[string]*endpoint)
+	eps := make(map[epKey]*endpoint)
 	p.mu.Lock()
 	for host, routes := range t {
 		hr := &hostRoutes{}
@@ -411,17 +470,21 @@ func (p *proxy) setTable(t Table) {
 			if o := old.find(r.Path); o != nil {
 				pl.next.Store(o.pool.next.Load())
 			}
-			for _, a := range r.Endpoints {
-				e := eps[a]
-				if e == nil {
-					if e = p.endpoints[a]; e == nil {
-						e = newEndpoint(a)
+			h2c := r.Protocol == ProtocolH2C
+			if r.Protocol == "" || h2c {
+				for _, a := range r.Endpoints {
+					k := epKey{addr: a, h2c: h2c}
+					e := eps[k]
+					if e == nil {
+						if e = p.endpoints[k]; e == nil {
+							e = newEndpoint(a, h2c, p.responseTimeout)
+						}
+						eps[k] = e
 					}
-					eps[a] = e
+					pl.endpoints = append(pl.endpoints, e)
 				}
-				pl.endpoints = append(pl.endpoints, e)
 			}
-			hr.routes = append(hr.routes, &route{path: r.Path, pool: pl})
+			hr.routes = append(hr.routes, &route{path: r.Path, pool: pl, h2c: h2c})
 			if r.Path != "" {
 				hr.paths = true
 			}
@@ -471,6 +534,10 @@ type ctxKey struct{}
 type reqInfo struct {
 	host string
 	pool *pool
+	// h2c is set for a request on an h2c route, and stream then holds its
+	// idle limit, if it has one.
+	h2c    bool
+	stream *streamIdle
 }
 
 // ServeHTTP is the HTTPS handler. A host the table does not have gets a
@@ -479,7 +546,8 @@ type reqInfo struct {
 // the request goes to the route that match chooses: a path that no route
 // takes gets 404, a path that routingPath refuses gets 400, and a route with
 // no Ready replica gets 503. The request's path goes to the replica as the
-// client sent it: the router matches on it and does not rewrite it.
+// client sent it: the router matches on it and does not rewrite it. A
+// request on an h2c route goes through serveH2C.
 func (p *proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	host := requestHost(r)
 	if r.TLS != nil && r.TLS.ServerName != "" && !strings.EqualFold(r.TLS.ServerName, host) {
@@ -503,8 +571,124 @@ func (p *proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "no replica is ready", http.StatusServiceUnavailable)
 		return
 	}
-	ctx := context.WithValue(r.Context(), ctxKey{}, reqInfo{host: host, pool: rt.pool})
-	p.rp.ServeHTTP(w, r.WithContext(ctx))
+	info := reqInfo{host: host, pool: rt.pool, h2c: rt.h2c}
+	if rt.h2c {
+		p.serveH2C(w, r, info)
+		return
+	}
+	p.rp.ServeHTTP(w, r.WithContext(context.WithValue(r.Context(), ctxKey{}, info)))
+}
+
+// serveH2C proxies a request on an h2c route to a replica over HTTP/2. The
+// request may be a stream either way that lasts as long as the client and
+// the replica keep it open, such as a gRPC server or bidirectional stream,
+// and it flows as it comes: the client's body goes to the replica as it is
+// read, and rpH2C flushes the reply after every write, with its trailers
+// (a gRPC call's status) at the end.
+//
+// The whole-request read limit of the https server (readTimeout), which
+// would cut a client that is still sending after 5 minutes, is lifted for
+// the request. Instead, a request that carries no data either way, in its
+// body or its reply's, for upgradeIdle is ended, as an upgraded connection
+// is. The reply's headers still have the response timeout, which counts from
+// when the client has sent its whole request: a server stream whose replica
+// sends nothing at all, not even its headers, for that long gets 502.
+func (p *proxy) serveH2C(w http.ResponseWriter, r *http.Request, info reqInfo) {
+	ctx, cancel := context.WithCancel(r.Context())
+	defer cancel()
+	rc := http.NewResponseController(w)
+	_ = rc.SetReadDeadline(time.Time{})
+	body := r.Body
+	if p.upgradeIdle > 0 {
+		// Go's HTTP/2 transport does not see the context end while it
+		// waits for the client to send more of the body, as in a quiet
+		// bidirectional stream, so the end of the limit also ends that
+		// wait: a read deadline in the past fails the read, and the
+		// transport then resets the replica's stream.
+		end := func() {
+			_ = rc.SetReadDeadline(time.Now().Add(-time.Second))
+			cancel()
+		}
+		s := newStreamIdle(p.upgradeIdle, end, p.log, info.host)
+		defer s.stop()
+		info.stream = s
+		if body != nil && body != http.NoBody {
+			body = &touchBody{ReadCloser: body, s: s}
+		}
+	}
+	// A copy of the request: the server closes the body it made.
+	r = r.WithContext(context.WithValue(ctx, ctxKey{}, info))
+	r.Body = body
+	p.rpH2C.ServeHTTP(w, r)
+}
+
+// streamIdle ends a request on an h2c route when no data passes either way
+// for idle: it calls end, which fails the request's reads and cancels its
+// context. That resets the replica's stream, and the client's reply then
+// fails, or is 502 if it had not begun.
+type streamIdle struct {
+	idle time.Duration
+	end  func()
+	log  *slog.Logger
+	host string
+	last atomic.Int64 // unix nanoseconds of the last data either way
+
+	mu    sync.Mutex
+	timer *time.Timer
+	done  bool
+}
+
+func newStreamIdle(idle time.Duration, end func(), log *slog.Logger, host string) *streamIdle {
+	s := &streamIdle{idle: idle, end: end, log: log, host: host}
+	s.touch()
+	s.mu.Lock()
+	s.timer = time.AfterFunc(idle, s.check)
+	s.mu.Unlock()
+	return s
+}
+
+// touch records data either way now.
+func (s *streamIdle) touch() { s.last.Store(time.Now().UnixNano()) }
+
+// check ends the request if it has been idle for idle, and otherwise looks
+// again when it would be. It holds mu while it calls end, so end never runs
+// after stop has returned, when the request's writer may be reused.
+func (s *streamIdle) check() {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.done {
+		return
+	}
+	if since := time.Since(time.Unix(0, s.last.Load())); since < s.idle {
+		s.timer.Reset(s.idle - since)
+		return
+	}
+	s.done = true
+	s.log.Debug("ending a request on an h2c route that carried no data either way", "host", s.host, "idle", s.idle)
+	s.end()
+}
+
+// stop ends the limit, when the request is done.
+func (s *streamIdle) stop() {
+	s.mu.Lock()
+	s.done = true
+	s.timer.Stop()
+	s.mu.Unlock()
+}
+
+// touchBody is a request or reply body that tells s of every read that
+// carried data.
+type touchBody struct {
+	io.ReadCloser
+	s *streamIdle
+}
+
+func (b *touchBody) Read(p []byte) (int, error) {
+	n, err := b.ReadCloser.Read(p)
+	if n > 0 {
+		b.s.touch()
+	}
+	return n, err
 }
 
 // upstreamFailed answers a request that no replica took.

@@ -5,7 +5,9 @@
 // host or a path prefix of it; a request goes to the route with the longest
 // prefix of its path, and round-robin to that route's replicas through
 // net/http/httputil.ReverseProxy; a replica that cannot be dialled is
-// skipped for a few seconds, and the next one is tried.
+// skipped for a few seconds, and the next one is tried. The router speaks
+// HTTP/1.1 to the replicas of a route, or HTTP/2 with prior knowledge to
+// those of an h2c route, such as gRPC servers.
 //
 // Certificates come from an ACME CA through certmagic, for the hosts in the
 // table only: there is no on-demand issuance. HTTP-01 is the only challenge.
@@ -85,8 +87,9 @@ type Config struct {
 	// makes no progress for this long. Zero means DefaultWriteTimeout.
 	WriteTimeout time.Duration
 	// UpgradeIdleTimeout closes an upgraded connection, such as a
-	// WebSocket, that carries no data either way for this long. Zero
-	// means DefaultUpgradeIdleTimeout.
+	// WebSocket, and ends a request on an h2c route, such as a gRPC stream,
+	// that carries no data either way for this long. Zero means
+	// DefaultUpgradeIdleTimeout.
 	UpgradeIdleTimeout time.Duration
 	// Email is the ACME account's contact. Registering the account agrees
 	// to the CA's subscriber agreement.

@@ -88,6 +88,9 @@ type testOptions struct {
 	backend func(tlsstore.Backend) tlsstore.Backend
 	// config, if set, changes the router's Config before New.
 	config func(*Config)
+	// before, if set, changes the router after New, before its first
+	// table and before it serves.
+	before func(*Router)
 }
 
 // newTestRouterWith is newTestRouter with o.
@@ -118,6 +121,9 @@ func newTestRouterWith(t *testing.T, table Table, o testOptions) *testRouter {
 	rt, err := New(cfg)
 	if err != nil {
 		t.Fatal(err)
+	}
+	if o.before != nil {
+		o.before(rt)
 	}
 	rt.manage = func(context.Context, []string) error { return nil }
 	cert, leaf := selfSigned(t, testHosts...)
@@ -809,7 +815,7 @@ func TestTablePollAndManagedHosts(t *testing.T) {
 
 func TestPoolOrder(t *testing.T) {
 	now := time.Unix(1000, 0)
-	a, b, c := newEndpoint("a:1"), newEndpoint("b:1"), newEndpoint("c:1")
+	a, b, c := newEndpoint("a:1", false, time.Second), newEndpoint("b:1", false, time.Second), newEndpoint("c:1", true, time.Second)
 	p := &pool{endpoints: []*endpoint{a, b, c}}
 	var firsts []string
 	for range 3 {
