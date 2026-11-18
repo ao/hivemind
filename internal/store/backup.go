@@ -53,6 +53,9 @@ type FileInfo struct {
 	// NodeID is the cluster's own node, from the cluster record. Empty if
 	// init never ran on it.
 	NodeID string
+	// CARotation is the CA rotation the file records, or nil for none, as
+	// for a file from before CARotationSchemaVersion.
+	CARotation *CARotation
 }
 
 // InspectFile checks a store file without migrating it: SQLite's
@@ -80,6 +83,15 @@ func InspectFile(ctx context.Context, path string) (FileInfo, error) {
 	if v >= 3 {
 		err := db.QueryRowContext(ctx, `SELECT node_id FROM cluster WHERE id = 1`).Scan(&info.NodeID)
 		if err != nil && !errors.Is(err, sql.ErrNoRows) {
+			return FileInfo{}, err
+		}
+	}
+	if v >= CARotationSchemaVersion {
+		r, err := getCARotation(ctx, db)
+		switch {
+		case err == nil:
+			info.CARotation = &r
+		case !errors.Is(err, ErrNotFound):
 			return FileInfo{}, err
 		}
 	}

@@ -299,6 +299,37 @@ DROP TABLE app_hosts;
 ALTER TABLE cluster ADD COLUMN epoch INTEGER NOT NULL DEFAULT 0 CHECK (epoch >= 0);
 ALTER TABLE nodes ADD COLUMN dials TEXT NOT NULL DEFAULT '';
 `,
+	// 17: cluster CA rotation (docs/ca-rotation.md). ca_rotation is the
+	// rotation in progress, if any: the fingerprints of the CA in ca.crt
+	// (current) and of the one in ca-next.crt (next), the phase, the CA it
+	// goes towards (next, or current after an abort in the renew phase),
+	// and the CA that signs the server's own certificate. 'ending' records
+	// that the rotation's last step, which changes the CA files, has
+	// begun. ca_rotation_nodes holds, for each node seen since the
+	// rotation started or turned round, whether it trusts the CA the
+	// rotation goes towards, whether it has presented a certificate from
+	// it, and whether its requests say nothing of what it trusts (a build
+	// without rotation).
+	`
+CREATE TABLE ca_rotation (
+	id         INTEGER PRIMARY KEY CHECK (id = 1),
+	current_fp BLOB NOT NULL CHECK (length(current_fp) = 32),
+	next_fp    BLOB NOT NULL CHECK (length(next_fp) = 32 AND next_fp != current_fp),
+	phase      TEXT NOT NULL CHECK (phase IN ('trust', 'renew', 'ending')),
+	toward     TEXT NOT NULL CHECK (toward IN ('next', 'current')),
+	listener   TEXT NOT NULL CHECK (listener IN ('current', 'next')),
+	started_at INTEGER NOT NULL,
+	updated_at INTEGER NOT NULL
+) STRICT;
+
+CREATE TABLE ca_rotation_nodes (
+	node_id   TEXT PRIMARY KEY CHECK (node_id != ''),
+	trusts    INTEGER NOT NULL DEFAULT 0 CHECK (trusts IN (0, 1)),
+	renewed   INTEGER NOT NULL DEFAULT 0 CHECK (renewed IN (0, 1)),
+	old_build INTEGER NOT NULL DEFAULT 0 CHECK (old_build IN (0, 1)),
+	seen_at   INTEGER NOT NULL
+) STRICT;
+`,
 }
 
 // migrationNotes says in a few words what each migration adds, for the log:
@@ -320,6 +351,7 @@ var migrationNotes = []string{
 	"rollout copy times",
 	"path routes",
 	"the cluster epoch and the server address each node dials",
+	"cluster CA rotation",
 }
 
 // SchemaVersion is the schema version this build writes.
