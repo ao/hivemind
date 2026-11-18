@@ -12,6 +12,7 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"net/http/httptrace"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -110,7 +111,8 @@ func NewClient(base string, tlsCfg *tls.Config, opts ...ClientOption) (*Client, 
 // reuses a connection opened before it. Each request carries the worker's
 // version, and each reply's server version and clock are recorded. With an
 // EpochGuard, each request carries the highest epoch seen, and a reply from
-// a server at a lower epoch is refused before anything else reads it.
+// a server at a lower epoch is refused before anything else reads it, and
+// its connection is closed and no other is reused (dropStale).
 type swapTransport struct {
 	cur     atomic.Pointer[http.Transport]
 	version string
@@ -153,6 +155,11 @@ func (s *swapTransport) RoundTrip(r *http.Request) (*http.Response, error) {
 			}
 		}
 	}
+	var conn *usedConn
+	if s.epoch != nil {
+		conn = &usedConn{}
+		r = r.WithContext(httptrace.WithClientTrace(r.Context(), &httptrace.ClientTrace{GotConn: conn.got}))
+	}
 	sent := time.Now()
 	resp, err := s.cur.Load().RoundTrip(r)
 	if err != nil {
@@ -162,8 +169,7 @@ func (s *swapTransport) RoundTrip(r *http.Request) (*http.Response, error) {
 		// Nothing of a stale server's reply is taken: not its version,
 		// its clock, nor that it answered.
 		if err := s.epoch.check(r.URL.Host, resp.Header.Get(EpochHeader)); err != nil {
-			_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, 4<<10))
-			resp.Body.Close()
+			s.dropStale(resp, conn.get())
 			return nil, err
 		}
 	}
@@ -178,6 +184,52 @@ func (s *swapTransport) RoundTrip(r *http.Request) (*http.Response, error) {
 		(*f)()
 	}
 	return resp, nil
+}
+
+// usedConn records the connection a request went out on (GotConn). The
+// transport calls GotConn again when it retries a request on another
+// connection, so the last one is the one the reply came on.
+type usedConn struct {
+	mu sync.Mutex
+	c  net.Conn
+}
+
+func (u *usedConn) got(info httptrace.GotConnInfo) {
+	u.mu.Lock()
+	u.c = info.Conn
+	u.mu.Unlock()
+}
+
+func (u *usedConn) get() net.Conn {
+	u.mu.Lock()
+	defer u.mu.Unlock()
+	return u.c
+}
+
+// dropStale retires the connection a stale server's reply came on, and
+// every other connection the client has. Without that, the drained reply
+// put its connection back in the pool, and every later request, the one
+// that asks the server again after Retry included, went out on it: the
+// worker never looked the server's name up again, and stayed on the old
+// machine for as long as it ran, though the name led to the restored one
+// (the fourth soak: 4 min 26 s, with the worker's replicas placed again by
+// the restored server and running twice). The other connections are
+// retired as ResetConnections does, since the log poll's may be to the same
+// machine. A later request dials, and so resolves the name again.
+func (s *swapTransport) dropStale(resp *http.Response, conn net.Conn) {
+	s.reset()
+	resp.Body.Close()
+	if conn != nil {
+		_ = conn.Close()
+	}
+}
+
+// reset makes every later request open a new connection (ResetConnections).
+func (s *swapTransport) reset() {
+	s.swap.Lock()
+	defer s.swap.Unlock()
+	old := s.cur.Swap(s.cur.Load().Clone())
+	old.CloseIdleConnections()
 }
 
 // WithCATrust makes the client send f's value, the CAs the node trusts
@@ -234,13 +286,9 @@ func (c *Client) CloseIdleConnections() { c.http.CloseIdleConnections() }
 // time, and its connection would go back to the pool afterwards and carry the
 // old certificate until that expired, when the server refuses it. Requests in
 // flight finish on their old connections, which are never reused and close
-// after idleConnTimeout.
-func (c *Client) ResetConnections() {
-	c.tr.swap.Lock()
-	defer c.tr.swap.Unlock()
-	old := c.tr.cur.Swap(c.tr.cur.Load().Clone())
-	old.CloseIdleConnections()
-}
+// after idleConnTimeout. A reply from a server from before a restore does
+// the same (EpochGuard).
+func (c *Client) ResetConnections() { c.tr.reset() }
 
 // Register tells the server the node's name and capacity.
 func (c *Client) Register(ctx context.Context, nodeID string, g Register) error {

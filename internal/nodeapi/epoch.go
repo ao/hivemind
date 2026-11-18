@@ -73,7 +73,8 @@ const DefaultStaleRetry = 10 * time.Second
 // It holds the highest epoch the worker has seen, which every request
 // carries. A reply whose epoch is lower is refused with a
 // StaleServerError: the client logs that once, sends that server nothing
-// for Retry, and then lets one request through to ask again. A reply with
+// for Retry, and then lets one request through to ask again, on a new
+// connection, so a name is looked up again (see dropStale). A reply with
 // a higher epoch raises the highest, which Save writes to the worker's data
 // directory. A reply without an epoch, from a server older than epochs, is
 // taken as before. A guard is safe for concurrent use; give each client its
