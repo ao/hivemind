@@ -30,6 +30,7 @@ import (
 	"strconv"
 	"time"
 
+	"github.com/ao/hivemind/internal/carotate"
 	"github.com/ao/hivemind/internal/logrelay"
 	"github.com/ao/hivemind/internal/nodeapi"
 	"github.com/ao/hivemind/internal/pki"
@@ -58,8 +59,14 @@ const (
 // Config configures Listen.
 type Config struct {
 	Store *store.Store
-	// CA signs node certificates and issues the server's own certificate.
+	// CA signs node certificates and issues the server's own certificate,
+	// when Rotation is nil.
 	CA *pki.CA
+	// Rotation holds the cluster's CAs and the CA rotation in progress
+	// (docs/ca-rotation.md): which client CAs the node listener accepts,
+	// which CA signs each certificate, and the CA set the workers follow.
+	// Nil means CA alone, with no rotation (carotate.Fixed).
+	Rotation *carotate.Manager
 	// Tokens redeems join tokens. It must be backed by the same store.
 	Tokens *pki.Tokens
 	// Advertise is the address that nodes dial, an IP address or a DNS name,
@@ -145,8 +152,11 @@ func NewNodeID() (string, error) {
 // listeners. Nothing is served until Serve is called. On error nothing stays
 // bound.
 func Listen(cfg Config) (*Cluster, error) {
-	if cfg.Store == nil || cfg.CA == nil || cfg.Tokens == nil || cfg.LocalNodeID == "" {
-		return nil, errors.New("cluster: Store, CA, Tokens and LocalNodeID are required")
+	if cfg.Store == nil || (cfg.CA == nil && cfg.Rotation == nil) || cfg.Tokens == nil || cfg.LocalNodeID == "" {
+		return nil, errors.New("cluster: Store, CA or Rotation, Tokens and LocalNodeID are required")
+	}
+	if cfg.Rotation == nil {
+		cfg.Rotation = carotate.Fixed(cfg.CA)
 	}
 	if err := pki.ValidateNodeID(cfg.LocalNodeID); err != nil {
 		return nil, err
@@ -203,9 +213,11 @@ func Listen(cfg Config) (*Cluster, error) {
 	c.join = newHTTPServer(joinRoutes(cfg, limiter, log))
 	// Both listeners read the server certificate from the holder at each
 	// handshake, so a renewal takes effect without a restart.
-	c.mtls.TLSConfig = pki.ServerTLSConfigFrom(cfg.CA, certs.holder)
+	// The node listener reads the client CAs it accepts from the rotation
+	// at each handshake, so a step of a rotation needs no restart.
+	c.mtls.TLSConfig = pki.ServerTLSConfigTrust(cfg.Rotation.Accept(), certs.holder)
 	c.join.TLSConfig = pki.JoinServerTLSConfigFrom(certs.holder)
-	certs.check() // logs the CA warning at start, if it applies
+	certs.check() // logs the late renewals at start, if any
 	return c, nil
 }
 

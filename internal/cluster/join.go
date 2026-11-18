@@ -63,7 +63,12 @@ func join(cfg Config, limiter *ratelimit.FailLimiter, log *slog.Logger, w http.R
 		fail(http.StatusUnauthorized, errJoinRefused, "malformed token")
 		return
 	}
-	if err := tok.CheckFingerprint(cfg.CA.Fingerprint()); err != nil {
+	// The token names the CA the joining node pinned, which is the CA of
+	// the server's certificate when the token was issued: during a CA
+	// rotation, either of the two. The node's certificate comes from it,
+	// so that it chains to the CA the node now trusts.
+	ca := cfg.Rotation.TokenCA(tok.Fingerprint)
+	if ca == nil {
 		fail(http.StatusUnauthorized, errJoinRefused, "token names another CA")
 		return
 	}
@@ -74,7 +79,7 @@ func join(cfg Config, limiter *ratelimit.FailLimiter, log *slog.Logger, w http.R
 		log.Error("node ID", "err", err)
 		return
 	}
-	der, err := cfg.CA.IssueNodeCert(req.CSR, pki.NodeCertOptions{NodeID: id, Lifetime: cfg.NodeCertLifetime, Now: cfg.now()()})
+	der, err := ca.IssueNodeCert(req.CSR, pki.NodeCertOptions{NodeID: id, Lifetime: cfg.NodeCertLifetime, Now: cfg.now()()})
 	if err != nil {
 		fail(http.StatusBadRequest, "the certificate request is invalid", err.Error())
 		return
@@ -86,7 +91,7 @@ func join(cfg Config, limiter *ratelimit.FailLimiter, log *slog.Logger, w http.R
 
 	recordIssued(r, cfg, log, id, der)
 	certPEM := pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: der})
-	writeJSON(w, http.StatusOK, nodeapi.JoinReply{NodeID: id, CertPEM: string(certPEM), CAPEM: string(cfg.CA.CertPEM)})
+	writeJSON(w, http.StatusOK, nodeapi.JoinReply{NodeID: id, CertPEM: string(certPEM), CAPEM: string(ca.CertPEM)})
 	log.Info("node joined", "node", id, "remote", src)
 }
 

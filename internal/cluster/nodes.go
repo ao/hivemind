@@ -10,6 +10,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/ao/hivemind/internal/carotate"
 	"github.com/ao/hivemind/internal/logrelay"
 	"github.com/ao/hivemind/internal/nodeapi"
 	"github.com/ao/hivemind/internal/pki"
@@ -28,8 +29,10 @@ type nodeAPI struct {
 	routers *nodeapi.RouterReports
 	// readers keeps how each router read the routing table (routes.go).
 	readers *nodeapi.RouteReaders
-	// ca, lifetime and now issue renewed certificates (renew.go).
-	ca       *pki.CA
+	// rot, lifetime and now issue renewed certificates (renew.go); rot
+	// also says which CAs a client certificate may be from now, and holds
+	// the CA set the workers follow (ca.go).
+	rot      *carotate.Manager
 	lifetime time.Duration
 	now      func() time.Time
 	certs    *certNotes
@@ -45,7 +48,7 @@ type nodeAPI struct {
 // and epoch, and a node that has seen a higher epoch is refused first.
 func nodeRoutes(cfg Config, log *slog.Logger) http.Handler {
 	a := &nodeAPI{st: cfg.Store, log: log, logs: cfg.Logs, routers: cfg.RouterReports, readers: cfg.RouteReaders,
-		ca: cfg.CA, lifetime: cfg.NodeCertLifetime, now: cfg.now(), certs: &certNotes{}, versions: map[string]string{}}
+		rot: cfg.Rotation, lifetime: cfg.NodeCertLifetime, now: cfg.now(), certs: &certNotes{}, versions: map[string]string{}}
 	mux := http.NewServeMux()
 	mux.HandleFunc("POST "+nodeapi.Prefix+"/nodes/{id}/register", a.register)
 	mux.HandleFunc("GET "+nodeapi.Prefix+"/nodes/{id}/assignments", a.assignments)
@@ -58,7 +61,9 @@ func nodeRoutes(cfg Config, log *slog.Logger) http.Handler {
 	mux.HandleFunc("GET "+nodeapi.Prefix+"/nodes/{id}/routes", a.routes)
 	mux.HandleFunc("POST "+nodeapi.Prefix+"/nodes/{id}/router-metrics", a.routerMetrics)
 	mux.HandleFunc("POST "+nodeapi.Prefix+"/nodes/{id}/tls/{op}", a.tls)
-	return withVersion(nodeapi.CleanVersion(cfg.Version), withEpoch(cfg.Epoch, log, a.denyRemoved(a.requireCurrentCert(mux))))
+	mux.HandleFunc("GET "+nodeapi.Prefix+"/nodes/{id}/ca", a.caSet)
+	return withVersion(nodeapi.CleanVersion(cfg.Version), withCADigest(a.rot,
+		withEpoch(cfg.Epoch, log, a.denyRemoved(a.requireCurrentCert(a.checkCA(mux))))))
 }
 
 // withVersion sets the server's version on every reply. A worker learns from

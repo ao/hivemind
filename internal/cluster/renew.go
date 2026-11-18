@@ -93,7 +93,15 @@ func (a *nodeAPI) renew(w http.ResponseWriter, r *http.Request) {
 		writeDecodeError(w, err)
 		return
 	}
-	der, err := a.ca.IssueNodeCert(req.CSR, pki.NodeCertOptions{NodeID: id, Lifetime: a.lifetime, Now: a.now()})
+	// During a CA rotation the renewal comes from the CA the rotation goes
+	// to, for a node that says it trusts it, and otherwise from the CA of
+	// the node's current certificate (carotate.RenewalCA).
+	var root [32]byte
+	if c := pki.VerifiedRoot(r.TLS); c != nil {
+		root = pki.Fingerprint(c)
+	}
+	trusts, _ := nodeapi.ParseCATrust(r.Header.Get(nodeapi.CATrustHeader))
+	der, err := a.rot.RenewalCA(root, trusts).IssueNodeCert(req.CSR, pki.NodeCertOptions{NodeID: id, Lifetime: a.lifetime, Now: a.now()})
 	if err != nil {
 		if errors.Is(err, pki.ErrInvalidCSR) {
 			writeError(w, http.StatusBadRequest, "the certificate request is invalid")
@@ -132,16 +140,15 @@ func recordIssued(r *http.Request, cfg Config, log *slog.Logger, id string, der 
 }
 
 // serverCertSource issues the server's own certificate for the advertise
-// address and renews it. It is signed by the cluster CA and carries the
-// server's node ID.
+// address and renews it. It is signed by the listener CA (the rotation's
+// Listener: the cluster CA, or during a CA rotation the CA the server
+// presents at that point) and carries the server's node ID.
 type serverCertSource struct {
 	cfg    Config
 	holder *pki.CertHolder
 	log    *slog.Logger
 	now    func() time.Time
-	// caWarned is when the CA expiry was last logged, and nodeWarned when
-	// each node's late renewal was.
-	caWarned   time.Time
+	// nodeWarned is when each node's late renewal was last logged.
 	nodeWarned map[string]time.Time
 }
 
@@ -154,12 +161,14 @@ func (s *serverCertSource) issue() (tls.Certificate, error) {
 	if err != nil {
 		return tls.Certificate{}, err
 	}
-	der, err := s.cfg.CA.IssueNodeCert(csr, pki.NodeCertOptions{NodeID: s.cfg.LocalNodeID, Advertise: s.cfg.Advertise, Bind: s.cfg.Bind,
+	// The chain carries the listener CA, which a joining node pins.
+	ca := s.cfg.Rotation.Listener()
+	der, err := ca.IssueNodeCert(csr, pki.NodeCertOptions{NodeID: s.cfg.LocalNodeID, Advertise: s.cfg.Advertise, Bind: s.cfg.Bind,
 		Lifetime: s.cfg.NodeCertLifetime, Now: s.now()})
 	if err != nil {
 		return tls.Certificate{}, err
 	}
-	cert, err := pki.NewTLSCertificate(der, key, s.cfg.CA)
+	cert, err := pki.NewTLSCertificate(der, key, ca)
 	if err != nil {
 		return tls.Certificate{}, err
 	}
@@ -169,20 +178,17 @@ func (s *serverCertSource) issue() (tls.Certificate, error) {
 	return cert, nil
 }
 
-// check renews the server certificate when it is due, and warns once a day
-// while the CA has less than pki.CAWarnBefore left, and once a day for each
-// node that is late to renew its certificate.
+// check renews the server certificate when it is due, or when the listener
+// CA is no longer the one that signed it, as when a CA rotation moves it,
+// and warns once a day for each node that is late to renew its
+// certificate. The CA's own expiry is the rotation's to warn about
+// (carotate.Manager.Run).
 func (s *serverCertSource) check() {
 	now := s.now()
-	ca := s.cfg.CA.Cert
-	if left := ca.NotAfter.Sub(now); left < pki.CAWarnBefore && now.Sub(s.caWarned) >= 24*time.Hour {
-		s.caWarned = now
-		s.log.Warn("the cluster CA expires soon, and hivemind cannot rotate it; node certificates end with the CA, "+
-			"and when it expires no node can reach the server. Before then, create a new cluster with init in a new "+
-			"data directory and join every machine to it", "ca_not_after", ca.NotAfter.UTC(), "left", left.Round(time.Hour))
-	}
 	s.warnNotRenewing(now)
-	if !pki.RenewDue(s.holder.Leaf(), now) {
+	ca := s.cfg.Rotation.Listener()
+	moved := s.holder.Leaf().CheckSignatureFrom(ca.Cert) != nil
+	if !moved && !pki.RenewDue(s.holder.Leaf(), now) {
 		return
 	}
 	cert, err := s.issue()
@@ -192,6 +198,11 @@ func (s *serverCertSource) check() {
 		return
 	}
 	s.holder.Store(cert)
+	if moved {
+		s.log.Info("server certificate issued from another CA: both cluster listeners present it from their next handshake",
+			"node", s.cfg.LocalNodeID, "ca", pki.FingerprintHex(ca.Fingerprint())[:16], "not_after", cert.Leaf.NotAfter.UTC())
+		return
+	}
 	s.log.Info("server certificate renewed", "node", s.cfg.LocalNodeID, "not_after", cert.Leaf.NotAfter.UTC())
 }
 
@@ -226,7 +237,8 @@ func (s *serverCertSource) warnNotRenewing(now time.Time) {
 	}
 }
 
-// run calls check every pki.RenewCheckInterval until ctx ends.
+// run calls check every pki.RenewCheckInterval, and at once when the
+// listener CA changes, until ctx ends.
 func (s *serverCertSource) run(ctx context.Context) {
 	for {
 		t := time.NewTimer(pki.RenewCheckInterval(s.holder.Leaf()))
@@ -234,6 +246,8 @@ func (s *serverCertSource) run(ctx context.Context) {
 		case <-ctx.Done():
 			t.Stop()
 			return
+		case <-s.cfg.Rotation.ListenerChanged():
+			t.Stop()
 		case <-t.C:
 		}
 		s.check()
