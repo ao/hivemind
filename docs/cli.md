@@ -449,7 +449,7 @@ hivemind init [flags]
 | `--route-http-port` | string | `80` | `HIVEMIND_ROUTE_HTTP_PORT` | port of the router's HTTP listener, for ACME HTTP-01 challenges and redirects to https |
 | `--route-https-port` | string | `443` | `HIVEMIND_ROUTE_HTTPS_PORT` | port of the router's HTTPS listener |
 | `--route-max-conns-per-ip` | string | `256` | `HIVEMIND_ROUTE_MAX_CONNS_PER_IP` | most connections the router keeps open from one client IP address (an IPv6 /64), over both its ports; 0 means no limit, for a router behind a proxy that does not pass client addresses |
-| `--start-grace` | string | `2m` | `HIVEMIND_START_GRACE` | how long after serve starts a worker that was up before it waits for its first report, keeping its replicas and its routes, before it is lost; at least 15s |
+| `--start-grace` | string | `2m` | `HIVEMIND_START_GRACE` | how long after serve starts a worker that was up before it waits for its first report, keeping its replicas and its routes, before it is lost, unless no such worker has reported by then; at least 15s |
 
 ### hivemind join
 
@@ -734,8 +734,18 @@ them, the age of its lease, whether it is ready or lost, and how many replicas
 are placed on it. A node is lost when its lease is more than 15 s old. After
 the server starts, a worker that was up before the start and has not reported
 since is waiting, not lost, for the start grace (serve --start-grace, 2
-minutes by default), and keeps its replicas. A lease age of 48 hours or more
-is printed in days.
+minutes by default), and keeps its replicas. When the grace ends with no
+report from any of the workers that were waiting, they all stay waiting,
+until one of them reports or is removed with hivemind node remove: a server
+that hears from none of its workers is more often an old copy of a cluster
+restored elsewhere, or cut off from them, than one whose workers all died
+(docs/backup.md). A line after the table says how many workers wait, how
+long the start grace has left, or that it has ended and the server keeps
+them waiting, and what to do. A lease age of 48 hours or more is printed in
+days.
+
+--json has, on a waiting node, "start_grace_left_seconds" while the grace
+lasts, and "start_held": true once it has ended with no report.
 
 ADDRESS is the node's private address, where its routed replicas publish
 their ports. "-" means it reported none: such a node takes no routed replicas.
@@ -1026,7 +1036,7 @@ hivemind serve [flags]
 | `--route-http-port` | string | `80` | `HIVEMIND_ROUTE_HTTP_PORT` | port of the router's HTTP listener, for ACME HTTP-01 challenges and redirects to https |
 | `--route-https-port` | string | `443` | `HIVEMIND_ROUTE_HTTPS_PORT` | port of the router's HTTPS listener |
 | `--route-max-conns-per-ip` | string | `256` | `HIVEMIND_ROUTE_MAX_CONNS_PER_IP` | most connections the router keeps open from one client IP address (an IPv6 /64), over both its ports; 0 means no limit, for a router behind a proxy that does not pass client addresses |
-| `--start-grace` | string | `2m` | `HIVEMIND_START_GRACE` | how long after serve starts a worker that was up before it waits for its first report, keeping its replicas and its routes, before it is lost; at least 15s |
+| `--start-grace` | string | `2m` | `HIVEMIND_START_GRACE` | how long after serve starts a worker that was up before it waits for its first report, keeping its replicas and its routes, before it is lost, unless no such worker has reported by then; at least 15s |
 
 ### hivemind status
 
@@ -1044,6 +1054,13 @@ engine's last error for it.
 A line "<app>: warning: ..." after the first table says what keeps the app from
 being served as its spec says, such as a router of a build before path routes,
 which answers 503 for the app's host once the host has a path route.
+
+While workers wait for their first report since the server started, after a
+restart or a restore, a line after the tables says how many, and that their
+replicas show as unknown, counted neither as running nor as ready, until
+they report; when the start grace has ended with no report from any of them,
+the line says that the server keeps them waiting, and what to do (see
+hivemind nodes).
 
 ```
 hivemind status [app] [flags]

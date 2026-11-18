@@ -380,6 +380,12 @@ by_name() {
 	[ "$left" -le 0 ] || sleep "$left"
 	workers_waiting || cl_fail "20 s after the start the workers are not waiting: $(docker exec "$S" hivemind nodes | tr '\n' ';')"
 	cl_note "20 s after the start both workers are waiting: $(docker exec "$S" hivemind nodes | awk -v a="$W1_ID" '$1 == a' | tr -s ' ')"
+	# hivemind status and nodes say why the workers' replicas are unknown.
+	for c in status nodes; do
+		docker exec "$S" hivemind "$c" | grep -q "^2 workers are waiting for their first report since the server started (start grace: .* left); their replicas show as unknown until they report.$" ||
+			cl_fail "hivemind $c does not say that two workers wait: $(docker exec "$S" hivemind "$c" | tr '\n' ';')"
+	done
+	cl_note "hivemind status and nodes: $(docker exec "$S" hivemind status | grep "^2 workers are waiting")"
 
 	left=$((SERVED_AT + 30 - $(date +%s)))
 	[ "$left" -le 0 ] || sleep "$left"
@@ -478,7 +484,7 @@ old_replica_rows() {
 # (by_name gives it --start-grace 15s), has had no report from either
 # worker: it keeps both waiting, marks neither lost, places none of their
 # replicas again, says at error that no worker has reported since it
-# started, and what to do. In
+# started, and what to do, and its hivemind status and nodes say so. In
 # the fourth soak, an old server marked every worker lost at its grace's
 # end and ran every replica on its own machine. OLD_ROWS are its replicas
 # as it came back; its log counts from the mark set then.
@@ -496,6 +502,10 @@ old_server_holds() {
 		cl_fail "past its grace, the old server does not keep both workers waiting: $(docker exec "$OLD_S" hivemind nodes | tr '\n' ';')"
 	[ "$(old_replica_rows)" = "$OLD_ROWS" ] ||
 		cl_fail "the old server placed replicas again past its grace: $(tr '\n' ';' <<<"$OLD_ROWS")before, $(old_replica_rows | tr '\n' ';')now"
+	for c in status nodes; do
+		docker exec "$OLD_S" hivemind "$c" | grep -q '^2 workers are waiting: none of them has reported since the server started, and its start grace has ended, so the server keeps them waiting' ||
+			cl_fail "hivemind $c on the old server does not say that it keeps the workers waiting: $(docker exec "$OLD_S" hivemind "$c" | tr '\n' ';')"
+	done
 	cl_note "the old server alone, $(($(date +%s) - OLD_AT)) s after its start and past its 15 s grace: both workers waiting, none lost, no replica placed again, and it says so: $(since "$OLD_S" | grep -o 'level=ERROR msg="no worker has reported[^:]*')"
 }
 

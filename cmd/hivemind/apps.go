@@ -406,7 +406,14 @@ engine's last error for it.
 
 A line "<app>: warning: ..." after the first table says what keeps the app from
 being served as its spec says, such as a router of a build before path routes,
-which answers 503 for the app's host once the host has a path route.`,
+which answers 503 for the app's host once the host has a path route.
+
+While workers wait for their first report since the server started, after a
+restart or a restore, a line after the tables says how many, and that their
+replicas show as unknown, counted neither as running nor as ready, until
+they report; when the start grace has ended with no report from any of them,
+the line says that the server keeps them waiting, and what to do (see
+hivemind nodes).`,
 		Args: cobra.MaximumNArgs(1),
 	}
 	cf := addClientFlags(cmd)
@@ -435,6 +442,16 @@ which answers 503 for the app's host once the host has a path route.`,
 		}
 		apps, readyKnown := statusRows(got)
 		printStatus(cmd.OutOrStdout(), apps, readyKnown)
+		// Workers waiting for their first report since the server
+		// started: their replicas are unknown, and count neither as
+		// running nor as ready, though they may serve. A server that
+		// cannot list its nodes for this has nothing to add.
+		var nodes []nodeRow
+		if len(apps) > 0 && c.call(cmd.Context(), "GET", "/v1/nodes", nil, &nodes) == nil {
+			if l := waitingLine(nodes); l != "" {
+				fmt.Fprintf(cmd.OutOrStdout(), "\n%s\n", l)
+			}
+		}
 		if len(args) == 0 {
 			// During a rotation of the cluster CA, the nodes its next step
 			// waits for, builds without rotation among them. A server

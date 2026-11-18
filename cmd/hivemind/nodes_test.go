@@ -9,6 +9,7 @@ import (
 	"net/http/httptest"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -465,4 +466,122 @@ func TestLeaseAge(t *testing.T) {
 			t.Errorf("leaseAge(%s) = %q, want %q", d, got, want)
 		}
 	}
+}
+
+// While workers wait for their first report since the server started,
+// hivemind nodes and hivemind status say so in a line after the tables, as
+// their replicas show as unknown and count as neither running nor ready: in
+// the fourth soak status showed 0 of 18 running for a minute while every
+// app served. Once the start grace has ended with no report from any of
+// them, the line says that the server keeps them waiting, and what to do.
+// Once one reports, the others are lost and there is no line.
+func TestStatusAndNodesSayWhyWorkersWait(t *testing.T) {
+	home := isolate(t)
+	ctx := context.Background()
+	var mu sync.Mutex
+	clock := time.Now().Add(-10 * time.Minute) // the workers' last leases
+	now := func() time.Time {
+		mu.Lock()
+		defer mu.Unlock()
+		if clock.IsZero() {
+			return time.Now()
+		}
+		return clock
+	}
+	st, err := store.Open(ctx, filepath.Join(home, "d", storeFileName), store.WithMinReady(0), store.WithClock(now))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+	if err := st.InitCluster(ctx, store.Cluster{AdminTokenHash: [32]byte{1}, NodeID: "node-s"}); err != nil {
+		t.Fatal(err)
+	}
+	for _, id := range []string{"node-s", "node-1", "node-2"} {
+		if err := st.UpsertNode(ctx, store.Node{ID: id, Name: id, CPU: 2, Memory: 1 << 30}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if _, err := st.PutApp(ctx, spec.App{Name: "web", Image: "nginx:alpine", Replicas: 3}); err != nil {
+		t.Fatal(err)
+	}
+	mu.Lock()
+	clock = time.Time{} // the real time from here on
+	mu.Unlock()
+	if err := st.UpsertNode(ctx, store.Node{ID: "node-s", Name: "node-s", CPU: 2, Memory: 1 << 30}); err != nil {
+		t.Fatal(err)
+	}
+	tok, _ := auth.NewToken()
+	sess, _ := auth.NewSessions(time.Hour)
+	authn, _ := auth.NewAuthenticator(auth.HashToken(tok), sess)
+	api, err := server.New(server.Config{Store: st, Runtime: fakeRuntime{}, NodeID: "node-s", Auth: authn,
+		Logger: slog.New(slog.NewTextHandler(io.Discard, nil))})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ts := httptest.NewServer(api.Handler())
+	defer ts.Close()
+	t.Setenv(envServer, ts.URL)
+	t.Setenv(envToken, tok)
+	both := func(want ...string) {
+		t.Helper()
+		for _, cmd := range []string{"nodes", "status"} {
+			out, _, err := run(t, "", cmd)
+			if err != nil {
+				t.Fatal(err)
+			}
+			for _, w := range want {
+				if !strings.Contains(out, w) {
+					t.Errorf("hivemind %s does not say %q:\n%s", cmd, w, out)
+				}
+			}
+			line := ""
+			for _, l := range strings.Split(out, "\n") {
+				if strings.Contains(l, " waiting") && (strings.HasPrefix(l, "1 worker ") || strings.Contains(l, " workers are ")) {
+					line = l
+				}
+			}
+			if (line != "") != (len(want) > 0) {
+				t.Errorf("hivemind %s, want a waiting line %v:\n%s", cmd, len(want) > 0, out)
+			}
+			if strings.Contains(line, " lost ") || strings.Contains(line, " ready ") {
+				t.Errorf("the line has a word that scripts look for in the table: %q", line)
+			}
+		}
+	}
+
+	// In the grace, 30 s after the start.
+	if err := st.SetStarted(ctx, time.Now().Add(-30*time.Second), 2*time.Minute); err != nil {
+		t.Fatal(err)
+	}
+	both("2 workers are waiting for their first report since the server started (start grace: 1m",
+		" left); their replicas show as unknown until they report.")
+	out, _, err := run(t, "", "nodes", "--json")
+	if err != nil || !strings.Contains(out, `"start_grace_left_seconds": `) || strings.Contains(out, "start_held") {
+		t.Fatalf("nodes --json in the grace: %v\n%s", err, out)
+	}
+
+	// The grace ended a minute ago, and neither worker has reported.
+	if err := st.SetStarted(ctx, time.Now().Add(-3*time.Minute), 2*time.Minute); err != nil {
+		t.Fatal(err)
+	}
+	both("2 workers are waiting: none of them has reported since the server started, and its start grace has ended",
+		"so the server keeps them waiting and places none of their replicas again",
+		"stop this server", "hivemind node remove <id> (docs/backup.md)")
+	out, _, err = run(t, "", "nodes", "--json")
+	if err != nil || strings.Count(out, `"start_held": true`) != 2 || strings.Contains(out, "start_grace_left_seconds") {
+		t.Fatalf("nodes --json past the grace: %v\n%s", err, out)
+	}
+	for _, l := range []string{waitingLine([]nodeRow{{NodeView: server.NodeView{State: "waiting", StartHeld: true}}}),
+		waitingLine([]nodeRow{{NodeView: server.NodeView{State: "waiting", StartGraceLeftSeconds: 61}}})} {
+		if strings.Contains(l, " lost ") || strings.Contains(l, " ready ") || !strings.HasPrefix(l, "1 worker is waiting") {
+			t.Errorf("one worker: %q", l)
+		}
+	}
+
+	// node-1 reports: the hold is over; node-2 is lost, and there is no
+	// line.
+	if err := st.RenewLease(ctx, "node-1"); err != nil {
+		t.Fatal(err)
+	}
+	both()
 }

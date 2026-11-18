@@ -24,8 +24,18 @@ type NodeView struct {
 	// gone 15 s without renewal. In the start grace after serve starts (2
 	// minutes by default, --start-grace), a node that was up before the
 	// start and has not reported to this process yet is "waiting": it is
-	// not lost, and its replicas stay where they are.
+	// not lost, and its replicas stay where they are. When the grace ends
+	// with no report from any node that was waiting, they all stay
+	// "waiting" (StartHeld).
 	State string `json:"state"`
+	// StartGraceLeftSeconds is, on a waiting node, how long the start
+	// grace has left. It is absent once the grace has ended.
+	StartGraceLeftSeconds float64 `json:"start_grace_left_seconds,omitempty"`
+	// StartHeld is true on a waiting node once the start grace has ended
+	// with no report since the start from any node that was waiting: the
+	// server keeps them waiting, and places none of their replicas, until
+	// one of them reports or is removed (store.StartWait).
+	StartHeld bool `json:"start_held,omitempty"`
 	// Server is true for the node that runs the server, which cannot be
 	// removed.
 	Server bool `json:"server"`
@@ -190,23 +200,32 @@ func (s *Server) listNodes(w http.ResponseWriter, r *http.Request) {
 		drains[d.NodeID] = drainView(d)
 	}
 	now := time.Now()
+	wait, _ := s.cfg.Store.StartWait(now)
 	out := make([]NodeView, 0, len(nodes))
 	for _, n := range nodes {
 		age := max(now.Sub(n.LastLease), 0)
 		state := "ready"
+		waiting := false
 		switch {
 		case age <= scheduler.DefaultLeaseTimeout:
 		case s.cfg.Store.Waiting(n, now):
 			// The node was up before serve started, and the start grace
-			// has not ended: the sweep does not count it lost (see
-			// store.Waiting), and the server waits for its first report.
-			state = "waiting"
+			// has not ended, or holds: the sweep does not count it lost
+			// (see store.Waiting), and the server waits for its first
+			// report.
+			state, waiting = "waiting", true
 		default:
 			state = "lost"
 		}
 		v := NodeView{ID: n.ID, Name: n.Name, CPU: n.CPU, Memory: n.Memory, LastLease: n.LastLease.UTC(),
 			LeaseAgeSeconds: age.Seconds(), State: state, Server: n.ID == s.cfg.NodeID, Replicas: count[n.ID],
 			Eligible: n.Eligible, Address: n.Address, Version: n.Version, Dials: n.Dials}
+		if waiting {
+			v.StartHeld = wait.Held
+			if left := wait.GraceEnds.Sub(now); left > 0 {
+				v.StartGraceLeftSeconds = left.Seconds()
+			}
+		}
 		if v.Server {
 			v.Advertise = s.cfg.Advertise
 		}
