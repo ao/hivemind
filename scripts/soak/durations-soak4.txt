@@ -1,0 +1,27 @@
+lose-server-late: power-off request to API down (1 s watcher)|scenario lose-server-late begin|event lose-server-late .* fault poweroff|watch api down
+lose-server-late: launch request to new machine ready (EC2, boot, Docker)|scenario lose-server-late begin|event lose-server-late .* fault launch|event lose-server-late machine-ready
+lose-server-late: new machine ready to API up (binary, hosts, CAs, restore, start)|scenario lose-server-late begin|event lose-server-late machine-ready|event lose-server-late api-up
+lose-server-late: API down to API up (outage)|scenario lose-server-late begin|watch api down|event lose-server-late api-up
+lose-server-late: API up to the name's record changed on every machine|scenario lose-server-late begin|event lose-server-late api-up|event dns-update hivemind-server.soak.test .* end
+lose-server-late: record changed to hivemind-soakf-2 ready|scenario lose-server-late begin|event dns-update hivemind-server.soak.test .* end|event lose-server-late hivemind-soakf-2 node-ready
+lose-server-late: record changed to hivemind-soakf-3 ready|scenario lose-server-late begin|event dns-update hivemind-server.soak.test .* end|event lose-server-late hivemind-soakf-3 node-ready
+lose-server-late: record changed to hivemind-soakf-4 ready|scenario lose-server-late begin|event dns-update hivemind-server.soak.test .* end|event lose-server-late hivemind-soakf-4 node-ready
+lose-server-late: record changed to converged, every replica running|scenario lose-server-late begin|event dns-update hivemind-server.soak.test .* end|event lose-server-late converged-yes
+old-server-back: start request to port 22 open|scenario old-server-back begin|event old-server-back .* fault start|event old-server-back .* port22-up
+old-server-back: port 22 open to the old server's API up|scenario old-server-back begin|event old-server-back .* port22-up|event old-server-back old-api-up
+old-server-back: redirect of the worker to it lost on the restored server|scenario old-server-back begin|event old-server-back .* fault redirect|event old-server-back .* node-lost
+old-server-back: heal to the worker ready on the restored server|scenario old-server-back begin|event old-server-back .* heal|event old-server-back .* node-ready
+old-server-back: old server stopped to the worker ready on the restored server|scenario old-server-back begin|event old-server-back .* stopped|event old-server-back .* node-ready
+old-server-back: old server stopped to converged|scenario old-server-back begin|event old-server-back .* stopped|event old-server-back converged-yes
+kill-worker: power-off request to port 22 closed|scenario kill-worker begin|event kill-worker .* fault poweroff|watch port22 hivemind-soakf-4 down
+kill-worker: port 22 closed to node lost|scenario kill-worker begin|watch port22 hivemind-soakf-4 down|watch node hivemind-soakf-4 lost
+kill-worker: node lost to its replicas running elsewhere|scenario kill-worker begin|watch node hivemind-soakf-4 lost|event kill-worker .* replicas-elsewhere
+kill-worker: port 22 closed to converged (volume replica held)|scenario kill-worker begin|watch port22 hivemind-soakf-4 down|event kill-worker converged-held-yes
+kill-worker: start request to port 22 open|scenario kill-worker begin|event kill-worker .* fault start|watch port22 hivemind-soakf-4 up
+kill-worker: start request to node ready|scenario kill-worker begin|event kill-worker .* fault start|watch node hivemind-soakf-4 ready
+kill-worker: start request to old containers removed|scenario kill-worker begin|event kill-worker .* fault start|event kill-worker .* old-containers-removed
+kill-worker: start request to converged|scenario kill-worker begin|event kill-worker .* fault start|event kill-worker converged-yes
+rollout-papi: deploy to converged|scenario rollout-papi begin|event rollout-papi .* fault deploy|event rollout-papi converged-yes
+rollout-proot: deploy to converged|scenario rollout-proot begin|event rollout-proot .* fault deploy|event rollout-proot converged-yes
+rollout-proot+papi: deploy to converged|scenario rollout-proot\+papi begin|event rollout-proot\+papi .* fault deploy|event rollout-proot\+papi converged-yes
+cert-restart: restart to the router serving a new certificate|scenario cert-restart begin|event cert-restart .* fault restart|event cert-restart .* certs .*

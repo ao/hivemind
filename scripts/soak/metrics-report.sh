@@ -26,7 +26,18 @@ LAG=${LAG:-15}
 
 echo "| Node | Host | Counter increase, code 200 | Clients' 200s between the reads | The same, $LAG s earlier | Counter minus clients |"
 echo "|---|---|---|---|---|---|"
-gawk -v lag="$LAG" -v dir="$DIR" '
+# The counters are by host, with no path label, so the streams of every path
+# of a host through a router (HOST@IP.log, HOST+P@IP.log) are counted together.
+LIST=$(for f in "$DIR"/*@*.log; do
+	b=$(basename "$f" .log)
+	h=${b%@*}
+	printf '%s|%s|%s;' "${h%%+*}" "${b##*@}" "$f"
+done)
+gawk -v lag="$LAG" -v list="$LIST" '
+BEGIN {
+	n = split(list, L, ";")
+	for (i = 1; i <= n; i++) if (split(L[i], p, "|") == 3) files[p[1] SUBSEP p[2]] = files[p[1] SUBSEP p[2]] (files[p[1] SUBSEP p[2]] == "" ? "" : "\t") p[3]
+}
 function labels(s, out,   n, a, i, kv) {
 	delete out
 	n = split(s, a, ",")
@@ -50,8 +61,9 @@ END {
 		nm = (id in name ? name[id] : id); addr = (nm in ip ? ip[nm] : "")
 		d = v2[k] - (k in v1 ? v1[k] : 0)
 		a = 0; b = 0
-		f = dir "/" host "@" addr ".log"
-		if (addr != "") {
+		nf = (addr != "" ? split(files[host SUBSEP addr], F, "\t") : 0)
+		for (j = 1; j <= nf; j++) {
+			f = F[j]
 			while ((getline line < f) > 0) {
 				n = split(line, x, " ")
 				if (n < 8 || x[2] != "200" || x[3] != "0") continue
@@ -61,6 +73,6 @@ END {
 			}
 			close(f)
 		}
-		printf "| %s | %s | %d | %s | %s | %s |\n", nm, host, d, (addr != "" ? a : "-"), (addr != "" ? b : "-"), (addr != "" ? sprintf("%+d", d - a) : "-")
+		printf "| %s | %s | %d | %s | %s | %s |\n", nm, host, d, (nf ? a : "-"), (nf ? b : "-"), (nf ? sprintf("%+d", d - a) : "-")
 	}
 }' "$RUN/ids" "$RUN/nodes" "$S1" "$S2" | sort

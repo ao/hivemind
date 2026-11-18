@@ -32,22 +32,38 @@
 # validation can reach any router. The clients trust Pebble's root, which
 # Pebble makes at its start: Pebble must not restart during the run.
 #
-# Clients: one stream per router and host. Each is one curl process making a
-# request every 100 ms (--rate 10/s) to https://HOST/ through that router,
+# Clients: one stream per router and entry of STREAMS (HOST/PATH). Each is
+# one curl process making a request every 100 ms (--rate 10/s) to
+# https://HOST/PATH through that router,
 # over HTTP/1.1 with a new TCP connection and a full TLS handshake each time
 # (--http1.1, Connection: close,
 # no session reuse: over HTTP/2 curl would send every request on one
 # connection), 3 s to connect, 10 s in all. Each request is one line of
-# /var/lib/soak-client/HOST@ROUTER.log:
+# /var/lib/soak-client/HOST@ROUTER.log, or HOST+P+Q@ROUTER.log for the path
+# /P/Q:
 #   <end, Unix s.us> <http code> <curl exit code> <connect> <TLS done>
 #   <first byte> <total> (seconds from the start) <connections> <error...>
+# A stream with a NAME (HOST/PATH=NAME) reads each reply, and writes after
+# <connections> "name=NAME" when whoami's "Name:" line names the app it
+# expects, "misroute=OTHER" when it names another, and "name=-" when the
+# reply has no such line (an error page, or no reply).
 # The certificate watcher logs, every 30 s, the serial and expiry of the
-# certificate each router serves for each host, from a fresh handshake.
+# certificate each router serves for each host, from a fresh handshake; the
+# routers are those in /var/lib/soak-client/routers, which client-add and
+# client-drop change.
 set -euo pipefail
 . "$(dirname "$0")/lib.sh"
 
 [ -n "$OUT_NAME" ] || die "no outside machine in $OUTSIDE_FILE"
-HOSTS=${ROUTED_HOSTS:-www.soak.test api.soak.test}
+if [ "$SOAK_PATHS" = 1 ]; then
+	HOSTS=${ROUTED_HOSTS:-www.soak.test api.soak.test $PATH_HOST}
+	STREAMS=${STREAMS:-www.soak.test/ api.soak.test/ $PATH_HOST/=proot $PATH_HOST/api/x=papi}
+else
+	HOSTS=${ROUTED_HOSTS:-www.soak.test api.soak.test}
+fi
+# One stream per router for each entry of STREAMS, "HOST/PATH" or
+# "HOST/PATH=NAME"; with NAME, each reply must be whoami's from the app NAME.
+STREAMS=${STREAMS:-$(printf '%s/ ' $HOSTS)}
 CERT_LIFETIME=${CERT_LIFETIME:-3600}
 PEBBLE_IMAGE=${PEBBLE_IMAGE:-ghcr.io/letsencrypt/pebble:latest}
 CHALL_IMAGE=${CHALL_IMAGE:-ghcr.io/letsencrypt/pebble-challtestsrv:latest}
@@ -173,22 +189,41 @@ wait_served() {
 
 read -r -d '' STREAM <<'EOF' || true
 #!/bin/bash
-# stream.sh ROUTER_IP HOST: a request every 100 ms to https://HOST/ through ROUTER_IP.
-ip=$1 host=$2 d=/var/lib/soak-client
+# stream.sh ROUTER_IP HOST [PATH [NAME]]: a request every 100 ms to
+# https://HOST/PATH through ROUTER_IP; with NAME, each reply's "Name:" line is checked.
+ip=$1 host=$2 path=${3:-/} name=${4:-} d=/var/lib/soak-client
+tag=$(printf '%s' "${path#/}" | tr / +)
+f=$d/$host${tag:++$tag}@$ip.log
+w='%time{%s.%f} %{http_code} %{exitcode} %{time_connect} %{time_appconnect} %{time_starttransfer} %{time_total} %{num_connects}'
 while :; do
-	curl -s --http1.1 --rate 10/s --no-sessionid -H 'Connection: close' --connect-timeout 3 -m 10 \
-		--cacert $d/root.pem --resolve "$host:443:$ip" -o /dev/null \
-		-w '%time{%s.%f} %{http_code} %{exitcode} %{time_connect} %{time_appconnect} %{time_starttransfer} %{time_total} %{num_connects} %{errormsg}\n' \
-		"https://$host/?n=[1-36000]" >>"$d/$host@$ip.log" 2>/dev/null
+	if [ -z "$name" ]; then
+		curl -s --http1.1 --rate 10/s --no-sessionid -H 'Connection: close' --connect-timeout 3 -m 10 \
+			--cacert $d/root.pem --resolve "$host:443:$ip" -o /dev/null -w "$w %{errormsg}\n" \
+			"https://$host$path?n=[1-36000]" >>"$f" 2>/dev/null
+	else
+		# The body goes to awk, which keeps the "Name:" line and writes one line
+		# per request when curl's marker line comes.
+		curl -s --http1.1 --rate 10/s --no-sessionid -H 'Connection: close' --connect-timeout 3 -m 10 \
+			--cacert $d/root.pem --resolve "$host:443:$ip" -w "\n@@soak@@ $w @@ %{errormsg}\n" \
+			"https://$host$path?n=[1-36000]" 2>/dev/null |
+			awk -v want="$name" '
+			/^Name: / { got = $2; next }
+			/^@@soak@@ / {
+				sub(/^@@soak@@ /, ""); i = index($0, " @@ ")
+				tag = (got == "" ? "name=-" : (got == want ? "name=" got : "misroute=" got))
+				print substr($0, 1, i - 1), tag, substr($0, i + 4); fflush(); got = ""
+			}' >>"$f"
+	fi
 done
 EOF
 
 read -r -d '' CERTWATCH <<'EOF' || true
 #!/bin/bash
-# certwatch.sh HOSTS IPS: every 30 s, the certificate each router serves for each host.
+# certwatch.sh HOSTS: every 30 s, the certificate each router in
+# /var/lib/soak-client/routers serves for each host.
 d=/var/lib/soak-client
 while :; do
-	for ip in $2; do
+	for ip in $(cat $d/routers); do
 		for h in $1; do
 			r=$(timeout 5 openssl s_client -connect "$ip:443" -servername "$h" -CAfile $d/root.pem -verify_return_error </dev/null 2>/dev/null |
 				openssl x509 -noout -serial -enddate 2>/dev/null | tr '\n' ' ')
@@ -199,55 +234,61 @@ while :; do
 done
 EOF
 
+# streams_to IP: start the streams of STREAMS to the router at IP.
+streams_to() {
+	local ip=$1 s hp host path name
+	for s in $STREAMS; do
+		hp=${s%%=*} name=""
+		[ "$hp" = "$s" ] || name=${s#*=}
+		host=${hp%%/*} path=/${hp#*/}
+		out "sudo setsid nohup $CDIR/stream.sh $ip $host '$path' $name >/dev/null 2>&1 </dev/null &"
+	done
+}
+
 client_start() {
-	local ip h
+	local ip
 	root
 	out "sudo tee $CDIR/stream.sh >/dev/null && sudo chmod 755 $CDIR/stream.sh" <<<"$STREAM"
 	out "sudo tee $CDIR/certwatch.sh >/dev/null && sudo chmod 755 $CDIR/certwatch.sh" <<<"$CERTWATCH"
-	for ip in "${IPS[@]}"; do
-		for h in $HOSTS; do
-			out "sudo setsid nohup $CDIR/stream.sh $ip $h >/dev/null 2>&1 </dev/null &"
-		done
-	done
-	out "sudo setsid nohup $CDIR/certwatch.sh '$HOSTS' '${IPS[*]}' >/dev/null 2>&1 </dev/null &"
-	ev client "start streams=$((${#IPS[@]} * $(wc -w <<<"$HOSTS"))) hosts=$HOSTS routers=${IPS[*]} curl=\"$(out 'curl --version | head -n 1')\""
+	out "echo '${IPS[*]}' | sudo tee $CDIR/routers >/dev/null"
+	for ip in "${IPS[@]}"; do streams_to "$ip"; done
+	out "sudo setsid nohup $CDIR/certwatch.sh '$HOSTS' >/dev/null 2>&1 </dev/null &"
+	ev client "start streams=$((${#IPS[@]} * $(wc -w <<<"$STREAMS"))) hosts=$HOSTS streams_per_router=$(tr ' ' ',' <<<"$STREAMS") routers=${IPS[*]} curl=\"$(out 'curl --version | head -n 1')\""
 }
 
-# client_add IP: streams to the router at IP (a new machine), and the
-# certificate watcher started again over every node of the list.
+# client_add IP: streams to the router at IP (a new machine, or an old one
+# that clients may still be sent to), and IP in the certificate watcher's list.
 client_add() {
-	local ip=$1 h
-	for h in $HOSTS; do
-		out "sudo setsid nohup $CDIR/stream.sh $ip $h >/dev/null 2>&1 </dev/null &"
-	done
-	certwatch_restart
-	ev client "add router=$ip streams=$(wc -w <<<"$HOSTS")"
+	local ip=$1
+	streams_to "$ip"
+	out "grep -qw '$ip' $CDIR/routers || { echo \"\$(cat $CDIR/routers) $ip\" | sudo tee $CDIR/routers.new >/dev/null && sudo mv $CDIR/routers.new $CDIR/routers; }"
+	ev client "add router=$ip streams=$(wc -w <<<"$STREAMS") watched=$(out "cat $CDIR/routers" | tr ' ' ',')"
 }
 
-# client_drop IP: stop the streams to the router at IP (a machine that is gone).
+# client_drop IP: stop the streams to the router at IP (a machine that is
+# gone), and take it off the certificate watcher's list.
 client_drop() {
 	local ip=$1
 	out "sudo pkill -f '/var/lib/soak-client/[s]tream.sh $ip '; sleep 0.5; sudo pkill -f '[-]-resolve [^ ]*:443:$ip '; true"
-	certwatch_restart
-	ev client "drop router=$ip"
-}
-
-# Two calls: a shell whose command line names certwatch.sh would match the
-# pkill pattern, and kill itself before it starts the new one.
-certwatch_restart() {
-	out "sudo pkill -f '/var/lib/soak-client/[c]ertwatch.sh'; true"
-	out "sudo setsid nohup $CDIR/certwatch.sh '$HOSTS' '${IPS[*]}' >/dev/null 2>&1 </dev/null &"
+	out "tr ' ' '\n' <$CDIR/routers | grep -vx '$ip' | grep . | tr '\n' ' ' | sudo tee $CDIR/routers.new >/dev/null && sudo mv $CDIR/routers.new $CDIR/routers"
+	ev client "drop router=$ip watched=$(out "cat $CDIR/routers" | tr ' ' ',')"
 }
 
 # chall_update: challtestsrv answers each routed host with the nodes of the
 # list now, as the hosts' DNS records would be changed for a new machine.
+# challtestsrv's add-a appends to a host's addresses, and Pebble validates
+# against the first one, so each host is cleared first (in the third soak and
+# the first run of the fourth, the dead old server stayed first, and every
+# renewal after a server move failed). The default answer, for any other
+# name, is the server's address.
 chall_update() {
 	local h addrs
 	addrs=$(printf '"%s",' "${IPS[@]}")
 	for h in $HOSTS; do
-		out "curl -fsS -d '{\"host\":\"$h\",\"addresses\":[${addrs%,}]}' http://127.0.0.1:8055/add-a" >/dev/null || die "challtestsrv did not take $h"
+		out "curl -fsS -d '{\"host\":\"$h\"}' http://127.0.0.1:8055/clear-a && curl -fsS -d '{\"host\":\"$h\",\"addresses\":[${addrs%,}]}' http://127.0.0.1:8055/add-a" >/dev/null || die "challtestsrv did not take $h"
 	done
-	ev outside "challtestsrv $HOSTS -> ${IPS[*]}"
+	out "curl -fsS -d '{\"ip\":\"$SERVER_IP\"}' http://127.0.0.1:8055/set-default-ipv4" >/dev/null || die "challtestsrv did not take the default address"
+	ev outside "challtestsrv $HOSTS -> ${IPS[*]} (cleared first); default $SERVER_IP"
 }
 
 # scratch_start: another cluster's server on the outside machine, for

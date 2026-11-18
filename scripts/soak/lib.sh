@@ -403,6 +403,40 @@ www_spec() {
 EOF
 }
 
+# The path-routed pair (the fourth soak). With SOAK_PATHS=1 two apps share
+# the host $PATH_HOST: proot takes the whole host and papi the prefix /api.
+# Both run traefik/whoami from the private registry with WHOAMI_NAME set to
+# the app's name, so every reply says which app answered it ("Name: papi").
+SOAK_PATHS=${SOAK_PATHS:-0}
+PATH_HOST=${PATH_HOST:-paths.soak.test}
+# path_spec NAME PATH VERSION: PATH "/" is the whole host.
+path_spec() {
+	local route
+	if [ "$2" = / ]; then
+		route="{\"host\":\"$PATH_HOST\",\"port\":80}"
+	else
+		route="{\"host\":\"$PATH_HOST\",\"path\":\"$2\",\"port\":80}"
+	fi
+	cat <<EOF
+{"name":"$1","image":"$REGISTRY/soak/whoami:$3","replicas":2,"env":{"WHOAMI_NAME":"$1"},
+ "routes":[$route],
+ "health":{"http":{"port":80,"path":"/health"},"interval":"2s","timeout":"1s"}}
+EOF
+}
+
+# app_spec APP VERSION: a routed whoami app at a version of the private image.
+app_spec() {
+	case "$1" in
+	www) www_spec "$2" ;;
+	proot) path_spec proot / "$2" ;;
+	papi) path_spec papi /api "$2" ;;
+	*)
+		echo "soak: no spec for $1" >&2
+		return 1
+		;;
+	esac
+}
+
 # join_worker NAME: join with a one-hour token, then hand over to systemd.
 join_worker() {
 	local n=$1 tok ip

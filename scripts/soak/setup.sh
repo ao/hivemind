@@ -4,6 +4,8 @@
 #
 #   SOAK_DIR=... BIN=path/to/hivemind scripts/soak/setup.sh
 #   SOAK_DIR=... scripts/soak/setup.sh rejoin NAME    join a removed worker again
+#   SOAK_DIR=... scripts/soak/setup.sh check-paths    which app answers each path
+#                                                     of $PATH_HOST, per router
 #
 # The first machine in $NODES_FILE becomes the server, the others workers.
 # Each machine needs Docker Engine running, jq, curl, iptables, and an ssh
@@ -35,6 +37,11 @@
 #     "shop" (compose-shop.yaml: front, nginx on 127.0.0.1:8081, and cache,
 #     redis without a port);
 #   - it waits until every router serves both hosts.
+#
+# With SOAK_PATHS=1 as well (the fourth soak), two more routed apps share one
+# host, proot on $PATH_HOST and papi on $PATH_HOST/api (path_spec in lib.sh),
+# and check_paths logs which app answers each of a list of paths through
+# every router, and the paths the router refuses.
 #
 # With SERVER_NAME set (the third soak), the server advertises that name
 # (--advertise NAME --cluster-addr <its address>), the workers join the name,
@@ -103,6 +110,26 @@ deploy_routed() {
 	deploy "{\"name\":\"kv\",\"image\":\"$KV_IMAGE\",\"command\":[\"redis-server\",\"--appendonly\",\"yes\"],\"ports\":[{\"host\":6379,\"container\":6379,\"bind\":\"127.0.0.1\"}],\"volumes\":[{\"name\":\"data\",\"path\":\"/data\"}]}"
 	hm "$SERVER" "compose deploy -" <"$HERE/compose-shop.yaml" >/dev/null || die "compose deploy shop"
 	ev setup "deployed www api spread kv; compose project shop: front cache"
+	if [ "$SOAK_PATHS" = 1 ]; then
+		deploy "$(path_spec proot / 1)"
+		deploy "$(path_spec papi /api 1)"
+		ev setup "deployed proot ($PATH_HOST/) and papi ($PATH_HOST/api)"
+	fi
+}
+
+# check_paths: through every router, which app answers each path of
+# $PATH_HOST (the "Name:" line of whoami's reply), and the paths the router
+# must refuse. Run on the outside machine, which trusts Pebble's root.
+check_paths() {
+	local ip p cmd="" out
+	for ip in "${IPS[@]}"; do
+		for p in / /x /api /api/ /api/x /apix /api.json //api//x /%61pi/x /API/x /api/../x /api%2Fx; do
+			cmd+="printf '%s %s ' $ip '$p'; curl -s --path-as-is -m 5 --cacert /var/lib/soak-client/root.pem --resolve $PATH_HOST:443:$ip -o /tmp/soak-path.out -w '%{http_code} ' 'https://$PATH_HOST$p'; grep -m1 '^Name: ' /tmp/soak-path.out || { head -c 80 /tmp/soak-path.out | tr '\n' ' '; echo; }; "
+		done
+	done
+	out=$(on "$OUT_NAME" "$cmd") || die "check_paths on $OUT_NAME"
+	while read -r line; do ev paths "$line"; done <<<"$out"
+	ev paths "routes $(hm "$SERVER" routes 2>&1 | tr -s ' \n' ' ')"
 }
 
 kv_node() { # the soak name of the node that runs kv replica 0
@@ -157,6 +184,7 @@ main() {
 	fi
 	wait_for 300 converged_now || die "not converged 300 s after the deploy: $(check_converged "$SOAK_DIR/setup.tsv" | tr '\n' ';')"
 	[ "$SOAK_ROUTES" = 1 ] && "$HERE/outside.sh" wait-served 300
+	[ "$SOAK_ROUTES" = 1 ] && [ "$SOAK_PATHS" = 1 ] && check_paths
 	n=$(kv_node) || die "kv has no node"
 	val="written-$(date -u +%FT%TZ)"
 	[ "$(kv_set "$n" "$val")" = "+OK" ] || die "could not write the kv value on $n"
@@ -194,5 +222,6 @@ rejoin() {
 
 case "${1:-}" in
 rejoin) rejoin "${2:?name}" ;;
+check-paths) check_paths ;;
 *) main "$@" ;;
 esac

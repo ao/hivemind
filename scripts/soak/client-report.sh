@@ -17,10 +17,16 @@
 # Per window and stream: requests; failed (not a 200, or a curl error), with
 # the codes ("000/28" is curl's timeout, "000/7" a refused connection,
 # "000/35" a failed TLS handshake);
+# misrouted, a 200 from another app than a name-checked stream expects
+# (outside.sh, HOST/PATH=NAME), with the app that answered; the successful
+# requests that took 1.5 s or more (a router's 2 s dial timeout to a dead
+# replica, then another replica);
 # the longest gap between two successful requests (or from the window's
 # first request, or to its last), and when it began; the
 # first and last failure, in seconds after the fault; and the total time of
-# the successful requests, p50, p99 and max, in ms.
+# the successful requests, p50, p99 and max, in ms. A stream with no request
+# in the window has no row. For the steady window, the same over every
+# stream, and per host and path over the routers.
 set -euo pipefail
 LOG=${1:?log}
 DIR=${2:?client dir}
@@ -44,10 +50,12 @@ END {
 	}
 }' "$LOG" >"$W"
 
-label() { # label FILE: host@node-name
+label() { # label FILE: host/path@node-name (a log HOST+P+Q@IP.log is the path /P/Q)
 	local b ip host
 	b=$(basename "$1" .log)
 	host=${b%@*} ip=${b#*@}
+	host=${host//+//}
+	[[ "$host" == */* ]] || host=$host/
 	echo "$host@$(awk -v ip="$ip" '$2 == ip { print $1 }' "$NODES_FILE" | sed 's/^.*-\([0-9]*\)$/\1/;s/^/node-/')"
 }
 
@@ -56,14 +64,17 @@ while read -r name ws we wf; do
 	echo
 	echo "From $(date -u -d @"${ws%.*}" +%T) to $(date -u -d @"${we%.*}" +%T) UTC, $(awk -v a="$ws" -v b="$we" 'BEGIN { printf "%.0f", b - a }') s$( [ "$wf" != 0.000 ] && echo ", fault at $(date -u -d @"${wf%.*}" +%T)")."
 	echo
-	echo "| Stream (host@router) | Requests | Failed | Codes of the failures | Longest gap (s) | Gap began | First / last failure (s after the fault) | p50 / p99 / max (ms) |"
-	echo "|---|---|---|---|---|---|---|---|"
+	echo "| Stream (host/path@router) | Requests | Failed | Codes of the failures | Misrouted | Over 1.5 s | Longest gap (s) | Gap began | First / last failure (s after the fault) | p50 / p99 / max (ms) |"
+	echo "|---|---|---|---|---|---|---|---|---|---|"
 	for f in "$DIR"/*@*.log; do
 		gawk -v ws="$ws" -v we="$we" -v wf="$wf" -v lab="$(label "$f")" '
 		function pct(p,   i) { i = int(p * nl + 0.999999); if (i < 1) i = 1; if (i > nl) i = nl; return sprintf("%.0f", lat[i] * 1000) }
 		NF < 8 || $2 !~ /^[0-9][0-9][0-9]$/ || $1 + 0 < ws || $1 + 0 > we { next }
 		{
 			t = $1 + 0; n++; if (!t0) t0 = t - $7; tl = t
+			# a 200 from another app than the stream expects (name-checked streams)
+			if ($9 ~ /^misroute=/) { mis++; mn[substr($9, 10)]++ }
+			if ($2 == "200" && $3 == "0" && $7 + 0 >= 1.5) slow++
 			if ($2 == "200" && $3 == "0") {
 				if (lastok) { g = t - lastok } else { g = t - t0 }
 				if (g > gap) { gap = g; gapat = (lastok ? lastok : t0) }
@@ -75,12 +86,14 @@ while read -r name ws we wf; do
 			}
 		}
 		END {
+			if (!n) exit
 			# A gap still open at the end of the window counts up to the last request.
 			if (n && lf > lastok) { g = tl - (lastok ? lastok : t0); if (g > gap) { gap = g; gapat = (lastok ? lastok : t0) } }
 			c = ""; for (k in codes) c = c (c == "" ? "" : ", ") k " x" codes[k]
+			m = ""; for (k in mn) m = m (m == "" ? "" : ", ") k " x" mn[k]
 			if (nl) asort(lat)
 			ref = (wf > 0 ? wf : ws)
-			printf "| %s | %d | %d | %s | %.2f | %s | %s | %s |\n", lab, n, bad, (c == "" ? "-" : c), gap,
+			printf "| %s | %d | %d | %s | %s | %d | %.2f | %s | %s | %s |\n", lab, n, bad, (c == "" ? "-" : c), (mis ? mis " (" m ")" : "0"), slow, gap,
 				(gapat ? strftime("%H:%M:%S", int(gapat), 1) : "-"),
 				(bad ? sprintf("%+.1f / %+.1f", ff - ref, lf - ref) : "-"),
 				(nl ? pct(0.5) " / " pct(0.99) " / " pct(1) : "-")
@@ -100,16 +113,34 @@ if [ "$ss" != 0 ]; then
 	function pct(a, n, p,   i) { i = int(p * n + 0.999999); if (i < 1) i = 1; if (i > n) i = n; return sprintf("%.1f", a[i] * 1000) }
 	NF < 8 || $2 !~ /^[0-9][0-9][0-9]$/ { partial++; next }
 	$1 + 0 < ws || $1 + 0 > we { next }
+	$9 ~ /^misroute=/ { n++; mis++; next }
 	{ n++; if ($2 == "200" && $3 == "0") { ok++; tt[ok] = $7 + 0; px[ok] = $6 - $5; tl[ok] = $5 - $4 } }
 	END {
 		asort(tt); asort(px); asort(tl)
-		printf "| Requests | Succeeded | Success rate |\n|---|---|---|\n| %d | %d | %.5f %% |\n\n", n, ok, (n ? 100 * ok / n : 0)
+		printf "| Requests | Succeeded | Success rate | Misrouted (a 200 from another app) |\n|---|---|---|---|\n| %d | %d | %.5f %% | %d |\n\n", n, ok, (n ? 100 * ok / n : 0), mis
 		printf "Lines skipped as incomplete, in all the logs (the last line of a log that curl had not finished writing when it was read or stopped): %d.\n\n", partial
 		printf "| Time, ms | p50 | p90 | p99 | p99.9 | max |\n|---|---|---|---|---|---|\n"
 		printf "| Total (TCP + TLS handshake + request) | %s | %s | %s | %s | %s |\n", pct(tt, ok, .5), pct(tt, ok, .9), pct(tt, ok, .99), pct(tt, ok, .999), pct(tt, ok, 1)
 		printf "| TLS handshake | %s | %s | %s | %s | %s |\n", pct(tl, ok, .5), pct(tl, ok, .9), pct(tl, ok, .99), pct(tl, ok, .999), pct(tl, ok, 1)
 		printf "| TLS done to first byte (router and replica) | %s | %s | %s | %s | %s |\n", pct(px, ok, .5), pct(px, ok, .9), pct(px, ok, .99), pct(px, ok, .999), pct(px, ok, 1)
 	}'
+	echo
+	# The same per host and path, over the routers.
+	echo "| Host and path | Streams | Requests | Succeeded | Success rate | Misrouted | Over 1.5 s | p50 / p99 / p99.9 / max (ms) |"
+	echo "|---|---|---|---|---|---|---|---|"
+	for p in $(for f in "$DIR"/*@*.log; do b=$(basename "$f" .log); echo "${b%@*}"; done | sort -u); do
+		awk 1 "$DIR/$p"@*.log | gawk -v ws="$ss" -v we="$se" -v lab="$(tr + / <<<"$p" | sed 's|^[^/]*$|&/|')" -v k="$(ls "$DIR/$p"@*.log | wc -l)" '
+		function pct(p,   i) { i = int(p * ok + 0.999999); if (i < 1) i = 1; if (i > ok) i = ok; return sprintf("%.1f", tt[i] * 1000) }
+		NF < 8 || $2 !~ /^[0-9][0-9][0-9]$/ { next }
+		$1 + 0 < ws || $1 + 0 > we { next }
+		$9 ~ /^misroute=/ { n++; mis++; next }
+		{ n++; if ($2 == "200" && $3 == "0") { ok++; tt[ok] = $7 + 0; if ($7 + 0 >= 1.5) slow++ } }
+		END {
+			if (!n) exit
+			asort(tt)
+			printf "| %s | %d | %d | %d | %.5f %% | %d | %d | %s / %s / %s / %s |\n", lab, k, n, ok, 100 * ok / n, mis, slow, pct(.5), pct(.99), pct(.999), pct(1)
+		}'
+	done
 	echo
 fi
 

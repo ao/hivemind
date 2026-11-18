@@ -24,6 +24,11 @@
 #   scenario.sh upgrade                       install $BIN everywhere, restart the server, then
 #                                             each worker once the last one's routed
 #                                             replicas are ready
+#   scenario.sh rollout [VERSION [APP...]]    rolling update of each APP (www) to VERSION
+#   scenario.sh old-back OLD OLDIP W          the old server's machine back on after a
+#                                             server-move; W sent to it for a while
+#   scenario.sh cert-restart T [LEFT]         restart T once a certificate its router
+#                                             serves is in its renewal window
 #   scenario.sh end NAME
 #
 # A fault that needs the machine's owner (power off, power on, a new machine)
@@ -348,7 +353,7 @@ server_replace() {
 
 # routed_ready ID: every routed replica the server places on node ID runs and
 # passes its health check, in hivemind status.
-ROUTED_APPS=${ROUTED_APPS:-www api}
+if [ "$SOAK_PATHS" = 1 ]; then ROUTED_APPS=${ROUTED_APPS:-www api proot papi}; else ROUTED_APPS=${ROUTED_APPS:-www api}; fi
 routed_ready() {
 	hm "$SERVER" status --json 2>/dev/null | jq -e --arg i "$1" --arg apps " $ROUTED_APPS " \
 		'[.[] | .name as $n | select($apps | contains(" " + $n + " ")) | .replicas[] | select(.node_id == $i and .desired == "running") | (.state == "running" and .ready == true)] | all' >/dev/null
@@ -458,7 +463,7 @@ tok=$(cat /var/lib/hivemind/admin.token)
 end=$(($(date +%s) + $1)); last=
 while [ "$(date +%s)" -lt "$end" ]; do
 	r=$(printf 'header = "Authorization: Bearer %s"\n' "$tok" | curl -sf -K - -m 1 http://127.0.0.1:4483/v1/routes |
-		jq -r '[.routes[] | "\(.host)=\(.endpoints | join(","))"] | join(" ")' 2>/dev/null) || r=down
+		jq -r '[.routes[] | "\(.host)\(.path // "")=\(.endpoints | join(","))"] | join(" ")' 2>/dev/null) || r=down
 	[ "$r" = "$last" ] || { echo "$(date -u +%s%3N) $r"; last=$r; }
 	sleep 0.2
 done
@@ -629,7 +634,10 @@ move_after() {
 	sid=$(id_of "$SERVER")
 	ev event "$name server-journal lost=$(on "$SERVER" "sudo journalctl -u hivemind --since @$t0 -o cat | grep -c 'node lost'") $(on "$SERVER" "sudo journalctl -u hivemind --since @$t0 -o cat | grep -iE 'resolves|set-server|address changed|advertis' | head -n 3" | tr '\n' ';' | cut -c1-600)"
 	ev event "$name server-cert $(on "${NAMES[1]}" "openssl s_client -connect $SERVER_IP:4484 </dev/null 2>/dev/null | openssl x509 -noout -ext subjectAltName 2>/dev/null | tail -n 1" | tr -s ' ')"
-	ev event "$name server-node $(hm "$SERVER" nodes --json | jq -c --arg i "$sid" '.[] | select(.id == $i) | {id, address, state}')"
+	ev event "$name server-node $(hm "$SERVER" nodes --json | jq -c --arg i "$sid" '.[] | select(.id == $i) | {id, address, advertise, state}')"
+	# what hivemind nodes shows the operator: the server's row names what the workers dial
+	ev event "$name nodes-table $(hm "$SERVER" nodes 2>&1 | tr -s ' \n' ' ' | cut -c1-900)"
+	ev event "$name nodes-dials $(hm "$SERVER" nodes --json | jq -c '[.[] | {id, state, dials}]')"
 	for ((i = 1; i < ${#NAMES[@]}; i++)); do
 		ev event "$name ${NAMES[$i]} node-json server=$(on "${NAMES[$i]}" "sudo jq -r .server $DATA/node.json")"
 		on "${NAMES[$i]}" "sudo journalctl -u hivemind --since @$t0 -o short-iso-precise --no-pager" >"$SOAK_DIR/journal-$name-${NAMES[$i]}.txt" 2>/dev/null || true
@@ -639,6 +647,189 @@ move_after() {
 	rm -f "$SOAK_DIR/new-server"
 	ev measure "$name end"
 	end_scenario "$name"
+}
+
+# The old server's own view, on its machine: whether its API answers, the
+# state of each node in its store, its routing table (host/path=endpoint
+# addresses), and the hivemind containers that run there.
+read -r -d '' REMOTE_OLD <<'EOF' || true
+h=$(curl -fsS -m 2 http://127.0.0.1:4483/healthz >/dev/null 2>&1 && echo up || echo down)
+n=$(/usr/local/bin/hivemind nodes --json 2>/dev/null | jq -r '[.[] | "\(.id)=\(.state)"] | join(",")')
+tok=$(cat /var/lib/hivemind/admin.token 2>/dev/null)
+r=$(printf 'header = "Authorization: Bearer %s"\n' "$tok" | curl -sf -K - -m 1 http://127.0.0.1:4483/v1/routes 2>/dev/null |
+	jq -r '[.routes[] | "\(.host)\(.path // "/")=\(.endpoints | map(split(":")[0]) | join("+"))"] | join(",")' 2>/dev/null)
+c=$(docker ps --filter label=hivemind.app --format '{{.Label "hivemind.app"}}' | sort | uniq -c | awk '{ printf "%s:%s,", $2, $1 }')
+echo "api=$h nodes=${n:--} routes=${r:--} containers=${c:--}"
+EOF
+
+# old_view LINE: the node IDs of a REMOTE_OLD line as names; the restored
+# server's ID is "self" there, since the old server has the same node ID.
+# Addresses stay addresses.
+old_view() {
+	local l=$1 id nm sid
+	sid=$(id_of "$SERVER")
+	l=${l//$sid=/self=}
+	while read -r id nm; do l=${l//$id=/$nm=}; done <"$IDS_FILE"
+	echo "$l"
+}
+
+# old_back OLD OLDIP W: the old server's machine OLD, at OLDIP, lost and
+# restored elsewhere with server-move, is powered on again by the operator
+# with its data directory and its unit enabled, which docs/backup.md warns
+# against. Measured once a second until OLD_SECS (300) after its API
+# answers: its port 22 and API, and its own view (REMOTE_OLD) at each change;
+# the restored server's view of W, convergence and duplicates. From the time
+# OLD answers on port 22 the clients send their streams to OLD's router too,
+# as clients whose DNS answer still has its address would.
+# REDIRECT_AFTER (30) s after OLD's API answers, worker W is sent to OLD, as
+# a resolver with the name's old record would send it: W's line for the name
+# names OLDIP, and W's connections to the restored server are reset
+# (iptables REJECT with tcp-reset on W's output to $SERVER_IP:4484), so that
+# W dials the name again. REDIRECT_SECS (30) later W's line names the
+# restored server again and the rule is removed; the log says when W is
+# ready on the restored server again. At OLD_SECS the old server's unit is
+# disabled and stopped (systemctl disable --now), as docs/backup.md says to
+# do, and the measure goes on until W is ready again and the cluster has
+# converged (or 300 s). Then the journals of OLD, W and the server, and the
+# epoch lines from each. The operator powers OLD off afterwards.
+old_back() {
+	local old=$1 oldip=$2 W=$3 name=old-server-back cur=$SOAK_DIR/measure-old-server-back.tsv
+	local end t d v p22=down oview="" up_at=0 redir=0 stopped=0 wst="" conv="" dupl="" t0 wid now stop_at=0
+	local ra=${REDIRECT_AFTER:-30} rs=${REDIRECT_SECS:-30} os=${OLD_SECS:-300}
+	t0=$(date -u +%s)
+	wid=$(id_of "$W")
+	ev scenario "$name begin target=$old/$oldip redirect=$W"
+	end=$(($(date +%s) + 1800))
+	while [ "$(date +%s)" -lt "$end" ]; do
+		t=$(now_ms)
+		now=$(date +%s)
+		if port22_ip "$oldip"; then v=up; else v=down; fi
+		[ "$v" = "$p22" ] || {
+			ev event "$name $old port22-$v"
+			p22=$v
+			if [ "$v" = up ] && [ "$stopped" = 0 ] && [ "$SOAK_ROUTES" = 1 ] && [ -n "$OUT_NAME" ]; then
+				"$HERE/outside.sh" client-add "$oldip" >>"$SOAK_DIR/old.out" 2>&1 &
+			fi
+		}
+		if [ "$p22" = up ]; then
+			v=$(SSH_CT=1 SSH_TIMEOUT=4 on_ip "$oldip" "sudo bash -s" <<<"$REMOTE_OLD" 2>/dev/null) || v="api=unknown ssh=fail"
+			v=$(old_view "$v")
+			[ "$v" = "$oview" ] || {
+				ev event "$name old-view $v"
+				oview=$v
+			}
+			if [ "$up_at" = 0 ] && [[ "$v" == api=up* ]]; then
+				up_at=$now
+				ev event "$name old-api-up"
+			fi
+		fi
+		# W to the old server, and back
+		if [ "$up_at" != 0 ] && [ "$redir" = 0 ] && [ "$now" -ge $((up_at + ra)) ]; then
+			dns_line "$W" "$oldip"
+			on "$W" "sudo iptables -I OUTPUT -p tcp -d $SERVER_IP --dport 4484 -j REJECT --reject-with tcp-reset"
+			ev event "$name $W fault redirect to $oldip"
+			redir=1
+		elif [ "$redir" = 1 ] && [ "$now" -ge $((up_at + ra + rs)) ]; then
+			dns_line "$W" "$SERVER_IP"
+			on "$W" "sudo iptables -D OUTPUT -p tcp -d $SERVER_IP --dport 4484 -j REJECT --reject-with tcp-reset"
+			ev event "$name $W heal: name and connections to $SERVER_IP again"
+			redir=2
+		fi
+		if [ "$up_at" != 0 ] && [ "$stopped" = 0 ] && [ "$now" -ge $((up_at + os)) ]; then
+			on_ip "$oldip" "sudo systemctl disable --now hivemind" >/dev/null 2>&1
+			ev event "$name $old stopped: systemctl disable --now hivemind"
+			stopped=1 stop_at=$now
+		fi
+		# the restored server's view
+		collect "$cur" nodes
+		if api_ok "$cur"; then
+			v=$(node_state "$cur" "$wid")
+			[ "$v" = "$wst" ] || {
+				ev event "$name $W node-$v (restored server)"
+				wst=$v
+			}
+			if check_converged "$cur" 0 >/dev/null; then v=yes; else v=no; fi
+			[ "$v" = "$conv" ] || {
+				ev event "$name converged-$v $(running "$cur")"
+				conv=$v
+			}
+		fi
+		d=$(dups "$cur" | tr '\n' ';')
+		[ "$d" = "$dupl" ] || {
+			ev event "$name dups ${d:-none}"
+			dupl=$d
+		}
+		if [ "$stopped" = 1 ] && { { [ "$wst" = ready ] && [ "$conv" = yes ] && [ "$redir" = 2 ]; } || [ "$now" -ge $((stop_at + 300)) ]; }; then
+			break
+		fi
+		d=$((1000 - ($(now_ms) - t)))
+		[ "$d" -le 0 ] || sleep "$((d / 1000)).$(printf '%03d' $((d % 1000)))"
+	done
+	wait
+	if [ "$SOAK_ROUTES" = 1 ] && [ -n "$OUT_NAME" ]; then "$HERE/outside.sh" client-drop "$oldip" >>"$SOAK_DIR/old.out" 2>&1 || true; fi
+	on_ip "$oldip" "sudo journalctl -u hivemind -b --no-pager -o short-iso-precise" >"$SOAK_DIR/journal-$name-$old.txt" 2>/dev/null || true
+	on "$W" "sudo journalctl -u hivemind --since @$t0 --no-pager -o short-iso-precise" >"$SOAK_DIR/journal-$name-$W.txt" 2>/dev/null || true
+	on "$SERVER" "sudo journalctl -u hivemind --since @$t0 --no-pager -o short-iso-precise" >"$SOAK_DIR/journal-$name-$SERVER.txt" 2>/dev/null || true
+	ev event "$name old-journal $(grep -E 'epoch=|newer copy|start grace|wait|node lost' "$SOAK_DIR/journal-$name-$old.txt" | head -n 8 | cut -c1-400 | tr '\n' ';')"
+	ev event "$name worker-journal $(grep -E 'before a restore|answers at this|epoch' "$SOAK_DIR/journal-$name-$W.txt" | head -n 6 | cut -c1-500 | tr '\n' ';')"
+	ev event "$name server-journal lost=$(grep -c 'node lost' "$SOAK_DIR/journal-$name-$SERVER.txt") $(grep -E 'node lost|epoch' "$SOAK_DIR/journal-$name-$SERVER.txt" | head -n 4 | cut -c1-400 | tr '\n' ';')"
+	ev event "$name $W cluster-epoch=$(on "$W" "sudo cat $DATA/cluster-epoch" 2>&1 | tr -d '\n') node.json-server=$(on "$W" "sudo jq -r .server $DATA/node.json")"
+	end_scenario "$name"
+}
+
+# The certificate a router serves for each host, read from the outside
+# machine: "host serial notAfter(Unix s)" lines.
+read -r -d '' REMOTE_CERTS <<'EOF' || true
+ip=$1
+shift
+for h in "$@"; do
+	r=$(timeout 5 openssl s_client -connect "$ip:443" -servername "$h" -CAfile /var/lib/soak-client/root.pem </dev/null 2>/dev/null | openssl x509 -noout -serial -enddate 2>/dev/null)
+	s=$(sed -n 's/^serial=//p' <<<"$r")
+	e=$(sed -n 's/^notAfter=//p' <<<"$r")
+	[ -n "$e" ] && e=$(date -d "$e" +%s)
+	echo "$h ${s:-none} ${e:-0}"
+done
+EOF
+if [ "$SOAK_PATHS" = 1 ]; then CERT_HOSTS=${CERT_HOSTS:-www.soak.test api.soak.test $PATH_HOST}; else CERT_HOSTS=${CERT_HOSTS:-www.soak.test api.soak.test}; fi
+served_certs() { on "$OUT_NAME" "bash -s $(ip_of "$1") $CERT_HOSTS" <<<"$REMOTE_CERTS"; }
+
+# cert_restart T [LEFT]: restart T's service once a certificate its router
+# serves has LEFT seconds (2985) or less of its lifetime left, so that the
+# router starts with a certificate in its renewal window: these one-hour
+# certificates are renewed once 50 minutes are left. The certificates T
+# serves are read every 5 s, for at most 40 minutes. Then for 90 s the
+# serials T serves, at each change; and T's journal lines about certificates
+# since the restart, and Pebble's issuances.
+cert_restart() {
+	local T=$1 left=${2:-2985} name=cert-restart end now c m t1 s last=""
+	ev scenario "$name begin target=$T left_max=$left"
+	end=$(($(date +%s) + 2400))
+	while :; do
+		now=$(date +%s)
+		c=$(served_certs "$T" 2>/dev/null)
+		m=$(awk -v now="$now" '$3 > 0 { l = $3 - now; if (m == "" || l < m) m = l } END { print (m == "" ? 99999 : m) }' <<<"$c")
+		[ "$m" -le "$left" ] && break
+		[ "$now" -lt "$end" ] || die "$name: no certificate on $T with $left s left in 40 minutes: $(tr '\n' ';' <<<"$c")"
+		sleep 5
+	done
+	ev event "$name $T certs-before $(awk -v now="$now" '{ printf "%s:%s:left=%ds ", $1, substr($2, 1, 12), $3 - now }' <<<"$c")"
+	t1=$(date -u +%s)
+	ev event "$name $T fault restart"
+	on "$T" "sudo systemctl restart hivemind" || die "$name: restart on $T"
+	end=$(($(date +%s) + 90))
+	while [ "$(date +%s)" -lt "$end" ]; do
+		now=$(date +%s)
+		s=$(served_certs "$T" 2>/dev/null | awk -v now="$now" '{ printf "%s:%s:left=%ds ", $1, substr($2, 1, 12), $3 - now }')
+		[ "$s" = "$last" ] || {
+			ev event "$name $T certs $s"
+			last=$s
+		}
+		sleep 5
+	done
+	ev event "$name $T journal $(on "$T" "sudo journalctl -u hivemind --since @$t1 -o cat --no-pager" | grep -iE 'renew|certif|obtain|acme|router ready' | cut -c1-300 | head -n 12 | tr '\n' ';')"
+	ev event "$name pebble $(on "$OUT_NAME" "sudo docker logs --since $t1 soak-pebble 2>&1" | grep -E 'Issued certificate|POST /finalize|validat' | cut -c1-200 | head -n 12 | tr '\n' ';')"
+	on "$T" "sudo journalctl -u hivemind --since @$t1 --no-pager -o short-iso-precise" >"$SOAK_DIR/journal-$name-$T.txt" 2>/dev/null || true
+	ev scenario "$name end"
 }
 
 # setserver_checks T ADDR...: hivemind node set-server on worker T, first
@@ -758,25 +949,35 @@ watch_moves() {
 	return 1
 }
 
-# rollout [VERSION]: a rolling update of www to the private image's tag
-# VERSION (2), measured until no rollout is in progress and the cluster has
-# converged with every www replica at the new generation.
+# rollout [VERSION [APP...]]: a rolling update of each APP (www) to the
+# private image's tag VERSION (2), all deployed at once, measured until no
+# rollout is in progress and the cluster has converged. The scenario is
+# "rollout" for www alone, else "rollout-APP+APP...".
 rollout() {
-	local name=rollout v=${1:-2} cur=$SOAK_DIR/measure-rollout.tsv end t d st r
+	local v=${1:-2} apps name a end t d st r="" s done
+	shift || true
+	apps=${*:-www}
+	if [ "$apps" = www ]; then name=rollout; else name=rollout-${apps// /+}; fi
 	begin "$name" "$SERVER"
-	ev event "$name www fault deploy $REGISTRY/soak/whoami:$v"
-	hm "$SERVER" "deploy -f -" <<<"$(www_spec "$v")" >/dev/null || die "$name: deploy"
+	for a in $apps; do
+		ev event "$name $a fault deploy $REGISTRY/soak/whoami:$v"
+		hm "$SERVER" "deploy -f -" <<<"$(app_spec "$a" "$v")" >/dev/null || die "$name: deploy $a"
+	done
 	end=$(($(date +%s) + 600))
-	r=""
 	while [ "$(date +%s)" -lt "$end" ]; do
 		t=$(now_ms)
 		st=$(hm "$SERVER" status --json 2>/dev/null) || st=""
-		v=$(jq -r '.[] | select(.name == "www") | (.rollout // {} | "\(.state // "none") target=\(.target // "-") moving=\(.moving // "-")") + " gens=" + ([.replicas[] | "\(.index):\(.generation):\(.state)"] | join(","))' <<<"$st" 2>/dev/null)
-		[ "$v" = "$r" ] || {
-			ev event "$name www $v"
-			r=$v
+		done=1 s=""
+		for a in $apps; do
+			v=$(jq -r --arg a "$a" '.[] | select(.name == $a) | (.rollout // {} | "\(.state // "none") target=\(.target // "-") moving=\(.moving // "-")") + " gens=" + ([.replicas[] | "\(.index):\(.generation):\(.state)"] | join(","))' <<<"$st" 2>/dev/null)
+			[[ "$v" == none* ]] || done=0
+			s+="$a $v;"
+		done
+		[ "$s" = "$r" ] || {
+			ev event "$name $s"
+			r=$s
 		}
-		if [[ "$v" == none* ]]; then
+		if [ "$done" = 1 ]; then
 			wait_for 120 converged_now && ev event "$name converged-yes"
 			break
 		fi
@@ -862,6 +1063,8 @@ shift || true
 case "$cmd" in
 fault) ev event "$1 $2 fault ${*:3}" ;;
 rollout) rollout "$@" ;;
+old-back) old_back "$@" ;;
+cert-restart) cert_restart "$@" ;;
 drain) drain_node "$@" ;;
 remove) remove_node "$@" ;;
 join-new) join_new "$@" ;;
