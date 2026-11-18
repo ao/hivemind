@@ -215,7 +215,8 @@ jobs:
       - run: ./scripts/integration-ca.sh
 
   # A cluster of mixed versions: the 2.0.0 release binary as the server and
-  # as a worker, and this build as a worker and then as the upgraded server.
+  # as a worker, and this build as a worker and then as the upgraded server;
+  # then a CA rotation with the 2.0.0 worker, upgraded in place during it.
   integration-mixed:
     name: Integration (mixed versions)
     runs-on: ubuntu-latest
@@ -234,10 +235,13 @@ jobs:
       - uses: actions/checkout@v4
       - run: ./scripts/integration-routing.sh
 
-  # The fault suite on three nodes: kill, partition, slow and flap. It takes
-  # about 20 minutes, and its timings are the ones reported in the docs, so it
-  # runs weekly and on demand rather than on every pull request. The cluster
-  # job above covers placement and one node loss on every change.
+  # The fault suite on three nodes: kill, partition, slow and flap, and the
+  # server's whole machine lost and restored at a new address while a worker
+  # is partitioned and while one is slow. Before the server-loss scenarios it
+  # took about 20 minutes here; they added about 7 minutes on a 16-vCPU build
+  # machine. Its timings are the ones reported in the docs, so it runs weekly
+  # and on demand rather than on every pull request. The cluster job above
+  # covers placement and one node loss on every change.
   fault-suite:
     name: Fault suite (3 nodes)
     if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'

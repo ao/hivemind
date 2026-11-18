@@ -1,6 +1,6 @@
 # When things go wrong
 
-What hivemind does when the machine under it fails, and what it tells you. Each case is a scenario of `scripts/edge-suite.sh`, which runs it against real Docker daemons (docker:dind) and checks the result, or a unit test where noted. The fault suite (`scripts/fault-suite.sh`) covers lost workers, a killed server, partitions and slow links.
+What hivemind does when the machine under it fails, and what it tells you. Each case is a scenario of `scripts/edge-suite.sh`, which runs it against real Docker daemons (docker:dind) and checks the result, or a unit test where noted. The fault suite (`scripts/fault-suite.sh`) covers lost workers, a killed server, partitions and slow links, and the loss of the server's whole machine while a worker is cut off and, separately, while a worker's link is slow: the server is restored from its latest backup on a new container at a new address, by name, and its old container, back with its old store, is refused by every worker.
 
 ## Docker restarts under the agent
 
