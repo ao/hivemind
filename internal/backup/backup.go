@@ -69,6 +69,37 @@ var entries = []entry{
 	{pki.CAKeyFile, true, maxSmallFile},
 	{pki.CACertFile, true, maxSmallFile},
 	{auth.TokenFileName, false, maxSmallFile},
+	// The new CA of a CA rotation, only while the store records one.
+	{pki.NextCAKeyFile, false, maxSmallFile},
+	{pki.NextCACertFile, false, maxSmallFile},
+}
+
+// nextCAFile reports whether name is one of the new CA's files.
+func nextCAFile(name string) bool { return name == pki.NextCAKeyFile || name == pki.NextCACertFile }
+
+// checkCAFiles checks that the CA files in dir are the ones the store's
+// rotation names: with none, ca.crt alone; with one, ca.crt and
+// ca-next.crt with the fingerprints it records. A rotation whose last
+// step had begun is refused: its files are changing.
+func checkCAFiles(dir string, rot *store.CARotation) error {
+	cur, err := pki.LoadCA(dir)
+	if err != nil {
+		return err
+	}
+	if rot == nil {
+		return nil
+	}
+	if rot.Phase == store.CAPhaseEnding {
+		return errors.New("the store records the end of a CA rotation in progress, so its CA files are changing")
+	}
+	next, err := pki.LoadNextCA(dir)
+	if err != nil {
+		return fmt.Errorf("the store records a CA rotation, and its new CA: %w", err)
+	}
+	if cur.Fingerprint() != rot.CurrentFP || next.Fingerprint() != rot.NextFP {
+		return errors.New("the CA files are not the CAs of the rotation the store records")
+	}
+	return nil
 }
 
 func lookup(name string) (entry, bool) {
@@ -158,16 +189,16 @@ func Write(ctx context.Context, w io.Writer, o Options) (Manifest, error) {
 	if info.NodeID == "" {
 		return Manifest{}, fmt.Errorf("backup: the store in %s has no cluster record; run hivemind init first", o.DataDir)
 	}
-	// LoadCA refuses a key that others can read, or that does not match
-	// the certificate, so a backup never carries a broken CA.
-	if _, err := pki.LoadCA(o.DataDir); err != nil {
-		return Manifest{}, fmt.Errorf("backup: cluster CA in %s: %w", o.DataDir, err)
-	}
-
 	paths := map[string]string{StoreName: snap}
 	m := Manifest{Format: Format, Version: Version, Created: now().UTC(), HivemindVersion: o.HivemindVersion,
 		SchemaVersion: info.SchemaVersion, NodeID: info.NodeID}
 	for _, e := range entries {
+		// The new CA's files go in only while the copied store records
+		// the rotation they belong to: without one, they are a start's
+		// that did not complete, which serve removes.
+		if nextCAFile(e.name) && info.CARotation == nil {
+			continue
+		}
 		p, ok := paths[e.name]
 		if !ok {
 			p = filepath.Join(o.DataDir, e.name)
@@ -182,6 +213,14 @@ func Write(ctx context.Context, w io.Writer, o Options) (Manifest, error) {
 		f.Name = e.name
 		paths[e.name] = p
 		m.Files = append(m.Files, f)
+	}
+	// LoadCA refuses a key that others can read, or that does not match
+	// the certificate, so a backup never carries a broken CA. The store
+	// was copied before the CA files were read: a step of a CA rotation
+	// in between leaves them out of step with it, which this finds. A
+	// change after the digests above is found as the files are copied.
+	if err := checkCAFiles(o.DataDir, info.CARotation); err != nil {
+		return Manifest{}, fmt.Errorf("backup: cluster CA in %s: %w; if a CA rotation step ran during the backup, run it again", o.DataDir, err)
 	}
 
 	mb, err := json.MarshalIndent(m, "", "  ")
@@ -413,6 +452,8 @@ type Restored struct {
 	// which has no epoch yet: Restore wrote Epoch to EpochFile, and serve
 	// gives it to the store once it has migrated it (ApplyEpochFile).
 	Pending bool
+	// CARotation is the CA rotation the backup was taken during, or nil.
+	CARotation *store.CARotation
 }
 
 // EpochFile is what Restore writes beside a store from before
@@ -511,10 +552,13 @@ func Restore(ctx context.Context, r io.Reader, dir string) (res Restored, err er
 	case info.SchemaVersion != m.SchemaVersion || info.NodeID != m.NodeID:
 		return Restored{}, fmt.Errorf("%w: the store does not match the manifest (schema %d, node %q)", ErrInvalid, info.SchemaVersion, info.NodeID)
 	}
-	if _, err := pki.LoadCA(dir); err != nil {
+	if err := checkCAFiles(dir, info.CARotation); err != nil {
 		return Restored{}, fmt.Errorf("%w: cluster CA: %v", ErrInvalid, err)
 	}
-	res = Restored{Manifest: m}
+	if info.CARotation == nil && slices.ContainsFunc(m.Files, func(f File) bool { return nextCAFile(f.Name) }) {
+		return Restored{}, fmt.Errorf("%w: the backup has a new CA's files, and its store records no CA rotation", ErrInvalid)
+	}
+	res = Restored{Manifest: m, CARotation: info.CARotation}
 	if info.SchemaVersion >= store.EpochSchemaVersion {
 		if res.Epoch, err = store.BumpEpochFile(ctx, dbPath); err != nil {
 			return Restored{}, fmt.Errorf("raising the epoch of the restored store: %w", err)

@@ -44,9 +44,11 @@ that runs serve.
 admin token. The server sends it only over TLS, or to a client on loopback.
 
 The file is a tar archive: manifest.json, with a format version and the
-SHA-256 of each file, then hivemind.db, ca.key, ca.crt and admin.token. backup
-reads the file back and checks every digest before it keeps it. Restore it
-with hivemind restore.`,
+SHA-256 of each file, then hivemind.db, ca.key, ca.crt and admin.token, and
+during a rotation of the cluster CA also ca-next.key and ca-next.crt. backup
+checks that the CA files are the ones the copied store names, and reads the
+file back and checks every digest before it keeps it. Restore it with
+hivemind restore.`,
 		Args: cobra.ExactArgs(1),
 	}
 	cf := addClientFlags(cmd)
@@ -224,6 +226,14 @@ each worker. See docs/backup.md.`,
 			} else {
 				fmt.Fprintf(out, "The cluster is at epoch %d now, one more than in the backup: workers that reach this server refuse a server at a lower epoch, such as the one the backup came from.\n",
 					m.Epoch)
+			}
+			if r := m.CARotation; r != nil {
+				phase := r.Phase
+				if r.Toward == store.CACurrent {
+					phase += ", going back to the old CA after an abort"
+				}
+				fmt.Fprintf(out, "The backup was taken during a rotation of the cluster CA (phase %s), and holds both CAs. Once serve runs, "+
+					"hivemind ca status shows where each node is; docs/ca-rotation.md#backup-and-restore says which step to run.\n", phase)
 			}
 			hasToken := slices.ContainsFunc(m.Files, func(f backup.File) bool { return f.Name == auth.TokenFileName })
 			if hasToken {
