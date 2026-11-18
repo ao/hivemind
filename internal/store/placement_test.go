@@ -215,6 +215,106 @@ func TestStartGraceLeavesOutTheServersOwnLease(t *testing.T) {
 	}
 }
 
+// An old server back on its own, after its cluster was restored elsewhere,
+// hears from none of its workers: they refuse it. In the fourth soak it
+// marked all three lost when its grace ended, and ran every replica on its
+// own machine. When the grace ends with no report from any worker that was
+// waiting, they go on waiting: none is lost, and their replicas stay where
+// they were, for as long as that lasts. A node removed meanwhile has its
+// replicas placed again, as a removal always does. Once one of them
+// reports, the others are lost, as at the end of any grace.
+func TestStartGraceHoldsWhenNoWorkerReports(t *testing.T) {
+	e := newSchedEnv(t, 0, "node-s", "node-1", "node-2", "node-3")
+	if err := e.s.InitCluster(ctxT(t), Cluster{AdminTokenHash: [32]byte{1}, NodeID: "node-s"}); err != nil {
+		t.Fatal(err)
+	}
+	mustPut(t, e.s, web(4))
+	before := e.nodesOfWeb()
+	if slices.Contains(before, "") || len(before) != 4 {
+		t.Fatalf("web on %v, want every replica placed", before)
+	}
+	e.clock.Advance(10 * time.Minute)
+	started := e.clock.Now()
+	if err := e.s.SetStarted(ctxT(t), started, 2*time.Minute); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := e.s.StartWait(started); !ok {
+		t.Fatal("StartWait: no workers waiting at the start")
+	}
+	waiting := func() []string {
+		t.Helper()
+		nodes, err := e.s.ListNodes(ctxT(t))
+		if err != nil {
+			t.Fatal(err)
+		}
+		var out []string
+		for _, n := range nodes {
+			if e.s.Waiting(n, e.clock.Now()) {
+				out = append(out, n.ID)
+			}
+		}
+		return out
+	}
+	held := func() bool {
+		w, ok := e.s.StartWait(e.clock.Now())
+		if !ok || !w.GraceEnds.Equal(started.Add(2*time.Minute)) {
+			t.Fatalf("StartWait %+v, %v", w, ok)
+		}
+		return w.Held
+	}
+	// The server's own node renews, as serve does; the workers never do.
+	at := func(d time.Duration) {
+		e.clock.t = started.Add(d)
+		e.renew("node-s")
+	}
+	for _, d := range []time.Duration{30 * time.Second, 2*time.Minute - time.Second, 2 * time.Minute, 3 * time.Minute, 2 * time.Hour} {
+		at(d)
+		if lost := e.sweep(); len(lost) != 0 {
+			t.Fatalf("%s after the start, no worker having reported: lost %v, want none", d, lost)
+		}
+		if w := waiting(); !slices.Equal(w, []string{"node-1", "node-2", "node-3"}) {
+			t.Fatalf("%s after the start: waiting %v, want the three workers", d, w)
+		}
+		if got := e.nodesOfWeb(); !slices.Equal(got, before) {
+			t.Fatalf("%s after the start: web on %v, want it where it was, %v", d, got, before)
+		}
+		if want := d >= 2*time.Minute; held() != want {
+			t.Fatalf("%s after the start: held %v, want %v", d, !want, want)
+		}
+	}
+
+	// The operator removes node-3, which is really gone: its replica is
+	// placed again, on a node that is up.
+	at(2*time.Hour + time.Second)
+	if _, err := e.s.RemoveNode(ctxT(t), "node-3", false); err != nil {
+		t.Fatal(err)
+	}
+	e.sweep()
+	for i, n := range before {
+		if n == "node-3" && e.nodeOf("web", i) != "node-s" {
+			t.Fatalf("web %d is on %q after node-3 was removed, want node-s", i, e.nodeOf("web", i))
+		}
+	}
+	if w := waiting(); !slices.Equal(w, []string{"node-1", "node-2"}) || !held() {
+		t.Fatalf("after the removal: waiting %v, held %v", w, held())
+	}
+
+	// node-1 reports: the hold is over, and node-2, which has not, is lost.
+	at(2*time.Hour + time.Minute)
+	e.renew("node-1")
+	if lost := e.sweep(); !slices.Equal(lost, []string{"node-2"}) {
+		t.Fatalf("after node-1's report: lost %v, want node-2", lost)
+	}
+	if w := waiting(); len(w) != 0 || held() {
+		t.Fatalf("after node-1's report: waiting %v, held %v", w, held())
+	}
+	for i, n := range e.nodesOfWeb() {
+		if n == "node-2" || n == "node-3" {
+			t.Fatalf("web %d is still on %s", i, n)
+		}
+	}
+}
+
 // nodesOfWeb returns the node of each replica of web, by index.
 func (e *schedEnv) nodesOfWeb() []string {
 	e.t.Helper()

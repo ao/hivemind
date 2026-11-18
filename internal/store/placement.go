@@ -128,7 +128,9 @@ func placedOn(ctx context.Context, q querier) ([]Assignment, error) {
 // backup, finds every lease as old as its outage, and without the start
 // grace its first sweep would move the replicas of nodes that are fine and
 // have not reached it yet, as when their resolvers still have the old
-// record of the server's name.
+// record of the server's name. When the grace ends with no report from any
+// of the nodes that were waiting, they go on waiting (see the hold in
+// start.go).
 func (s *Store) ReconcileNodes(ctx context.Context) ([]string, error) {
 	var lost []string
 	err := s.tx(ctx, func(tx *sql.Tx) error {

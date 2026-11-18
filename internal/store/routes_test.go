@@ -363,6 +363,7 @@ func TestRouteTableAfterAStart(t *testing.T) {
 	}
 	e.report(node1, routedContainer("web", 0, 1, 32768))
 	e.report(nodeB, routedContainer("blocker", 0, 1, 33000))
+	e.renewAt(nodeC, "10.0.0.3") // another worker, with nothing routed
 
 	// The server is down for a minute and starts again. Its own node renews
 	// its lease at once; the worker has not reported yet.
@@ -386,9 +387,13 @@ func TestRouteTableAfterAStart(t *testing.T) {
 		t.Fatalf("after the server's report: %v", got)
 	}
 
-	// The worker never reports. It stays in the table past the lease
-	// timeout, for the whole start grace, and leaves when the grace ends.
-	e.clock.Advance(89 * time.Second)
+	// The other worker reports in the grace; this one never does. It stays
+	// in the table past the lease timeout, for the whole start grace, and
+	// leaves when the grace ends, as a worker that was waiting has
+	// reported (else the grace would hold it: TestRouteTableAfterARestore).
+	e.clock.Advance(29 * time.Second)
+	e.renewAt(nodeC, "10.0.0.3")
+	e.clock.Advance(60 * time.Second)
 	if got := e.table()["b.example.com"]; !slices.Equal(got, []string{"10.0.0.2:33000"}) {
 		t.Fatalf("90 s after the start, the worker silent: %v; want it kept in the grace", got)
 	}
@@ -401,7 +406,8 @@ func TestRouteTableAfterAStart(t *testing.T) {
 // A server restored from a backup, whose workers have not reported for two
 // minutes, renews its own node's lease as it starts, before it records the
 // start, as serve did. The routing table must still list every worker's
-// endpoints, through the whole start grace. In the third soak it had none
+// endpoints, through the whole start grace, and past it while no worker
+// has reported (the hold). In the third soak it had none
 // for the first seconds after each restore, until the server's own node
 // renewed its lease again: the reference for the grace was the server's
 // fresh lease, and every worker was more than 15 s older than that. The
@@ -436,10 +442,14 @@ func TestRouteTableAfterARestore(t *testing.T) {
 		}
 		e.renewAt(node1, "10.0.0.9") // the server's agent
 	}
-	e.clock.t = started.Add(DefaultStartGrace)
-	e.renewAt(node1, "10.0.0.9")
-	if got := e.table()["b.example.com"]; len(got) != 0 {
-		t.Fatalf("when the grace ended: %v, want none", got)
+	// No worker has reported since the start, so the grace holds the
+	// worker past its end, and its endpoints stay (the hold, start.go).
+	for _, d := range []time.Duration{DefaultStartGrace, time.Hour} {
+		e.clock.t = started.Add(d)
+		e.renewAt(node1, "10.0.0.9")
+		if got := e.table()["b.example.com"]; !slices.Equal(got, want) {
+			t.Fatalf("%s after the start, no worker having reported: %v, want %v", d, got, want)
+		}
 	}
 	// The worker comes back and reports: its replicas are in the table
 	// again.

@@ -48,7 +48,10 @@
 #     the old store. Both workers refuse it and log that once, the old
 #     server logs that a newer copy of the cluster exists, and for 20 s
 #     nothing moves: the workers' containers are the same, and the old
-#     server has no report from them. Then the alias leaves the old
+#     server has no report from them. Its start grace is 15 s: past it,
+#     on its own, it keeps both workers waiting, marks neither lost, places
+#     none of their replicas again, and logs at error that no worker has
+#     reported since it started. Then the alias leaves the old
 #     container, whose serve keeps running, and the restored server starts
 #     again under it: the workers, never restarted, report to it within
 #     30 s, while the old server still runs, with no second refusal and no
@@ -421,8 +424,12 @@ by_name() {
 	reconnect "$S" "$NEW_IP"
 	OLD_NET_ARGS="--alias $ALIAS"
 	SERVER_ADDR=$ALIAS:4484
-	old_server_returns --advertise "$ALIAS" --cluster-addr "$OLD_IP" --min-ready 5s
+	old_server_returns --advertise "$ALIAS" --cluster-addr "$OLD_IP" --min-ready 5s --start-grace 15s
+	mark_logs "$OLD_S"
+	wait_for 30 docker exec "$OLD_S" hivemind status || cl_fail "the old server's API did not answer"
+	OLD_ROWS=$(old_replica_rows)
 	workers_refuse_old
+	old_server_holds
 
 	# The name leads to the restored server again while the old one still
 	# runs, as when the record is put right before the old machine is
@@ -459,6 +466,37 @@ by_name() {
 		cl_fail "requests through $W1's router while the old server ran: $(codes_summary <<<"$codes")"
 	[ "$(docker exec "$W1" pgrep -x hivemind) $(docker exec "$W2" pgrep -x hivemind)" = "$pids" ] || cl_fail "a worker process was restarted"
 	cl_note "by name, the old server back: $W1's router served $total requests, $bad not 200; the workers took the restored server again, never restarted"
+}
+
+# old_replica_rows: each replica on the old server, as APP INDEX NODE, from
+# its hivemind status.
+old_replica_rows() {
+	docker exec "$OLD_S" hivemind status | awk '$1 == "APP" && $2 == "REPLICA" { t = 1; next } t && $2 ~ /^[0-9]+$/ { print $1, $2, $3 }' | sort
+}
+
+# old_server_holds: the old server, on its own, past its start grace of 15 s
+# (by_name gives it --start-grace 15s), has had no report from either
+# worker: it keeps both waiting, marks neither lost, places none of their
+# replicas again, says at error that no worker has reported since it
+# started, and what to do. In
+# the fourth soak, an old server marked every worker lost at its grace's
+# end and ran every replica on its own machine. OLD_ROWS are its replicas
+# as it came back; its log counts from the mark set then.
+old_server_holds() {
+	local left c
+	left=$((OLD_AT + 25 - $(date +%s)))
+	[ "$left" -le 0 ] || sleep "$left"
+	held_logged() { since "$OLD_S" | grep -q 'level=ERROR msg="no worker has reported to this server since it started, and its start grace has ended'; }
+	wait_for 30 held_logged || cl_fail "the old server did not say that no worker has reported since it started: $(since "$OLD_S" | tail -n 5)"
+	since "$OLD_S" | grep -q 'hivemind node remove <id>' || cl_fail "the old server's line does not name hivemind node remove"
+	if since "$OLD_S" | grep 'node lost'; then
+		cl_fail "the old server, on its own past its start grace, marked a worker lost"
+	fi
+	[ "$(docker exec "$OLD_S" hivemind nodes | awk -v a="$W1_ID" -v b="$W2_ID" '($1 == a || $1 == b) && / waiting /' | wc -l)" -eq 2 ] ||
+		cl_fail "past its grace, the old server does not keep both workers waiting: $(docker exec "$OLD_S" hivemind nodes | tr '\n' ';')"
+	[ "$(old_replica_rows)" = "$OLD_ROWS" ] ||
+		cl_fail "the old server placed replicas again past its grace: $(tr '\n' ';' <<<"$OLD_ROWS")before, $(old_replica_rows | tr '\n' ';')now"
+	cl_note "the old server alone, $(($(date +%s) - OLD_AT)) s after its start and past its 15 s grace: both workers waiting, none lost, no replica placed again, and it says so: $(since "$OLD_S" | grep -o 'level=ERROR msg="no worker has reported[^:]*')"
 }
 
 # set_server NODE ADDRESS: run node set-server on NODE, and print its output.

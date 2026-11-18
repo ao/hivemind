@@ -959,6 +959,7 @@ func (s *Store) UpsertNode(ctx context.Context, n Node) error {
 			n.ID, n.Name, n.CPU, n.Memory, now, n.ID, now, n.Address, n.Version, n.Dials, now-int64(scheduler.DefaultLeaseTimeout), now); err != nil {
 			return err
 		}
+		s.noteReport(n.ID)
 		return s.placePending(ctx, tx)
 	})
 }
@@ -1067,6 +1068,7 @@ func (s *Store) renewLease(ctx context.Context, tx *sql.Tx, nodeID string, now i
 		}
 		return fmt.Errorf("node %q: %w", nodeID, ErrNotFound)
 	}
+	s.noteReport(nodeID)
 	return nil
 }
 

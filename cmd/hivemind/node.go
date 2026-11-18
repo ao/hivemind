@@ -54,12 +54,15 @@ const sweepInterval = 5 * time.Second
 // replicas wait for it. Each node is logged once when it is lost. A node that
 // was up before serve started waits for its first report for the start grace
 // (see store.Waiting), so a server that was down gives the workers that
-// time to reach it. Drains count the start of their moves from started at
-// the earliest (see store.AdvanceDrains).
+// time to reach it, and when none of them has reported by the end of the
+// grace, they go on waiting, which startHoldLog says at error. Drains count
+// the start of their moves from started at the earliest (see
+// store.AdvanceDrains).
 func sweep(ctx context.Context, st *store.Store, log *slog.Logger, every time.Duration, started time.Time) {
 	t := time.NewTicker(every)
 	defer t.Stop()
 	lost := map[string]bool{}
+	var hold startHoldLog
 	for {
 		select {
 		case <-ctx.Done():
@@ -67,6 +70,9 @@ func sweep(ctx context.Context, st *store.Store, log *slog.Logger, every time.Du
 		case <-t.C:
 		}
 		nodes, err := st.ReconcileNodes(ctx)
+		if err == nil {
+			hold.note(ctx, st, log, started)
+		}
 		if err != nil {
 			// Nothing was released, as on a full disk: a loss is logged
 			// when a sweep releases the node.
@@ -111,7 +117,7 @@ func noteWaiting(ctx context.Context, st *store.Store, grace time.Duration, log 
 		}
 	}
 	if waiting > 0 {
-		log.Info("workers that were up before this start wait for their first report; any that has not reported when the start grace ends is lost",
+		log.Info("workers that were up before this start wait for their first report; when the start grace ends, those that have not reported are lost, unless none has, which keeps them all waiting",
 			"waiting", waiting, "start_grace", max(grace, scheduler.DefaultLeaseTimeout))
 	}
 }
