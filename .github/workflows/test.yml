@@ -203,6 +203,17 @@ jobs:
       - uses: actions/checkout@v4
       - run: ./scripts/integration-newaddr.sh
 
+  # Rotations of the cluster CA with a routed app serving through every
+  # router: a whole one, one with a worker offline, one aborted in the renew
+  # phase, and one restored from a backup taken in the renew phase.
+  integration-ca:
+    name: Integration (CA rotation)
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - run: ./scripts/integration-ca.sh
+
   # A cluster of mixed versions: the 2.0.0 release binary as the server and
   # as a worker, and this build as a worker and then as the upgraded server.
   integration-mixed:
