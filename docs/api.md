@@ -155,21 +155,26 @@ The archive holds the CA private key, so the server sends it only over TLS, or t
 `GET /v1/routes` returns the routing table that every router serves, one entry per route, sorted by host and then path:
 
 ```json
-{"routes": [{"host": "www.example.com", "path": "/", "app": "web", "port": 80,
+{"routes": [{"host": "www.example.com", "path": "/", "app": "web", "port": 80, "protocol": "http",
   "endpoints": ["10.0.0.5:32768", "10.0.0.6:32771"]},
- {"host": "www.example.com", "path": "/api", "app": "api", "port": 8080,
-  "endpoints": ["10.0.0.6:32775"]}]}
+ {"host": "www.example.com", "path": "/api", "app": "api", "port": 8080, "protocol": "http",
+  "endpoints": ["10.0.0.6:32775"]},
+ {"host": "www.example.com", "path": "/shop.Cart", "app": "cart", "port": 50051, "protocol": "h2c",
+  "endpoints": ["10.0.0.7:32780"]}]}
 ```
 
-`path` is the route's path prefix, or `/` for a route of the whole host (which the app spec writes with no `path`). `port` is the container port the route names. `endpoints` are the `address:port` of each replica that takes the route's traffic now: its container is Ready, it is the copy the replica (or its rollout surge) is assigned, and its node's lease is current. A route whose app has no such replica has `"endpoints": []`, and a router answers it with `503`. See [routing](routing.md); `hivemind routes` prints this table.
+`path` is the route's path prefix, or `/` for a route of the whole host (which the app spec writes with no `path`). `port` is the container port the route names. `protocol` is what the routers speak to the replicas: `http` (HTTP/1.1) or `h2c` (HTTP/2 without TLS, as gRPC servers speak; see [protocols](routing.md#protocols)). A server of a build before protocols sends none, and its routes are all `http`. `endpoints` are the `address:port` of each replica that takes the route's traffic now: its container is Ready, it is the copy the replica (or its rollout surge) is assigned, and its node's lease is current. A route whose app has no such replica has `"endpoints": []`, and a router answers it with `503`. See [routing](routing.md); `hivemind routes` prints this table.
 
-When a worker's router of a build before path routes has read the table in the last minute, the reply also has `old_routers`:
+When a worker's router of a build before path routes, or before route protocols, has read the table in the last minute, the reply also has `old_routers`:
 
 ```json
-"old_routers": [{"node": "node-3f2a...", "version": "v2.2.0-12-gabc", "hosts": ["www.example.com"]}]
+"old_routers": [{"node": "node-3f2a...", "version": "v2.2.0-12-gabc", "paths": false, "protocols": false,
+  "hosts": ["www.example.com"], "h2c": ["grpc.example.com"]},
+ {"node": "node-7c10...", "version": "v2.2.0-31-gdef", "paths": true, "protocols": false,
+  "hosts": [], "h2c": ["grpc.example.com", "www.example.com/shop.Cart"]}]
 ```
 
-Such a router cannot tell paths apart, so the server gives it each host that has a path route with no endpoints, and `hosts` lists those it answers `503` for; it is `[]` while no host has a path route. `version` is what the node sent, or `""`. The field is absent when there is no such router. See [mixed versions](routing.md#mixed-versions).
+`paths` and `protocols` say whether the router reads path routes and route protocols; one that reads no paths reads no protocols either. A router before path routes cannot tell paths apart, so the server gives it each host that has a path route with no endpoints, and `hosts` lists those it answers `503` for; it is `[]` while no host has a path route, and for a router that reads paths. A router before protocols would speak HTTP/1.1 to an h2c route's replicas, so the server gives it each h2c route with no endpoints, and `h2c` lists those it answers `503` for, as host and path; for a router before paths, these are the hosts with no path route whose route is h2c. `version` is what the node sent, or `""`. The field is absent when there is no such router. A server of a build before protocols sends no `paths`, `protocols` or `h2c`, and lists routers before paths only. See [mixed versions](routing.md#mixed-versions).
 
 ## Registries
 
@@ -303,7 +308,7 @@ While a rollout is in progress, or after it has paused, the app status has a `ro
 
 A paused rollout stays paused until a spec with another template is deployed. Rolling back is deploying the old spec.
 
-`warnings`, a list of sentences, is present when something keeps the app from being served as its spec says. Today that is one case: a router of a build before path routes read the table in the last minute and answers `503` for a host the app routes, because the host has a path route. `hivemind status` prints each as `<app>: warning: ...`.
+`warnings`, a list of sentences, is present when something keeps the app from being served as its spec says. Today there are two cases: a router of a build before path routes read the table in the last minute and answers `503` for a host the app routes, because the host has a path route; or a router of a build before route protocols did, and answers `503` for the app's h2c routes. `hivemind status` prints each as `<app>: warning: ...`.
 
 ### App spec
 
@@ -320,7 +325,7 @@ The spec is the JSON form of the YAML file that `deploy -f` reads. Unknown field
 | `volumes` | list | Up to 16. Each has `name` and an absolute `path` other than `/`. An app with volumes has one replica. The Docker volume is named `hivemind-<app>_<name>` |
 | `resources` | object | `cpu` (0, or 0.01 to 1024) and `memory` (0, or 6Mi to 1Ti). Counted by placement and applied as container limits. 0 means no limit |
 | `health` | object | Exactly one of `http` (`path`, default `/`; `port`), `tcp` (`port`) or `exec` (a list of arguments). Also `interval` (default `10s`), `timeout` (default `2s`), `retries` (1 to 10, default 3) and `start_period` (default 0). Durations are strings such as `5s` |
-| `routes` | list | Up to 16. Each has `host`, an exact DNS name of at least two labels (lowercased, a trailing dot dropped; no wildcard, IP address or underscore), `port`, the container port (1 to 65535), and an optional `path`, a path prefix such as `/api` (see [paths](routing.md#paths) for what it may hold). No `path`, or `/`, is the whole host. A host and path appear once in an app, and belong to one app: a put that claims a host and path another app routes gets `409`, while apps may share a host under different paths. A change to `routes` is a rolling update. See [routing](routing.md) |
+| `routes` | list | Up to 16. Each has `host`, an exact DNS name of at least two labels (lowercased, a trailing dot dropped; no wildcard, IP address or underscore), `port`, the container port (1 to 65535), an optional `path`, a path prefix such as `/api` (see [paths](routing.md#paths) for what it may hold), and an optional `protocol`, `http` (HTTP/1.1, the default) or `h2c` (HTTP/2 without TLS, for gRPC; see [protocols](routing.md#protocols)), in any case. No `path`, or `/`, is the whole host. A host and path appear once in an app, and belong to one app: a put that claims a host and path another app routes gets `409`, while apps may share a host under different paths. A change to `routes` is a rolling update. See [routing](routing.md) |
 
 `memory` takes a whole number of bytes, or a string such as `512Mi` or `2G`. The suffixes `k`, `M`, `G` and `T` are powers of 1000, and `Ki`, `Mi`, `Gi` and `Ti` are powers of 1024.
 

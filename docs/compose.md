@@ -177,9 +177,14 @@ services:
     x-hivemind:
       routes:
         - {host: www.example.com, path: /api, port: 8080}
+  cart:
+    image: ghcr.io/example/cart:1
+    x-hivemind:
+      routes:
+        - {host: www.example.com, path: /shop.Cart, port: 50051, protocol: h2c}
 ```
 
-`routes` is a list of routes as in an app spec: `host`, `port` (the container port) and an optional `path` prefix, checked by the same rules (see [paths](routing.md#paths)). Strings in it are interpolated, so `host: ${HOST}` works. `x-hivemind` has `routes` only, and a route has those three keys only: any other key in either is refused, an `x-` key too, since the mapping is hivemind's and a key it does not read is a mistake. `x-hivemind` at the top level is refused, since routes there would route nothing. A route needs no entry in `ports`: the router reaches the container port on an ephemeral host port.
+`routes` is a list of routes as in an app spec: `host`, `port` (the container port), an optional `path` prefix and an optional `protocol`, `http` (the default) or `h2c` for a gRPC server or another that speaks HTTP/2 without TLS, checked by the same rules (see [paths](routing.md#paths) and [protocols](routing.md#protocols)). Strings in it are interpolated, so `host: ${HOST}` works. `x-hivemind` has `routes` only, and a route has those four keys only: any other key in either is refused, an `x-` key too, since the mapping is hivemind's and a key it does not read is a mistake. `x-hivemind` at the top level is refused, since routes there would route nothing. A route needs no entry in `ports`: the router reaches the container port on an ephemeral host port.
 
 ## Interpolation
 
