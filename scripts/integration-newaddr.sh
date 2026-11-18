@@ -48,9 +48,13 @@
 #     the old store. Both workers refuse it and log that once, the old
 #     server logs that a newer copy of the cluster exists, and for 20 s
 #     nothing moves: the workers' containers are the same, and the old
-#     server has no report from them. The old server stops, the restored
-#     one starts again under the alias, and the workers, never restarted,
-#     report to it. A worker's router serves every request throughout.
+#     server has no report from them. Then the alias leaves the old
+#     container, whose serve keeps running, and the restored server starts
+#     again under it: the workers, never restarted, report to it within
+#     30 s, while the old server still runs, with no second refusal and no
+#     "talks to it again" line, as they never refused the restored
+#     server's address. Then the old server stops. A worker's router serves
+#     every request throughout.
 #
 # By IP address:
 #   - serve runs with --advertise <its IP>, and the workers join that IP.
@@ -420,16 +424,33 @@ by_name() {
 	old_server_returns --advertise "$ALIAS" --cluster-addr "$OLD_IP" --min-ready 5s
 	workers_refuse_old
 
-	# The old server goes, and the restored one comes back under the name:
-	# the workers, never restarted, report to it again.
-	old_server_goes
+	# The name leads to the restored server again while the old one still
+	# runs, as when the record is put right before the old machine is
+	# stopped: the alias leaves the old container, whose serve keeps
+	# running, and the restored server starts again under it. A worker
+	# closes the connection a refused reply came on, so its next ask, at
+	# most 10 s later, resolves the name again: both workers, never
+	# restarted, report to the restored server while the old one runs. In
+	# the fourth soak a worker stayed on the old server, on its pooled
+	# connection, until the old server stopped. The restored server's
+	# address was never refused, so no worker logs that it talks to it
+	# "again", and none logs another refusal.
+	reconnect "$OLD_S" "$OLD_IP"
 	reconnect "$S" "$NEW_IP" --alias "$ALIAS"
 	cl_serve_server
 	wait_for 30 docker exec "$S" hivemind status || cl_fail "the restored server's API did not answer after its restart"
 	SERVED_AT=$(date +%s)
+	wait_for 30 workers_ready ||
+		cl_fail "the workers did not report to the restored server while the old one ran: $(docker exec "$S" hivemind nodes | tr '\n' ';') $W1: $(docker exec "$W1" tail -n 3 /var/log/hivemind.log)"
+	docker exec "$OLD_S" pgrep -x hivemind >/dev/null || cl_fail "the old server stopped before the workers reported to the restored one"
+	cl_note "both workers report to the restored server $(($(date +%s) - SERVED_AT)) s after its API answered, with the old server still up"
 	for c in "$W1" "$W2"; do
-		wait_for 90 talks_again "$c" || cl_fail "$c did not take the restored server again: $(docker exec "$c" tail -n 5 /var/log/hivemind.log)"
+		[ "$(refusals "$c")" = 1 ] || cl_fail "$c logged the refusal $(refusals "$c") times, not once"
+		if since "$c" | grep -q 'this worker talks to it again'; then
+			cl_fail "$c logged that it talks to a server again, though it never refused the restored server's address: $(since "$c" | grep 'talks to it again')"
+		fi
 	done
+	old_server_goes
 	check_back
 	codes=$(loop_stop /tmp/w1b)
 	total=$(wc -l <<<"$codes")

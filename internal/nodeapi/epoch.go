@@ -50,6 +50,10 @@ func FormatEpoch(epoch int64) string { return strconv.FormatInt(epoch, 10) }
 type StaleServerError struct {
 	// Server is the host:port the request went to.
 	Server string
+	// Addr is the address the reply came from, ip:port, the remote end of
+	// its connection: for a Server that is a name, the machine the name
+	// led to. It is Server when that is not known.
+	Addr string
 	// Epoch is the server's epoch, and Seen the highest the worker has
 	// seen.
 	Epoch, Seen int64
@@ -57,7 +61,18 @@ type StaleServerError struct {
 
 func (e *StaleServerError) Error() string {
 	return fmt.Sprintf("the server at %s is from before a restore of this cluster: it is at epoch %d, and this worker has seen epoch %d",
-		e.Server, e.Epoch, e.Seen)
+		e.server(), e.Epoch, e.Seen)
+}
+
+// server is Server, followed by Addr in brackets when that is another
+// string, as for a name: "hivemind.example.internal:4484 (10.0.0.5:4484)".
+func (e *StaleServerError) server() string { return serverAt(e.Server, e.Addr) }
+
+func serverAt(server, addr string) string {
+	if addr == "" || addr == server {
+		return server
+	}
+	return server + " (" + addr + ")"
 }
 
 // Unreachable reports true: the server this worker belongs to did not
@@ -99,8 +114,18 @@ type EpochGuard struct {
 	highest   int64
 	saved     int64
 	saveTried time.Time // the last failed save, zero after a good one
-	stale     *StaleServerError
-	until     time.Time // while stale, no request goes out before it
+	// stale holds each address whose last reply was from a server at a
+	// lower epoch. The refusal is logged when an address joins it, and
+	// "talks to it again" when one leaves it. Two machines can answer one
+	// name, as the old server and the restored one do while a record or a
+	// resolver still leads to the old one: keyed by the name, the state
+	// went from one to the other with each reply, and both lines were
+	// logged again at each switch (the fourth soak).
+	stale map[string]bool
+	// last is the refusal of the last reply, and nil when the last reply
+	// was taken. While it is set, no request goes out before until.
+	last  *StaleServerError
+	until time.Time
 }
 
 // NewEpochGuard returns a guard that has seen highest, as read from the
@@ -137,50 +162,62 @@ func (g *EpochGuard) log() *slog.Logger {
 	return slog.Default()
 }
 
-// hold returns the refusal while the server was found stale less than Retry
-// ago, so the request is not sent. The first request after that is let
-// through to ask again, and the others wait for its answer.
+// hold returns the refusal while the last reply was from a stale server
+// less than Retry ago, so the request is not sent. The first request after
+// that is let through to ask again, and the others wait for its answer.
 func (g *EpochGuard) hold() error {
 	g.mu.Lock()
 	defer g.mu.Unlock()
-	if g.stale == nil {
+	if g.last == nil {
 		return nil
 	}
 	now := g.now()
 	if now.Before(g.until) {
-		return g.stale
+		return g.last
 	}
 	g.until = now.Add(g.retry())
 	return nil
 }
 
-// check takes the EpochHeader of a reply from server. It returns a
-// StaleServerError when the epoch is lower than the highest seen.
-func (g *EpochGuard) check(server, header string) error {
+// check takes the EpochHeader of a reply from server that came from addr,
+// the connection's remote address ("" when not known). It returns a
+// StaleServerError when the epoch is lower than the highest seen. The
+// refusal is logged once for each address, and taking a server again only
+// for an address that was refused: a reply from another machine behind the
+// same name, such as the restored server, is taken without a line.
+func (g *EpochGuard) check(server, addr, header string) error {
+	if addr == "" {
+		addr = server
+	}
+	at := serverAt(server, addr)
 	epoch, ok := ParseEpoch(header)
 	g.mu.Lock()
 	defer g.mu.Unlock()
 	if ok && epoch < g.highest {
-		first := g.stale == nil
-		g.stale = &StaleServerError{Server: server, Epoch: epoch, Seen: g.highest}
+		g.last = &StaleServerError{Server: server, Addr: addr, Epoch: epoch, Seen: g.highest}
 		g.until = g.now().Add(g.retry())
-		if first {
-			g.log().Error("the server at "+server+" is from before a restore of this cluster: a restored copy of the cluster has been seen "+
+		if !g.stale[addr] {
+			if g.stale == nil {
+				g.stale = map[string]bool{}
+			}
+			g.stale[addr] = true
+			g.log().Error("the server at "+at+" is from before a restore of this cluster: a restored copy of the cluster has been seen "+
 				"at a higher epoch. This worker sends the old server nothing, keeps its containers running, and asks again every "+
-				g.retry().String()+", as the restored server may come back at this address. Stop the old server; if this worker should dial "+
-				"another address, stop the worker and move it with hivemind node set-server <address> (docs/backup.md)",
-				"server", server, "server_epoch", epoch, "seen_epoch", g.highest)
+				g.retry().String()+" on a new connection, as the restored server may come back at this address. Stop the old server; "+
+				"if this worker should dial another address, stop the worker and move it with hivemind node set-server <address> (docs/backup.md)",
+				"server", server, "address", addr, "server_epoch", epoch, "seen_epoch", g.highest)
 		}
-		return g.stale
+		return g.last
 	}
-	if g.stale != nil {
-		g.stale = nil
+	g.last = nil
+	if g.stale[addr] {
+		delete(g.stale, addr)
 		if ok {
-			g.log().Info("the server at "+server+" answers at this cluster's epoch now; this worker talks to it again",
-				"server", server, "server_epoch", epoch)
+			g.log().Info("the server at "+at+" answers at this cluster's epoch now; this worker talks to it again",
+				"server", server, "address", addr, "server_epoch", epoch)
 		} else {
-			g.log().Info("the server at "+server+" answers without an epoch now, as a build older than epochs does; this worker talks to it again",
-				"server", server)
+			g.log().Info("the server at "+at+" answers without an epoch now, as a build older than epochs does; this worker talks to it again",
+				"server", server, "address", addr)
 		}
 	}
 	if ok && epoch > g.highest {

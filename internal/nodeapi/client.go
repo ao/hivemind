@@ -168,8 +168,13 @@ func (s *swapTransport) RoundTrip(r *http.Request) (*http.Response, error) {
 	if s.epoch != nil {
 		// Nothing of a stale server's reply is taken: not its version,
 		// its clock, nor that it answered.
-		if err := s.epoch.check(r.URL.Host, resp.Header.Get(EpochHeader)); err != nil {
-			s.dropStale(resp, conn.get())
+		c := conn.get()
+		var addr string
+		if c != nil {
+			addr = c.RemoteAddr().String()
+		}
+		if err := s.epoch.check(r.URL.Host, addr, resp.Header.Get(EpochHeader)); err != nil {
+			s.dropStale(resp, c)
 			return nil, err
 		}
 	}

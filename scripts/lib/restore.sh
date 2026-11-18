@@ -157,12 +157,16 @@ old_server_returns() {
 
 # refusals NODE: how many times the worker on NODE has logged, since its
 # mark, that the server it dials, at SERVER_ADDR, is from before a restore.
-refusals() { since "$1" | grep -c "level=ERROR msg=\"the server at $SERVER_ADDR is from before a restore of this cluster" || true; }
+# For a server that is a name, the line names the address it led to after
+# it, in brackets: "the server at hm-server:4484 (10.0.0.5:4484) is ...".
+refusals() { since "$1" | grep -cE "level=ERROR msg=\"the server at $SERVER_ADDR( \([^)]*\))? is from before a restore of this cluster" || true; }
 refused_old() { [ "$(refusals "$1")" -ge 1 ]; }
 
-# talks_again NODE: the worker on NODE has logged, since its mark, that the
-# server at SERVER_ADDR is at the cluster's epoch again.
-talks_again() { since "$1" | grep -q "the server at $SERVER_ADDR answers at this cluster.s epoch now; this worker talks to it again"; }
+# talks_again NODE: the worker on NODE reports to the restored server, S,
+# again: S has it ready. A worker logs "... this worker talks to it again"
+# only for an address it refused, so a worker whose name leads to another
+# machine again, the restored server, takes it without that line.
+talks_again() { docker exec "$S" hivemind nodes | awk -v id="$(cl_node_id_of "$1")" '$1 == id' | grep -q ' ready '; }
 
 # workers_refuse_old: every worker refuses the old server, and logs it once;
 # the old server says a newer copy of the cluster exists; for 20 s nothing
