@@ -43,6 +43,45 @@ type Route struct {
 	Path string `json:"path,omitempty" yaml:"path,omitempty"`
 	// Port is the container port, as in Port.Container.
 	Port int `json:"port" yaml:"port"`
+	// Protocol is what the routers speak to the replicas: "http", the
+	// default, for HTTP/1.1, or "h2c", for HTTP/2 without TLS, with prior
+	// knowledge, which gRPC needs. Normalize makes "http" empty, so a spec
+	// that writes it has the template of one that does not.
+	Protocol string `json:"protocol,omitempty" yaml:"protocol,omitempty"`
+}
+
+// The protocols a route can speak to its replicas. RouteHTTP is stored as
+// "" (see Route.Protocol).
+const (
+	RouteHTTP = "http"
+	RouteH2C  = "h2c"
+)
+
+// ProtocolName is the route's protocol as people write it: "http" or "h2c".
+func (r Route) ProtocolName() string {
+	if r.Protocol == "" {
+		return RouteHTTP
+	}
+	return r.Protocol
+}
+
+// ValidateRouteProtocol checks a normalised route protocol: "" (HTTP/1.1)
+// or RouteH2C.
+func ValidateRouteProtocol(p string) error {
+	if p == "" || p == RouteH2C {
+		return nil
+	}
+	return fmt.Errorf("protocol %q: use http or h2c", truncHost(p))
+}
+
+// NormalizeRouteProtocol returns a route protocol in the form Validate
+// expects: lower case, and "" for http.
+func NormalizeRouteProtocol(p string) string {
+	p = strings.ToLower(strings.TrimSpace(p))
+	if p == RouteHTTP {
+		return ""
+	}
+	return p
 }
 
 // Port publishes a container port on the node.
@@ -160,6 +199,7 @@ func (a *App) Normalize() {
 	for i := range a.Routes {
 		a.Routes[i].Host = NormalizeHost(a.Routes[i].Host)
 		a.Routes[i].Path = NormalizePath(a.Routes[i].Path)
+		a.Routes[i].Protocol = NormalizeRouteProtocol(a.Routes[i].Protocol)
 	}
 	if len(a.Routes) == 0 {
 		a.Routes = nil
@@ -343,6 +383,9 @@ func (a *App) Validate() error {
 		}
 		if !validPort(r.Port) {
 			add("routes[%d]: port must be a container port between 1 and 65535", i)
+		}
+		if err := ValidateRouteProtocol(r.Protocol); err != nil {
+			add("routes[%d]: %v", i, err)
 		}
 		switch k := r.Key(); {
 		case routes[k] && r.Path == "":

@@ -12,6 +12,7 @@ import (
 func TestHivemindExtensionRoutes(t *testing.T) {
 	file := `x-routes: &api-routes
   - {host: "${HOST}", path: /api/, port: 8080}
+  - {host: "${HOST}", path: /grpc.Echo, port: 50051, protocol: H2C}
 services:
   web:
     image: nginx:1.27
@@ -37,7 +38,7 @@ services:
 	}
 	want := map[string][]spec.Route{
 		"web":   {{Host: "www.example.com", Port: 80}},
-		"api":   {{Host: "www.example.com", Path: "/api", Port: 8080}},
+		"api":   {{Host: "www.example.com", Path: "/api", Port: 8080}, {Host: "www.example.com", Path: "/grpc.Echo", Port: 50051, Protocol: "h2c"}},
 		"plain": nil,
 	}
 	if !reflect.DeepEqual(got, want) {
@@ -54,11 +55,13 @@ func TestHivemindExtensionRefuses(t *testing.T) {
 		{"routes not a list", web("x-hivemind: {routes: {host: a.example.com}}"), "services.web.x-hivemind.routes", "want a list of routes"},
 		{"route not a mapping", web("x-hivemind: {routes: [www.example.com]}"), "services.web.x-hivemind.routes[0]", "want a mapping"},
 		{"unknown route key", web("x-hivemind: {routes: [{host: a.example.com, port: 80, strip_prefix: true}]}"), "services.web.x-hivemind.routes[0].strip_prefix",
-			"not supported: a route has host, port and path only"},
+			"not supported: a route has host, port, path and protocol only"},
 		{"no host", web("x-hivemind: {routes: [{port: 80}]}"), "services.web.x-hivemind.routes[0].host", "required"},
 		{"no port", web("x-hivemind: {routes: [{host: a.example.com}]}"), "services.web.x-hivemind.routes[0].port", "required"},
 		{"port not a number", web("x-hivemind: {routes: [{host: a.example.com, port: http}]}"), "services.web.x-hivemind.routes[0].port", "want a whole number"},
 		{"bad path", web("x-hivemind: {routes: [{host: a.example.com, port: 80, path: /a/../b}]}"), "services.web", "routes[0]: path \"/a/../b\" has a .. segment"},
+		{"bad protocol", web("x-hivemind: {routes: [{host: a.example.com, port: 80, protocol: h2}]}"), "services.web", `routes[0]: protocol "h2": use http or h2c`},
+		{"protocol not a string", web("x-hivemind: {routes: [{host: a.example.com, port: 80, protocol: [h2c]}]}"), "services.web.x-hivemind.routes[0].protocol", "want a string"},
 		{"path twice", web("x-hivemind: {routes: [{host: a.example.com, port: 80, path: /a}, {host: a.example.com, port: 81, path: /a/}]}"), "services.web",
 			`routes[1]: host "a.example.com" with path "/a" listed twice`},
 		{"unset variable", web("x-hivemind: {routes: [{host: '${UNSET}', port: 80}]}"), "services.web.x-hivemind.routes[0].host", "variable UNSET is not set"},

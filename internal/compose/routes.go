@@ -34,22 +34,22 @@ func (c *converter) hivemindExtension(path string, v *node, a *spec.App) {
 	}
 }
 
-// routes reads a list of routes, each a mapping of host, port and an
-// optional path, which the app spec checks.
+// routes reads a list of routes, each a mapping of host, port and the
+// optional path and protocol, which the app spec checks.
 func (c *converter) routes(path string, v *node) []spec.Route {
 	switch v.kind {
 	case nullKind:
 		return nil
 	case seqKind:
 	default:
-		c.add(path, "want a list of routes, each with host, port and, optionally, path")
+		c.add(path, "want a list of routes, each with host, port and, optionally, path and protocol")
 		return nil
 	}
 	var out []spec.Route
 	for i, it := range v.items {
 		p := fmt.Sprintf("%s[%d]", path, i)
 		if it.kind != mapKind {
-			c.add(p, "want a mapping with host, port and, optionally, path")
+			c.add(p, "want a mapping with host, port and, optionally, path and protocol")
 			continue
 		}
 		var r spec.Route
@@ -60,10 +60,12 @@ func (c *converter) routes(path string, v *node) []spec.Route {
 				r.Host, _ = c.str(kp, val)
 			case "path":
 				r.Path, _ = c.str(kp, val)
+			case "protocol":
+				r.Protocol, _ = c.str(kp, val)
 			case "port":
 				r.Port, _ = c.integer(kp, val)
 			default:
-				c.refuse(kp, "a route has host, port and path only")
+				c.refuse(kp, "a route has host, port, path and protocol only")
 			}
 		}
 		for _, k := range []string{"host", "port"} {

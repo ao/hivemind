@@ -82,8 +82,8 @@ func TestRoutesWithPaths(t *testing.T) {
 	if err := a.Validate(); err != nil {
 		t.Fatalf("routes with paths refused: %v", err)
 	}
-	want := []Route{{"www.example.com", "", 80}, {"www.example.com", "/api", 8080}, {"www.example.com", "/admin", 8081},
-		{"api.example.com", "", 8080}}
+	want := []Route{{"www.example.com", "", 80, ""}, {"www.example.com", "/api", 8080, ""}, {"www.example.com", "/admin", 8081, ""},
+		{"api.example.com", "", 8080, ""}}
 	for i, r := range a.Routes {
 		if r != want[i] {
 			t.Errorf("route %d normalised to %+v, want %+v", i, r, want[i])
