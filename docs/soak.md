@@ -913,7 +913,7 @@ Nothing on the old server said that it was the old copy until a worker of the re
 | proot to `whoami:2` | 21.3 s | 0 | 0 | 0 |
 | proot and papi to `whoami:1`, at once | 23.5 s | 0 | 0 | 0 |
 
-Each rollout moved one replica at a time. The longest gap between two successful requests on any stream was 0.11, 0.13 and 0.15 s in the three windows, and the slowest request took 12, 36 and 54 ms. No reply for a path came from the other app while both apps' replicas were being replaced, also when both were replaced at once.
+Each rollout moved one replica at a time, starting the new generation, here on another node, before stopping the old; the probe loop counted those surge copies as replicas on two machines in two probes of each rollout, as it did for the third soak's drain. The longest gap between two successful requests on any stream was 0.11, 0.13 and 0.15 s in the three windows, and the slowest request took 12, 36 and 54 ms. No reply for a path came from the other app while both apps' replicas were being replaced, also when both were replaced at once.
 
 ### Power off a worker
 
