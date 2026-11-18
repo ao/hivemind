@@ -96,6 +96,9 @@ type Route struct {
 	App  string
 	// Port is the container port the route names.
 	Port int
+	// Protocol is what the routers speak to the replicas: "" for HTTP/1.1,
+	// or spec.RouteH2C. It is the app spec's.
+	Protocol string
 	// Endpoints are the address:port of each replica that can take traffic
 	// now, sorted. Empty when none can.
 	Endpoints []string
@@ -107,19 +110,46 @@ func (r Route) Key() spec.RouteKey { return spec.RouteKey{Host: r.Host, Path: r.
 // RouteTable returns the routing table, sorted by host and then path, the
 // whole host first. Every route that a live app has is in it, with or
 // without endpoints.
+//
+// A route's protocol is in its app's spec, not in app_routes, so the store
+// needs no new schema for it, and a build before protocols can still open
+// the store. The spec is decoded only for an app whose stored JSON holds
+// "protocol":"h2c", as encoding/json writes an h2c route; the routes of
+// every other app are HTTP/1.1. A spec that holds that text elsewhere is
+// decoded for nothing.
 func (s *Store) RouteTable(ctx context.Context) ([]Route, error) {
-	rows, err := s.rdb.QueryContext(ctx, `SELECT h.host, h.path, h.app, h.port FROM app_routes h JOIN apps a ON a.name = h.app
+	rows, err := s.rdb.QueryContext(ctx, `SELECT h.host, h.path, h.app, h.port,
+		CASE WHEN instr(a.spec, '"protocol":"h2c"') > 0 THEN a.spec ELSE '' END
+		FROM app_routes h JOIN apps a ON a.name = h.app
 		WHERE a.deleted = 0 ORDER BY h.host, h.path`)
 	if err != nil {
 		return nil, err
 	}
 	var out []Route
 	apps := map[string]bool{}
+	protocols := map[string]map[spec.RouteKey]string{}
 	for rows.Next() {
 		var r Route
-		if err := rows.Scan(&r.Host, &r.Path, &r.App, &r.Port); err != nil {
+		var specJSON string
+		if err := rows.Scan(&r.Host, &r.Path, &r.App, &r.Port, &specJSON); err != nil {
 			rows.Close()
 			return nil, err
+		}
+		if specJSON != "" {
+			byKey, ok := protocols[r.App]
+			if !ok {
+				var a spec.App
+				if err := json.Unmarshal([]byte(specJSON), &a); err != nil {
+					rows.Close()
+					return nil, fmt.Errorf("app %s: stored spec: %w", r.App, err)
+				}
+				byKey = map[spec.RouteKey]string{}
+				for _, sr := range a.Routes {
+					byKey[sr.Key()] = sr.Protocol
+				}
+				protocols[r.App] = byKey
+			}
+			r.Protocol = byKey[r.Key()]
 		}
 		out = append(out, r)
 		apps[r.App] = true

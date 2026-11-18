@@ -54,12 +54,14 @@ func (c *Client) LocalAddress(ctx context.Context, nodeID string) (string, error
 	return ip.Unmap().String(), nil
 }
 
-// Routes returns the routing table, with path routes: the router of this
-// build reads them. An older server ignores the parameter and sends whole
+// Routes returns the routing table, with path routes and their protocols:
+// the router of this build reads both. An older server ignores the
+// parameters it does not know and sends routes without protocols, or whole
 // host routes only, which this build reads as well.
 func (c *Client) Routes(ctx context.Context, nodeID string) ([]Route, error) {
 	var t RouteTable
-	if err := c.do(ctx, http.MethodGet, RoutesPath(nodeID)+"?"+RoutesPathsParam+"=1", nil, &t); err != nil {
+	q := "?" + RoutesPathsParam + "=1&" + RoutesProtocolsParam + "=1"
+	if err := c.do(ctx, http.MethodGet, RoutesPath(nodeID)+q, nil, &t); err != nil {
 		return nil, err
 	}
 	if err := t.Validate(); err != nil {
@@ -74,55 +76,78 @@ func (c *Client) Routes(ctx context.Context, nodeID string) ([]Route, error) {
 const RouteReaderMaxAge = time.Minute
 
 // RouteReaders keeps, on the server, how each worker's router last read the
-// routing table: with or without paths, and its version. A router of a
-// build before path routes reads it without, and answers 503 for the hosts
-// that have path routes (see HostTableFromStore); the server warns about
-// such routers in its log, in GET /v1/routes and in the status of the apps
-// that have path routes. It is safe for concurrent use; a nil one keeps
-// nothing.
+// routing table: with or without paths and protocols, and its version. A
+// router of a build before path routes reads it without either, and answers
+// 503 for the hosts that have path routes, and for those whose route is h2c
+// (see HostTableFromStore); one of a build with paths and before protocols
+// answers 503 for the h2c routes (RouteTableFromStore). The server warns
+// about such routers in its log, in GET /v1/routes and in the status of the
+// apps whose routes they hold back. It is safe for concurrent use; a nil one
+// keeps nothing.
 type RouteReaders struct {
 	mu sync.Mutex
 	m  map[string]routeRead
 }
 
-type routeRead struct {
-	version string
-	paths   bool
-	held    []string
-	at      time.Time
+// RouteRead is how a router read the table once.
+type RouteRead struct {
+	// Version is the version its node sent with the read, or "" for none.
+	Version string
+	// Paths and Protocols say whether it asked for path routes and for
+	// route protocols.
+	Paths, Protocols bool
+	// Held are the hosts it was given with no endpoints because they have
+	// path routes, and H2C the routes, as host and path, given none
+	// because they are h2c routes.
+	Held, H2C []string
 }
 
-// OldRouter is a router that read the routing table without paths.
+type routeRead struct {
+	RouteRead
+	at time.Time
+}
+
+// OldRouter is a router that read the routing table without paths or
+// without protocols.
 type OldRouter struct {
 	Node string `json:"node"`
 	// Version is the version its node sent with the read, or "" for none.
 	Version string `json:"version"`
+	// Paths and Protocols say whether it reads path routes and route
+	// protocols. A router that reads no paths reads no protocols either.
+	Paths     bool `json:"paths"`
+	Protocols bool `json:"protocols"`
 	// Hosts are the hosts it was given with no endpoints because they have
-	// path routes, and answers 503 for. Empty while no host has one.
+	// path routes, and answers 503 for. Empty while no host has one, and
+	// for a router that reads paths.
 	Hosts []string `json:"hosts"`
+	// H2C are the routes, as host and path (www.example.com/api), that it
+	// was given with no endpoints because they are h2c routes, and answers
+	// 503 for. Empty while there are none.
+	H2C []string `json:"h2c"`
 }
 
 // NewRouteReaders returns an empty holder.
 func NewRouteReaders() *RouteReaders { return &RouteReaders{m: map[string]routeRead{}} }
 
-// Seen records a read of the table by node's router at at: with paths, or
-// without and with the hosts held from it. It reports whether the read
-// differs from the node's last one, in version, paths or held hosts, so the
-// caller logs a change once.
-func (rr *RouteReaders) Seen(node, version string, paths bool, held []string, at time.Time) bool {
+// Seen records node's router's read r at at. It reports whether the read
+// differs from the node's last one, in version, in what it asked for or in
+// what it was held back from, so the caller logs a change once.
+func (rr *RouteReaders) Seen(node string, r RouteRead, at time.Time) bool {
 	if rr == nil {
 		return false
 	}
 	rr.mu.Lock()
 	defer rr.mu.Unlock()
 	last, ok := rr.m[node]
-	rr.m[node] = routeRead{version: version, paths: paths, held: held, at: at}
-	return !ok || last.version != version || last.paths != paths || !slices.Equal(last.held, held)
+	rr.m[node] = routeRead{RouteRead: r, at: at}
+	return !ok || last.Version != r.Version || last.Paths != r.Paths || last.Protocols != r.Protocols ||
+		!slices.Equal(last.Held, r.Held) || !slices.Equal(last.H2C, r.H2C)
 }
 
-// Old returns the routers that read the table without paths within
-// RouteReaderMaxAge before now, sorted by node, and forgets the reads
-// older than that.
+// Old returns the routers that read the table without paths or without
+// protocols within RouteReaderMaxAge before now, sorted by node, and
+// forgets the reads older than that.
 func (rr *RouteReaders) Old(now time.Time) []OldRouter {
 	if rr == nil {
 		return nil
@@ -135,16 +160,21 @@ func (rr *RouteReaders) Old(now time.Time) []OldRouter {
 			delete(rr.m, node)
 			continue
 		}
-		if !r.paths {
-			hosts := slices.Clone(r.held)
-			if hosts == nil {
-				hosts = []string{}
-			}
-			out = append(out, OldRouter{Node: node, Version: r.version, Hosts: hosts})
+		if !r.Paths || !r.Protocols {
+			out = append(out, OldRouter{Node: node, Version: r.Version, Paths: r.Paths, Protocols: r.Protocols,
+				Hosts: orEmpty(r.Held), H2C: orEmpty(r.H2C)})
 		}
 	}
 	slices.SortFunc(out, func(a, b OldRouter) int { return strings.Compare(a.Node, b.Node) })
 	return out
+}
+
+// orEmpty is a copy of s, or an empty list for none.
+func orEmpty(s []string) []string {
+	if s == nil {
+		return []string{}
+	}
+	return slices.Clone(s)
 }
 
 // TLS returns the node's view of the shared TLS storage on the server. It

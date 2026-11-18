@@ -61,8 +61,8 @@ var storeTable = []store.Route{
 }
 
 func TestRouteTableWithPaths(t *testing.T) {
-	rt := RouteTableFromStore(storeTable)
-	if err := rt.Validate(); err != nil {
+	rt, held := RouteTableFromStore(storeTable, true)
+	if err := rt.Validate(); err != nil || held != nil {
 		t.Fatal(err)
 	}
 	if len(rt.Routes) != 5 || rt.Routes[3].Path != "/api" || rt.Routes[4].Endpoints == nil {
@@ -104,9 +104,9 @@ func TestRouteTableWithPaths(t *testing.T) {
 // The table for a router before paths decodes as that router decodes it,
 // and holds back every host with a path route.
 func TestHostTableForARouterBeforePaths(t *testing.T) {
-	ht, held := HostTableFromStore(storeTable)
-	if !slices.Equal(held, []string{"api.example.com", "www.example.com"}) {
-		t.Fatalf("held %v", held)
+	ht, held, h2c := HostTableFromStore(storeTable)
+	if !slices.Equal(held, []string{"api.example.com", "www.example.com"}) || h2c != nil {
+		t.Fatalf("held %v, h2c %v", held, h2c)
 	}
 	b, _ := json.Marshal(ht)
 	old, err := decodeAsOldRouter(b)
@@ -128,12 +128,12 @@ func TestHostTableForARouterBeforePaths(t *testing.T) {
 	}
 	// A table without paths is given as it is.
 	plain := []store.Route{{Host: "only.example.com", App: "only", Port: 80, Endpoints: []string{"10.0.0.6:40000"}}}
-	ht, held = HostTableFromStore(plain)
-	if len(held) != 0 || len(ht.Routes) != 1 || !slices.Equal(ht.Routes[0].Endpoints, plain[0].Endpoints) {
+	ht, held, h2c = HostTableFromStore(plain)
+	if len(held) != 0 || len(h2c) != 0 || len(ht.Routes) != 1 || !slices.Equal(ht.Routes[0].Endpoints, plain[0].Endpoints) {
 		t.Fatalf("a table without paths: %+v, %v", ht, held)
 	}
-	if b, _ := json.Marshal(RouteTableFromStore(plain)); !bytes.Equal(b, mustJSON(t, ht)) {
-		t.Fatalf("without paths, the two tables differ: %s", b)
+	if rt, _ := RouteTableFromStore(plain, false); !bytes.Equal(mustJSON(t, rt), mustJSON(t, ht)) {
+		t.Fatalf("without paths, the two tables differ: %s", mustJSON(t, rt))
 	}
 }
 
@@ -148,30 +148,47 @@ func mustJSON(t *testing.T, v any) []byte {
 
 func TestRouteReaders(t *testing.T) {
 	var none *RouteReaders
-	if none.Seen("node-a", "v", false, nil, time.Now()) || none.Old(time.Now()) != nil {
+	if none.Seen("node-a", RouteRead{Version: "v"}, time.Now()) || none.Old(time.Now()) != nil {
 		t.Fatal("a nil RouteReaders keeps something")
 	}
 	rr := NewRouteReaders()
 	t0 := time.Unix(1000, 0)
-	if !rr.Seen("node-b", "v2.2.0", false, []string{"www.example.com"}, t0) {
+	beforePaths := RouteRead{Version: "v2.2.0", Held: []string{"www.example.com"}}
+	if !rr.Seen("node-b", beforePaths, t0) {
 		t.Fatal("a first read is not a change")
 	}
-	if rr.Seen("node-b", "v2.2.0", false, []string{"www.example.com"}, t0.Add(time.Second)) {
+	if rr.Seen("node-b", beforePaths, t0.Add(time.Second)) {
 		t.Fatal("the same read again is a change")
 	}
-	if !rr.Seen("node-b", "v2.2.0", false, []string{"api.example.com", "www.example.com"}, t0.Add(2*time.Second)) {
+	if !rr.Seen("node-b", RouteRead{Version: "v2.2.0", Held: []string{"api.example.com", "www.example.com"}}, t0.Add(2*time.Second)) {
 		t.Fatal("new held hosts are not a change")
 	}
-	rr.Seen("node-a", "", false, nil, t0)
-	rr.Seen("node-c", "v2.3.0", true, nil, t0)
+	rr.Seen("node-a", RouteRead{}, t0)
+	rr.Seen("node-c", RouteRead{Version: "v2.3.0", Paths: true, Protocols: true}, t0)
+	rr.Seen("node-d", RouteRead{Version: "v2.2.0-paths", Paths: true}, t0)
 	old := rr.Old(t0.Add(30 * time.Second))
-	if len(old) != 2 || old[0].Node != "node-a" || old[0].Hosts == nil || old[1].Node != "node-b" ||
-		!slices.Equal(old[1].Hosts, []string{"api.example.com", "www.example.com"}) || old[1].Version != "v2.2.0" {
+	if len(old) != 3 || old[0].Node != "node-a" || old[0].Hosts == nil || old[0].H2C == nil || old[1].Node != "node-b" ||
+		!slices.Equal(old[1].Hosts, []string{"api.example.com", "www.example.com"}) || old[1].Version != "v2.2.0" || old[1].Paths ||
+		old[2].Node != "node-d" || !old[2].Paths || old[2].Protocols || len(old[2].H2C) != 0 {
 		t.Fatalf("old routers %+v", old)
 	}
-	// An upgraded router reads paths, and is no longer old.
-	if !rr.Seen("node-b", "v2.3.0", true, nil, t0.Add(40*time.Second)) {
+	// A router before protocols that is held back from an h2c route: a
+	// change, and listed with the route.
+	if !rr.Seen("node-d", RouteRead{Version: "v2.2.0-paths", Paths: true, H2C: []string{"grpc.example.com"}}, t0.Add(31*time.Second)) {
+		t.Fatal("a new held h2c route is not a change")
+	}
+	if old := rr.Old(t0.Add(31 * time.Second)); len(old) != 3 || !slices.Equal(old[2].H2C, []string{"grpc.example.com"}) {
+		t.Fatalf("old routers %+v", old)
+	}
+	// An upgraded router reads paths and protocols, and is no longer old.
+	if !rr.Seen("node-b", RouteRead{Version: "v2.3.0", Paths: true, Protocols: true}, t0.Add(40*time.Second)) {
 		t.Fatal("reading paths is not a change")
+	}
+	if !rr.Seen("node-d", RouteRead{Version: "v2.3.0", Paths: true, Protocols: true}, t0.Add(40*time.Second)) {
+		t.Fatal("reading protocols is not a change")
+	}
+	if old := rr.Old(t0.Add(40 * time.Second)); len(old) != 1 || old[0].Node != "node-a" {
+		t.Fatalf("old routers after the upgrades: %+v", old)
 	}
 	// A router that stopped reading is forgotten after RouteReaderMaxAge.
 	if old := rr.Old(t0.Add(40*time.Second + RouteReaderMaxAge)); len(old) != 0 {

@@ -96,8 +96,8 @@ func TestRoutesCommandAndPathRoutes(t *testing.T) {
 
 	// A router of a build before path routes read the table: routes warns
 	// on standard error, and so does the status of each app on its host.
-	readers.Seen("node-w", "v2.2.0-old", false, []string{"www.example.com"}, time.Now())
-	readers.Seen("node-x", "", false, nil, time.Now())
+	readers.Seen("node-w", nodeapi.RouteRead{Version: "v2.2.0-old", Held: []string{"www.example.com"}}, time.Now())
+	readers.Seen("node-x", nodeapi.RouteRead{}, time.Now())
 	out, stderr, err = run(t, "", "routes")
 	if err != nil || len(tableRows(t, out)) != 3 {
 		t.Fatalf("routes: %q, %v", out, err)
@@ -138,8 +138,8 @@ func TestRoutesCommandAndPathRoutes(t *testing.T) {
 
 	// The api app's route of a whole host of its own is not held back by
 	// the old router; once that router reads paths, nothing is.
-	readers.Seen("node-w", "v2.2.1", true, nil, time.Now())
-	readers.Seen("node-x", "v2.2.1", true, nil, time.Now())
+	readers.Seen("node-w", nodeapi.RouteRead{Version: "v2.2.1", Paths: true, Protocols: true}, time.Now())
+	readers.Seen("node-x", nodeapi.RouteRead{Version: "v2.2.1", Paths: true, Protocols: true}, time.Now())
 	out, _, err = run(t, "", "status")
 	if err != nil || strings.Contains(out, "warning") {
 		t.Fatalf("status after the upgrade: %s, %v", out, err)
@@ -169,5 +169,83 @@ func TestDeployWithAPathShowsIt(t *testing.T) {
 	out, _, err := run(t, f, "deploy", "-f", "-")
 	if err != nil || !strings.Contains(out, "unchanged") {
 		t.Fatalf("deploy again: %q, %v", out, err)
+	}
+}
+
+// hivemind routes shows each route's protocol, and names the routers of a
+// build before route protocols, which answer 503 for the h2c routes; so
+// does the status of each app with one. A protocol hivemind does not have
+// is refused when the app is deployed, and http is the default.
+func TestRoutesCommandAndProtocols(t *testing.T) {
+	_, readers := routesAPI(t)
+	grpc := "name: grpc\nimage: example/grpc:1\nroutes:\n  - {host: grpc.example.com, port: 50051, protocol: h2c}\n  - {host: www.example.com, path: /echo.Echo, port: 50051, protocol: H2C}\n"
+	web := "name: web\nimage: nginx:alpine\nroutes:\n  - {host: www.example.com, port: 80, protocol: http}\n"
+	for _, f := range []string{grpc, web} {
+		if _, _, err := run(t, f, "deploy", "-f", "-"); err != nil {
+			t.Fatalf("deploy: %v\n%s", err, f)
+		}
+	}
+	bad := "name: bad\nimage: nginx:alpine\nroutes:\n  - {host: bad.example.com, port: 80, protocol: grpc}\n"
+	if _, _, err := run(t, bad, "deploy", "-f", "-"); err == nil || !strings.Contains(err.Error(), `routes[0]: protocol "grpc": use http or h2c`) {
+		t.Fatalf("a bad protocol: %v", err)
+	}
+	// http is the default, so writing it changes nothing.
+	if out, _, err := run(t, strings.Replace(web, ", protocol: http", "", 1), "deploy", "-f", "-"); err != nil || !strings.Contains(out, "unchanged") {
+		t.Fatalf("web without protocol: http: %q, %v", out, err)
+	}
+
+	out, stderr, err := run(t, "", "routes")
+	if err != nil || stderr != "" {
+		t.Fatalf("routes: %v, %s", err, stderr)
+	}
+	rows := tableRows(t, out)
+	for _, want := range []map[string]string{
+		{"HOST": "grpc.example.com", "PATH": "/", "APP": "grpc", "PORT": "50051", "PROTOCOL": "h2c", "ENDPOINTS": "-"},
+		{"HOST": "www.example.com", "PATH": "/", "APP": "web", "PORT": "80", "PROTOCOL": "http", "ENDPOINTS": "-"},
+		{"HOST": "www.example.com", "PATH": "/echo.Echo", "APP": "grpc", "PORT": "50051", "PROTOCOL": "h2c", "ENDPOINTS": "-"},
+	} {
+		if !hasRow(rows, want) {
+			t.Errorf("no row %v in:\n%s", want, out)
+		}
+	}
+	out, _, err = run(t, "", "routes", "--json")
+	var list server.RouteList
+	if err != nil || json.Unmarshal([]byte(out), &list) != nil || len(list.Routes) != 3 ||
+		list.Routes[0].Protocol != "h2c" || list.Routes[1].Protocol != "http" {
+		t.Fatalf("routes --json: %s, %v", out, err)
+	}
+
+	readers.Seen("node-p", nodeapi.RouteRead{Version: "v2.2.0-paths", Paths: true, H2C: []string{"grpc.example.com", "www.example.com/echo.Echo"}}, time.Now())
+	readers.Seen("node-q", nodeapi.RouteRead{Version: "v2.2.0-paths", Paths: true}, time.Now())
+	readers.Seen("node-r", nodeapi.RouteRead{Version: "v2.2.0-old", Held: []string{"www.example.com"}, H2C: []string{"grpc.example.com"}}, time.Now())
+	_, stderr, err = run(t, "", "routes")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{
+		"warning: the router on node node-p (v2.2.0-paths) is of a build before route protocols, and answers 503 for the h2c routes grpc.example.com, www.example.com/echo.Echo; upgrade the node",
+		"note: the router on node node-q (v2.2.0-paths) is of a build before route protocols; it would answer 503 for an h2c route",
+		"warning: the router on node node-r (v2.2.0-old) is of a build before path routes, and answers 503 for www.example.com; upgrade the node",
+		"warning: the router on node node-r (v2.2.0-old) is of a build before route protocols, and answers 503 for the h2c routes grpc.example.com; upgrade the node",
+	} {
+		if !strings.Contains(stderr, want) {
+			t.Errorf("routes stderr lacks %q:\n%s", want, stderr)
+		}
+	}
+	out, _, err = run(t, "", "status")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{
+		"grpc: warning: the router on node node-p (v2.2.0-paths) is of a build before route protocols, and answers 503 for the h2c routes grpc.example.com, www.example.com/echo.Echo; upgrade the node",
+		"grpc: warning: the router on node node-r (v2.2.0-old) is of a build before route protocols, and answers 503 for the h2c route grpc.example.com; upgrade the node",
+		"web: warning: the router on node node-r (v2.2.0-old) is of a build before path routes, and answers 503 for www.example.com, which has path routes",
+	} {
+		if !strings.Contains(out, want) {
+			t.Errorf("status lacks %q:\n%s", want, out)
+		}
+	}
+	if strings.Contains(out, "node-q") || strings.Contains(out, "web: warning: the router on node node-p") {
+		t.Errorf("status warns about a router that holds back none of the app's routes:\n%s", out)
 	}
 }

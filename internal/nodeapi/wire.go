@@ -130,18 +130,21 @@ type RoutePort struct {
 }
 
 // Route is one route of the routing table, a whole host or a path prefix of
-// one, and the address:port of each replica that takes its traffic now.
-// Path is "" for the whole host, and left out then, so the entry of a whole
-// host route reads as it did before paths existed.
+// one, the protocol its replicas speak, and the address:port of each
+// replica that takes its traffic now. Path is "" for the whole host, and
+// Protocol "" for HTTP/1.1; each is left out then, so the entry of a whole
+// host route to HTTP/1.1 replicas reads as it did before paths existed.
 type Route struct {
 	Host      string   `json:"host"`
 	Path      string   `json:"path,omitempty"`
+	Protocol  string   `json:"protocol,omitempty"`
 	Endpoints []string `json:"endpoints"`
 }
 
 // RouteTable is the reply to GET routes. A router that asks for paths, with
-// RoutesPathsParam, gets one entry per route (RouteTableFromStore); any
-// other router gets one per host and no paths (HostTableFromStore).
+// RoutesPathsParam, gets one entry per route (RouteTableFromStore), with
+// protocols if it asks for them too (RoutesProtocolsParam); any other
+// router gets one per host and no paths (HostTableFromStore).
 type RouteTable struct {
 	Routes []Route `json:"routes"`
 }
@@ -152,6 +155,14 @@ type RouteTable struct {
 // reply is decoded: a path field would make it refuse the whole table, and
 // two entries for one host as well.
 const RoutesPathsParam = "paths"
+
+// RoutesProtocolsParam is the query parameter, with the value "1", with
+// which a router that asks for paths asks for route protocols as well. A
+// router of a build before protocols sends none, and would refuse the whole
+// table for a protocol field, so it gets none, and an h2c route has no
+// endpoints in its table: it would speak HTTP/1.1 to replicas that may speak
+// only HTTP/2, so it answers 503 for the route instead.
+const RoutesProtocolsParam = "protocols"
 
 // TLSRequest is the body of every TLS storage operation. Each one reads the
 // fields it needs: Key for the storage methods (a prefix for list), Value
@@ -356,7 +367,7 @@ func ValidateNodeAddress(s string) error {
 }
 
 // Validate checks the routing table a server sent: each host and path as
-// spec allows them, and no route twice.
+// spec allows them, each protocol one this build has, and no route twice.
 func (t RouteTable) Validate() error {
 	if len(t.Routes) > maxRoutes {
 		return fmt.Errorf("%w: more than %d routes", ErrInvalid, maxRoutes)
@@ -370,6 +381,9 @@ func (t RouteTable) Validate() error {
 			return fmt.Errorf("%w: route %s: %v", ErrInvalid, r.Host, err)
 		}
 		k := spec.RouteKey{Host: r.Host, Path: r.Path}
+		if err := spec.ValidateRouteProtocol(r.Protocol); err != nil {
+			return fmt.Errorf("%w: route %s: %v", ErrInvalid, k, err)
+		}
 		if seen[k] {
 			return fmt.Errorf("%w: route %s is listed twice", ErrInvalid, k)
 		}
@@ -529,17 +543,36 @@ func (a Assignment) ToStore() store.Assignment {
 // FromStore converts store assignments to the wire form. With withAuth
 // false, which is what a node that did not ask for credentials gets, no
 // assignment carries one.
+//
+// No assignment carries a route's protocol. The agent does not use it: it
+// publishes a route's port the same way whatever the protocol, which only
+// the routers read, from the routing table. A worker of a build before
+// protocols decodes assignments strictly, and would refuse the whole list
+// for a protocol field.
 func FromStore(as []store.Assignment, withAuth bool) []Assignment {
 	out := make([]Assignment, 0, len(as))
 	for _, a := range as {
 		w := Assignment{App: a.App, Index: a.Index, NodeID: a.NodeID, Generation: a.Generation,
-			Desired: string(a.Desired), PendingReason: a.PendingReason, Spec: a.Spec}
+			Desired: string(a.Desired), PendingReason: a.PendingReason, Spec: withoutProtocols(a.Spec)}
 		if withAuth && a.Auth != nil {
 			w.RegistryAuth = &RegistryAuth{Host: a.Auth.Host, Username: a.Auth.Username, Password: a.Auth.Password}
 		}
 		out = append(out, w)
 	}
 	return out
+}
+
+// withoutProtocols returns a with no protocol on its routes, leaving a's own
+// routes as they are.
+func withoutProtocols(a spec.App) spec.App {
+	if !slices.ContainsFunc(a.Routes, func(r spec.Route) bool { return r.Protocol != "" }) {
+		return a
+	}
+	a.Routes = slices.Clone(a.Routes)
+	for i := range a.Routes {
+		a.Routes[i].Protocol = ""
+	}
+	return a
 }
 
 // ToStore converts the report to the store's statuses. The caller sets the
@@ -579,28 +612,43 @@ func StatusFromStore(sts []store.Status) StatusReport {
 }
 
 // RouteTableFromStore converts the store's routing table to the wire form
-// for a router that reads paths: one entry per route.
-func RouteTableFromStore(rt []store.Route) RouteTable {
-	out := RouteTable{Routes: make([]Route, 0, len(rt))}
+// for a router that reads paths: one entry per route. With protocols, each
+// entry has its route's protocol. Without, which is what a router of a
+// build before protocols gets, no entry has one, and an h2c route has no
+// endpoints: such a router would speak HTTP/1.1 to replicas that may speak
+// only HTTP/2, and it answers 503 for the route instead. held lists, sorted,
+// the routes given no endpoints for that reason, as host and path.
+func RouteTableFromStore(rt []store.Route, protocols bool) (t RouteTable, held []string) {
+	t = RouteTable{Routes: make([]Route, 0, len(rt))}
 	for _, r := range rt {
-		eps := r.Endpoints
-		if eps == nil {
-			eps = []string{}
+		w := Route{Host: r.Host, Path: r.Path, Endpoints: r.Endpoints}
+		switch {
+		case protocols:
+			w.Protocol = r.Protocol
+		case r.Protocol != "":
+			w.Endpoints = nil
+			held = append(held, r.Key().String())
 		}
-		out.Routes = append(out.Routes, Route{Host: r.Host, Path: r.Path, Endpoints: eps})
+		if w.Endpoints == nil {
+			w.Endpoints = []string{}
+		}
+		t.Routes = append(t.Routes, w)
 	}
-	return out
+	slices.Sort(held)
+	return t, held
 }
 
 // HostTableFromStore converts the store's routing table to the form a
 // router of a build before path routes reads: one entry per host, and no
-// paths. Such a router would send every request for a host to one app, so a
-// host with a path route is listed with no endpoints, and the router
-// answers 503 for it rather than send one app's requests, with their
+// paths or protocols. Such a router would send every request for a host to
+// one app, so a host with a path route is listed with no endpoints, and the
+// router answers 503 for it rather than send one app's requests, with their
 // cookies and credentials, to another. It keeps the host's certificate.
-// Hosts without path routes are as they were. held lists, sorted, the hosts
-// given no endpoints for that reason.
-func HostTableFromStore(rt []store.Route) (t RouteTable, held []string) {
+// held lists, sorted, the hosts given no endpoints for that reason. A host
+// whose one route is an h2c route is listed with no endpoints too, as
+// RouteTableFromStore lists it for a router before protocols, and is in h2c.
+// Other hosts are as they were.
+func HostTableFromStore(rt []store.Route) (t RouteTable, held, h2c []string) {
 	withPaths := map[string]bool{}
 	for _, r := range rt {
 		if r.Path != "" {
@@ -616,6 +664,9 @@ func HostTableFromStore(rt []store.Route) (t RouteTable, held []string) {
 				t.Routes = append(t.Routes, Route{Host: r.Host, Endpoints: []string{}})
 				held = append(held, r.Host)
 			}
+		case r.Protocol != "":
+			t.Routes = append(t.Routes, Route{Host: r.Host, Endpoints: []string{}})
+			h2c = append(h2c, r.Host)
 		case r.Path == "":
 			eps := r.Endpoints
 			if eps == nil {
@@ -626,7 +677,8 @@ func HostTableFromStore(rt []store.Route) (t RouteTable, held []string) {
 		listed[r.Host] = true
 	}
 	slices.Sort(held)
-	return t, held
+	slices.Sort(h2c)
+	return t, held, h2c
 }
 
 func hasControl(s string) bool {

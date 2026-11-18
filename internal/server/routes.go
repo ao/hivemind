@@ -19,6 +19,10 @@ type RouteView struct {
 	App  string `json:"app"`
 	// Port is the container port the route names.
 	Port int `json:"port"`
+	// Protocol is what the routers speak to the replicas: "http"
+	// (HTTP/1.1) or "h2c" (HTTP/2 without TLS). A server of a build
+	// before protocols sends none; its routes are all http.
+	Protocol string `json:"protocol"`
 	// Endpoints are the address:port of each replica that takes the
 	// route's traffic now: Ready, assigned, and on a node with a current
 	// lease.
@@ -29,9 +33,10 @@ type RouteView struct {
 type RouteList struct {
 	Routes []RouteView `json:"routes"`
 	// OldRouters are the workers' routers that read the table in the last
-	// minute without paths, being of a build before path routes. Each
-	// answers 503 for the hosts it lists, which have path routes. Absent
-	// when there are none.
+	// minute without paths, being of a build before path routes, or
+	// without protocols, being of a build before route protocols. Each
+	// answers 503 for the hosts and routes it lists, which have path
+	// routes or are h2c routes. Absent when there are none.
 	OldRouters []nodeapi.OldRouter `json:"old_routers,omitempty"`
 }
 
@@ -48,7 +53,8 @@ func (s *Server) listRoutes(w http.ResponseWriter, r *http.Request) {
 		if eps == nil {
 			eps = []string{}
 		}
-		out.Routes = append(out.Routes, RouteView{Host: x.Host, Path: cmpOr(x.Path, "/"), App: x.App, Port: x.Port, Endpoints: eps})
+		out.Routes = append(out.Routes, RouteView{Host: x.Host, Path: cmpOr(x.Path, "/"), App: x.App, Port: x.Port,
+			Protocol: cmpOr(x.Protocol, spec.RouteHTTP), Endpoints: eps})
 	}
 	writeJSON(w, http.StatusOK, out)
 }
@@ -61,29 +67,51 @@ func cmpOr(s, def string) string {
 }
 
 // routeWarnings says, for an app with routes, which routers answer 503 for
-// its hosts because they cannot read the path routes those hosts have.
+// its hosts because they cannot read the path routes those hosts have, and
+// for its h2c routes because they cannot read route protocols.
 func routeWarnings(a spec.App, old []nodeapi.OldRouter) []string {
 	if len(a.Routes) == 0 || len(old) == 0 {
 		return nil
 	}
 	hosts := a.RouteHosts()
+	var keys []string
+	for _, r := range a.Routes {
+		keys = append(keys, r.Key().String())
+	}
 	var out []string
 	for _, o := range old {
-		var held []string
-		for _, h := range o.Hosts {
-			if slices.Contains(hosts, h) {
-				held = append(held, h)
+		version := cmpOr(o.Version, "no version")
+		if held := within(o.Hosts, hosts); len(held) > 0 {
+			have := "has"
+			if len(held) > 1 {
+				have = "have"
 			}
+			out = append(out, fmt.Sprintf("the router on node %s (%s) is of a build before path routes, and answers 503 for %s, which %s path routes; upgrade the node",
+				o.Node, version, strings.Join(held, ", "), have))
 		}
-		if len(held) == 0 {
-			continue
+		if held := within(o.H2C, keys); len(held) > 0 {
+			out = append(out, fmt.Sprintf("the router on node %s (%s) is of a build before route protocols, and answers 503 for the h2c %s %s; upgrade the node",
+				o.Node, version, plural(len(held), "route", "routes"), strings.Join(held, ", ")))
 		}
-		have := "has"
-		if len(held) > 1 {
-			have = "have"
-		}
-		out = append(out, fmt.Sprintf("the router on node %s (%s) is of a build before path routes, and answers 503 for %s, which %s path routes; upgrade the node",
-			o.Node, cmpOr(o.Version, "no version"), strings.Join(held, ", "), have))
 	}
 	return out
+}
+
+// within returns the items of list that are in set, in list's order.
+func within(list, set []string) []string {
+	var out []string
+	for _, x := range list {
+		if slices.Contains(set, x) {
+			out = append(out, x)
+		}
+	}
+	return out
+}
+
+// plural is one when n is 1, and many otherwise.
+func plural(n int, one, many string) string {
+	if n == 1 {
+		return one
+	}
+	return many
 }

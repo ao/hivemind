@@ -51,7 +51,7 @@ func TestRouteTableValidate(t *testing.T) {
 			t.Errorf("%s: %v", name, err)
 		}
 	}
-	rt := RouteTableFromStore([]store.Route{{Host: "www.example.com", App: "web", Port: 80}})
+	rt, _ := RouteTableFromStore([]store.Route{{Host: "www.example.com", App: "web", Port: 80}}, true)
 	b, _ := json.Marshal(rt)
 	if !strings.Contains(string(b), `"endpoints":[]`) {
 		t.Errorf("a host without endpoints encodes as %s", b)

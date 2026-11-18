@@ -922,18 +922,23 @@ hivemind restore <file> [flags]
 ### hivemind routes
 
 Show the routing table that every router serves: the host and path of each
-route, the app and container port it sends requests to, and the address:port
-of each replica that takes its traffic now.
+route, the app and container port it sends requests to, the protocol the
+routers speak to its replicas, and the address:port of each replica that takes
+its traffic now.
 
 PATH "/" is the whole host. Any other path is a prefix: a request goes to the
 route whose path is the longest prefix of its own on a segment boundary, so
 /api takes /api and /api/x but not /apix, and to the whole host route when no
-prefix matches. ENDPOINTS "-" means no replica of that route is ready, and the
-routers answer 503 for it.
+prefix matches. PROTOCOL is http (HTTP/1.1) or h2c (HTTP/2 without TLS, as
+gRPC servers speak). ENDPOINTS "-" means no replica of that route is ready,
+and the routers answer 503 for it.
 
 A router of a build before path routes cannot tell paths apart, so it is given
-each host that has a path route with no replicas, and answers 503 for it. The
-command names such routers on standard error; upgrade their nodes.
+each host that has a path route with no replicas, and answers 503 for it. A
+router of a build before route protocols would speak HTTP/1.1 to an h2c
+route's replicas, so it is given each h2c route with no replicas, and answers
+503 for it. The command names such routers on standard error; upgrade their
+nodes.
 
 ```
 hivemind routes [flags]

@@ -14,11 +14,14 @@ import (
 
 // routes returns the routing table. Every node reads the whole table: a
 // router on any node serves every routed host. A router that asks for paths
-// gets every route; any other is of a build before path routes, and gets the
-// table it can read, one entry per host with no paths, in which a host with
-// path routes has no endpoints (nodeapi.HostTableFromStore). The server
-// logs a warning when such a router is first given that, and again when the
-// hosts change.
+// and protocols gets every route as it is. One that asks for paths only is
+// of a build before route protocols, and gets every route without its
+// protocol, and an h2c route with no endpoints (nodeapi.RouteTableFromStore).
+// Any other is of a build before path routes, and gets the table it can
+// read, one entry per host with no paths, in which a host with path routes,
+// and one whose route is h2c, has no endpoints (nodeapi.HostTableFromStore).
+// The server logs a warning when such a router is first given that, and
+// again when the routes it holds back change.
 func (a *nodeAPI) routes(w http.ResponseWriter, r *http.Request) {
 	id, ok := a.node(w, r)
 	if !ok {
@@ -29,16 +32,25 @@ func (a *nodeAPI) routes(w http.ResponseWriter, r *http.Request) {
 		a.fail(w, r, err)
 		return
 	}
-	version := nodeVersion(r)
-	if r.URL.Query().Get(nodeapi.RoutesPathsParam) == "1" {
-		a.readers.Seen(id, version, true, nil, a.now())
-		writeJSON(w, http.StatusOK, nodeapi.RouteTableFromStore(rt))
-		return
+	q := r.URL.Query()
+	read := nodeapi.RouteRead{Version: nodeVersion(r), Paths: q.Get(nodeapi.RoutesPathsParam) == "1"}
+	read.Protocols = read.Paths && q.Get(nodeapi.RoutesProtocolsParam) == "1"
+	var t nodeapi.RouteTable
+	if read.Paths {
+		t, read.H2C = nodeapi.RouteTableFromStore(rt, read.Protocols)
+	} else {
+		t, read.Held, read.H2C = nodeapi.HostTableFromStore(rt)
 	}
-	t, held := nodeapi.HostTableFromStore(rt)
-	if a.readers.Seen(id, version, false, held, a.now()) && len(held) > 0 {
-		a.log.Warn("this node's router is of a build before path routes, and answers 503 for the hosts that have them; upgrade the node",
-			"node", id, "version", firstNonEmpty(version, "none"), "hosts", held)
+	if a.readers.Seen(id, read, a.now()) {
+		version := firstNonEmpty(read.Version, "none")
+		if len(read.Held) > 0 {
+			a.log.Warn("this node's router is of a build before path routes, and answers 503 for the hosts that have them; upgrade the node",
+				"node", id, "version", version, "hosts", read.Held)
+		}
+		if len(read.H2C) > 0 {
+			a.log.Warn("this node's router is of a build before route protocols, and answers 503 for the h2c routes; upgrade the node",
+				"node", id, "version", version, "routes", read.H2C)
+		}
 	}
 	writeJSON(w, http.StatusOK, t)
 }
