@@ -168,6 +168,6 @@ A renewal that fails is tried again at the next check, and logged. A worker whos
 
 `hivemind nodes` shows each node's certificate expiry, and `/metrics` has `hivemind_node_cert_expiry_timestamp_seconds`. A node that joined before 2.1 has its expiry recorded on its first request to a 2.1 server.
 
-The cluster CA lasts ten years. It cannot be rotated; that is out of scope for now. In the CA's last year, certificates are issued to end when the CA does, and the server logs a warning once a day. When the CA expires, no node can reach the server. Before then, create a new cluster with `init` in a new data directory and join every machine to it.
+The cluster CA lasts ten years. It cannot be rotated; that is out of scope for now. In the CA's last year, certificates are issued to end when the CA does, and the server logs a warning once a day. When the CA expires, no node can reach the server. Before then, create a new cluster with `init` in a new data directory and join every machine to it. The design for rotating it in place is in [CA rotation](ca-rotation.md).
 
 Tests use a shorter certificate lifetime. Only a binary built with `-tags hivemind_testknobs` reads it, from `HIVEMIND_TEST_CERT_LIFETIME`. A release build has no code that shortens a certificate, and refuses to start the cluster listener when that variable is set.
