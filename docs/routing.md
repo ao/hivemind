@@ -162,6 +162,22 @@ On an h2c route the router:
 
 A gRPC client speaks HTTP/2 to the router over TLS, negotiated with ALPN, as to any gRPC service on 443: in Go, `grpc.NewClient("www.example.com:443", grpc.WithTransportCredentials(credentials.NewTLS(nil)))`; with grpcurl, `grpcurl www.example.com:443 shop.Cart/List`. A client on HTTP/1.1 is proxied too: the router sends its request to the replica as HTTP/2, and its reply comes back chunked, with the trailers at the end. That serves browsers and tools that reach an HTTP/2 backend. gRPC itself needs HTTP/2 from the client as well, and every gRPC client speaks it; gRPC-Web is not translated.
 
+grpcurl without `-proto` or `-protoset` asks the server for its services over gRPC's reflection service first, which is a service of its own, `/grpc.reflection.v1.ServerReflection`. With a path route for `/shop.Cart` alone, that call goes to the host's other routes, and grpcurl stops with `server does not support the reflection API`. Route the reflection service to the app as well, or route the whole host to it, or give grpcurl the `.proto` files:
+
+```yaml
+routes:
+  - host: www.example.com
+    path: /shop.Cart
+    port: 50051
+    protocol: h2c
+  - host: www.example.com
+    path: /grpc.reflection.v1.ServerReflection
+    port: 50051
+    protocol: h2c
+```
+
+On 2026-11-18, grpcurl 1.9.3 against `kong/grpcbin` behind such routes listed the services and made a unary call through each of three routers; with the first route alone, `list` and the call both failed as above. A server that has only the older `grpc.reflection.v1alpha.ServerReflection` needs that path instead.
+
 ### Streams and their limits
 
 A request on an h2c route can be a stream that lasts as long as it moves. Its limits:
@@ -177,7 +193,7 @@ A request on an h2c route can be a stream that lasts as long as it moves. Its li
 
 ### Health checks
 
-The agent's HTTP check speaks HTTP/1.1. A server that speaks only HTTP/2 without TLS, as a gRPC server does, closes the connection on it, so the check fails and the replica never becomes Ready; `internal/health` tests that. For such a server, use:
+The agent's HTTP check speaks HTTP/1.1. A server that speaks only HTTP/2 without TLS, as a gRPC server does, answers it with an HTTP/2 frame or closes the connection, so the check fails and the replica never becomes Ready; `internal/health` tests that. The agent then restarts the container as unhealthy, again and again. `hivemind status` shows `HEALTH` `starting` and `RESTARTS` going up, and, while a restart waits out its backoff, `crash-looping: failed its health check 3 times in a row: http GET /: ... malformed HTTP response "\x00\x00\x06\x04..."`; the node's log has a `restarted unhealthy container` line with the same error at each restart. For such a server, use:
 
 - a TCP check on its port, as above: the replica is ready once the server listens;
 - an exec check that asks the server over gRPC's health protocol from inside the container, such as [grpc_health_probe](https://github.com/grpc-ecosystem/grpc-health-probe), when the image has it: `exec: [/bin/grpc_health_probe, -addr=127.0.0.1:50051]`;
