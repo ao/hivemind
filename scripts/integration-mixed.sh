@@ -33,6 +33,13 @@
 #     The server logs a warning naming the node, and hivemind routes and
 #     status warn, until the router reads paths. curl in a curlimages/curl
 #     container, with n1's node certificate, plays that router
+#   - with h2c routes, a whole host and a path, the table for a router of a
+#     build with paths and before route protocols (?paths=1 only) has no
+#     protocol field and both routes with no endpoints; for a router before
+#     paths, the h2c host has none either; with ?paths=1&protocols=1 both
+#     have "protocol":"h2c". The server logs a warning naming the node and
+#     its version, and hivemind routes and status warn, until the router
+#     reads protocols. curl plays the router again
 #   - hivemind logs of the replica on n2 says the worker is older than 2.1
 #     and cannot stream logs; the log of the replica on n1 is read
 # A rotation of the cluster CA with n2 still on 2.0.0, which has no
@@ -239,9 +246,9 @@ mkdir -p "$CL_WORK/w1-cert"
 for f in node.crt node.key ca.crt; do
 	docker cp "$W1:/var/lib/hivemind/$f" "$CL_WORK/w1-cert/$f"
 done
-node_routes() { # node_routes QUERY: GET routes on the node API as W1
+node_routes() { # node_routes QUERY [VERSION]: GET routes on the node API as W1, a router of VERSION
 	docker run --rm --network "$CL_NET" --user "$(id -u)" -v "$CL_WORK/w1-cert:/certs:ro" "${CURL_IMAGE:-curlimages/curl:8.11.1}" \
-		-sf --cacert /certs/ca.crt --cert /certs/node.crt --key /certs/node.key -H "Hivemind-Version: v2.2.0-before-paths" \
+		-sf --cacert /certs/ca.crt --cert /certs/node.crt --key /certs/node.key -H "Hivemind-Version: ${2:-v2.2.0-before-paths}" \
 		"https://$S_IP:4484/node/v1/nodes/$W1_ID/routes$1"
 }
 old_table=$(node_routes "") || cl_fail "the node API did not answer W1's GET routes"
@@ -253,7 +260,7 @@ dups=$(grep -o '"host":"[^"]*"' <<<"$old_table" | sort | uniq -d)
 grep -qF '{"host":"www.mixed.test","endpoints":[]}' <<<"$old_table" ||
 	cl_fail "a router before paths did not get www.mixed.test without endpoints: $old_table"
 grep -qF '"host":"only.mixed.test"' <<<"$old_table" || cl_fail "a router before paths did not get only.mixed.test: $old_table"
-new_table=$(node_routes "?paths=1") || cl_fail "the node API did not answer W1's GET routes?paths=1"
+new_table=$(node_routes "?paths=1&protocols=1" "$NEW_VERSION") || cl_fail "the node API did not answer W1's GET routes?paths=1&protocols=1"
 grep -qF '"host":"www.mixed.test","path":"/api"' <<<"$new_table" || cl_fail "a router of this build did not get the path route: $new_table"
 # The read without paths again, and the warnings it causes: the server's
 # log, hivemind routes and the status of each app on the host.
@@ -270,11 +277,62 @@ for app in web api; do
 	grep -qF "$app: warning: the router on node $W1_ID (v2.2.0-before-paths)" <<<"$status_out" ||
 		cl_fail "hivemind status does not warn for $app: $(tr '\n' ';' <<<"$status_out")"
 done
-# Once the router reads paths, the warnings go.
-node_routes "?paths=1" >/dev/null || cl_fail "GET routes?paths=1 as W1"
+# Once the router reads paths, and protocols, as this build's does, the
+# warnings go.
+node_routes "?paths=1&protocols=1" "$NEW_VERSION" >/dev/null || cl_fail "GET routes?paths=1&protocols=1 as W1"
 routes_err=$(docker exec "$S" hivemind routes 2>&1 >/dev/null)
 [ -z "$routes_err" ] || cl_fail "hivemind routes still warns after the router read paths: $routes_err"
 cl_note "a router before paths gets each host once and no path field, with no endpoints for www.mixed.test; the server, routes and status warn until it reads paths"
+
+# Route protocols and a router of a build before them, which has paths: it
+# asks for ?paths=1 only, and decodes strictly, so it must get no protocol
+# field, and no endpoints for an h2c route, which it would send HTTP/1.1. A
+# router before paths gets none for a host whose route is h2c. This build's
+# router asks for protocols and gets them.
+docker exec -i "$S" hivemind deploy -f - >/dev/null <<EOF2 || cl_fail "deploy grpc with h2c routes"
+name: grpc
+image: busybox:stable
+command: [sleep, "3600"]
+routes:
+  - {host: grpc.mixed.test, port: 50051, protocol: h2c}
+  - {host: www.mixed.test, path: /echo.Echo, port: 50051, protocol: h2c}
+EOF2
+before=v2.2.0-before-protocols
+paths_table=$(node_routes "?paths=1" "$before") || cl_fail "the node API did not answer W1's GET routes?paths=1"
+if grep -qF '"protocol"' <<<"$paths_table"; then
+	cl_fail "a router before protocols got a protocol field: $paths_table"
+fi
+for want in '{"host":"grpc.mixed.test","endpoints":[]}' '{"host":"www.mixed.test","path":"/echo.Echo","endpoints":[]}' '"host":"www.mixed.test","path":"/api"'; do
+	grep -qF "$want" <<<"$paths_table" || cl_fail "a router before protocols did not get $want: $paths_table"
+done
+old_table=$(node_routes "") || cl_fail "the node API did not answer W1's GET routes"
+grep -qF '{"host":"grpc.mixed.test","endpoints":[]}' <<<"$old_table" && ! grep -qF '"protocol"' <<<"$old_table" ||
+	cl_fail "a router before paths did not get grpc.mixed.test without endpoints and protocol: $old_table"
+new_table=$(node_routes "?paths=1&protocols=1" "$NEW_VERSION") || cl_fail "the node API did not answer W1's GET routes?paths=1&protocols=1"
+for want in '"host":"grpc.mixed.test","protocol":"h2c"' '"host":"www.mixed.test","path":"/echo.Echo","protocol":"h2c"'; do
+	grep -qF "$want" <<<"$new_table" || cl_fail "a router of this build did not get $want: $new_table"
+done
+node_routes "?paths=1" "$before" >/dev/null || cl_fail "GET routes?paths=1 as W1"
+warned() { [ "$(count "$S" "is of a build before route protocols")" -ge 1 ]; }
+wait_for 10 warned || cl_fail "the server did not log a warning about the router before protocols"
+docker exec "$S" grep -F "is of a build before route protocols" /var/log/hivemind.log | tail -n 1 | grep -F "node=$W1_ID" | grep -qF "version=$before" ||
+	cl_fail "the server's warning does not name $W1_ID and $before: $(docker exec "$S" grep -F 'before route protocols' /var/log/hivemind.log)"
+routes_err=$(docker exec "$S" hivemind routes 2>&1 >/dev/null)
+grep -qF "warning: the router on node $W1_ID ($before) is of a build before route protocols, and answers 503 for the h2c routes grpc.mixed.test, www.mixed.test/echo.Echo; upgrade the node" <<<"$routes_err" ||
+	cl_fail "hivemind routes does not warn about $W1_ID's router: $routes_err"
+docker exec "$S" hivemind routes | grep -qE '^grpc\.mixed\.test +/ +grpc +50051 +h2c ' ||
+	cl_fail "hivemind routes does not show grpc.mixed.test as h2c: $(docker exec "$S" hivemind routes | tr '\n' ';')"
+status_out=$(docker exec "$S" hivemind status)
+grep -qF "grpc: warning: the router on node $W1_ID ($before) is of a build before route protocols" <<<"$status_out" ||
+	cl_fail "hivemind status does not warn for grpc: $(tr '\n' ';' <<<"$status_out")"
+if grep -qF "web: warning: the router on node $W1_ID ($before)" <<<"$status_out"; then
+	cl_fail "hivemind status warns for web, which has no h2c route: $(tr '\n' ';' <<<"$status_out")"
+fi
+node_routes "?paths=1&protocols=1" "$NEW_VERSION" >/dev/null || cl_fail "GET routes?paths=1&protocols=1 as W1"
+routes_err=$(docker exec "$S" hivemind routes 2>&1 >/dev/null)
+[ -z "$routes_err" ] || cl_fail "hivemind routes still warns after the router read protocols: $routes_err"
+docker exec "$S" hivemind delete grpc >/dev/null || cl_fail "delete grpc"
+cl_note "a router before protocols gets no protocol field and no endpoints for the h2c routes, one before paths none for grpc.mixed.test; the server, routes and status warn until it reads protocols"
 
 # Logs, once the server has run a minute: the 2.0.0 worker is named as
 # such, and the new worker streams.

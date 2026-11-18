@@ -35,6 +35,13 @@
 #     backslashes get 400; hivemind routes shows both. A rolling update of
 #     each app in turn, with requests for / and /v1/x through all three
 #     routers: every one is a 200 from the app that owns the path
+#   - h2c: a server of gRPC's wire format, test/h2ctest, which speaks
+#     HTTP/2 without TLS and no HTTP/1.1, under /h2ctest.Echo on the same
+#     host. Through each router, a unary call, a server stream and a
+#     bidirectional stream over HTTP/2, and a unary call over HTTP/1.1,
+#     each with grpc-status 0 in its trailers; hivemind routes shows h2c.
+#     A rolling update of it with those calls through all three routers
+#     the whole time: none fails, and both generations answer
 #   - a node that runs a replica is killed: requests through the other two
 #     routers keep getting 200s while the replica is placed again
 #
@@ -55,6 +62,7 @@ PEBBLE_IMAGE=${PEBBLE_IMAGE:-ghcr.io/letsencrypt/pebble:latest}
 CHALL_IMAGE=${CHALL_IMAGE:-ghcr.io/letsencrypt/pebble-challtestsrv:latest}
 CURL_IMAGE=${CURL_IMAGE:-curlimages/curl:8.11.1}
 APP_IMAGE=${APP_IMAGE:-traefik/whoami:v1.10.3}
+H2C_IMAGE=hivemind-h2ctest:test # built from test/h2ctest and imported into each node
 HOST=www.routing.test
 HTTP_PORT=5002 # Pebble's httpPort: where it checks HTTP-01 answers
 HTTPS_PORT=8443
@@ -414,9 +422,9 @@ seen=$(docker exec "$CLIENT" curl -s --max-time 10 --cacert /tmp/root.pem --reso
 	"https://$HOST:$HTTPS_PORT/v1/users/7?q=a%2Fb" | tr -d '\r')
 grep -qxF "GET /v1/users/7?q=a%2Fb HTTP/1.1" <<<"$seen" || cl_fail "api did not get the path as sent: $(tr '\n' ';' <<<"$seen")"
 routes_out=$(docker exec "$S" hivemind routes 2>&1)
-grep -qE "^$HOST +/ +who +80 +[0-9.:]+,[0-9.:]+$" <<<"$routes_out" && grep -qE "^$HOST +/v1 +api +80 +[0-9.:]+,[0-9.:]+$" <<<"$routes_out" ||
+grep -qE "^$HOST +/ +who +80 +http +[0-9.:]+,[0-9.:]+$" <<<"$routes_out" && grep -qE "^$HOST +/v1 +api +80 +http +[0-9.:]+,[0-9.:]+$" <<<"$routes_out" ||
 	cl_fail "hivemind routes does not show both routes with two endpoints each: $(tr '\n' ';' <<<"$routes_out")"
-if grep -q "before path routes" <<<"$routes_out"; then
+if grep -qE "before (path routes|route protocols)" <<<"$routes_out"; then
 	cl_fail "hivemind routes warns about a router of this build: $routes_out"
 fi
 cl_note "path routes: through each of the three routers, /v1 goes to api and the rest to who, unchanged; 6 kinds of path refused with 400"
@@ -459,6 +467,87 @@ read -r total bad <<<"$(docker exec "$CLIENT" awk '{ n++ } !(($1 == "/" && $2 ==
 [ "$total" -ge 60 ] || cl_fail "only $total requests during the two rollouts"
 [ "$bad" -eq 0 ] || cl_fail "$bad of $total requests failed or reached the wrong app during the rollouts: $(docker exec "$CLIENT" sort /tmp/paths | uniq -c | tr '\n' ';')"
 cl_note "rolling updates of api, then who: $total requests for / and /v1/x through the three routers, $bad failed or misrouted"
+
+# h2c: a server of gRPC's wire format, test/h2ctest, which speaks HTTP/2
+# without TLS and no HTTP/1.1, as gRPC servers do, under /h2ctest.Echo on
+# the same host, so the host's routes differ in protocol. It is built here
+# from Go's standard library and imported into each node, so the test pulls
+# no gRPC image; the router does not read protobuf, so gRPC's framing and
+# trailers are what it has to carry. Its health check is TCP: the agent's
+# HTTP check speaks HTTP/1.1, which an h2c-only server refuses.
+mkdir -p "$CL_WORK/h2c"
+docker run --rm -v "$REPO:/src" -v "$CACHE_VOLUME:/cache" -w /src \
+	-e GOMODCACHE=/cache/mod -e GOCACHE=/cache/build -e GOFLAGS=-buildvcs=false \
+	-e GOPROXY=direct -e GOSUMDB=off -e GOTOOLCHAIN=local -e CGO_ENABLED=0 \
+	"$GO_IMAGE" go build -trimpath -o "/src/${CL_WORK#"$REPO"/}/h2c/h2ctest" ./test/h2ctest || cl_fail "could not build test/h2ctest"
+for c in "${CL_NAMES[@]}"; do
+	tar -C "$CL_WORK/h2c" -cf - h2ctest | docker exec -i "$c" docker import --change 'ENTRYPOINT ["/h2ctest"]' - "$H2C_IMAGE" >/dev/null ||
+		cl_fail "could not import $H2C_IMAGE into $c"
+done
+docker cp "$CL_WORK/h2c/h2ctest" "$CLIENT:/tmp/h2ctest"
+deploy_grpc() { # deploy_grpc VERSION
+	docker exec -i "$S" hivemind deploy -f - >/dev/null <<EOF2
+name: grpc
+image: $H2C_IMAGE
+replicas: 2
+env:
+  V: "$1"
+command: [serve, -addr, ":50051", -name, grpc]
+routes:
+  - host: $HOST
+    path: /h2ctest.Echo
+    port: 50051
+    protocol: h2c
+health:
+  tcp:
+    port: 50051
+  interval: 1s
+  timeout: 1s
+EOF2
+}
+grpc_call() { # grpc_call IP KIND [-h1]: one checked call through IP's router; prints the replica
+	docker exec "$CLIENT" /tmp/h2ctest call -url "https://$HOST:$HTTPS_PORT" -connect "$1:$HTTPS_PORT" -ca /tmp/root.pem ${3:-} "$2"
+}
+deploy_grpc 1 || cl_fail "deploy grpc"
+wait_for 120 rolled grpc 1 || cl_fail "grpc did not run two replicas: $(app_rows grpc | tr '\n' ';')"
+for ip in "${IPS[@]}"; do
+	wait_for 30 grpc_call "$ip" unary || cl_fail "the router on $ip does not route a unary call to grpc: $(grpc_call "$ip" unary 2>&1)"
+	for kind in unary server bidi; do
+		who=$(grpc_call "$ip" "$kind" 2>&1) || cl_fail "a $kind call through the router on $ip: $who"
+		case $who in grpc/1@*) ;; *) cl_fail "a $kind call through the router on $ip reached $who, want grpc/1" ;; esac
+	done
+	who=$(grpc_call "$ip" unary -h1 2>&1) || cl_fail "a unary call over HTTP/1.1 through the router on $ip: $who"
+done
+# The http routes of the host are as they were.
+for x in "/ who" "/v1/x api"; do
+	got=$(name_at "$W1_IP" "${x% *}")
+	[ "$got" = "${x#* }" ] || cl_fail "with the h2c route on the host, ${x% *} reached \"$got\""
+done
+routes_out=$(docker exec "$S" hivemind routes 2>&1)
+grep -qE "^$HOST +/h2ctest\.Echo +grpc +50051 +h2c +[0-9.:]+,[0-9.:]+$" <<<"$routes_out" ||
+	cl_fail "hivemind routes does not show the h2c route with two endpoints: $(tr '\n' ';' <<<"$routes_out")"
+cl_note "h2c: through each of the three routers, unary, server-stream and bidirectional calls over HTTP/2, and a unary call over HTTP/1.1, reach grpc with grpc-status 0"
+
+# A rolling update of grpc, with a unary call, a server stream and a
+# bidirectional stream through each router in turn the whole time: each
+# must end with grpc-status 0.
+docker exec -d "$CLIENT" /tmp/h2ctest loop -url "https://$HOST:$HTTPS_PORT" -ca /tmp/root.pem -out /tmp/grpc \
+	"$S_IP:$HTTPS_PORT" "$W1_IP:$HTTPS_PORT" "$W2_IP:$HTTPS_PORT"
+sleep 3
+deploy_grpc 2 || cl_fail "deploy grpc version 2"
+ROLL_AT=$(date +%s)
+wait_for 180 rolled grpc 2 || cl_fail "the rollout of grpc did not finish: $(app_rows grpc | tr '\n' ';')"
+cl_note "rollout of grpc to generation 2 finished in $(($(date +%s) - ROLL_AT)) s"
+sleep 10 # the old copies' drain delay, and their stop
+docker exec "$CLIENT" touch /tmp/grpc.stop
+sleep 16
+read -r total bad gens <<<"$(docker exec "$CLIENT" awk '{ n++ } $2 != "ok" { bad++ }
+	$2 == "ok" { split($3, a, "@"); g[a[1]] = 1 } END { s = ""; for (k in g) s = s k ","; print n+0, bad+0, s }' /tmp/grpc)"
+[ "$total" -ge 30 ] || cl_fail "only $total calls during the rollout of grpc"
+[ "$bad" -eq 0 ] || cl_fail "$bad of $total calls failed during the rollout of grpc: $(docker exec "$CLIENT" grep -v ' ok ' /tmp/grpc | sort | uniq -c | head -n 20 | tr '\n' ';')"
+case ",$gens" in *,grpc/1,*grpc/2,* | *,grpc/2,*grpc/1,*) ;; *) cl_fail "the calls during the rollout reached $gens, want both generations" ;; esac
+counts=$(docker exec "$CLIENT" awk '{ c[$1]++ } END { for (k in c) printf "%s %d, ", k, c[k] }' /tmp/grpc)
+cl_note "rolling update of grpc: $total calls through the three routers ($counts), $bad failed"
 
 # Kill a worker that runs a replica. The other two routers keep answering.
 victim=""
