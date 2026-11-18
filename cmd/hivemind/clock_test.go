@@ -59,12 +59,12 @@ func TestRenewedCertFromTheFutureNamesTheClock(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	_, err = checkRenewedCert(ca, "node-abc123", key, pemEncodeCert(der), time.Now())
+	_, err = checkRenewedCert(pki.MustTrust(ca.Cert), "node-abc123", key, pemEncodeCert(der), time.Now())
 	if err == nil || !strings.Contains(err.Error(), "this machine's clock reads") || !strings.Contains(err.Error(), "NTP") {
 		t.Fatalf("certificate from the future: %v", err)
 	}
 	// The same certificate checked at the server's time is fine.
-	if _, err := checkRenewedCert(ca, "node-abc123", key, pemEncodeCert(der), time.Now().Add(3*time.Hour)); err != nil {
+	if _, err := checkRenewedCert(pki.MustTrust(ca.Cert), "node-abc123", key, pemEncodeCert(der), time.Now().Add(3*time.Hour)); err != nil {
 		t.Fatal(err)
 	}
 }

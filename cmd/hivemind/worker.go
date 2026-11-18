@@ -57,9 +57,10 @@ type workerState struct {
 type joinedWorker struct {
 	state  workerState
 	tlsCfg *tls.Config
-	// ca and holder are for renewal: tlsCfg reads the client certificate
-	// from holder at each handshake.
-	ca     *pki.CA
+	// trust is the CAs in ca.crt, which tlsCfg trusts. holder is for
+	// renewal: tlsCfg reads the client certificate from it at each
+	// handshake.
+	trust  *pki.Trust
 	holder *pki.CertHolder
 }
 
@@ -391,19 +392,21 @@ func loadWorkerState(dir string) (*joinedWorker, error) {
 		return nil, damaged(dir, st.NodeID, fmt.Errorf("%s: %w", workerKeyFile, err))
 	}
 
+	// ca.crt holds every CA the worker trusts: one, or two while the
+	// cluster's CA is rotated. A crash while it was replaced leaves
+	// ca.crt.next, which is dropped: ca.crt is the old set or the new.
+	if err := removeStaleTrust(dir); err != nil {
+		return nil, err
+	}
 	caPEM, err := os.ReadFile(filepath.Join(dir, pki.CACertFile))
 	if err != nil {
 		return nil, damaged(dir, st.NodeID, fmt.Errorf("reading the cluster CA: %w", err))
 	}
-	cb, _ := pem.Decode(caPEM)
-	if cb == nil || cb.Type != "CERTIFICATE" {
-		return nil, damaged(dir, st.NodeID, fmt.Errorf("%s is not a PEM certificate", pki.CACertFile))
-	}
-	caCert, err := x509.ParseCertificate(cb.Bytes)
+	trust, err := pki.ParseTrustPEM(caPEM)
 	if err != nil {
 		return nil, damaged(dir, st.NodeID, fmt.Errorf("%s: %w", pki.CACertFile, err))
 	}
-	ca := &pki.CA{Cert: caCert, CertPEM: caPEM}
+	caCert := trust.CAs()[0]
 
 	certPEM, err := os.ReadFile(filepath.Join(dir, workerCertFile))
 	if err != nil {
@@ -420,9 +423,7 @@ func loadWorkerState(dir string) (*joinedWorker, error) {
 	if id, err := pki.NodeIDFromCert(leaf); err == nil && id == st.NodeID && time.Now().After(leaf.NotAfter) {
 		return nil, certExpiredError(id, leaf.NotAfter)
 	}
-	pool := x509.NewCertPool()
-	pool.AddCert(caCert)
-	if _, err := leaf.Verify(x509.VerifyOptions{Roots: pool, KeyUsages: []x509.ExtKeyUsage{x509.ExtKeyUsageClientAuth}}); err != nil {
+	if _, err := leaf.Verify(x509.VerifyOptions{Roots: trust.Pool(), KeyUsages: []x509.ExtKeyUsage{x509.ExtKeyUsageClientAuth}}); err != nil {
 		var ie x509.CertificateInvalidError
 		if errors.As(err, &ie) && ie.Reason == x509.Expired {
 			// The certificate has not expired, as checked above, so the
@@ -443,16 +444,16 @@ func loadWorkerState(dir string) (*joinedWorker, error) {
 	if pub, ok := leaf.PublicKey.(*ecdsa.PublicKey); !ok || !pub.Equal(&key.PublicKey) {
 		return nil, damaged(dir, st.NodeID, fmt.Errorf("%s and %s do not belong together: the key is not the certificate's", workerKeyFile, workerCertFile))
 	}
-	tlsCert, err := pki.NewTLSCertificate(nb.Bytes, key, ca)
+	tlsCert, err := pki.NewTLSCertificate(nb.Bytes, key, &pki.CA{Cert: trust.Issuer(leaf)})
 	if err != nil {
 		return nil, damaged(dir, st.NodeID, err)
 	}
 	holder := pki.NewCertHolder(tlsCert)
-	tlsCfg, err := pki.ClientTLSConfigFrom(ca, holder, host)
+	tlsCfg, err := pki.ClientTLSConfigTrust(trust, holder, host)
 	if err != nil {
 		return nil, err
 	}
-	return &joinedWorker{state: st, tlsCfg: tlsCfg, ca: ca, holder: holder}, nil
+	return &joinedWorker{state: st, tlsCfg: tlsCfg, trust: trust, holder: holder}, nil
 }
 
 // damaged is the error of a worker data directory that cannot be used, with
@@ -503,16 +504,27 @@ func runWorker(ctx context.Context, cfg *config.Config, log *slog.Logger, rt run
 	if err != nil {
 		return err
 	}
+	// The trust keeper follows the server's CA set through a rotation of
+	// the cluster CA: every request says which CAs this worker trusts, and
+	// every reply's digest of the server's set is checked against the one
+	// applied.
+	host, _, _ := net.SplitHostPort(w.state.Server)
+	keeper := newTrustKeeper(cfg.DataDir, w.state.NodeID, host, w.trust, w.holder, log.With("component", "ca"))
 	client, err := nodeapi.NewClient("https://"+w.state.Server, w.tlsCfg, nodeapi.WithVersion(version),
-		nodeapi.WithEpochGuard(workerEpochGuard(cfg.DataDir, log)))
+		nodeapi.WithEpochGuard(workerEpochGuard(cfg.DataDir, log)), nodeapi.WithCATrust(keeper.header))
 	if err != nil {
 		return err
 	}
+	keeper.client = client
+	client.OnCA(keeper.seen)
+	defer client.OnCA(nil)
 	renewCtx, stopRenew := context.WithCancel(ctx)
 	defer stopRenew()
+	go keeper.run(renewCtx)
 	renewLog := log.With("component", "renew")
-	go (&renewer{dir: cfg.DataDir, nodeID: w.state.NodeID, ca: w.ca, holder: w.holder, client: client,
-		log: renewLog, now: time.Now, missing: nodeapi.NewMissingRoute(client, "certificate renewal", renewLog)}).run(renewCtx)
+	go (&renewer{dir: cfg.DataDir, nodeID: w.state.NodeID, trust: keeper.Trust, holder: w.holder, client: client,
+		log: renewLog, now: time.Now, missing: nodeapi.NewMissingRoute(client, "certificate renewal", renewLog),
+		rotation: keeper}).run(renewCtx)
 	hostname, _ := os.Hostname()
 	// addr is the node's private address, where its routed replicas publish
 	// their ports. It is found before the first registration, and kept. A

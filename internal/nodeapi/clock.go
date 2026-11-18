@@ -49,6 +49,13 @@ func (c *Client) ClockSkew() (skew time.Duration, ok bool) {
 // because a certificate is not valid at this machine's time: expired, or
 // not valid yet, which is what a clock that is wrong by hours looks like.
 func clockHint(err error) error {
+	var ua x509.UnknownAuthorityError
+	if errors.As(err, &ua) {
+		// The server's certificate is from a CA this node does not trust.
+		return fmt.Errorf("%w; the server's certificate is from a CA this worker does not trust: the address is another cluster's server, "+
+			"or this cluster's CA was rotated without this node (hivemind ca rotate finish --force). For the second, run "+
+			"`hivemind node remove <id>` on the server, then join this machine again with an empty --data-dir and a new join token", err)
+	}
 	var ie x509.CertificateInvalidError
 	if !errors.As(err, &ie) || ie.Reason != x509.Expired {
 		return err

@@ -48,11 +48,14 @@ type certRenewer interface {
 // over the node API, and authenticates with the current certificate. The new
 // pair is written to the data directory and stored in holder, which the
 // client's TLS config reads at each handshake, so the worker uses it without
-// a restart.
+// a restart. During a rotation of the cluster CA it also renews when the
+// server's CA set says to renew under a CA its certificate is not from.
 type renewer struct {
 	dir    string
 	nodeID string
-	ca     *pki.CA
+	// trust gives the CAs the worker trusts now; a renewed certificate
+	// must chain to one of them.
+	trust  func() *pki.Trust
 	holder *pki.CertHolder
 	client certRenewer
 	log    *slog.Logger
@@ -60,18 +63,40 @@ type renewer struct {
 	// missing logs, once, that the server has no renewal route (it is older
 	// than 2.1). Nil logs each failure as any other.
 	missing *nodeapi.MissingRoute
+	// rotation says when the CA set wants a renewal now. Nil: never.
+	rotation rotationRenewals
 }
 
-// renewIfDue renews when the certificate is due. It reports whether it
-// renewed. An expired certificate is certExpiredError.
+// rotationRenewals is the part of the trust keeper the renewer uses.
+type rotationRenewals interface {
+	// renewUnder is the CA to renew under now, when the certificate leaf
+	// is from another one, or nil.
+	renewUnder(leaf *x509.Certificate) *[32]byte
+	// renewNow receives a value when renewUnder may have changed.
+	renewNow() <-chan struct{}
+	// renewed is told after each renewal.
+	renewed()
+}
+
+// renewIfDue renews when the certificate is due, or when the rotation asks
+// for a certificate from another CA. It reports whether it renewed. An
+// expired certificate is certExpiredError.
 func (r *renewer) renewIfDue(ctx context.Context) (bool, error) {
 	leaf := r.holder.Leaf()
 	now := r.now()
 	if now.After(leaf.NotAfter) {
 		return false, certExpiredError(r.nodeID, leaf.NotAfter)
 	}
-	if !pki.RenewDue(leaf, now) {
+	var under *[32]byte
+	if r.rotation != nil {
+		under = r.rotation.renewUnder(leaf)
+	}
+	if under == nil && !pki.RenewDue(leaf, now) {
 		return false, nil
+	}
+	if under != nil {
+		r.log.Info("renewing the node certificate under the cluster's new CA, as the CA rotation's renew phase asks",
+			"ca", pki.FingerprintHex(*under)[:16])
 	}
 	return true, r.renew(ctx)
 }
@@ -90,7 +115,7 @@ func (r *renewer) renew(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
-	cert, err := checkRenewedCert(r.ca, r.nodeID, key, certPEM, r.now())
+	cert, err := checkRenewedCert(r.trust(), r.nodeID, key, certPEM, r.now())
 	if err != nil {
 		return fmt.Errorf("the server's renewed certificate: %w", err)
 	}
@@ -102,16 +127,24 @@ func (r *renewer) renew(ctx context.Context) error {
 	// as the log poll's. Move every later request to new connections, which
 	// handshake with the new one.
 	r.client.ResetConnections()
+	if r.rotation != nil {
+		r.rotation.renewed()
+	}
 	return nil
 }
 
 // run checks the certificate at start and then every
-// pki.RenewCheckInterval, until ctx ends. A failure is logged and tried again
-// at the next check.
+// pki.RenewCheckInterval, and when the rotation asks, until ctx ends. A
+// failure is logged and tried again at the next check.
 func (r *renewer) run(ctx context.Context) {
+	var now <-chan struct{}
+	if r.rotation != nil {
+		now = r.rotation.renewNow()
+	}
 	for {
 		old := r.holder.Leaf()
 		renewed, err := r.renewIfDue(ctx)
+		next := pki.RenewCheckInterval(r.holder.Leaf())
 		switch {
 		case err != nil && ctx.Err() != nil:
 			return
@@ -120,26 +153,32 @@ func (r *renewer) run(ctx context.Context) {
 			// matters, and the check is tried again on schedule.
 			_ = r.missing.Check(err, "not_after", old.NotAfter.UTC())
 		case err != nil:
+			if r.rotation != nil && r.rotation.renewUnder(old) != nil {
+				// A rotation is waiting on this renewal: try again soon.
+				next = min(next, caSetRetry)
+			}
 			r.log.Error("renewing the node certificate failed; trying again at the next check", "err", err,
-				"not_after", old.NotAfter.UTC(), "next_check", pki.RenewCheckInterval(old))
+				"not_after", old.NotAfter.UTC(), "next_check", next)
 		case renewed:
 			r.log.Info("node certificate renewed", "node", r.nodeID, "old_not_after", old.NotAfter.UTC(),
 				"not_after", r.holder.Leaf().NotAfter.UTC())
 		}
-		t := time.NewTimer(pki.RenewCheckInterval(r.holder.Leaf()))
+		t := time.NewTimer(next)
 		select {
 		case <-ctx.Done():
 			t.Stop()
 			return
+		case <-now:
+			t.Stop()
 		case <-t.C:
 		}
 	}
 }
 
 // checkRenewedCert checks what the server sent: one PEM certificate that
-// chains to the cluster CA for client auth, is valid at now, names this node,
-// and is for key. It returns the TLS pair.
-func checkRenewedCert(ca *pki.CA, nodeID string, key *ecdsa.PrivateKey, certPEM []byte, now time.Time) (tls.Certificate, error) {
+// chains to a cluster CA the worker trusts, for client auth, is valid at
+// now, names this node, and is for key. It returns the TLS pair.
+func checkRenewedCert(trust *pki.Trust, nodeID string, key *ecdsa.PrivateKey, certPEM []byte, now time.Time) (tls.Certificate, error) {
 	b, rest := pem.Decode(certPEM)
 	if b == nil || b.Type != "CERTIFICATE" || len(bytes.TrimSpace(rest)) != 0 {
 		return tls.Certificate{}, errors.New("not one PEM certificate")
@@ -148,9 +187,7 @@ func checkRenewedCert(ca *pki.CA, nodeID string, key *ecdsa.PrivateKey, certPEM 
 	if err != nil {
 		return tls.Certificate{}, err
 	}
-	pool := x509.NewCertPool()
-	pool.AddCert(ca.Cert)
-	if _, err := leaf.Verify(x509.VerifyOptions{Roots: pool, CurrentTime: now,
+	if _, err := leaf.Verify(x509.VerifyOptions{Roots: trust.Pool(), CurrentTime: now,
 		KeyUsages: []x509.ExtKeyUsage{x509.ExtKeyUsageClientAuth}}); err != nil {
 		var ie x509.CertificateInvalidError
 		if errors.As(err, &ie) && ie.Reason == x509.Expired {
@@ -168,7 +205,7 @@ func checkRenewedCert(ca *pki.CA, nodeID string, key *ecdsa.PrivateKey, certPEM 
 	if !ok || !pub.Equal(&key.PublicKey) {
 		return tls.Certificate{}, errors.New("is not for the new key")
 	}
-	return pki.NewTLSCertificate(b.Bytes, key, ca)
+	return pki.NewTLSCertificate(b.Bytes, key, &pki.CA{Cert: trust.Issuer(leaf)})
 }
 
 // writeRenewed replaces node.key and node.crt. Each new file is written in

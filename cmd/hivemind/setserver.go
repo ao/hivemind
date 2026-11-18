@@ -146,7 +146,7 @@ func runSetServer(ctx context.Context, out io.Writer, dir, arg string) error {
 // the worker has seen). The error says which part failed, and what that
 // means.
 func checkNewServer(ctx context.Context, w *joinedWorker, host, server string, guard *nodeapi.EpochGuard) error {
-	tlsCfg, err := pki.ClientTLSConfigFrom(w.ca, w.holder, host)
+	tlsCfg, err := pki.ClientTLSConfigTrust(w.trust, w.holder, host)
 	if err != nil {
 		return err
 	}
@@ -180,7 +180,7 @@ func serverCheckError(err error, w *joinedWorker, host, server string) error {
 		return staleServerError(stale, server)
 	case errors.As(err, &unknownCA):
 		return otherCAError(err, w, host, server)
-	case errors.As(err, &badName) && (badName.Certificate == nil || !signedBy(badName.Certificate, w.ca)):
+	case errors.As(err, &badName) && (badName.Certificate == nil || !signedBy(badName.Certificate, w.trust)):
 		// The name is checked before the chain, so a certificate from
 		// another CA for another name fails on the name first.
 		return otherCAError(err, w, host, server)
@@ -231,18 +231,33 @@ func otherCAError(err error, w *joinedWorker, host, server string) error {
 			}
 		}
 	}
-	return fmt.Errorf("the server at %s presents a certificate from %s, not from this worker's cluster CA, fingerprint %x: "+
+	return fmt.Errorf("the server at %s presents a certificate from %s, not from this worker's cluster CA, %s: "+
 		"it is another cluster's server, or something between this machine and %s holds another CA",
-		server, theirs, w.ca.Fingerprint(), host)
+		server, theirs, trustFingerprints(w.trust), host)
 }
 
-// signedBy reports whether leaf chains to ca for server authentication,
-// whatever names it carries.
-func signedBy(leaf *x509.Certificate, ca *pki.CA) bool {
-	pool := x509.NewCertPool()
-	pool.AddCert(ca.Cert)
-	_, err := leaf.Verify(x509.VerifyOptions{Roots: pool, KeyUsages: []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth}})
+// signedBy reports whether leaf chains to a CA in trust for server
+// authentication, whatever names it carries.
+func signedBy(leaf *x509.Certificate, trust *pki.Trust) bool {
+	_, err := leaf.Verify(x509.VerifyOptions{Roots: trust.Pool(), KeyUsages: []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth}})
 	return err == nil
+}
+
+// trustFingerprints names the CAs a worker trusts by fingerprint: one, or
+// two during a rotation of the cluster CA.
+func trustFingerprints(trust *pki.Trust) string {
+	fps := trust.Fingerprints()
+	if len(fps) == 1 {
+		return fmt.Sprintf("fingerprint %x", fps[0])
+	}
+	s := "fingerprints"
+	for i, fp := range fps {
+		if i > 0 {
+			s += " and"
+		}
+		s += fmt.Sprintf(" %x", fp)
+	}
+	return s
 }
 
 // remoteAlert is the TLS alert the server sent, such as "remote error: tls:

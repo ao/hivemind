@@ -76,7 +76,7 @@ func newTestRenewer(t *testing.T, dir string, srv certRenewer, now *time.Time) *
 	if err != nil {
 		t.Fatal(err)
 	}
-	return &renewer{dir: dir, nodeID: w.state.NodeID, ca: w.ca, holder: w.holder, client: srv, log: quietLog(),
+	return &renewer{dir: dir, nodeID: w.state.NodeID, trust: func() *pki.Trust { return w.trust }, holder: w.holder, client: srv, log: quietLog(),
 		now: func() time.Time { return *now }}
 }
 
@@ -336,7 +336,7 @@ func TestWorkerRenewsOverNodeAPI(t *testing.T) {
 	// 300 days on, by the worker's clock: past two thirds of 365 days.
 	time.Sleep(1100 * time.Millisecond)
 	later := time.Now().Add(300 * 24 * time.Hour)
-	r := &renewer{dir: dir, nodeID: reply.NodeID, ca: w.ca, holder: w.holder, client: client, log: quietLog(),
+	r := &renewer{dir: dir, nodeID: reply.NodeID, trust: func() *pki.Trust { return w.trust }, holder: w.holder, client: client, log: quietLog(),
 		now: func() time.Time { return later }}
 	if renewed, err := r.renewIfDue(ctx); err != nil || !renewed {
 		t.Fatalf("renewal over the node API: %v, %v", renewed, err)
