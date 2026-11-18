@@ -155,11 +155,15 @@ cl_ready_node() {
 
 # cl_start_nodes: create the network, start every node as dind, copy in the
 # binary built into $CL_WORK/hivemind, and wait for each Docker daemon.
+# CL_SERVER_RUN_ARGS, if set, are more docker-run options for the server's
+# node (index 0), such as --network-alias.
 cl_start_nodes() {
 	local c
 	cl_build
 	cl_create_network
-	for c in "${CL_NAMES[@]}"; do
+	# shellcheck disable=SC2086
+	cl_run_node "${CL_NAMES[0]}" ${CL_SERVER_RUN_ARGS:-}
+	for c in "${CL_NAMES[@]:1}"; do
 		cl_run_node "$c"
 	done
 	for c in "${CL_NAMES[@]}"; do

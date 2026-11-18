@@ -5,7 +5,10 @@
 #   NODES=5 ./scripts/fault-suite.sh
 #
 # NODES is the total number of nodes: one server and NODES-1 workers, each a
-# docker:dind container on one private network, as in integration-cluster.sh.
+# docker:dind container on one private network with a subnet of its own, as
+# in integration-cluster.sh. The server advertises a name, hm-server, a
+# network alias of its container, and the workers join that name, as the
+# docs recommend, so that the server can be restored at another address.
 # The workloads are tiny: busybox httpd on host port 8080 (app web, NODES+1
 # replicas, so one replica stays pending on the port) and busybox sleep (app
 # spread, NODES replicas).
@@ -30,6 +33,43 @@
 #                 longer than the lease. Then the new replicas placed in the
 #                 30 s after the last heal must avoid the flapping node
 #                 (MinReady).
+#   lose-server-partition
+#                 a worker is cut off from port 4484 at any address, and its
+#                 spread replicas move once its lease lapses. Then the server's
+#                 whole machine is lost: a backup is taken, the latest one, and
+#                 the server's container is killed (kept, stopped, with its
+#                 data directory, for later). A new container at another
+#                 address restores the backup at the next epoch and serves
+#                 with --advertise hm-server --cluster-addr <its address>, as
+#                 in integration-newaddr.sh (helpers in scripts/lib/restore.sh).
+#                 20 s after its start the workers that were up are waiting,
+#                 and the cut-off one, already lost in the backup, is lost. At
+#                 30 s, inside the 2 minute start grace, the alias moves to it,
+#                 as a DNS record would. The workers that were up report, with
+#                 their containers as before the loss and none new; the cut-off
+#                 one has kept its containers running. Then the partition
+#                 heals, and the cluster converges: the cut-off worker reaches
+#                 the new server by name without joining again and removes the
+#                 copies that moved. No worker that was up is lost, and the
+#                 workers that were up still run the containers they ran
+#                 before the loss.
+#   lose-server-slow
+#                 the same loss and restore, with tc netem adding 2000 ms of
+#                 delay to a worker throughout instead of the partition. Every
+#                 worker waits, then reports, the slow one too, inside the
+#                 grace; no node is lost, and no worker's container changes,
+#                 before or after the delay is removed and the cluster
+#                 converges.
+#
+# After each restore, the old server comes back: the restored server stops,
+# the alias moves to the old container, which starts again at its old
+# address with its old store, and serve runs there. Every worker refuses it,
+# as it has seen the higher epoch, and logs that once; for 20 s their
+# containers stay as they were, and the old server has no report from them.
+# Then the old server stops, the restored one serves again under the alias,
+# every worker reports to it again, never restarted, and the cluster
+# converges. On 3 nodes on a 16-vCPU arm64 machine (EC2 c8g.4xlarge) the two
+# took about 7 minutes together, and the whole suite 17.
 #
 # Convergence (see converged): every replica is either running on the node the
 # server assigns it, with that container running, or pending with a placement
@@ -37,8 +77,8 @@
 # no container is left over; no (app, replica) pair is on two nodes.
 #
 # It publishes no ports. On exit, also after a failure or Ctrl-C, it removes
-# its containers, network and volumes. The Go build cache (hivemind-cache) is
-# kept.
+# its containers, the old servers' included, network and volumes. The Go
+# build cache (hivemind-cache) is kept.
 set -euo pipefail
 
 NODES=${NODES:-3}
@@ -53,17 +93,26 @@ esac
 REPO=$(cd "$(dirname "$0")/.." && pwd)
 # shellcheck source=lib/cluster.sh
 . "$REPO/scripts/lib/cluster.sh"
+# shellcheck source=lib/restore.sh
+. "$REPO/scripts/lib/restore.sh"
 
 WEB_IMAGE=${WEB_IMAGE:-busybox:stable}
 CONVERGE_SECS=${CONVERGE_SECS:-240}
 WEB_REPLICAS=$((NODES + 1))
 SPREAD_REPLICAS=$NODES
 RESULTS=()
+ALIAS=hm-server
+EXTRA=()
 
 cl_init "fault$NODES"
 for ((i = 0; i < NODES; i++)); do cl_add_node; done
 cl_trap_cleanup
 S=${CL_NAMES[0]}
+CL_NET_SUBNET=auto
+CL_SERVER_RUN_ARGS="--network-alias $ALIAS"
+CL_ADVERTISE=$ALIAS
+CL_JOIN_ADDR=$ALIAS
+SERVER_ADDR=$ALIAS:4484
 
 now() { date +%s; }
 
@@ -372,12 +421,228 @@ scenario_flap() {
 	result flap "PASS, $((lost1 - lost0)) losses of the flapping node; no placement on it within 30 s of the last heal"
 }
 
+# running_on FILE NAME...: the running hivemind containers of the nodes
+# named, as C lines, into FILE.
+running_on() {
+	local f=$1
+	shift
+	container_rows | awk -F'\t' -v names=" $* " '$4 == "running" && index(names, " " $2 " ")' >"$f"
+}
+
+# same_containers FILE NAME...: the nodes named run the containers in FILE,
+# with the same IDs and StartedAt, and no other. If not, it prints which
+# are gone and which are new, and fails.
+same_containers() {
+	local f=$1 w=$CL_WORK/same.want g=$CL_WORK/same.got
+	shift
+	running_on "$CL_WORK/same.tsv" "$@"
+	cut -f 2,3,5 "$f" | sort >"$w"
+	cut -f 2,3,5 "$CL_WORK/same.tsv" | sort >"$g"
+	cmp -s "$w" "$g" && return 0
+	echo "gone: $(comm -23 "$w" "$g" | tr '\t\n' ' ;') new: $(comm -13 "$w" "$g" | tr '\t\n' ' ;')"
+	return 1
+}
+
+# state_is ID STATE: the node's row in the server's hivemind nodes has STATE.
+state_is() { docker exec "$S" hivemind nodes | awk -v id="$1" '$1 == id' | grep -q " $2 "; }
+
+# all_state STATE ID...: every node named has STATE.
+all_state() {
+	local want=$1 id
+	shift
+	for id in "$@"; do state_is "$id" "$want" || return 1; done
+}
+
+server_id() { docker exec "$S" hivemind nodes | awk '$3 == "server" { print $1 }'; }
+
+# web_settled: web runs one replica on every node, and its extra replica is
+# pending on the port, as after setup.
+web_settled() {
+	take_snapshot || return 1
+	awk -F'\t' -v n="$NODES" '
+	$1 == "R" && $2 == "web" && $5 == "running" { run++; on[$4] = 1 }
+	END { c = 0; for (k in on) c++; exit !(run == n && c == n) }' "$CL_WORK/state.tsv"
+}
+
+# lose_and_restore WHAT WAITING: the server's machine is lost, and its
+# latest backup restored on a new container at a new address (see the
+# header), with --cluster-addr, as the alias still leads nowhere. The
+# restored server says the name does not resolve, keeps the server's node
+# ID, and waits for WAITING workers.
+lose_and_restore() {
+	local what=$1 waiting=$2
+	lose_server
+	docker exec "$S" apk add --no-cache jq >/dev/null || cl_fail "$what: installing jq in the new server node"
+	CL_SERVE_ARGS="--cluster-addr $NEW_IP"
+	restore_and_serve
+	[ "$(server_id)" = "${CL_IDS[0]}" ] || cl_fail "$what: the restored server's node is $(server_id), not ${CL_IDS[0]}"
+	docker exec "$S" grep -q -- '--advertise does not resolve' /var/log/hivemind.log ||
+		cl_fail "$what: serve did not warn that $ALIAS does not resolve: $(docker exec "$S" tail -n 5 /var/log/hivemind.log)"
+	docker exec "$S" grep -q "workers that were up before this start wait for their first report.* waiting=$waiting " /var/log/hivemind.log ||
+		cl_fail "$what: serve did not log that $waiting workers wait: $(docker exec "$S" grep 'wait for their first report' /var/log/hivemind.log)"
+}
+
+# at_since_served SECONDS: sleep until SECONDS after the restored server
+# answered.
+at_since_served() {
+	local left=$((SERVED_AT + $1 - $(now)))
+	[ "$left" -le 0 ] || sleep "$left"
+}
+
+# move_record WHAT: 30 s after the restored server started, past the 15 s
+# lease timeout and inside the 2 minute start grace, the alias moves to it,
+# as a DNS record would be updated.
+move_record() {
+	at_since_served 30
+	reconnect "$S" "$NEW_IP" --alias "$ALIAS"
+	docker exec "$S" pgrep -x hivemind >/dev/null || cl_fail "$1: serve stopped when the alias moved"
+	cl_check_server_listeners
+	cl_note "$1: moved the alias $ALIAS to $NEW_IP, $(($(now) - SERVED_AT)) s after serve started"
+}
+
+# not_lost WHAT ID...: the restored server has logged none of the nodes
+# named as lost.
+not_lost() {
+	local what=$1 id
+	shift
+	for id in "$@"; do
+		[ "$(lost_count "$id")" -eq 0 ] || cl_fail "$what: the restored server lost $id, which was up: $(docker exec "$S" grep 'node lost' /var/log/hivemind.log | tr '\n' ';')"
+	done
+}
+
+# old_server_check WHAT: the restored server stops, the alias moves to the
+# old server's container, which starts again at its old address with its
+# old store, and serve runs there. Every worker refuses it (see
+# workers_refuse_old in lib/restore.sh). Then the old server stops, the
+# restored one serves again under the alias, every worker, never restarted,
+# reports to it again, and the cluster converges.
+old_server_check() {
+	local what=$1 c i
+	for ((i = 1; i < NODES; i++)); do
+		c=${CL_NAMES[$i]}
+		epoch_is "$c" "$RS_LOSSES" || cl_fail "$what: $c has not seen the restored server's epoch $RS_LOSSES: $(docker exec "$c" cat /var/lib/hivemind/cluster-epoch 2>&1)"
+		CONTAINERS[$i]=$(worker_containers "$c")
+	done
+	mark_logs "${CL_NAMES[@]:1}"
+	docker exec "$S" pkill -TERM -x hivemind || true
+	wait_for 30 worker_stopped "$S" || cl_fail "$what: the restored server did not stop"
+	reconnect "$S" "$NEW_IP"
+	OLD_NET_ARGS="--alias $ALIAS"
+	old_server_returns --advertise "$ALIAS" --cluster-addr "$OLD_IP"
+	workers_refuse_old
+	old_server_goes
+	reconnect "$S" "$NEW_IP" --alias "$ALIAS"
+	cl_serve_server
+	wait_for 30 docker exec "$S" hivemind status || cl_fail "$what: the restored server's API did not answer after its restart"
+	for ((i = 1; i < NODES; i++)); do
+		c=${CL_NAMES[$i]}
+		wait_for 90 talks_again "$c" || cl_fail "$what: $c did not take the restored server again: $(docker exec "$c" tail -n 5 /var/log/hivemind.log)"
+	done
+	wait_converged "$what, after the old server"
+	cl_note "$what: the old server at $OLD_IP was refused by every worker; the restored one has them back"
+}
+
+scenario_lose_server_partition() {
+	local what=lose-server-partition c=${CL_NAMES[1]} id=${CL_IDS[1]} pre=$CL_WORK/pre-lsp.tsv cut=$CL_WORK/pre-lsp-cut.tsv
+	local up=() up_ids=() i out t_start t0 t_moved t_back t_heal t_conv
+	t_start=$(now)
+	for ((i = 2; i < NODES; i++)); do
+		up=(${up[@]+"${up[@]}"} "${CL_NAMES[$i]}")
+		up_ids=(${up_ids[@]+"${up_ids[@]}"} "${CL_IDS[$i]}")
+	done
+	place_spread
+	must_hold_spread "$id"
+	# No destination: the worker stays cut off from the new server too.
+	docker exec "$c" iptables -I OUTPUT -p tcp --dport 4484 -j DROP || cl_fail "$what: iptables in $c"
+	t0=$(now)
+	cl_note "$what: $c cannot reach port 4484 at any address from $(date -u +%T)"
+	wait_for 90 spread_off_node "$id" || cl_fail "$what: spread replicas did not move off $id within 90 s"
+	t_moved=$(($(now) - t0))
+	cl_note "$what: spread replicas moved off $id after $t_moved s"
+	sleep 5
+	running_on "$pre" "${up[@]}"
+	running_on "$cut" "$c"
+
+	lose_and_restore "$what" "${#up[@]}"
+	# The workers that were up wait. The cut-off one, whose lease had lapsed
+	# when the server went down, is lost at once.
+	at_since_served 20
+	all_state waiting "${up_ids[@]}" || cl_fail "$what: 20 s after the start the workers that were up are not waiting: $(docker exec "$S" hivemind nodes | tr '\n' ';')"
+	state_is "$id" lost || cl_fail "$what: 20 s after the start the cut-off $id is not lost: $(docker exec "$S" hivemind nodes | tr '\n' ';')"
+	cl_note "$what: 20 s after the start, ${#up[@]} worker(s) waiting, the cut-off $id lost"
+	move_record "$what"
+	wait_for 90 all_state ready "${up_ids[@]}" || cl_fail "$what: the workers that were up did not reconnect: $(docker exec "$S" hivemind nodes | tr '\n' ';')"
+	t_back=$(($(now) - SERVED_AT))
+	cl_note "$what: the workers that were up report, $t_back s after serve started"
+	out=$(same_containers "$pre" "${up[@]}") || cl_fail "$what: the containers of the workers that were up changed: $out"
+	out=$(same_containers "$cut" "$c") || cl_fail "$what: the cut-off worker's containers changed before the heal: $out"
+	if state_is "$id" ready; then cl_fail "$what: the cut-off $id reported through the partition"; fi
+	not_lost "$what" "${up_ids[@]}"
+
+	docker exec "$c" iptables -D OUTPUT -p tcp --dport 4484 -j DROP || cl_fail "$what: heal: iptables in $c"
+	t_heal=$(now)
+	cl_note "$what: healed at $(date -u +%T)"
+	# The cut-off worker takes web's pending replica once it is past
+	# --min-ready; converged alone allows it to be pending.
+	wait_for "$CONVERGE_SECS" web_settled || cl_fail "$what: web does not run on every node after the heal: $(awk -F'\t' '$1 == "R" && $2 == "web"' "$CL_WORK/state.tsv" | tr '\n' ';')"
+	wait_converged "$what"
+	t_conv=$(($(now) - t_heal))
+	[ "$(cl_node_id_of "$c")" = "$id" ] || cl_fail "$what: $c has node ID $(cl_node_id_of "$c"), not $id"
+	[ "$(docker exec "$c" grep -c 'joined the cluster' /var/log/hivemind.log)" = 1 ] || cl_fail "$what: $c joined again"
+	out=$(same_containers "$pre" "${up[@]}") || cl_fail "$what: the containers of the workers that were up changed after the heal: $out"
+	not_lost "$what" "${up_ids[@]}"
+	cl_note "$what: converged $t_conv s after the heal; the cut-off worker is back without joining again"
+
+	RS_DOWN_IDS=$id
+	old_server_check "$what"
+	out=$(same_containers "$pre" "${up[@]}") || cl_fail "$what: the containers of the workers that were up changed beside the old server: $out"
+	not_lost "$what" "${up_ids[@]}"
+	result "$what" "PASS in $(($(now) - t_start)) s, replicas moved in ${t_moved} s; restored at $NEW_IP, workers that were up back ${t_back} s after serve started, none lost, containers kept; converged ${t_conv} s after heal; old server refused"
+}
+
+scenario_lose_server_slow() {
+	local what=lose-server-slow c=${CL_NAMES[1]} id=${CL_IDS[1]} pre=$CL_WORK/pre-lss.tsv
+	local workers=("${CL_NAMES[@]:1}") ids=("${CL_IDS[@]:1}") out t_start t_back t_conv
+	t_start=$(now)
+	place_spread
+	must_hold_spread "$id"
+	docker exec "$c" apk add --no-cache iproute2 >/dev/null || cl_fail "$what: installing iproute2 in $c"
+	docker exec "$c" tc qdisc add dev eth0 root netem delay 2000ms || cl_fail "$what: tc netem in $c"
+	cl_note "$what: 2000 ms delay on $c eth0"
+	running_on "$pre" "${workers[@]}"
+
+	lose_and_restore "$what" "${#workers[@]}"
+	at_since_served 20
+	all_state waiting "${ids[@]}" || cl_fail "$what: 20 s after the start the workers are not waiting: $(docker exec "$S" hivemind nodes | tr '\n' ';')"
+	cl_note "$what: 20 s after the start, ${#workers[@]} workers waiting"
+	move_record "$what"
+	wait_for 90 all_state ready "${ids[@]}" || cl_fail "$what: the workers did not reconnect, the slow one included: $(docker exec "$S" hivemind nodes | tr '\n' ';')"
+	t_back=$(($(now) - SERVED_AT))
+	cl_note "$what: every worker reports, the slow $c too, $t_back s after serve started"
+	out=$(same_containers "$pre" "${workers[@]}") || cl_fail "$what: a worker's containers changed: $out"
+	not_lost "$what" "${ids[@]}"
+
+	docker exec "$c" tc qdisc del dev eth0 root || cl_fail "$what: removing the netem qdisc"
+	wait_converged "$what"
+	t_conv=$(($(now) - SERVED_AT))
+	out=$(same_containers "$pre" "${workers[@]}") || cl_fail "$what: a worker's containers changed: $out"
+	not_lost "$what" "${ids[@]}"
+
+	RS_DOWN_IDS=
+	old_server_check "$what"
+	out=$(same_containers "$pre" "${workers[@]}") || cl_fail "$what: a worker's containers changed beside the old server: $out"
+	not_lost "$what" "${ids[@]}"
+	result "$what" "PASS in $(($(now) - t_start)) s, restored at $NEW_IP with 2000 ms delay on a worker; every worker back ${t_back} s after serve started, none lost, no container changed; converged ${t_conv} s after serve started; old server refused"
+}
+
 setup
 scenario_kill_worker
 scenario_kill_server
 scenario_partition
 scenario_slow
 scenario_flap
+scenario_lose_server_partition
+scenario_lose_server_slow
 
 cl_note "summary for $NODES nodes:"
 for r in "${RESULTS[@]}"; do cl_note "  $r"; done
