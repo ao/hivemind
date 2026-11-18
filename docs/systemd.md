@@ -74,6 +74,8 @@ sudo systemctl enable --now hivemind
 
 On the server, `sudo hivemind nodes` lists the worker as `ready`.
 
+`join` does not keep its flags. A worker that runs a [router](routing.md) needs `--route-addr` and `--acme-email`, and `--acme-ca` if you gave one, in this unit's `ExecStart` too, as in `hivemind serve --role worker --route-addr 0.0.0.0 --acme-email ops@example.com`, or as `route-addr:` and `acme-email:` in `/var/lib/hivemind/hivemind.yaml`. Without them the unit runs the agent and no router, and logs nothing about it. The server's unit takes the same flags after `--advertise`.
+
 ## What the settings do
 
 - The units run hivemind as root, which is what the default data directory (`/var/lib/hivemind`) and the Docker socket expect. To run as another user, add `User=` and a `--data-dir` that user owns, and give the user access to the Docker socket.
