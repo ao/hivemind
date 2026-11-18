@@ -29,6 +29,20 @@
 #                                             server-move; W sent to it for a while
 #   scenario.sh cert-restart T [LEFT]         restart T once a certificate its router
 #                                             serves is in its renewal window
+#   scenario.sh ca-rotate [NAME]              a CA rotation, start, renew, finish, each
+#                                             once the one before it is done; measured
+#   scenario.sh ca-offline T                  a rotation with worker T powered off,
+#                                             finish --force, T back cut off, removed
+#                                             and joined again
+#   scenario.sh ca-abort                      a rotation aborted in phase renew, then
+#                                             the turned rotation finished
+#   scenario.sh ca-restore-begin              start, renew, then a backup, for a
+#                                             server-move during a rotation
+#   scenario.sh ca-finish NAME                finish the rotation a restore brought back
+#   scenario.sh ca-watch | ca-views NAME LABEL  the rotation's state, on change or once
+#   scenario.sh start-hold                    the server's machine stopped and started
+#                                             with every worker cut off from it, past
+#                                             its start grace; then the workers back
 #   scenario.sh end NAME
 #
 # A fault that needs the machine's owner (power off, power on, a new machine)
@@ -212,8 +226,9 @@ partition() {
 }
 
 server_backup() {
-	local f=/var/tmp/hivemind-soak.tar
-	on "$SERVER" "sudo rm -f $f && sudo $HM backup $f" >/dev/null || die "hivemind backup on $SERVER"
+	local f=/var/tmp/hivemind-soak.tar out
+	out=$(on "$SERVER" "sudo rm -f $f && sudo $HM backup $f 2>/dev/null") || die "hivemind backup on $SERVER"
+	ev event "lose-server backup-said $(tr '\n' ';' <<<"$out" | cut -c1-400)"
 	(umask 077 && SSH_TIMEOUT=60 on "$SERVER" "sudo cat $f" >"$SOAK_DIR/backup.tar") || die "copying the backup"
 	chmod 600 "$SOAK_DIR/backup.tar"
 	ev event "lose-server backup bytes=$(stat -c %s "$SOAK_DIR/backup.tar") sha256=$(sha256sum "$SOAK_DIR/backup.tar" | cut -d' ' -f1) entries=$(tar -tf "$SOAK_DIR/backup.tar" | tr '\n' ',')"
@@ -221,12 +236,17 @@ server_backup() {
 
 # restore_server: on the new, empty server machine, as docs/backup.md says.
 restore_server() {
+	local out
 	install_bin "$SERVER" || return 1
 	# The machine set-up that is not hivemind's state: hosts, trust, certs.d.
 	if [ "$SOAK_ROUTES" = 1 ]; then prepare_node "$SERVER" || return 1; fi
 	(SSH_TIMEOUT=60 on "$SERVER" "umask 077; cat > /var/tmp/hivemind-soak.tar" <"$SOAK_DIR/backup.tar") || return 1
-	on "$SERVER" "sudo $HM restore /var/tmp/hivemind-soak.tar --data-dir $DATA && rm -f /var/tmp/hivemind-soak.tar" >/dev/null || return 1
-	ev event "lose-server restored"
+	# restore's own lines (no secret in them): the epoch, and the CA rotation's phase
+	out=$(on "$SERVER" "sudo $HM restore /var/tmp/hivemind-soak.tar --data-dir $DATA 2>&1 && rm -f /var/tmp/hivemind-soak.tar") || {
+		echo "$out"
+		return 1
+	}
+	ev event "lose-server restored $(tr '\n' ';' <<<"$out" | cut -c1-900)"
 	install_unit "$SERVER" "$(server_unit "$SERVER_IP")" || return 1
 	ev event "lose-server service-started"
 }
@@ -1058,6 +1078,538 @@ join_new() {
 
 node_is() { [ "$(hm "$SERVER" nodes --json | jq -r --arg i "$1" '.[] | select(.id == $i) | .state')" = "$2" ]; }
 
+# The fifth soak: rotations of the cluster CA (docs/ca-rotation.md), and the
+# start grace's hold.
+#
+# A CA is shown by the end of its name: the CA from init is "hivemind cluster
+# CA" (shown as ca0); one a rotation makes is "hivemind cluster CA 1a2b3c4d",
+# the first 4 bytes of its fingerprint (shown as 1a2b3c4d).
+
+# On the server: the rotation as hivemind ca status --json has it (the CAs,
+# phase, direction, whether the server's certificate has moved, the next step
+# and the nodes it waits for, and per node live or down, T if it trusts the
+# CA the rotation goes to, R if it has renewed under it, O for an old build),
+# the CA files in the data directory, and the certificate the join listener
+# presents: the node listener presents the same one, and a handshake there
+# without a client certificate would be a TLS error in the server's log.
+read -r -d '' REMOTE_CA_SERVER <<'EOF' || true
+addr=$1
+d=/var/lib/hivemind
+cn() { sed -n 's/^.*CN *= *hivemind cluster CA *//p' | sed 's/^$/ca0/'; }
+s=$(/usr/local/bin/hivemind ca status --json 2>/dev/null | jq -r '
+	def tag: if . == null then "-" else (ltrimstr("hivemind cluster CA") | ltrimstr(" ") | if . == "" then "ca0" else . end) end;
+	.current.fingerprint as $c | (.next.fingerprint // "") as $n |
+	"cur=\(.current.name | tag) next=\(.next.name | tag) listener=\(if .listener == $c then (.current.name | tag) elif .listener == $n then (.next.name | tag) else .listener[0:8] end) " +
+	(if .rotation == null then "phase=none" else
+		"phase=\(.rotation.phase) toward=\(.rotation.toward) moved=\(.rotation.listener_moved) step=\(.rotation.next_step) waiting=\([.rotation.waiting[] | .node] | join(",") | if . == "" then "-" else . end) nodes=\([(.nodes // [])[] | "\(.id)=\(if .live then "live" else "down" end):\(if .trusts then "T" else "-" end)\(if .renewed then "R" else "-" end)\(if .old_build then "O" else "" end)"] | join(","))"
+	end)' 2>/dev/null) || s=""
+f=$(cd $d && for x in ca.crt ca-next.crt; do [ -f $x ] && printf '%s:%s,' $x "$(openssl x509 -in $x -noout -subject | cn)"; done; for x in ca.key ca-next.key; do [ -f $x ] && printf '%s,' $x; done)
+l=$(timeout 3 openssl s_client -connect $addr:4485 </dev/null 2>/dev/null | openssl x509 -noout -issuer -serial 2>/dev/null)
+li=$(sed -n '/^issuer/p' <<<"$l" | cn)
+ls=$(sed -n 's/^serial=//p' <<<"$l")
+echo "${s:-status=fail} files=${f:--} served=${li:-none}:${ls: -8}"
+EOF
+
+# On a worker, its own view: the CAs in ca.crt, in order; the issuer, serial
+# and expiry of node.crt; whether the server's certificate, from the join
+# listener at NAME (what the worker dials), verifies against ca.crt for NAME,
+# and its issuer; and whether a ca.crt.next is there.
+read -r -d '' REMOTE_CA_WORKER <<'EOF' || true
+name=$1
+d=/var/lib/hivemind
+cn() { sed -n 's/^.*CN *= *hivemind cluster CA *//p' | sed 's/^$/ca0/'; }
+[ -f $d/ca.crt ] || { echo "ca.crt=none"; exit 0; }
+cas=$(openssl crl2pkcs7 -nocrl -certfile $d/ca.crt 2>/dev/null | openssl pkcs7 -print_certs -noout 2>/dev/null | grep '^subject' | cn | tr '\n' '+')
+n=$(openssl x509 -in $d/node.crt -noout -issuer -serial -enddate 2>/dev/null)
+ni=$(sed -n '/^issuer/p' <<<"$n" | cn)
+ns=$(sed -n 's/^serial=//p' <<<"$n")
+ne=$(date -u -d "$(sed -n 's/^notAfter=//p' <<<"$n")" +%FT%TZ 2>/dev/null)
+# No -verify_return_error: an aborted handshake is a TLS error in the
+# server's log ("bad record MAC"); s_client reports the result either way.
+v=$(timeout 3 openssl s_client -connect $name:4485 -verify_hostname $name -CAfile $d/ca.crt </dev/null 2>&1)
+vc=$(sed -n 's/^ *Verify return code: \([0-9]*\).*/\1/p' <<<"$v" | tail -n 1)
+si=$(openssl x509 -noout -issuer 2>/dev/null <<<"$v" | cn)
+echo "ca.crt=${cas%+} node.crt=${ni:-none}:${ns: -8}:${ne:-?} server=${si:-none}:verify=${vc:-fail} next=$([ -e $d/ca.crt.next ] && echo yes || echo no)"
+EOF
+
+# with_names TEXT: the node IDs in TEXT as soak names.
+with_names() {
+	local l=$1 id nm
+	while read -r id nm; do l=${l//$id/$nm}; done <"$IDS_FILE"
+	echo "$l"
+}
+
+ca_server_view() { SSH_CT=${SSH_CT:-2} SSH_TIMEOUT=8 on "$SERVER" "sudo bash -s $SERVER_IP" <<<"$REMOTE_CA_SERVER" 2>/dev/null || echo "ssh=fail"; }
+ca_worker_view() { SSH_CT=${SSH_CT:-2} SSH_TIMEOUT=8 on "$1" "sudo bash -s $(server_addr)" <<<"$REMOTE_CA_WORKER" 2>/dev/null || echo "ssh=fail"; }
+
+# ca_watch: once a second the server's view, every 2 s each worker's, one
+# "ca server" or "ca disk NAME" line at each change. Runs until killed
+# (bg_start cawatch); it reads the node list when it starts.
+ca_watch() {
+	local k=0 t d v i n f=$SOAK_DIR/ca-watch
+	declare -A last
+	trap 'exit 0' TERM INT
+	while :; do
+		t=$(now_ms)
+		if [ $((k % 2)) -eq 0 ]; then
+			for ((i = 1; i < ${#NAMES[@]}; i++)); do
+				(SSH_CT=1 ca_worker_view "${NAMES[$i]}" >"$f.$i") &
+			done
+		fi
+		v=$(with_names "$(SSH_CT=1 ca_server_view)")
+		[ "$v" = "${last[server]:-}" ] || {
+			ev ca "server $v"
+			last[server]=$v
+		}
+		wait
+		if [ $((k % 2)) -eq 0 ]; then
+			for ((i = 1; i < ${#NAMES[@]}; i++)); do
+				n=${NAMES[$i]}
+				v=$(cat "$f.$i" 2>/dev/null)
+				rm -f "$f.$i"
+				[ "$v" = "${last[$n]:-}" ] || {
+					ev ca "disk $n $v"
+					last[$n]=$v
+				}
+			done
+		fi
+		k=$((k + 1))
+		d=$((1000 - ($(now_ms) - t)))
+		[ "$d" -le 0 ] || sleep "$((d / 1000)).$(printf '%03d' $((d % 1000)))"
+	done
+}
+
+# ca_views NAME LABEL: the server's view and every worker's, as events, once.
+ca_views() {
+	local i
+	ev event "$1 ca-$2 $SERVER $(with_names "$(ca_server_view)")"
+	for ((i = 1; i < ${#NAMES[@]}; i++)); do ev event "$1 ca-$2 ${NAMES[$i]} $(ca_worker_view "${NAMES[$i]}")"; done
+}
+
+# ca_step NAME STEP [--force]: one step on the server, as the operator runs
+# it; its reply and exit code, and how long it took.
+ca_step() {
+	local name=$1 step=$2 force=${3:-} out rc t
+	t=$(now_ms)
+	ev event "$name $SERVER fault ca-$step${force:+ $force}"
+	out=$(hm "$SERVER" "ca rotate $step $force" 2>&1)
+	rc=$?
+	ev event "$name ca-$step${force:+-force}-done rc=$rc ms=$(($(now_ms) - t)) $(with_names "$(tr '\n' ';' <<<"$out" | tr -s ' ' | cut -c1-1200)")"
+	return $rc
+}
+
+C_TRUST='.rotation.next_step == "renew" and (.rotation.waiting | length) == 0'
+C_RENEWED='.rotation.next_step == "finish" and (.rotation.waiting | length) == 0'
+C_MOVED='.rotation.listener_moved == true'
+
+# ca_wait NAME LABEL SECS COND: until hivemind ca status --json meets the jq
+# condition COND, polled every 0.5 s; an event when it does.
+ca_wait() {
+	local name=$1 label=$2 secs=$3 cond=$4 t0 end
+	t0=$(now_ms)
+	end=$(($(date +%s) + secs))
+	while [ "$(date +%s)" -lt "$end" ]; do
+		if hm "$SERVER" "ca status --json" 2>/dev/null | jq -e "$cond" >/dev/null 2>&1; then
+			ev event "$name $label after_ms=$(($(now_ms) - t0))"
+			return 0
+		fi
+		sleep 0.5
+	done
+	ev event "$name $label-timeout $(with_names "$(ca_server_view)")"
+	return 1
+}
+
+# ca_tag: the server's current CA, as shown.
+ca_tag() {
+	hm "$SERVER" "ca status --json" | jq -r '.current.name | ltrimstr("hivemind cluster CA") | ltrimstr(" ") | if . == "" then "ca0" else . end'
+}
+
+# ca_wait_disk NAME LABEL SECS TAG [SKIP]: until every worker but SKIP has
+# only TAG in ca.crt and a node certificate from TAG, polled every second.
+ca_wait_disk() {
+	local name=$1 label=$2 secs=$3 tag=$4 skip=${5:-} t0 end i n ok v
+	t0=$(now_ms)
+	end=$(($(date +%s) + secs))
+	while [ "$(date +%s)" -lt "$end" ]; do
+		ok=1
+		for ((i = 1; i < ${#NAMES[@]}; i++)); do
+			n=${NAMES[$i]}
+			[ "$n" = "$skip" ] && continue
+			v=$(ca_worker_view "$n")
+			[[ "$v" == "ca.crt=$tag node.crt=$tag:"* ]] || {
+				ok=0
+				break
+			}
+		done
+		if [ "$ok" = 1 ]; then
+			ev event "$name $label tag=$tag after_ms=$(($(now_ms) - t0))"
+			return 0
+		fi
+		sleep 1
+	done
+	ev event "$name $label-timeout tag=$tag"
+	return 1
+}
+
+# all_kept PRE [SKIP]: like worker_kept, over every node of the list now,
+# the server too, but SKIP.
+all_kept() {
+	local cur=$SOAK_DIR/kept.tsv n
+	: >"$cur"
+	for n in "${NAMES[@]}"; do
+		[ "$n" = "${2:-}" ] && continue
+		container_rows_of "$n" >>"$cur" 2>/dev/null || printf 'U\t%s\n' "$n" >>"$cur"
+	done
+	awk -F'\t' -v w=" ${NAMES[*]} " -v skip="${2:-}" '
+		FILENAME == ARGV[1] { if ($1 == "C" && $4 == "running" && index(w, " " $2 " ") && $2 != skip) pre[$2 "|" $3 "|" $5] = $6 "|" $7; next }
+		$1 == "U" { out = out "unreachable:" $2 ","; next }
+		$1 == "C" && $4 == "running" { k = $2 "|" $3 "|" $5; now[k] = 1; if (!(k in pre)) out = out "new:" $2 ":" $3 ":" $6 "|" $7 "," }
+		END { for (k in pre) if (!(k in now)) { split(k, a, "|"); out = out "gone:" a[1] ":" a[2] ":" pre[k] "," } print (out == "" ? "unchanged" : out) }' "$1" "$cur"
+}
+
+# ids_check: the node IDs in hivemind nodes are those of the ID map, and each
+# worker's node.json has its ID: no node joined again.
+ids_check() {
+	local want got i n bad=""
+	want=$(awk '{ print $1 }' "$IDS_FILE" | sort | tr '\n' ' ')
+	got=$(hm "$SERVER" nodes --json | jq -r '.[].id' | sort | tr '\n' ' ')
+	[ "$want" = "$got" ] || bad="nodes=[$got] map=[$want] "
+	for ((i = 1; i < ${#NAMES[@]}; i++)); do
+		n=${NAMES[$i]}
+		[ "$(on "$n" "sudo jq -r .node_id $DATA/node.json")" = "$(id_of "$n")" ] || bad+="$n:node.json-differs "
+	done
+	echo "${bad:-same}"
+}
+
+# ca_after NAME T0 PRE [SKIP]: after a rotation: the containers (all_kept),
+# the node IDs, the TLS handshake errors and refusals in the server's log
+# since T0 (Unix s), the TLS and x509 lines in each worker's, the joins, the
+# node certificates' expiry the server records, and the journals to files.
+ca_after() {
+	local name=$1 t0=$2 pre=$3 skip=${4:-} i n
+	ev event "$name kept $(all_kept "$pre" "$skip")"
+	ev event "$name ids $(ids_check)"
+	on "$SERVER" "sudo journalctl -u hivemind --since @$t0 -o short-iso-precise --no-pager" >"$SOAK_DIR/journal-$name-$SERVER.txt" 2>/dev/null || true
+	ev event "$name server-log tls_handshake_errors=$(grep -c 'TLS handshake error' "$SOAK_DIR/journal-$name-$SERVER.txt") refused=$(grep -c 'request refused' "$SOAK_DIR/journal-$name-$SERVER.txt") joined=$(grep -c 'node joined' "$SOAK_DIR/journal-$name-$SERVER.txt") errors=$(grep -c 'level=ERROR' "$SOAK_DIR/journal-$name-$SERVER.txt") warns=$(grep -c 'level=WARN' "$SOAK_DIR/journal-$name-$SERVER.txt")"
+	for ((i = 1; i < ${#NAMES[@]}; i++)); do
+		n=${NAMES[$i]}
+		on "$n" "sudo journalctl -u hivemind --since @$t0 -o short-iso-precise --no-pager" >"$SOAK_DIR/journal-$name-$n.txt" 2>/dev/null || true
+		ev event "$name $n worker-log tls_x509_lines=$(grep -ciE 'x509|tls:|handshake' "$SOAK_DIR/journal-$name-$n.txt") errors=$(grep -c 'level=ERROR' "$SOAK_DIR/journal-$name-$n.txt") warns=$(grep -c 'level=WARN' "$SOAK_DIR/journal-$name-$n.txt") ca_lines=$(grep -cE 'cluster CA|renew' "$SOAK_DIR/journal-$name-$n.txt")"
+	done
+	ev event "$name node-cert-expiry $(with_names "$(on "$SERVER" "sudo bash -s" <<<"$REMOTE_CERT_EXPIRY" 2>/dev/null | tr '\n' ' ')")"
+}
+
+read -r -d '' REMOTE_CERT_EXPIRY <<'EOF' || true
+tok=$(cat /var/lib/hivemind/admin.token) || exit 1
+printf 'header = "Authorization: Bearer %s"\n' "$tok" | curl -sS -K - -m 5 http://127.0.0.1:4483/metrics |
+	sed -n 's/^hivemind_node_cert_expiry_timestamp_seconds{node="\([^"]*\)"} \(.*\)$/\1 \2/p' |
+	while read -r n v; do echo "$n=$(date -u -d @"$(printf '%.0f' "$v")" +%FT%TZ)"; done
+EOF
+
+# ca_rotate: a rotation under the clients, each step once the one before
+# it is done: start; renew once every node trusts the new CA; finish once
+# every node has renewed and the server's certificate has moved; then until
+# every worker holds the new CA alone.
+ca_rotate() {
+	local name=${1:-ca-rotate} pre t0
+	pre=$SOAK_DIR/pre-$name.tsv
+	begin "$name" "$SERVER"
+	t0=$(date -u +%s)
+	bg_start cawatch "$HERE/scenario.sh" ca-watch
+	ca_views "$name" before
+	ca_step "$name" start || die "$name: start"
+	ca_wait "$name" trust-all 300 "$C_TRUST" || die "$name: not every node trusts the new CA"
+	ca_views "$name" trust
+	ca_step "$name" renew || die "$name: renew"
+	ca_wait "$name" renewed-all 300 "$C_RENEWED" || die "$name: not every node renewed"
+	ca_wait "$name" listener-moved 300 "$C_MOVED" || die "$name: the server's certificate did not move"
+	ca_views "$name" renew
+	ca_step "$name" finish || die "$name: finish"
+	ca_wait_disk "$name" workers-one-ca 120 "$(ca_tag)"
+	sleep 5
+	ca_views "$name" after
+	bg_stop cawatch
+	ca_after "$name" "$t0" "$pre"
+	end_scenario "$name"
+}
+
+port22_down() { ! port22 "$1"; }
+
+# ca_offline T: a rotation with worker T powered off. The operator powers T
+# off when the log says "ca-offline: power ... off now", and on again when it
+# says "... on now"; this waits for each. With T lost, its replicas
+# elsewhere: start; renew, which T does not hold back; finish, which must
+# refuse naming T; finish --force. T then comes back cut off: the line its
+# log says it with, its containers, then hivemind node remove and a join
+# from an empty data directory (setup.sh rejoin), until converged.
+ca_offline() {
+	local T=$1 name=ca-offline pre=$SOAK_DIR/pre-ca-offline.tsv id t0 t1 end v line=""
+	begin "$name" "$T"
+	id=$(id_of "$T")
+	t0=$(date -u +%s)
+	bg_start cawatch "$HERE/scenario.sh" ca-watch
+	note "$name: power $T off now"
+	wait_for 900 port22_down "$T" || die "$name: $T did not go down"
+	measure "$name" "$T" loss 300 || die "$name: $T was not lost"
+	ca_views "$name" before
+	ca_step "$name" start || die "$name: start"
+	ca_wait "$name" trust-live 300 "$C_TRUST" || die "$name: not every live node trusts the new CA"
+	ca_views "$name" trust
+	ca_step "$name" renew || die "$name: renew"
+	ca_wait "$name" renewed-live 300 "([.nodes[] | select(.live and (.renewed | not))] | length) == 0 and ([.rotation.waiting[].node] == [\"$id\"])" ||
+		die "$name: the live nodes did not renew"
+	sleep 5
+	ev event "$name status-before-finish $(with_names "$(ca_server_view)")"
+	ca_views "$name" renew
+	ca_step "$name" finish && die "$name: finish did not refuse with $T down"
+	ca_step "$name" finish --force || die "$name: finish --force"
+	ca_wait_disk "$name" workers-one-ca 120 "$(ca_tag)" "$T"
+	ca_views "$name" after
+	note "$name: power $T on now"
+	wait_for 900 port22 "$T" || die "$name: $T did not come back"
+	t1=$(date -u +%s)
+	forget_host "$T"
+	ev event "$name $T back"
+	end=$(($(date +%s) + 300))
+	while [ "$(date +%s)" -lt "$end" ]; do
+		line=$(on "$T" "sudo journalctl -u hivemind -b -o short-iso-precise --no-pager | grep -m1 -E 'does not trust|unknown authority'" 2>/dev/null) && [ -n "$line" ] && break
+		sleep 2
+	done
+	ev event "$name $T cut-off-line ${line:-none}"
+	sleep 30
+	ev event "$name $T after-30s $(ca_worker_view "$T") containers=$(on "$T" "sudo docker ps --filter label=hivemind.app --format '{{.Label \"hivemind.app\"}}|{{.Label \"hivemind.replica\"}}'" | sort | tr '\n' ',') state=$(hm "$SERVER" nodes --json | jq -r --arg i "$id" '.[] | select(.id == $i) | .state')"
+	snapshot "$SOAK_DIR/now.tsv" && ev event "$name dups $(dups "$SOAK_DIR/now.tsv" | tr '\n' ';')"
+	on "$T" "sudo journalctl -u hivemind -b -o short-iso-precise --no-pager" >"$SOAK_DIR/journal-$name-$T-cutoff.txt" 2>/dev/null || true
+	ev event "$name $T cut-off-lines $(grep -cE 'does not trust|unknown authority' "$SOAK_DIR/journal-$name-$T-cutoff.txt") first-and-last $(grep -E 'does not trust|unknown authority' "$SOAK_DIR/journal-$name-$T-cutoff.txt" | sed -n '1s/ .*//p;$s/ .*//p' | tr '\n' ' ')"
+	ev event "$name $T fault node-remove"
+	v=$(hm "$SERVER" node remove "$id" 2>&1)
+	ev event "$name $T removed rc=$? $(tr '\n' ';' <<<"$v" | cut -c1-400)"
+	ev event "$name $T fault rejoin"
+	"$HERE/setup.sh" rejoin "$T" >>"$SOAK_DIR/rejoin.out" 2>&1 || die "$name: rejoin $T"
+	wait_for 300 converged_now && ev event "$name converged-yes"
+	ca_views "$name" rejoined
+	bg_stop cawatch
+	ca_after "$name" "$t0" "$pre" "$T"
+	end_scenario "$name"
+}
+
+# On the server: renew, then abort as soon as at least one node has renewed
+# and not every one has (or MAX ms after renew returned), polling GET /v1/ca
+# every 50 ms. Server times, Unix ms.
+read -r -d '' REMOTE_ABORT <<'EOF' || true
+max=$1
+HM=/usr/local/bin/hivemind
+tok=$(cat /var/lib/hivemind/admin.token)
+st() { printf 'header = "Authorization: Bearer %s"\n' "$tok" | curl -sf -K - -m 2 http://127.0.0.1:4483/v1/ca; }
+t0=$(date +%s%3N)
+out=$($HM ca rotate renew 2>&1); rc=$?
+t1=$(date +%s%3N)
+echo "renew rc=$rc server_ms=$t1 took_ms=$((t1 - t0))"
+[ $rc = 0 ] || { echo "$out" | tr '\n' ';'; exit 1; }
+while :; do
+	s=$(st)
+	now=$(date +%s%3N)
+	r=$(jq -r '[.nodes[] | select(.renewed)] | length' <<<"$s")
+	a=$(jq -r '.nodes | length' <<<"$s")
+	[ "$r" -ge 1 ] && [ "$r" -lt "$a" ] && break
+	[ $((now - t1)) -ge "$max" ] && break
+	sleep 0.05
+done
+echo "abort-at server_ms=$now after_renew_ms=$((now - t1)) renewed=$r/$a moved=$(jq -r .rotation.listener_moved <<<"$s") nodes=$(jq -r '[.nodes[] | "\(.id)=\(if .renewed then "R" else "-" end)"] | join(",")' <<<"$s")"
+out=$($HM ca rotate abort 2>&1); rc=$?
+echo "abort rc=$rc server_ms=$(date +%s%3N) $(echo "$out" | tr '\n' ';' | tr -s ' ' | cut -c1-900)"
+EOF
+
+# ca_abort: start; renew once every node trusts the new CA; abort in phase
+# renew (REMOTE_ABORT); then the turned rotation, back to the CA it came
+# from, until every node has renewed back and the server's certificate is
+# back, and finish.
+ca_abort() {
+	local name=ca-abort pre=$SOAK_DIR/pre-ca-abort.tsv t0 from out l
+	begin "$name" "$SERVER"
+	t0=$(date -u +%s)
+	bg_start cawatch "$HERE/scenario.sh" ca-watch
+	from=$(ca_tag)
+	ca_views "$name" before
+	ca_step "$name" start || die "$name: start"
+	ca_wait "$name" trust-all 300 "$C_TRUST" || die "$name: not every node trusts the new CA"
+	ca_views "$name" trust
+	ev event "$name $SERVER fault ca-renew-then-abort"
+	out=$(SSH_TIMEOUT=60 on "$SERVER" "sudo bash -s ${ABORT_MAX_MS:-10000}" <<<"$REMOTE_ABORT" 2>&1)
+	while read -r l; do ev event "$name $(with_names "$l")"; done <<<"$out"
+	ca_wait "$name" turned-back 300 ".rotation.toward == \"current\" and $C_RENEWED and $C_MOVED" || die "$name: the turned rotation did not come back"
+	ca_views "$name" turned
+	ca_step "$name" finish || die "$name: finish"
+	ca_wait_disk "$name" workers-one-ca 120 "$from"
+	sleep 5
+	ca_views "$name" after
+	bg_stop cawatch
+	ca_after "$name" "$t0" "$pre"
+	end_scenario "$name"
+}
+
+# ca_restore_begin: the first half of a restore during a rotation: start,
+# renew, every node renewed and the server's certificate moved, then the
+# backup (server-backup), in phase renew. Then the operator loses the
+# server and server-move restores it (scenario ca-restore), and ca-finish
+# ends the rotation on the restored server.
+ca_restore_begin() {
+	local name=ca-restore
+	begin "$name" "$SERVER"
+	date -u +%s >"$SOAK_DIR/ca-restore.t0"
+	bg_start cawatch "$HERE/scenario.sh" ca-watch
+	ca_views "$name" before
+	ca_step "$name" start || die "$name: start"
+	ca_wait "$name" trust-all 300 "$C_TRUST" || die "$name: not every node trusts the new CA"
+	ca_step "$name" renew || die "$name: renew"
+	ca_wait "$name" renewed-all 300 "$C_RENEWED" || die "$name: not every node renewed"
+	ca_wait "$name" listener-moved 300 "$C_MOVED" || die "$name: the server's certificate did not move"
+	ca_views "$name" renew
+	server_backup
+	ca_views "$name" backup
+	bg_stop cawatch
+	note "$name: backup taken in phase renew; power the server off now"
+}
+
+# ca_finish NAME: on the restored server, the rotation as it came back, until
+# every node has renewed (the restored server learns it from their
+# requests), then finish, until every worker holds the new CA alone.
+ca_finish() {
+	local name=${1:-ca-finish} t0
+	ev scenario "$name begin target=$SERVER"
+	t0=$(date -u +%s)
+	bg_start cawatch "$HERE/scenario.sh" ca-watch
+	ca_views "$name" restored
+	ca_wait "$name" renewed-all 300 "$C_RENEWED and $C_MOVED"
+	ca_step "$name" finish
+	ca_wait_disk "$name" workers-one-ca 120 "$(ca_tag)"
+	sleep 5
+	ca_views "$name" after
+	bg_stop cawatch
+	ev event "$name workers-kept-since-backup $(worker_kept "$SOAK_DIR/pre-ca-restore.tsv")"
+	ca_after "$name" "$t0" "$SOAK_DIR/pre-ca-restore.tsv" "$SERVER"
+	end_scenario "$name"
+}
+
+# start_hold: the server's machine is stopped by the operator (EC2 stop)
+# when the log says "start-hold: stop ...", and every worker's packets to
+# the server's port 4484 are dropped (iptables on each worker) once it is
+# down; the operator then starts it. Once a second until HOLD_AFTER (90) s
+# past the end of its start grace (START_GRACE, 120): its API, the state of
+# each worker in its hivemind nodes (+held for start_held), the containers on
+# its own machine, its status line, and its error line. Then the rules come
+# off, and until every worker is ready and the cluster has converged. With
+# HEAL_LATE=W (scenario start-hold-late), W's rule comes off HEAL_LAG (12) s
+# after the others', so that the hold ends with W not yet reported.
+start_hold() {
+	local name=start-hold pre=$SOAK_DIR/pre-start-hold.tsv cur=$SOAK_DIR/measure-start-hold.tsv
+	local grace=${START_GRACE:-120} after=${HOLD_AFTER:-90} t0 t now d v i n s api=down p22=down up_at=0 heal_at=0
+	local lastn="" lastc="" lasts="" errl="" ready="" conv="" dupl="" end late=${HEAL_LATE:-} lag=${HEAL_LAG:-12} late_done=0
+	[ -z "$late" ] || name=start-hold-late
+	pre=$SOAK_DIR/pre-$name.tsv cur=$SOAK_DIR/measure-$name.tsv
+	begin "$name" "$SERVER"
+	t0=$(date -u +%s)
+	note "$name: stop the server's machine now"
+	wait_for 900 port22_down "$SERVER" || die "$name: the server's machine did not stop"
+	ev event "$name $SERVER port22-down"
+	for ((i = 1; i < ${#NAMES[@]}; i++)); do
+		n=${NAMES[$i]}
+		on "$n" "sudo iptables -I OUTPUT -p tcp -d $SERVER_IP --dport 4484 -j DROP" || die "$name: iptables on $n"
+		ev event "$name $n fault drop to $SERVER_IP:4484"
+	done
+	forget_host "$SERVER"
+	note "$name: start the server's machine now"
+	end=$(($(date +%s) + 1800))
+	while [ "$(date +%s)" -lt "$end" ]; do
+		t=$(now_ms)
+		now=$(date +%s)
+		if port22 "$SERVER"; then v=up; else v=down; fi
+		[ "$v" = "$p22" ] || {
+			ev event "$name $SERVER port22-$v"
+			p22=$v
+		}
+		if [ "$p22" = up ] && SSH_CT=1 SSH_TIMEOUT=4 on "$SERVER" "curl -fsS -m 2 http://127.0.0.1:4483/healthz" >/dev/null 2>&1; then v=up; else v=down; fi
+		[ "$v" = "$api" ] || {
+			ev event "$name api-$v"
+			api=$v
+			[ "$v" = up ] && [ "$up_at" = 0 ] && up_at=$now
+		}
+		if [ "$api" = up ]; then
+			v=$(with_names "$(hm "$SERVER" nodes --json 2>/dev/null | jq -r '[.[] | select(.server | not) | "\(.id)=\(.state)\(if .start_held then "+held" else "" end)"] | join(",")')")
+			[ "$v" = "$lastn" ] || {
+				ev event "$name nodes $v"
+				lastn=$v
+			}
+			v=$(on "$SERVER" "sudo docker ps --filter label=hivemind.app --format '{{.Label \"hivemind.app\"}}|{{.Label \"hivemind.replica\"}}'" 2>/dev/null | sort | tr '\n' ',')
+			[ "$v" = "$lastc" ] || {
+				ev event "$name server-containers ${v:-none}"
+				lastc=$v
+			}
+			v=$(hm "$SERVER" status 2>/dev/null | grep -iE 'waiting|grace|report' | tr '\n' ';' | cut -c1-600)
+			[ "$v" = "$lasts" ] || {
+				ev event "$name status-line ${v:-none}"
+				lasts=$v
+			}
+			if [ -z "$errl" ] && [ "$now" -ge $((up_at + grace)) ]; then
+				errl=$(on "$SERVER" "sudo journalctl -u hivemind -b -o short-iso-precise --no-pager | grep -m1 'no worker has reported'" 2>/dev/null | cut -c1-900)
+				[ -z "$errl" ] || ev event "$name error-line $(with_names "$errl")"
+			fi
+		fi
+		if [ "$heal_at" = 0 ] && [ "$up_at" != 0 ] && [ "$now" -ge $((up_at + grace + after)) ]; then
+			for ((i = 1; i < ${#NAMES[@]}; i++)); do
+				[ "${NAMES[$i]}" = "$late" ] && continue
+				on "${NAMES[$i]}" "sudo iptables -D OUTPUT -p tcp -d $SERVER_IP --dport 4484 -j DROP" || ev event "$name ${NAMES[$i]} heal-failed"
+			done
+			ev event "$name heal: the workers ${late:+but $late }reach $SERVER_IP:4484 again"
+			heal_at=$now
+		fi
+		if [ -n "$late" ] && [ "$heal_at" != 0 ] && [ "$late_done" = 0 ] && [ "$now" -ge $((heal_at + lag)) ]; then
+			on "$late" "sudo iptables -D OUTPUT -p tcp -d $SERVER_IP --dport 4484 -j DROP" || ev event "$name $late heal-failed"
+			ev event "$name heal: $late reaches $SERVER_IP:4484 again, ${lag}s after the others"
+			late_done=1
+		fi
+		if [ "$heal_at" != 0 ]; then
+			collect "$cur" nodes
+			if api_ok "$cur"; then
+				for ((i = 1; i < ${#NAMES[@]}; i++)); do
+					n=${NAMES[$i]}
+					s=$(node_state "$cur" "$(id_of "$n")")
+					case " $ready " in *" $n "*) ;; *)
+						if [ "$s" = ready ]; then
+							ev event "$name $n node-ready"
+							ready="$ready $n"
+						fi
+						;;
+					esac
+				done
+				if check_converged "$cur" 0 >/dev/null; then v=yes; else v=no; fi
+				[ "$v" = "$conv" ] || {
+					ev event "$name converged-$v $(running "$cur")"
+					conv=$v
+				}
+			fi
+			d=$(dups "$cur" | tr '\n' ';')
+			[ "$d" = "$dupl" ] || {
+				ev event "$name dups ${d:-none}"
+				dupl=$d
+			}
+			if { [ "$conv" = yes ] && [ "$(wc -w <<<"$ready")" -eq $((${#NAMES[@]} - 1)) ] && { [ -z "$late" ] || [ "$late_done" = 1 ]; }; } || [ "$now" -ge $((heal_at + 300)) ]; then
+				break
+			fi
+		fi
+		d=$((1000 - ($(now_ms) - t)))
+		[ "$d" -le 0 ] || sleep "$((d / 1000)).$(printf '%03d' $((d % 1000)))"
+	done
+	on "$SERVER" "sudo journalctl -u hivemind -b -o short-iso-precise --no-pager" >"$SOAK_DIR/journal-$name-$SERVER.txt" 2>/dev/null || true
+	for ((i = 1; i < ${#NAMES[@]}; i++)); do
+		on "${NAMES[$i]}" "sudo journalctl -u hivemind --since @$t0 -o short-iso-precise --no-pager" >"$SOAK_DIR/journal-$name-${NAMES[$i]}.txt" 2>/dev/null || true
+	done
+	ev event "$name server-journal lost=$(grep -c 'node lost' "$SOAK_DIR/journal-$name-$SERVER.txt") errors=$(grep -c 'level=ERROR' "$SOAK_DIR/journal-$name-$SERVER.txt") $(with_names "$(grep -E 'start grace|has reported|waiting=' "$SOAK_DIR/journal-$name-$SERVER.txt" | cut -c1-500 | tr '\n' ';')")"
+	ev event "$name workers-kept $(worker_kept "$pre")"
+	ev event "$name ids $(ids_check)"
+	end_scenario "$name"
+}
+
 cmd=${1:-}
 shift || true
 case "$cmd" in
@@ -1065,6 +1617,14 @@ fault) ev event "$1 $2 fault ${*:3}" ;;
 rollout) rollout "$@" ;;
 old-back) old_back "$@" ;;
 cert-restart) cert_restart "$@" ;;
+ca-watch) ca_watch ;;
+ca-views) ca_views "${1:-ca}" "${2:-now}" ;;
+ca-rotate) ca_rotate "$@" ;;
+ca-offline) ca_offline "$@" ;;
+ca-abort) ca_abort ;;
+ca-restore-begin) ca_restore_begin ;;
+ca-finish) ca_finish "$@" ;;
+start-hold) start_hold ;;
 drain) drain_node "$@" ;;
 remove) remove_node "$@" ;;
 join-new) join_new "$@" ;;

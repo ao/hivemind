@@ -213,7 +213,9 @@ converged_now() { snapshot "$SOAK_DIR/setup.tsv" && check_converged "$SOAK_DIR/s
 rejoin() {
 	local n=$1
 	note "rejoining $n with an empty data directory"
-	SSH_TIMEOUT=180 on "$n" "sudo systemctl disable --now hivemind.service; ids=\$(sudo docker ps -aq --filter label=hivemind.app); [ -z \"\$ids\" ] || sudo docker rm -f \$ids >/dev/null; sudo rm -rf $DATA" ||
+	# -v: the anonymous volumes of an image's VOLUME lines go with their
+	# containers (the fifth soak left redis's behind); named volumes stay
+	SSH_TIMEOUT=180 on "$n" "sudo systemctl disable --now hivemind.service; ids=\$(sudo docker ps -aq --filter label=hivemind.app); [ -z \"\$ids\" ] || sudo docker rm -fv \$ids >/dev/null; sudo rm -rf $DATA" ||
 		die "$n: could not clear the old node"
 	join_worker "$n"
 	write_ids

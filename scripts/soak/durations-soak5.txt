@@ -1,0 +1,39 @@
+ca-rotate: start to every node trusting the new CA|scenario ca-rotate begin|event ca-rotate .* fault ca-start|event ca-rotate trust-all
+ca-rotate: renew to the server's certificate from the new CA (1 s watcher)|scenario ca-rotate begin|event ca-rotate .* fault ca-renew|ca server .*phase=renew .*moved=true
+ca-rotate: renew to every node renewed|scenario ca-rotate begin|event ca-rotate .* fault ca-renew|event ca-rotate renewed-all
+ca-rotate: finish to every worker with the new CA alone in ca.crt|scenario ca-rotate begin|event ca-rotate .* fault ca-finish|event ca-rotate workers-one-ca
+ca-rotate: start to finish returned|scenario ca-rotate begin|event ca-rotate .* fault ca-start|event ca-rotate ca-finish-done
+ca-offline: power-off request to port 22 closed|scenario ca-offline begin|event ca-offline .* fault poweroff|event ca-offline .* port22-down
+ca-offline: port 22 closed to node lost|scenario ca-offline begin|event ca-offline .* port22-down|event ca-offline .* node-lost
+ca-offline: node lost to its replicas elsewhere, converged|scenario ca-offline begin|event ca-offline .* node-lost|event ca-offline converged-held-yes
+ca-offline: start to every live node trusting the new CA|scenario ca-offline begin|event ca-offline .* fault ca-start|event ca-offline trust-live
+ca-offline: renew to every live node renewed|scenario ca-offline begin|event ca-offline .* fault ca-renew|event ca-offline renewed-live
+ca-offline: finish --force to the live workers with the new CA alone|scenario ca-offline begin|event ca-offline .* fault ca-finish --force|event ca-offline workers-one-ca
+ca-offline: start request to port 22 open|scenario ca-offline begin|event ca-offline .* fault start|event ca-offline .* back
+ca-offline: node remove to converged after the join|scenario ca-offline begin|event ca-offline .* fault node-remove|event ca-offline converged-yes
+ca-abort: start to every node trusting the new CA|scenario ca-abort begin|event ca-abort .* fault ca-start|event ca-abort trust-all
+ca-abort: abort to every node renewed back and the server's certificate back|scenario ca-abort begin|event ca-abort abort rc=|event ca-abort turned-back
+ca-abort: finish to every worker with the old CA alone in ca.crt|scenario ca-abort begin|event ca-abort .* fault ca-finish|event ca-abort workers-one-ca
+ca-restore: start to every node renewed|scenario ca-restore begin|event ca-restore .* fault ca-start|event ca-restore renewed-all
+ca-restore: power-off request to API down (1 s measure)|scenario ca-restore begin|event ca-restore .* fault poweroff|event ca-restore api-down
+ca-restore: launch request to new machine ready|scenario ca-restore begin|event ca-restore .* fault launch|event ca-restore machine-ready
+ca-restore: new machine ready to API up (binary, hosts, CAs, restore, start)|scenario ca-restore begin|event ca-restore machine-ready|event ca-restore api-up
+ca-restore: API down to API up (outage)|scenario ca-restore begin|event ca-restore api-down|event ca-restore api-up
+ca-restore: API up to the name's record changed on every machine|scenario ca-restore begin|event ca-restore api-up|event dns-update hivemind-server.soak.test .* end
+ca-restore: record changed to hivemind-soakg-2 ready|scenario ca-restore begin|event dns-update hivemind-server.soak.test .* end|event ca-restore hivemind-soakg-2 node-ready
+ca-restore: record changed to hivemind-soakg-3 ready|scenario ca-restore begin|event dns-update hivemind-server.soak.test .* end|event ca-restore hivemind-soakg-3 node-ready
+ca-restore: record changed to hivemind-soakg-4 ready|scenario ca-restore begin|event dns-update hivemind-server.soak.test .* end|event ca-restore hivemind-soakg-4 node-ready
+ca-restore: record changed to converged, every replica running|scenario ca-restore begin|event dns-update hivemind-server.soak.test .* end|event ca-restore converged-yes
+ca-restore-finish: finish to every worker with the new CA alone|scenario ca-restore-finish begin|event ca-restore-finish .* fault ca-finish|event ca-restore-finish workers-one-ca
+start-hold: stop request to port 22 closed|scenario start-hold begin|event start-hold .* fault stop|event start-hold .* port22-down
+start-hold: start request to port 22 open|scenario start-hold begin|event start-hold .* fault start|event start-hold .* port22-up
+start-hold: port 22 open to API up|scenario start-hold begin|event start-hold .* port22-up|event start-hold api-up
+start-hold: API up to every worker held (start_held)|scenario start-hold begin|event start-hold api-up|event start-hold nodes .*held
+start-hold: heal to hivemind-soakg-2 ready|scenario start-hold begin|event start-hold heal:|event start-hold hivemind-soakg-2 node-ready
+start-hold: heal to hivemind-soakg-3 ready|scenario start-hold begin|event start-hold heal:|event start-hold hivemind-soakg-3 node-ready
+start-hold: heal to hivemind-soakg-4 ready|scenario start-hold begin|event start-hold heal:|event start-hold hivemind-soakg-4 node-ready
+start-hold: heal to converged|scenario start-hold begin|event start-hold heal:|event start-hold converged-yes
+start-hold-late: heal of the others to the late worker lost (1 s measure)|scenario start-hold-late begin|event start-hold-late heal: the workers but|event start-hold-late nodes .*hivemind-soakg-2=lost
+start-hold-late: heal of the others to its replicas on two machines|scenario start-hold-late begin|event start-hold-late heal: the workers but|event start-hold-late dups [a-z]
+start-hold-late: heal of the late worker to it ready|scenario start-hold-late begin|event start-hold-late heal: hivemind-soakg-2|event start-hold-late hivemind-soakg-2 node-ready
+start-hold-late: heal of the late worker to converged, no replica on two machines|scenario start-hold-late begin|event start-hold-late heal: hivemind-soakg-2|event start-hold-late dups none
