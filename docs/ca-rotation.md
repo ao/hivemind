@@ -35,7 +35,7 @@ In this phase the server:
 - issues every certificate, at join and at renewal, from the old CA, as before. (A renewal is never issued from an older CA than the certificate it replaces: a node that presents a certificate from the new CA, which happens in this phase only after a restore, renews under the new CA.);
 - tells every worker, on every node API reply, that the CA set has changed (a header, `Hivemind-CA`, with a digest of it). A worker that sees a digest it has not applied asks for the set (`GET /node/v1/nodes/{id}/ca`), checks it, adds the new CA to its `ca.crt`, and from then on trusts both.
 
-Every request from a worker of this build says which CAs it trusts (`Hivemind-CA-Trust`, their fingerprints). The server records, for each node, that it trusts the new CA once a request says so. A worker writes the new `ca.crt` (to `ca.crt.next`, synced, then renamed) before it sends the new set, so a node the server counts as trusting the new CA trusts it on disk, also after a restart.
+Every request from a worker of this build says which CAs it trusts (`Hivemind-CA-Trust`, their fingerprints). The server records, for each node, that it trusts the new CA once a request says so. A worker writes the new `ca.crt` (to `ca.crt.next`, synced, then renamed) before it sends the new set, so a node the server counts as trusting the new CA trusts it on disk, also after a restart. The header is the worker's own claim, which the server cannot check. A compromised worker that lies about it gains nothing: the server's certificate moves to the new CA sooner, and the only node that then fails its handshake is the one that lied.
 
 `hivemind ca status` lists the nodes that do not trust the new CA yet. Once it lists none, run `renew`.
 
