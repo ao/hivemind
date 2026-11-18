@@ -22,6 +22,7 @@ hivemind
 | Command | Description |
 |---|---|
 | `backup` | Write a backup of the server's state to a file |
+| `ca` | Show the cluster CA, and rotate it |
 | `compose` | Convert a Docker Compose file to apps, and deploy or delete them |
 | `delete` | Delete an app and stop its containers |
 | `deploy` | Create or update an app |
@@ -59,9 +60,11 @@ that runs serve.
 admin token. The server sends it only over TLS, or to a client on loopback.
 
 The file is a tar archive: manifest.json, with a format version and the
-SHA-256 of each file, then hivemind.db, ca.key, ca.crt and admin.token. backup
-reads the file back and checks every digest before it keeps it. Restore it
-with hivemind restore.
+SHA-256 of each file, then hivemind.db, ca.key, ca.crt and admin.token, and
+during a rotation of the cluster CA also ca-next.key and ca-next.crt. backup
+checks that the CA files are the ones the copied store names, and reads the
+file back and checks every digest before it keeps it. Restore it with
+hivemind restore.
 
 ```
 hivemind backup <file> [flags]
@@ -73,6 +76,149 @@ hivemind backup <file> [flags]
 | `--ca-cert` | string | - | - | PEM file of the CA certificates to trust for an https server, instead of the system's (env HIVEMIND_CA_CERT; default from the client config) |
 | `--client-config` | string | - | `HIVEMIND_CLIENT_CONFIG` | client config file (env HIVEMIND_CLIENT_CONFIG; default $XDG_CONFIG_HOME/hivemind/config.yaml or ~/.config/hivemind/config.yaml) |
 | `--data-dir` | string | see description | `HIVEMIND_DATA_DIR` | the server's data directory (env HIVEMIND_DATA_DIR; default /var/lib/hivemind for root, else ~/.local/state/hivemind). The default is /var/lib/hivemind for root, and $XDG_STATE_HOME/hivemind or ~/.local/state/hivemind for other users. |
+| `--json` | bool | - | - | print JSON instead of a table |
+| `--server` | string | - | `HIVEMIND_SERVER` | server URL (env HIVEMIND_SERVER; default from the client config, then http://127.0.0.1:4483) |
+| `--token` | string | - | `HIVEMIND_TOKEN` | API token (env HIVEMIND_TOKEN; default from the client config's token file) |
+
+### hivemind ca
+
+Show the cluster CA, and rotate it in place, without joining any machine
+again. The steps run on the server, through its API, with the admin token.
+See docs/ca-rotation.md.
+
+```
+hivemind ca
+```
+
+| Command | Description |
+|---|---|
+| `rotate` | Rotate the cluster CA: start, renew, finish, or abort |
+| `status` | Show the cluster CA and the rotation in progress |
+
+#### hivemind ca rotate
+
+Rotate the cluster CA in three steps, each run once hivemind ca status says
+the one before it is done:
+
+  hivemind ca rotate start    make the new CA; every node learns to trust both
+  hivemind ca rotate renew    every node renews its certificate under the new CA
+  hivemind ca rotate finish   the old CA is trusted nowhere, and its key is deleted
+
+hivemind ca rotate abort undoes a rotation before finish. Each step is kept in
+the server's store, so a server that stops in the middle of one finishes it
+when it starts. Take a backup after start and after finish.
+
+```
+hivemind ca rotate
+```
+
+| Command | Description |
+|---|---|
+| `abort` | Undo a rotation that has not finished |
+| `finish` | End the rotation: trust the new CA alone and delete the old one |
+| `renew` | Have every node renew its certificate under the new CA |
+| `start` | Make a new CA, and have every node trust it beside the old one |
+
+##### hivemind ca rotate abort
+
+Undo a rotation that has not finished. In phase trust, the new CA is deleted at
+once, and the workers stop trusting it at their next request. In phase renew,
+some nodes may hold certificates from the new CA, so the rotation turns round
+instead: the nodes renew back under the old CA, and hivemind ca rotate finish
+ends it and deletes the new CA.
+
+```
+hivemind ca rotate abort [flags]
+```
+
+| Flag | Type | Default | Environment | Description |
+|---|---|---|---|---|
+| `--ca-cert` | string | - | - | PEM file of the CA certificates to trust for an https server, instead of the system's (env HIVEMIND_CA_CERT; default from the client config) |
+| `--client-config` | string | - | `HIVEMIND_CLIENT_CONFIG` | client config file (env HIVEMIND_CLIENT_CONFIG; default $XDG_CONFIG_HOME/hivemind/config.yaml or ~/.config/hivemind/config.yaml) |
+| `--json` | bool | - | - | print JSON instead of a table |
+| `--server` | string | - | `HIVEMIND_SERVER` | server URL (env HIVEMIND_SERVER; default from the client config, then http://127.0.0.1:4483) |
+| `--token` | string | - | `HIVEMIND_TOKEN` | API token (env HIVEMIND_TOKEN; default from the client config's token file) |
+
+##### hivemind ca rotate finish
+
+End the rotation: the server's certificate is from the new CA, the server and
+every worker trust the new CA alone, ca-next.key and ca-next.crt replace
+ca.key and ca.crt, and the old CA's key is deleted. finish refuses while a
+node has not renewed, and names each one, with why; --force cuts those nodes
+off, and each must join again with an empty data directory and a new join
+token. Backups taken before finish hold the old CA's key: take a new one.
+
+```
+hivemind ca rotate finish [flags]
+```
+
+| Flag | Type | Default | Environment | Description |
+|---|---|---|---|---|
+| `--ca-cert` | string | - | - | PEM file of the CA certificates to trust for an https server, instead of the system's (env HIVEMIND_CA_CERT; default from the client config) |
+| `--client-config` | string | - | `HIVEMIND_CLIENT_CONFIG` | client config file (env HIVEMIND_CLIENT_CONFIG; default $XDG_CONFIG_HOME/hivemind/config.yaml or ~/.config/hivemind/config.yaml) |
+| `--force` | bool | - | - | cut off the nodes that have not renewed |
+| `--json` | bool | - | - | print JSON instead of a table |
+| `--server` | string | - | `HIVEMIND_SERVER` | server URL (env HIVEMIND_SERVER; default from the client config, then http://127.0.0.1:4483) |
+| `--token` | string | - | `HIVEMIND_TOKEN` | API token (env HIVEMIND_TOKEN; default from the client config's token file) |
+
+##### hivemind ca rotate renew
+
+Move the rotation to phase renew: each node that trusts the new CA renews its
+certificate under it at once, and the server's own certificate moves to it
+once every node trusts it. renew refuses while a live node does not trust the
+new CA, and names each one; --force goes ahead anyway.
+
+```
+hivemind ca rotate renew [flags]
+```
+
+| Flag | Type | Default | Environment | Description |
+|---|---|---|---|---|
+| `--ca-cert` | string | - | - | PEM file of the CA certificates to trust for an https server, instead of the system's (env HIVEMIND_CA_CERT; default from the client config) |
+| `--client-config` | string | - | `HIVEMIND_CLIENT_CONFIG` | client config file (env HIVEMIND_CLIENT_CONFIG; default $XDG_CONFIG_HOME/hivemind/config.yaml or ~/.config/hivemind/config.yaml) |
+| `--force` | bool | - | - | go ahead while live nodes do not trust the new CA |
+| `--json` | bool | - | - | print JSON instead of a table |
+| `--server` | string | - | `HIVEMIND_SERVER` | server URL (env HIVEMIND_SERVER; default from the client config, then http://127.0.0.1:4483) |
+| `--token` | string | - | `HIVEMIND_TOKEN` | API token (env HIVEMIND_TOKEN; default from the client config's token file) |
+
+##### hivemind ca rotate start
+
+Make a new CA beside the old one, in ca-next.crt and ca-next.key, and start a
+rotation in phase trust. The server accepts certificates from both CAs, and
+every worker of this build adds the new CA to what it trusts at its next
+request; a worker of an earlier build cannot, and hivemind ca status names it.
+Nothing is issued from the new CA yet. A backup taken now holds both CAs.
+
+```
+hivemind ca rotate start [flags]
+```
+
+| Flag | Type | Default | Environment | Description |
+|---|---|---|---|---|
+| `--ca-cert` | string | - | - | PEM file of the CA certificates to trust for an https server, instead of the system's (env HIVEMIND_CA_CERT; default from the client config) |
+| `--client-config` | string | - | `HIVEMIND_CLIENT_CONFIG` | client config file (env HIVEMIND_CLIENT_CONFIG; default $XDG_CONFIG_HOME/hivemind/config.yaml or ~/.config/hivemind/config.yaml) |
+| `--json` | bool | - | - | print JSON instead of a table |
+| `--server` | string | - | `HIVEMIND_SERVER` | server URL (env HIVEMIND_SERVER; default from the client config, then http://127.0.0.1:4483) |
+| `--token` | string | - | `HIVEMIND_TOKEN` | API token (env HIVEMIND_TOKEN; default from the client config's token file) |
+
+#### hivemind ca status
+
+Show the cluster CA: its fingerprint and expiry, and which CA the server's
+certificate is from, which join tokens name. During a rotation, also the new
+CA, the phase, and for each node whether it is live, whether it trusts the CA
+the rotation goes to, which CA its certificate is from, and whether it is a
+build without rotation; then the next step and the nodes it waits for.
+
+Compare the fingerprints with the ones the workers log when they add a CA.
+
+```
+hivemind ca status [flags]
+```
+
+| Flag | Type | Default | Environment | Description |
+|---|---|---|---|---|
+| `--ca-cert` | string | - | - | PEM file of the CA certificates to trust for an https server, instead of the system's (env HIVEMIND_CA_CERT; default from the client config) |
+| `--client-config` | string | - | `HIVEMIND_CLIENT_CONFIG` | client config file (env HIVEMIND_CLIENT_CONFIG; default $XDG_CONFIG_HOME/hivemind/config.yaml or ~/.config/hivemind/config.yaml) |
 | `--json` | bool | - | - | print JSON instead of a table |
 | `--server` | string | - | `HIVEMIND_SERVER` | server URL (env HIVEMIND_SERVER; default from the client config, then http://127.0.0.1:4483) |
 | `--token` | string | - | `HIVEMIND_TOKEN` | API token (env HIVEMIND_TOKEN; default from the client config's token file) |

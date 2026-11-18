@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"github.com/ao/hivemind/internal/auth"
+	"github.com/ao/hivemind/internal/carotate"
 	"github.com/ao/hivemind/internal/logrelay"
 	"github.com/ao/hivemind/internal/nodeapi"
 	"github.com/ao/hivemind/internal/ratelimit"
@@ -93,6 +94,10 @@ type Config struct {
 	// the server, as given: GET /v1/nodes shows it on the server's node.
 	// Empty without --advertise.
 	Advertise string
+	// CA holds the cluster's CAs and runs a rotation of them, for GET
+	// /v1/ca and POST /v1/ca/rotation/{step}. Nil means this server has no
+	// cluster CA, and those routes answer 503.
+	CA *carotate.Manager
 }
 
 // Defaults for Config.LoginLimiter: an address may fail LoginFailLimit
@@ -225,6 +230,8 @@ func (s *Server) routes() {
 	r.HandleFunc("PUT /v1/registries/{host}", s.putRegistry)
 	r.HandleFunc("DELETE /v1/registries/{host}", s.deleteRegistry)
 	r.HandleFunc("POST /v1/backup", s.postBackup)
+	r.HandleFunc("GET /v1/ca", s.getCA)
+	r.HandleFunc("POST /v1/ca/rotation/{step}", s.postCARotation)
 	r.HandleFunc("GET /metrics", s.metricsHandler)
 }
 

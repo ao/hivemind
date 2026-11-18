@@ -19,6 +19,7 @@ import (
 	"github.com/spf13/cobra"
 	"gopkg.in/yaml.v3"
 
+	"github.com/ao/hivemind/internal/carotate"
 	"github.com/ao/hivemind/internal/server"
 	"github.com/ao/hivemind/internal/spec"
 )
@@ -434,6 +435,17 @@ which answers 503 for the app's host once the host has a path route.`,
 		}
 		apps, readyKnown := statusRows(got)
 		printStatus(cmd.OutOrStdout(), apps, readyKnown)
+		if len(args) == 0 {
+			// During a rotation of the cluster CA, the nodes its next step
+			// waits for, builds without rotation among them. A server
+			// without the route, or without a CA, has nothing to add.
+			var ca carotate.Status
+			if err := c.call(cmd.Context(), "GET", "/v1/ca", nil, &ca); err == nil && ca.Rotation != nil && len(ca.Rotation.Waiting) > 0 {
+				out := cmd.OutOrStdout()
+				fmt.Fprintf(out, "\nCluster CA rotation, phase %s: hivemind ca rotate %s waits for:\n", ca.Rotation.Phase, ca.Rotation.NextStep)
+				printWaiting(out, ca.Rotation.Waiting)
+			}
+		}
 		return nil
 	}
 	return cmd

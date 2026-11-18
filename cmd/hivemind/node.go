@@ -22,6 +22,7 @@ import (
 	"github.com/ao/hivemind/internal/agent"
 	"github.com/ao/hivemind/internal/auth"
 	"github.com/ao/hivemind/internal/backup"
+	"github.com/ao/hivemind/internal/carotate"
 	"github.com/ao/hivemind/internal/cluster"
 	"github.com/ao/hivemind/internal/config"
 	"github.com/ao/hivemind/internal/logging"
@@ -348,24 +349,30 @@ func removeCA(dir string) {
 	_ = os.Remove(filepath.Join(dir, pki.CACertFile))
 }
 
-// loadClusterCA reads the cluster CA from dir. It returns nil, and no error,
-// when the directory has no CA.
-func loadClusterCA(dir string) (*pki.CA, error) {
-	ca, err := pki.LoadCA(dir)
-	if errors.Is(err, fs.ErrNotExist) {
+// openCARotation opens the cluster's CAs and the CA rotation in dir, as
+// carotate.Open does, finishing a step a stop interrupted. It returns nil,
+// and no error, when the directory has no CA key.
+func openCARotation(ctx context.Context, dir string, st *store.Store, nodeID string, log *slog.Logger) (*carotate.Manager, error) {
+	if _, err := os.Lstat(filepath.Join(dir, pki.CAKeyFile)); errors.Is(err, fs.ErrNotExist) {
 		return nil, nil
+	} else if err != nil {
+		return nil, err
 	}
+	m, err := carotate.Open(ctx, carotate.Options{Dir: dir, Store: st, LocalNode: nodeID, Logger: log.With("component", "ca")})
 	if err != nil {
 		return nil, fmt.Errorf("cluster CA in %s: %w", dir, err)
 	}
-	return ca, nil
+	return m, nil
 }
 
-// joinIssuer returns the function that issues join tokens for ca.
-func joinIssuer(ca *pki.CA, st *store.Store) func(time.Duration) (string, time.Time, error) {
+// joinIssuer returns the function that issues join tokens. A token names
+// the CA of the server's certificate at the moment, which the joining node
+// pins: during a CA rotation, the old CA until the server's certificate
+// moves to the new one.
+func joinIssuer(rot *carotate.Manager, st *store.Store) func(time.Duration) (string, time.Time, error) {
 	tokens := pki.NewTokens(st.JoinTokens())
 	return func(ttl time.Duration) (string, time.Time, error) {
-		return tokens.Issue(ca.Fingerprint(), ttl)
+		return tokens.Issue(rot.Listener().Fingerprint(), ttl)
 	}
 }
 
@@ -560,20 +567,31 @@ func runServe(ctx context.Context, cfg *config.Config, log *slog.Logger, rt runt
 	if err != nil {
 		return err
 	}
-	ca, err := loadClusterCA(cfg.DataDir)
+	// The rotation manager loads the cluster CA, and first finishes a step
+	// of a CA rotation that a stop interrupted, so nothing reads the CA
+	// files before it.
+	rot, err := openCARotation(ctx, cfg.DataDir, st, cl.NodeID, log)
 	if err != nil {
 		return err
 	}
-	if cfg.Advertise != "" && ca == nil {
+	if cfg.Advertise != "" && rot == nil {
 		return fmt.Errorf("--advertise is set, but %s has no cluster CA: run hivemind init first", cfg.DataDir)
 	}
 	var issue func(time.Duration) (string, time.Time, error)
-	if ca != nil {
-		issue = joinIssuer(ca, st)
+	if rot != nil {
+		issue = joinIssuer(rot, st)
 	}
 	writeBackup := func(ctx context.Context, w io.Writer) error {
-		_, err := backup.Write(ctx, w, backup.Options{DataDir: cfg.DataDir, Snapshot: st.SnapshotTo, HivemindVersion: version})
-		return err
+		write := func() error {
+			_, err := backup.Write(ctx, w, backup.Options{DataDir: cfg.DataDir, Snapshot: st.SnapshotTo, HivemindVersion: version})
+			return err
+		}
+		if rot == nil {
+			return write()
+		}
+		// No step of a CA rotation runs while the backup copies the store
+		// and the CA files, so they are of one moment.
+		return rot.Hold(write)
 	}
 	// Workers exist only with the cluster listener, and their logs come
 	// through it.
@@ -645,7 +663,7 @@ func runServe(ctx context.Context, cfg *config.Config, log *slog.Logger, rt runt
 		if lifetime != 0 {
 			log.Warn("test build: node certificates are issued with a short lifetime", "lifetime", lifetime)
 		}
-		c, err := cluster.Listen(cluster.Config{Store: st, CA: ca, Tokens: pki.NewTokens(st.JoinTokens()),
+		c, err := cluster.Listen(cluster.Config{Store: st, Rotation: rot, Tokens: pki.NewTokens(st.JoinTokens()),
 			Advertise: cfg.Advertise, Bind: nodeAddr, Port: cfg.ClusterPort, LocalNodeID: cl.NodeID,
 			Logger: log.With("component", "cluster"), NodeCertLifetime: lifetime, Logs: logs,
 			RouterReports: routerReports, RouteReaders: routeReaders, Version: version, Epoch: cl.Epoch})
@@ -695,7 +713,7 @@ func runServe(ctx context.Context, cfg *config.Config, log *slog.Logger, rt runt
 	api, err := server.New(server.Config{Store: st, Runtime: rt, NodeID: cl.NodeID, Auth: authn,
 		Trigger: ag.Trigger, Logger: log.With("component", "api"), Metrics: m, IssueJoinToken: issue,
 		Backup: writeBackup, Logs: logs, RouterReport: routerReport, RouterReports: routerReports, RouteReaders: routeReaders,
-		Started: started, Version: version, Advertise: cfg.Advertise})
+		Started: started, Version: version, Advertise: cfg.Advertise, CA: rot})
 	if err != nil {
 		closeListeners()
 		return err
@@ -709,6 +727,15 @@ func runServe(ctx context.Context, cfg *config.Config, log *slog.Logger, rt runt
 
 	agentCtx, stopAgent := context.WithCancel(context.Background())
 	var wg sync.WaitGroup
+	if rot != nil {
+		// It moves the server's certificate in a CA rotation, and warns in
+		// the CA's last year.
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			rot.Run(agentCtx)
+		}()
+	}
 	wg.Add(2)
 	go func() {
 		defer wg.Done()
