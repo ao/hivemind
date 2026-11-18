@@ -41,7 +41,7 @@ As a user other than root, `restore` cannot create `/var/lib/hivemind` (`error: 
 - the format and its version. A backup from a newer format is refused;
 - the size and SHA-256 of every file, so a truncated or altered file is refused;
 - SQLite's integrity check on the store, and its schema version. A store at an older version is migrated forward when `serve` opens it, as any data directory is. A store from a newer hivemind is refused;
-- the CA key matches the CA certificate.
+- the CA key matches the CA certificate, and the CA files are the ones the store's [CA rotation](ca-rotation.md#backup-and-restore), if any, names. A backup taken during a rotation holds the new CA too, and `restore` says so, with the phase.
 
 Then it raises the cluster's epoch in the restored store to one more than the backup's, and says so (`The cluster is at epoch 1 now, ...`). The workers that reach the restored server refuse a server at a lower epoch, such as the one the backup came from; see [if the old server comes back](#if-the-old-server-comes-back). The store is not migrated for that. A store from before epochs (schema version 16) has none yet: `restore` leaves it as it is, so that the release that wrote it can still serve it, as [going back to 2.0.0](upgrading.md#from-200) needs, and writes the epoch, 1, to `restored-epoch` beside it. This build's `serve` migrates the store, gives the cluster that epoch, and removes the file.
 
@@ -147,9 +147,14 @@ A backup is a tar archive. The entries, in order:
 | `ca.key` | The cluster CA's private key, PEM |
 | `ca.crt` | The cluster CA certificate, PEM |
 | `admin.token` | The admin token, when the data directory has the file |
+| `ca-next.key`, `ca-next.crt` | Only during a [CA rotation](ca-rotation.md): the new CA's key and certificate, PEM. A build without CA rotation refuses a backup with them |
+
+`backup` copies the store first and reads the CA files after it, and checks that they are the CA files of the rotation the copied store records, or of none. A rotation step that ran in between, from another shell, makes it fail and ask to run it again; `hivemind backup --api` and the steps run one after the other in the server, never at once.
 
 Every entry is a regular file with mode 0600. `restore` refuses any other entry, and any file the manifest does not list. The optional settings file, `hivemind.yaml`, is not in a backup; keep it with your configuration.
 
 ## The CA
 
-The cluster CA lasts ten years from `init`. hivemind cannot rotate it. In the CA's last year, node certificates are issued to end when the CA does, and the server logs a warning once a day. When the CA expires, no node certificate verifies, and no worker can reach the server. Before then, create a new cluster with `init` in a new data directory, and join every machine to it. A backup carries the same CA, so restoring one does not extend it.
+The cluster CA lasts ten years from `init`. In the CA's last year, node certificates are issued to end when the CA does, and the server logs a warning once a day. When the CA expires, no node certificate verifies, and no worker can reach the server. Before then, rotate it: `hivemind ca rotate start`, `renew` and `finish` ([CA rotation](ca-rotation.md)). A backup carries the CA it was taken with, so restoring one does not extend it.
+
+Take a backup after a rotation's `start`, so that a restore has the new CA's key, and after its `finish`, since backups from before it hold the old CA's key and name the old CA as the cluster's. What a restore of each brings back is in [CA rotation](ca-rotation.md#backup-and-restore). A restore raises the epoch in any phase of a rotation, as it always does; the rotation does not change the epoch.

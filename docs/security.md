@@ -8,8 +8,8 @@ This lists every listener the code opens, what each one exposes, and the files h
 |---|---|---|---|
 | API | `127.0.0.1:4483` (`--api-addr`) | Bearer admin token, compared in constant time, or a session cookie that the token bought at `POST /v1/session`. A cookie request to `POST`, `PUT`, `PATCH` or `DELETE` also needs the session's CSRF token. `GET /healthz` needs no token and returns only `{"status":"ok"}` | Apps and their specs, including environment values. Status. Logs of every node's containers. Join token issuance. Nodes, and their removal. Registry credentials: storing and removing them, and their hosts and usernames; no route returns a password. Metrics. A backup of the data directory, with the CA private key and the admin token, sent only over TLS or to a loopback client |
 | Metrics | Off. `--metrics-addr` starts it, and it must be loopback | The admin token | Prometheus metrics only |
-| Node listener | Off. Starts with `--advertise`, on one address: `--cluster-addr`, or the address `--advertise` names or resolves to on this machine. Port 4484 (`--cluster-port`) | TLS 1.3, and a client certificate that chains to the cluster CA, names a node that was not removed, and is valid by the server's clock at each request. The node ID must match the one in the path | To a node: its own assignments, which include each replica's full spec and environment values, and the registry credential for each replica's image, if one is stored and the node asks for it. It can also report its own containers, register its own name, capacity and private address, get a new certificate for its own ID, take the log requests queued for it, and send the logs it was asked for. For its router: the whole routing table, and read and write access to the shared TLS storage, which holds every routed host's certificate and private key and the ACME account key |
-| Join listener | Off. Starts with `--advertise`, on the node listener's address, port 4485 | TLS 1.3 with the server certificate. No client certificate. The join token is the credential. Only `POST /join` is routed | The cluster CA certificate, and a node certificate for each valid token |
+| Node listener | Off. Starts with `--advertise`, on one address: `--cluster-addr`, or the address `--advertise` names or resolves to on this machine. Port 4484 (`--cluster-port`) | TLS 1.3, and a client certificate that chains to a cluster CA the server accepts at that moment (two during a [CA rotation](ca-rotation.md), checked again at each request), names a node that was not removed, and is valid by the server's clock at each request. The node ID must match the one in the path | To a node: its own assignments, which include each replica's full spec and environment values, and the registry credential for each replica's image, if one is stored and the node asks for it. It can also report its own containers, register its own name, capacity and private address, get a new certificate for its own ID, take the log requests queued for it, and send the logs it was asked for. For its router: the whole routing table, and read and write access to the shared TLS storage, which holds every routed host's certificate and private key and the ACME account key. The cluster's CA certificates, which are public, and during a CA rotation the new CA's cross-certificate |
+| Join listener | Off. Starts with `--advertise`, on the node listener's address, port 4485 | TLS 1.3 with the server certificate. No client certificate. The join token is the credential. Only `POST /join` is routed | The CA certificate the token names, and a node certificate from that CA for each valid token |
 | Router, http | Off. Starts with `--route-addr`, on any node, port 80 (`--route-http-port`). It may be `0.0.0.0` | None. It serves the apps' public traffic | ACME HTTP-01 answers for the routed hosts, a `308` to https for every other request to one, and `404` for any other host |
 | Router, https | Off. Starts with `--route-addr`, port 443 (`--route-https-port`). It may be `0.0.0.0` | None of its own: whatever each app does. TLS 1.2 or later, with a certificate from the ACME CA for each routed host | Every routed app, to anyone who can reach the port. A host not in the routing table gets no certificate, and a TLS handshake for it fails |
 
@@ -41,6 +41,7 @@ The server's data directory is created with mode 0700.
 | `admin.token` | 0600 | The admin token, in plain text. This is the only copy |
 | `ca.key` | 0600 | The cluster CA's private key. It can sign any node certificate |
 | `ca.crt` | 0644 | The cluster CA certificate. Public |
+| `ca-next.key`, `ca-next.crt` | 0600, 0644 | Only during a [CA rotation](ca-rotation.md): the new CA's key and certificate. `finish` renames them over `ca.key` and `ca.crt`; `abort` deletes them |
 | `hivemind.yaml` | 0600 when `init` writes it; as you create it otherwise | Optional settings for `serve`. `init` writes the serve flags it was given here; nothing else writes it. A `token` key in it is refused |
 | `hivemind.lock` | 0600 | The pid of the `serve` that holds it locked |
 | `restored-epoch` | 0600 | Only after `restore` of a store from before epochs, until `serve` first opens it: the epoch to give the restored cluster ([backup](backup.md#restoring)) |
@@ -53,7 +54,7 @@ A worker's data directory is created with mode 0700.
 |---|---|---|
 | `node.key` | 0600 | The worker's private key |
 | `node.crt` | 0644 at join, 0600 after a renewal | The worker's certificate. Public |
-| `ca.crt` | 0644 | The cluster CA certificate. Public |
+| `ca.crt` | 0644 at join, 0600 once a CA rotation changed it | The cluster CAs the worker trusts, one PEM certificate each: one, or two during a [CA rotation](ca-rotation.md), the CA of `node.crt` first. Public. `ca.crt.next` is there only while it is replaced |
 | `node.json` | 0600 | The node ID, the server's address and the join time |
 | `cluster-epoch` | 0600 | The highest cluster epoch the worker has seen from a server of its cluster, once one has sent more than 0. `cluster-epoch.next` is there only while it is replaced |
 | `node.key.next`, `node.crt.next` | 0600 | Only during a renewal: the new pair, before it is renamed into place |
@@ -61,7 +62,7 @@ A worker's data directory is created with mode 0700.
 
 A worker has no CA key, no database and no admin token.
 
-A backup file (`hivemind backup`) is written with mode 0600. It holds `hivemind.db`, `ca.key`, `ca.crt` and `admin.token`, so it grants everything the server's data directory does. A restored data directory is 0700, with every file 0600, `ca.crt` included. See [backup](backup.md).
+A backup file (`hivemind backup`) is written with mode 0600. It holds `hivemind.db`, `ca.key`, `ca.crt` and `admin.token`, and during a CA rotation `ca-next.key` and `ca-next.crt`, so it grants everything the server's data directory does. A backup taken before a rotation's `finish` holds the old CA's key after it. A restored data directory is 0700, with every file 0600, `ca.crt` included. See [backup](backup.md).
 
 ## What a compromised worker can do
 
@@ -81,6 +82,7 @@ Assume an attacker has the worker's data directory, or root on the worker. The c
 - Read the whole routing table: every routed host, and the address and port of each of its replicas.
 - Post any counts and certificate expiries for its own router's series in the server's `/metrics`. They carry its own node ID, and the server keeps only the hosts in the routing table and `unknown`, so it cannot add hosts or touch another node's series; the figures are what the worker says they are, like its logs.
 - Send any epoch with its requests. One above the server's makes the server refuse that worker's own requests with `409`, and log once that a newer copy of the cluster exists, naming the node. It cannot change another node's epoch, or the server's. See [a server from before a restore](#a-server-from-before-a-restore).
+- Say anything about the CAs it trusts during a [CA rotation](ca-rotation.md). Saying it does not trust the new CA, or nothing, as a build without rotation does, holds back the move of the server's certificate and `finish` until the node is removed or `finish --force`. Saying it trusts the new CA when it does not cuts only itself off when the server's certificate moves. It cannot make the server trust a CA, or issue it a certificate from a CA it does not hold.
 
 A worker's router needs nothing more than this: the routes above are what it uses.
 
@@ -149,7 +151,7 @@ So a stolen certificate stops working when its node is removed. The node's key a
 
 Removal needs the admin token. It refuses the server's own node, and it refuses a node that still renews its lease unless `--force` is given, so a node is not cut off by mistake while it runs. To cut off a compromised node that is still running, use `--force`.
 
-Removal does not reach what the node already has: the assignments it read before, including their environment values, and any containers it runs. Treat those values as exposed, and change them. To cut off every node at once, create a new cluster with `init` in a new data directory and join every machine again.
+Removal does not reach what the node already has: the assignments it read before, including their environment values, and any containers it runs. Treat those values as exposed, and change them. To cut off every node at once, create a new cluster with `init` in a new data directory and join every machine again. A [CA rotation](ca-rotation.md) does not do that: every node that is not removed renews under the new CA.
 
 ## Certificate renewal
 
@@ -168,6 +170,6 @@ A renewal that fails is tried again at the next check, and logged. A worker whos
 
 `hivemind nodes` shows each node's certificate expiry, and `/metrics` has `hivemind_node_cert_expiry_timestamp_seconds`. A node that joined before 2.1 has its expiry recorded on its first request to a 2.1 server.
 
-The cluster CA lasts ten years. It cannot be rotated; that is out of scope for now. In the CA's last year, certificates are issued to end when the CA does, and the server logs a warning once a day. When the CA expires, no node can reach the server. Before then, create a new cluster with `init` in a new data directory and join every machine to it. The design for rotating it in place is in [CA rotation](ca-rotation.md).
+The cluster CA lasts ten years. In its last year, certificates are issued to end when the CA does, and the server logs a warning once a day that names `hivemind ca rotate start`. When the CA expires, no node can reach the server. Before then, rotate it in place: `hivemind ca rotate start`, `renew` and `finish` replace it with a new CA without joining any machine again ([CA rotation](ca-rotation.md)). The same steps replace a CA whose key may have leaked; that page says what they do not undo.
 
 Tests use a shorter certificate lifetime. Only a binary built with `-tags hivemind_testknobs` reads it, from `HIVEMIND_TEST_CERT_LIFETIME`. A release build has no code that shortens a certificate, and refuses to start the cluster listener when that variable is set.

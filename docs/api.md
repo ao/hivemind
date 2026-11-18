@@ -193,7 +193,7 @@ A change affects the next pull only; running containers keep running. How a cred
 
 ## Node API (internal)
 
-Workers talk to the server over a second API, on the cluster port that `serve --advertise` opens. It has routes for a worker to join, register, read its assignments, report its containers, renew its certificate, take and answer log requests, read the routing table, use the routers' shared TLS storage, and post its router's counters. It is internal. Its routes, bodies and errors may change in any release, so this document does not describe them, except that a removed node gets `403` on every one of them, and a certificate that has expired by the server's clock gets `401`. The listeners and the trust model are in [security](security.md).
+Workers talk to the server over a second API, on the cluster port that `serve --advertise` opens. It has routes for a worker to join, register, read its assignments, report its containers, renew its certificate, take and answer log requests, read the routing table, use the routers' shared TLS storage, post its router's counters, and read the cluster's CA set during a [CA rotation](ca-rotation.md). It is internal. Its routes, bodies and errors may change in any release, so this document does not describe them, except that a removed node gets `403` on every one of them, a certificate from a CA the server no longer accepts gets `403`, and a certificate that has expired by the server's clock gets `401`. The listeners and the trust model are in [security](security.md).
 
 ## Routes
 
@@ -222,6 +222,8 @@ Workers talk to the server over a second API, on the cluster port that `serve --
 | `PUT /v1/registries/{host}` | `{"username", "password"}` | 200, the record without the password | Store or replace a registry credential. `409` when it would take a node's assignments past 15 MiB, as it goes with each running replica of an image from the registry |
 | `DELETE /v1/registries/{host}` | none | 204 | Remove a registry credential |
 | `POST /v1/backup` | none | 200, `application/x-tar` | A backup of the data directory, CA private key included. TLS or loopback only. See [backup](#backup) |
+| `GET /v1/ca` | none | 200, the CA status | The cluster's CAs, the [CA rotation](ca-rotation.md) in progress, and during one, each node and the nodes the next step waits for. `503` on a server without a CA |
+| `POST /v1/ca/rotation/{step}` | `{"force": true}`, optional, for `renew` and `finish` | 200, the CA status | A step of a CA rotation: `start`, `renew`, `finish` or `abort`. A step the rotation's state or its nodes do not allow is `409`, with `error` and `waiting`, the nodes it waits for and why |
 | `GET /metrics` | none | 200, Prometheus text | Metrics |
 
 An app that has been deleted is treated as missing by every route, even before its containers are gone.

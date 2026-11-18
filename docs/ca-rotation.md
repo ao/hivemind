@@ -1,7 +1,5 @@
 # Rotating the cluster CA
 
-> Design, written ahead of the code on this branch. The code follows it; where they differ, this file is corrected.
-
 The cluster CA signs every node certificate, and every node trusts it: the server checks each worker's client certificate against it, and each worker checks the server's certificate against it. It lasts ten years from `init`. A rotation replaces it with a new CA, without joining any machine again and without stopping any container, in three steps the operator runs on the server:
 
 ```
@@ -94,7 +92,7 @@ After an abort in phase `renew`, the table holds with A and B swapped, until `fi
 
 The join listener presents the server's certificate, so it moves to the new CA when the server's certificate does. A joining node pins the CA its token names, and checks that the server's certificate chains to it, so a join token names the listener CA when it is issued: `hivemind join-token` gives a token for the old CA until the server's certificate moves, and for the new CA after. A token issued before the move stops working at the move; the joining node says that its token names another CA than the server presents, and that a token issued before a rotation of the CA must be replaced. The server takes a token that names either CA; the joining node's pin is what decides.
 
-A node that joins during a rotation gets its certificate from the listener CA, and `ca.crt` with that CA, as at any join, since that is the CA it pinned. Its first node API reply then tells it the CA set, and it follows the rotation from there like any other node. The join reply's format does not change, so a joining node of an earlier build still joins.
+A node that joins during a rotation gets its certificate from the CA its token names, which is the CA it pinned, and `ca.crt` with that CA, as at any join. Its first node API reply then tells it the CA set, and it follows the rotation from there like any other node. The join reply's format does not change, so a joining node of an earlier build still joins.
 
 ### How a worker gets the new CA
 
@@ -105,7 +103,7 @@ Over the node API, from the route `GET /node/v1/nodes/{id}/ca`, behind the same 
 
 The first alone would do while only the server can answer on that connection. The second makes trust in a new CA depend on the old CA's key itself, which only the server's data directory holds, and not on whatever produced the reply. The server's own TLS key is a different key, made at each start and held in memory: with it, someone can pose as the server to the workers until that certificate expires, but cannot make a worker trust a CA of their own for good. A CA in the reply that the worker cannot check that way is not added. A worker that joined after the server's certificate moved to the new CA has no use for the old one, and does not add it.
 
-The worker also checks the reply against what it holds: it never removes the CA that signed its own certificate, nor the CA that the reply's own connection was checked against, and never keeps an empty set. It logs each CA it adds or removes, with its fingerprint, and the fingerprints can be compared with `hivemind ca status` on the server.
+The worker also checks the reply against what it holds: it never removes the CA that signed its own certificate, nor the CA that the reply's own connection was checked against, and never keeps an empty set. A worker keeps its connection to the server open as long as it calls, so at `finish` its connection may still be the one it opened while the server's certificate was from the old CA; a set without that CA is then read again on a new connection, before it is refused. It logs each CA it adds or removes, with its fingerprint, and the fingerprints can be compared with `hivemind ca status` on the server.
 
 `ca.crt` holds every CA a worker trusts, one PEM certificate each, the CA of its own certificate first. A worker changes it to `ca.crt.next`, syncs it, then renames it over `ca.crt`, and removes a stale `ca.crt.next` at start. After a change it opens new connections to the server, with the new set, as it does after a renewal. `hivemind node set-server`, on a worker, checks the new address against every CA in it.
 
@@ -117,7 +115,7 @@ The API's TLS certificate is the operator's (`--api-tls-cert`), and the CLI chec
 
 A node that is down during a rotation holds back the server's certificate (in phase `renew`) and `finish`, and `hivemind ca status` names it with the time of its last lease. If it comes back before `finish`, it follows the rotation from where it is: it gets the CA set, adds the new CA, and renews.
 
-`finish` refuses while such a node has not renewed, and names it. `finish --force` goes ahead, and the node is cut off: its certificate is from the old CA, which the server no longer accepts, and the server's certificate is from the new CA, which the node does not trust. Coming back, it fails its TLS handshake with the server, and logs, once, that the server's certificate is from a CA it does not trust, that the cluster's CA was likely rotated without it, and what to do: run `hivemind node remove <id>` on the server, then join the machine again with an empty data directory and a new join token. It does not stop its containers, as a removed node does not; the server has placed its replicas elsewhere once its lease lapsed.
+`finish` refuses while such a node has not renewed, and names it. `finish --force` goes ahead, and the node is cut off: its certificate is from the old CA, which the server no longer accepts, and the server's certificate is from the new CA, which the node does not trust. Coming back, it fails its TLS handshake with the server, and each failed attempt in its log says that the server's certificate is from a CA it does not trust, that the address is another cluster's server or the cluster's CA was rotated without it, and what to do for the second: run `hivemind node remove <id>` on the server, then join the machine again with an empty data directory and a new join token. It does not stop its containers, as a removed node does not; the server has placed its replicas elsewhere once its lease lapsed.
 
 ## Workers of an earlier build
 
