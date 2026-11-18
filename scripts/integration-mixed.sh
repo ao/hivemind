@@ -35,15 +35,36 @@
 #     container, with n1's node certificate, plays that router
 #   - hivemind logs of the replica on n2 says the worker is older than 2.1
 #     and cannot stream logs; the log of the replica on n1 is read
+# A rotation of the cluster CA with n2 still on 2.0.0, which has no
+# rotation (docs/ca-rotation.md#workers-of-an-earlier-build):
+#   - after ca rotate start, n1 trusts the new CA and logs its fingerprint;
+#     the server marks n2 a build without rotation and logs that once;
+#     ca status shows n2 as an old build, and it and hivemind status name
+#     it as what renew waits for; renew refuses, naming it
+#   - after renew --force, n1 renews under the new CA, and the server's
+#     certificate stays on the old one. n2 keeps working on the old CA: its
+#     ca.crt is the old CA alone, it stays ready, and it runs a new replica,
+#     placed with the other two nodes ineligible. hivemind status names it
+#     as what finish waits for, and finish refuses, naming it
+#   - n2 is upgraded in place to this build, on its data directory: it
+#     trusts the new CA, renews under it, and the server's certificate
+#     moves. finish passes, ca.crt is the new CA alone on every node, and n2
+#     kept its node ID, node.json and containers, without joining again
+# 2.0.0 has no router, so no requests go through routers here.
 #
 # It publishes no ports. On exit it removes the containers, the network and
 # the volumes it created, also after a failure or Ctrl-C. Needs Docker, curl,
-# and the docker:dind, golang and curlimages/curl images.
+# jq, and the docker:dind, golang and curlimages/curl images.
 set -euo pipefail
 
 REPO=$(cd "$(dirname "$0")/.." && pwd)
 # shellcheck source=lib/cluster.sh
 . "$REPO/scripts/lib/cluster.sh"
+
+command -v jq >/dev/null || {
+	echo "mixed: needs jq" >&2
+	exit 1
+}
 
 OLD_VERSION=v2.0.0
 NEW_VERSION=v2.2.0-mixed-test
@@ -268,4 +289,111 @@ for p in "has no log streaming; upgrade the server" "has no lease renewal betwee
 	[ "$(count "$W1" "$p")" -eq 1 ] || cl_fail "$W1 logged \"$p\" again after the upgrade"
 done
 cl_note "logs: $out"
+
+# A rotation of the cluster CA with n2 still on 2.0.0, a build without
+# rotation.
+DATA=/var/lib/hivemind
+ca_json() { docker exec "$S" hivemind ca status --json; }
+ca_q() { ca_json | jq -r "$1"; }
+node_q() { ca_json | jq -r --arg id "$1" ".nodes[] | select(.id == \$id) | .$2"; } # node_q NODE-ID FIELD
+fsum() { docker exec "$1" sha256sum "$2" | awk '{ print $1 }'; }
+pem_count() { docker exec "$1" grep -c 'BEGIN CERTIFICATE' "$2"; }
+running_ids() { docker exec "$1" docker ps -q --filter label=hivemind.app | sort | tr '\n' ' '; }
+rotate() {
+	local out
+	out=$(docker exec "$S" hivemind ca rotate "$@" 2>&1) || cl_fail "hivemind ca rotate $*: $out"
+}
+is_true() { [ "$(node_q "$1" "$2")" = true ]; } # is_true NODE-ID FIELD
+state_of() { docker exec "$S" hivemind nodes | awk -v n="$1" '$1 == n' | grep -oE ' (ready|lost|waiting) ' | tr -d ' '; }
+# names_old OUTPUT: OUTPUT has a line that names n2 as a build without
+# rotation.
+names_old() { grep -F "$W2_ID" <<<"$1" | grep -qF "is a build without CA rotation (older than 2.2): upgrade it, or remove it"; }
+CA0=$(fsum "$S" "$DATA/ca.crt")
+W2_STATE=$(fsum "$W2" "$DATA/node.json")
+rotate start
+NEXT_FP=$(ca_q '.next.fingerprint')
+wait_for 60 is_true "$W1_ID" trusts || cl_fail "$W1 does not trust the new CA: $(ca_json)"
+wait_for 60 is_true "$W2_ID" old_build || cl_fail "the server did not mark $W2_ID as a build without rotation: $(ca_json)"
+docker exec "$W1" grep -q "trusts a new cluster CA.*ca=$NEXT_FP" /var/log/hivemind.log || cl_fail "$W1 did not log the new CA's fingerprint $NEXT_FP"
+[ "$(ca_q '[.rotation.waiting[].node] | join(" ")')" = "$W2_ID" ] || cl_fail "renew does not wait for $W2_ID alone: $(ca_json)"
+ca_text=$(docker exec "$S" hivemind ca status)
+awk -v n="$W2_ID" '$1 == n' <<<"$ca_text" | grep -qF "no (old build)" || cl_fail "ca status does not show $W2_ID as an old build: $(tr '\n' ';' <<<"$ca_text")"
+names_old "$ca_text" || cl_fail "ca status does not say renew waits for $W2_ID, a build without rotation: $(tr '\n' ';' <<<"$ca_text")"
+status_out=$(docker exec "$S" hivemind status)
+grep -qF "Cluster CA rotation, phase trust: hivemind ca rotate renew waits for:" <<<"$status_out" && names_old "$status_out" ||
+	cl_fail "hivemind status does not name $W2_ID as a build without rotation: $(tr '\n' ';' <<<"$status_out")"
+if out=$(docker exec "$S" hivemind ca rotate renew 2>&1); then
+	cl_fail "renew went ahead with $W2_ID on $OLD_VERSION: $out"
+fi
+grep -qF "$W2_ID" <<<"$out" && grep -qF "is a build without CA rotation" <<<"$out" && grep -qF -- "--force" <<<"$out" ||
+	cl_fail "renew's refusal does not name $W2_ID as a build without rotation: $out"
+cl_note "start: $W1 trusts the new CA ${NEXT_FP:0:16}; ca status and status name $W2_ID as a build without rotation; renew refuses: $out"
+
+rotate renew --force
+wait_for 90 is_true "$W1_ID" renewed || cl_fail "$W1 did not renew under the new CA: $(ca_json)"
+docker exec "$W1" grep -q "renewing the node certificate under the cluster's new CA" /var/log/hivemind.log || cl_fail "$W1 did not log its renewal"
+[ "$(ca_q '.rotation.listener_moved')" = false ] || cl_fail "the server's certificate moved while $W2_ID trusts the old CA only"
+# n2 works on the old CA: its ca.crt is the old CA alone, its certificate is
+# from it, its lease is current, and it takes a new replica, with the two
+# other nodes ineligible.
+[ "$(pem_count "$W2" "$DATA/ca.crt")" = 1 ] && [ "$(fsum "$W2" "$DATA/ca.crt")" = "$CA0" ] || cl_fail "$W2's ca.crt is not the old CA alone"
+if is_true "$W2_ID" renewed; then cl_fail "$W2_ID, on $OLD_VERSION, is marked renewed under the new CA"; fi
+docker exec "$S" hivemind node eligibility "$S_ID" --disable >/dev/null || cl_fail "making $S_ID ineligible"
+docker exec "$S" hivemind node eligibility "$W1_ID" --disable >/dev/null || cl_fail "making $W1_ID ineligible"
+docker exec "$S" hivemind deploy --name late --image busybox:stable --replicas 1 -- sleep 3600 >/dev/null || cl_fail "deploy late"
+late_on_w2() {
+	[ "$(replica_on late "$W2_ID")" = 0 ] && docker exec "$S" hivemind status late --json | grep -q '"state": "running"' &&
+		[ -n "$(docker exec "$W2" docker ps -q --filter label=hivemind.app=late)" ]
+}
+wait_for 120 late_on_w2 || cl_fail "late did not run on $W2_ID: $(docker exec "$S" hivemind status late | tr '\n' ';')"
+docker exec "$S" hivemind node eligibility "$S_ID" --enable >/dev/null || cl_fail "making $S_ID eligible"
+docker exec "$S" hivemind node eligibility "$W1_ID" --enable >/dev/null || cl_fail "making $W1_ID eligible"
+[ "$(state_of "$W2_ID")" = ready ] || cl_fail "$W2_ID is not ready in the renew phase: $(docker exec "$S" hivemind nodes | tr '\n' ';')"
+status_out=$(docker exec "$S" hivemind status)
+grep -qF "Cluster CA rotation, phase renew: hivemind ca rotate finish waits for:" <<<"$status_out" && names_old "$status_out" ||
+	cl_fail "hivemind status in the renew phase does not name $W2_ID: $(tr '\n' ';' <<<"$status_out")"
+if out=$(docker exec "$S" hivemind ca rotate finish 2>&1); then
+	cl_fail "finish went ahead with $W2_ID on $OLD_VERSION: $out"
+fi
+grep -qF "$W2_ID" <<<"$out" && grep -qF "is a build without CA rotation" <<<"$out" ||
+	cl_fail "finish's refusal does not name $W2_ID as a build without rotation: $out"
+[ "$(count "$S" "a node of a build without CA rotation is in the cluster")" -eq 1 ] &&
+	docker exec "$S" grep -F "a node of a build without CA rotation is in the cluster" /var/log/hivemind.log | grep -qF "node=$W2_ID" ||
+	cl_fail "the server did not log once that $W2_ID is a build without rotation: $(docker exec "$S" grep -F 'without CA rotation' /var/log/hivemind.log | tr '\n' ';')"
+cl_note "renew --force: $W1 renewed, the server's certificate stays on the old CA, $W2_ID runs a new replica on it; finish refuses: $out"
+
+# n2 is upgraded in place, on its data directory, and follows the rotation
+# from where it is, without joining again.
+W2_RUNNING=$(running_ids "$W2")
+docker exec "$W2" pkill -f 'hivemind-2.0.0 join' || cl_fail "no $OLD_VERSION worker to stop on $W2"
+w2_old_gone() { ! docker exec "$W2" pgrep -f 'hivemind-2.0.0' >/dev/null; }
+wait_for 30 w2_old_gone || cl_fail "the $OLD_VERSION worker on $W2 did not stop"
+docker exec -d "$W2" sh -c "exec hivemind serve --role worker >>/var/log/hivemind.log 2>&1"
+up2=$(date +%s)
+wait_for 120 is_true "$W2_ID" renewed || cl_fail "$W2 did not renew under the new CA after its upgrade: $(ca_json)"
+for p in "trusts a new cluster CA.*ca=$NEXT_FP" "renewing the node certificate under the cluster's new CA"; do
+	docker exec "$W2" grep -q "$p" /var/log/hivemind.log || cl_fail "$W2 did not log \"$p\" after its upgrade: $(docker exec "$W2" tail -n 5 /var/log/hivemind.log)"
+done
+if is_true "$W2_ID" old_build; then cl_fail "$W2_ID is still marked a build without rotation after its upgrade"; fi
+listener_moved() { [ "$(ca_q '.rotation.listener_moved')" = true ]; }
+wait_for 60 listener_moved || cl_fail "the server's certificate did not move to the new CA: $(ca_json)"
+none_waiting() { [ "$(ca_q '.rotation.waiting | length')" = 0 ]; }
+wait_for 30 none_waiting || cl_fail "finish still waits for nodes: $(ca_json)"
+cl_note "$W2 upgraded: it renewed under the new CA $(($(date +%s) - up2)) s after its start, and the server's certificate moved"
+rotate finish
+[ "$(ca_q '.rotation')" = null ] && [ "$(ca_q '.current.fingerprint')" = "$NEXT_FP" ] || cl_fail "after finish: $(ca_json)"
+CA1=$(fsum "$S" "$DATA/ca.crt")
+[ "$CA1" != "$CA0" ] || cl_fail "ca.crt did not change"
+one_ca() {
+	local c
+	for c in "$S" "$W1" "$W2"; do
+		[ "$(pem_count "$c" "$DATA/ca.crt")" = 1 ] && [ "$(fsum "$c" "$DATA/ca.crt")" = "$CA1" ] || return 1
+	done
+}
+wait_for 60 one_ca || cl_fail "ca.crt is not the new CA alone on every node: $(for c in "$S" "$W1" "$W2"; do printf '%s %s CAs %s; ' "$c" "$(pem_count "$c" "$DATA/ca.crt")" "$(fsum "$c" "$DATA/ca.crt")"; done)"
+[ "$(cl_node_id_of "$W2")" = "$W2_ID" ] && [ "$(fsum "$W2" "$DATA/node.json")" = "$W2_STATE" ] &&
+	[ "$(docker exec "$W2" grep -c 'joined the cluster' /var/log/hivemind.log)" = 1 ] || cl_fail "$W2 joined again"
+[ "$(running_ids "$W2")" = "$W2_RUNNING" ] || cl_fail "the containers on $W2 changed across its upgrade: $W2_RUNNING before, $(running_ids "$W2") now"
+three_ready || cl_fail "a node is not ready after finish: $(docker exec "$S" hivemind nodes | tr '\n' ';')"
+cl_note "finish: ca.crt is the new CA alone on every node; $W2 kept its node ID, node.json and containers"
 cl_note "PASS"
