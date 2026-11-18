@@ -1049,3 +1049,282 @@ scripts/soak/outside.sh fetch
 SOAK_DURATIONS=scripts/soak/durations-soak4.txt scripts/soak/report.sh "$SOAK_DIR/soak.log"
 scripts/soak/client-report.sh "$SOAK_DIR/soak.log" "$SOAK_DIR/client"
 ```
+
+# Fifth soak: rotations of the cluster CA, and the start grace's hold
+
+The fourth soak's set-up on six new machines, on 2026-11-18, on the build that adds the rotation of the cluster CA ([ca-rotation](ca-rotation.md)), a new connection after a refused reply, the refusal kept by the address that answered, and the start grace's hold. Under the 16 client streams the CA was rotated four times: with every node up; with a worker powered off, finished with `--force`, and the worker removed and joined again; aborted in phase renew and finished back to the CA it came from; and with the server lost in phase renew, a backup from that phase restored on a new machine by name, and the rotation finished there. Then the server's machine was stopped and started again with every worker cut off from it, past its start grace, and an hour of steady state followed. Times are UTC; the machines' private addresses are shown renumbered, 10.0.0.N for hivemind-soakg-N. The CA from `init` is named `hivemind cluster CA`; each one a rotation makes has the first 8 hex digits of its fingerprint after that, and is called by them here, as 83d3dd58.
+
+## The four rotations
+
+| | Every node up | A worker powered off | Aborted in phase renew | The server lost in phase renew |
+|---|---|---|---|---|
+| CAs | init's to 83d3dd58 | 83d3dd58 to 50f80d35 | 50f80d35 to ef678147, then back | 50f80d35 to c63be9fc |
+| `start` to every node trusting the new CA (live nodes) | 1.2 s | 1.2 s | 1.2 s | 1.2 s |
+| `renew` to every node renewed (live nodes) | 1.8 s | 1.8 s | aborted 1.06 s after `renew` | 1.8 s |
+| The server's certificate moves to the new CA | in the `renew` step | in the `finish --force` step | in the `renew` step, and back to 50f80d35 0.96 s after the abort | in the `renew` step; the restored server's from its start |
+| `finish` | passed | refused, naming the worker; `--force` passed | passed, 2.7 s after the abort | passed on the restored server |
+| `finish` to every worker with that CA alone in `ca.crt` | 1.5 s | 1.4 s | 1.5 s | 1.5 s |
+| Failed requests, 16 streams | 0 | 0 through the three routers that stayed up | 0 | 0 through the workers' routers and the new server's |
+| Requests of 1.5 s or more | 0 | 2 per stream of an app with a replica on the powered-off worker | 0 | 4 or 5 per stream of an app with a replica on the lost server |
+| TLS handshake errors in the server's log | 0 | 7 from the cut-off worker, 18 from the harness's probe on it | 0 | 0 |
+| Containers changed | none | the powered-off worker's replicas, placed again when it was lost | none | none on the workers |
+| Nodes that joined again | none | the cut-off worker, after `hivemind node remove` | none | none |
+
+Each step's command, run over ssh from the control machine, returned in 54 to 65 ms.
+
+## The machines and the build
+
+| | |
+|---|---|
+| Machines | 6 EC2 c7g.large in one subnet: 2 vCPU (Graviton3), 3.7 GiB (MemTotal 3897240 kB), Amazon Linux 2023.12.20261117, kernel 6.18.62-127.179.amzn2023.aarch64, Docker 25.0.18 |
+| Roles | hivemind-soakg-1 the first server, 2 to 4 workers, 5 the outside machine, 6 the new server machine, launched during the run at a new address |
+| hivemind | 6027284, `CGO_ENABLED=0 go build -trimpath ./cmd/hivemind`, Go 1.27.4, linux/arm64, sha256 651ff9b9...2c6b9d8b, for the whole run |
+| Service | As in the fourth soak: the units of [systemd.md](systemd.md), `--advertise hivemind-server.soak.test --cluster-addr <its address>` on the server, the router's flags on every node, `--start-grace` at its default, 2 minutes |
+| Outside machine | Pebble (revision 5caaab3), pebble-challtestsrv, registry:2, curl 8.21.0 |
+| Network | As in the fourth soak, checked again before the set-up: TCP 80, 443, 4484, 4485, 14000, 32768, 40000 and 60999 open from one machine to a listener on another, 8000 closed. Clocks: chrony put every machine within 3.4 microseconds of the Amazon Time Sync Service at the start |
+
+## Set-up
+
+As in the fourth soak, 18 replicas with the path-routed pair. It took 61 s from the binaries' install to every router serving the three hosts, and every path of the fourth soak's table went to the same app through each of the four routers, with the same `301` and `400`s.
+
+## Method
+
+The fourth soak's harness and clients, 16 streams. New in [scripts/soak](../scripts/soak):
+
+- `scenario.sh ca-rotate` runs a rotation as [ca-rotation](ca-rotation.md) says: `hivemind ca rotate start`; `renew` once `hivemind ca status --json` shows every node trusting the new CA (polled every 0.5 s); `finish` once every node has renewed and the server's certificate has moved; then until every worker's `ca.crt` holds the new CA alone.
+- During each rotation a watcher logs, at each change, the server's view once a second (the rotation in `ca status --json`, the CA files in its data directory, and the issuer and serial of the certificate its join listener presents, which the node listener presents too) and each worker's every 2 s (the CAs in its `ca.crt`, in order; the issuer, serial and expiry of its `node.crt`; whether the server's certificate verifies against `ca.crt` for the server's name).
+- `ca-offline T` waits for T to be powered off and lost, rotates, expects `finish` to refuse and runs `finish --force`, waits for T to be powered on, logs the line T's journal gives for its failed handshakes and what T runs, then runs `hivemind node remove` and joins T again with an empty data directory (`setup.sh rejoin`).
+- `ca-abort` runs `renew`, then polls `GET /v1/ca` on the server every 50 ms and aborts once at least one node has renewed and not every one has.
+- `ca-restore-begin` rotates to phase renew, waits until every node has renewed and the server's certificate has moved, and takes the backup; `server-move` measures the loss and the restore by name as in the fourth soak, and `ca-finish` finishes the rotation on the restored server.
+- `start-hold` waits for the server's machine to stop, drops every worker's packets to the server's port 4484 (iptables), waits for the machine to start again, and logs once a second the server's view of its workers, the containers on its machine and its status line, until 90 s past the end of its start grace; then removes the rules and measures until every worker is ready. With `HEAL_LATE=W` the rule on W comes off `HEAL_LAG` (12) s after the others.
+- After each rotation: the containers on every node against those before it (ID and start time), the node IDs in `hivemind nodes` and in each worker's `node.json` against the map, and the TLS handshake errors, x509 lines, refusals and joins in the server's and the workers' journals.
+
+## Results
+
+### A rotation with every node up
+
+| | UTC | Seconds |
+|---|---|---|
+| `hivemind ca rotate start`: 83d3dd58 | 21:58:10.52 | |
+| Each worker adds it (`this worker trusts a new cluster CA, cross-signed by one it trusted`) | 21:58:10.59, 10.86, 11.33 | +0.08, +0.35, +0.81 |
+| `renew`; in the same step the server's certificate moves to 83d3dd58, as every node trusts it | 21:58:12.14 | |
+| Each worker renews (`renewing the node certificate under the cluster's new CA`) | 21:58:12.32, 12.59, 12.86 | +0.18, +0.46, +0.72 |
+| The server sees each new certificate (`a node presents a certificate from the new cluster CA`) | 21:58:13.32, 13.59, 13.86 | 1.0 s after each renewal |
+| `finish` | 21:58:14.41 | start + 3.90 |
+| Each worker drops init's CA (`this worker no longer trusts a cluster CA`) | 21:58:14.59, 14.86, 15.33 | +0.18, +0.45, +0.91 |
+
+On disk, through the phases, the same on every worker:
+
+| Phase | Worker's `ca.crt`, in order | Worker's `node.crt` from | Server's data directory | Server's certificate from |
+|---|---|---|---|---|
+| Before | init's | init's | `ca.crt`, `ca.key` | init's |
+| trust | init's, 83d3dd58 | init's | and `ca-next.crt` (83d3dd58), `ca-next.key` | init's |
+| renew, after the worker renewed | 83d3dd58, init's | 83d3dd58, a new serial, to 2027-11-18 21:58:12 | as in trust | 83d3dd58 |
+| After `finish` | 83d3dd58 | 83d3dd58 | `ca.crt` (83d3dd58), `ca.key`; no `ca-next.*` | 83d3dd58 |
+
+The server's certificate verified against every worker's `ca.crt` at every poll. No request on the 16 streams failed or took 1.5 s; the longest gap between two successful requests on a stream was 0.11 s and the slowest request 10 ms. The server logged no TLS handshake error, no refused request, no warning, no error and no join, and the workers' journals had no TLS or x509 line. No container on any node changed (the same IDs and start times before and after), and every node kept its ID and its `node.json`. The server's `hivemind_node_cert_expiry_timestamp_seconds` had the new expiry of every node.
+
+### A rotation with a worker powered off
+
+hivemind-soakg-4 (10.0.0.4), with `api` 1, `cache`, `papi` 0, `spread` 3 and `www` 0, was powered off with `sysrq o` at 22:00:17.7. Its port 22 closed 7.4 s later, it was lost 15.0 s after that, and its five replicas ran elsewhere 6.4 s later.
+
+| | UTC |
+|---|---|
+| `start`: 50f80d35 | 22:00:48.73 |
+| `ca status`: every live node trusts it; hivemind-soakg-4 is `down` | 22:00:49.96 |
+| `renew`, without `--force`: passed | 22:00:52.26 |
+| The two live workers renewed; the server's certificate stays from 83d3dd58, as hivemind-soakg-4 does not trust 50f80d35 | 22:00:54.05 |
+| `finish`: refused | 22:01:01.45 |
+| `finish --force`: the server's certificate moves to 50f80d35, and the rotation ends | 22:01:01.50 |
+| The two live workers hold 50f80d35 alone | 22:01:02.93 |
+| hivemind-soakg-4 started | 22:01:21.47 |
+| Its port 22 open | 22:01:35.83 |
+| Its first failed handshake | 22:01:37.19 |
+| `hivemind node remove` | 22:02:09.07 |
+| Joined again with an empty data directory and a new token; converged | 22:02:10.57 |
+
+`finish` named it and why:
+
+```
+error: hivemind ca rotate finish waits for 1 node(s): node-3c5d8032c4c8 (...) is down: its last lease was at 2026-11-18T22:00:22Z. Run it again once hivemind ca status lists none, or with --force to cut them off: each must then join again
+```
+
+Coming back, the worker logged at each attempt, every 5 s, the line [ca-rotation](ca-rotation.md#nodes-that-are-offline) describes:
+
+```
+level=WARN msg="registering with the server; retrying" server=hivemind-server.soak.test:4484 err="calling the server: Get \"https://hivemind-server.soak.test:4484/node/v1/nodes/node-3c5d8032c4c8/status\": tls: failed to verify certificate: x509: certificate signed by unknown authority; the server's certificate is from a CA this worker does not trust: the address is another cluster's server, or this cluster's CA was rotated without this node (hivemind ca rotate finish --force). For the second, run `hivemind node remove <id>` on the server, then join this machine again with an empty --data-dir and a new join token"
+```
+
+Its `ca.crt` held 83d3dd58 alone and its `node.crt` was from it. It ran no container: the power-off had stopped them, and its agent started none without the server, so no replica ran twice. The server had it `lost`, and logged each attempt as `http: TLS handshake error from 10.0.0.4:<port>: remote error: tls: bad certificate`, with the address and nothing more. Eighteen more lines from that address, `local error: tls: bad record MAC`, came from the harness's own check on that machine, which aborted its handshakes with the join listener when the check failed; the check no longer aborts. `hivemind node remove` said `removed; 0 replicas placed again`, as they had been placed when it was lost. It joined as a new node, with 50f80d35 alone in `ca.crt` and a certificate from it.
+
+Through the other three routers no request failed. On each stream of `www`, `api` and `papi`, which had a replica on the powered-off worker, two requests took longer: one of 7.5 s on a kept connection to it, then one 2.0 s dial, as in the fourth soak. Through its own router 383 requests per stream failed, from 5 s after the power-off until 112 s after it, when its router served again after the join.
+
+### Aborted in phase renew
+
+| | UTC, the server's clock |
+|---|---|
+| `start`: ef678147; every node trusts it 1.2 s later | 22:03:05.48 |
+| `renew`; the server's certificate moves to ef678147 | 22:03:07.19 |
+| The three workers renew under ef678147 | 22:03:07.23, 07.59, 07.86 |
+| The server sees hivemind-soakg-4's new certificate | 22:03:08.21 |
+| `abort`: the poll before it had 1 of 3 nodes renewed (the other two had renewed, and not yet sent a request with their new certificates) and the server's certificate from ef678147 | 22:03:08.25 |
+| The rotation turns round, back towards 50f80d35, in phase renew | 22:03:08.27 |
+| The three workers renew back under 50f80d35 | 22:03:08.60, 08.87, 09.23 |
+| The server's certificate back to 50f80d35 | 22:03:09.23 |
+| The server sees every node's certificate from 50f80d35 | 22:03:10.21 |
+| `finish`: passed, ef678147 deleted | 22:03:10.93 |
+| Every worker holds 50f80d35 alone | 22:03:12.40 |
+
+No request failed or took 1.5 s, the slowest took 12 ms; there was no TLS error on either side, no container changed and no node joined again. From their renewal back until `finish`, each worker's `ca.crt` had ef678147 first and 50f80d35 second, while its `node.crt` was from 50f80d35, where the docs say the CA of the node's own certificate comes first. In the turned rotation the workers' and the server's lines call 50f80d35 the new CA: `renewing the node certificate under the cluster's new CA ... ca=50f80d3521d8db84`, `a node trusts the new cluster CA ... ca=50f80d3521d8db84`.
+
+### A backup in phase renew, restored on a new machine by name
+
+`start` (c63be9fc), `renew` once every node trusted it, and every node renewed with the server's certificate moved 3.0 s after `start`; then `hivemind backup`, 225792 bytes, with `ca-next.key` and `ca-next.crt` beside `ca.key` and `ca.crt`. The server, hivemind-soakg-1, was powered off, and the backup was restored on hivemind-soakg-6 at 10.0.0.6 as in the fourth soak, with the name's record changed as soon as the restored API answered.
+
+| | UTC | Seconds |
+|---|---|---|
+| Backup | 22:04:39.4 | |
+| Power-off request | 22:04:54.6 | |
+| API down (1 s measure) | 22:05:05.7 | +11.0 |
+| Launch request for the new machine | 22:05:09.3 | |
+| New machine ready | 22:06:41.2 | launch + 91.9 |
+| API up | 22:06:44.6 | outage 98.9 |
+| The name's record changed on every machine | 22:06:46.0 | |
+| hivemind-soakg-3, 2 and 4 ready | 22:06:50.8, 52.4, 52.4 | record + 4.7, 6.4, 6.4 |
+| Converged | 22:06:52.4 | record + 6.4 |
+| `ca status` on the restored server: phase renew, its certificate from c63be9fc, every node trusting and renewed, nothing to wait for | 22:07:41.9 | |
+| `finish`: passed | 22:07:42.2 | |
+| Every worker holds c63be9fc alone | 22:07:43.7 | +1.5 |
+
+`restore` said that the backup was taken during a rotation of the cluster CA, in phase renew, that it holds both CAs, and where the docs say which step to run. The restored server issued its own certificate at its start from c63be9fc, the CA the store recorded for it, and the workers, which trusted both CAs and held certificates from c63be9fc, reached it with no step in between. From the backup to the end no container on a worker changed and no node joined again. Through the workers' routers no request failed; each stream of `www` and `papi`, with a replica on the lost server, had 4 or 5 requests of 1.5 s or more, the first of 7.5 s and then the backoff's 2.0 s dials. Through the new server's router no request failed from its first; through the lost server's router 64 to 76 per stream failed until the clients stopped asking it.
+
+### The start grace's hold
+
+The server's machine, hivemind-soakg-6, was stopped (`aws ec2 stop-instances --force`), and once its port 22 had closed, every worker's packets to its port 4484 were dropped. Then the machine was started again.
+
+| | UTC | Seconds |
+|---|---|---|
+| Stop request | 22:08:11.8 | |
+| Port 22 closed; the rules on the three workers | 22:08:17.2 | +5.4 |
+| Start request | 22:08:37.8 | |
+| Port 22 open | 22:08:53.5 | +15.7 |
+| `serve` started: `workers that were up before this start wait for their first report ... waiting=3 start_grace=2m0s`; its agent restarted its own five containers | 22:08:54.3 | |
+| API up. `hivemind nodes`: the three workers `waiting`. `hivemind status`: `3 workers are waiting for their first report since the server started (start grace: 1m59s left); ...` | 22:08:55.6 | |
+| The grace ends: the error line; `nodes`: still `waiting`, with `start_held`; `status`: `3 workers are waiting: none of them has reported since the server started, and its start grace has ended, so the server keeps them waiting and places none of their replicas again; ...` | 22:10:54.3 | start + 120.0 |
+| The rules removed on the three workers | 22:12:25.7 | grace + 91.4 |
+| Each worker reaches the server (`the server answers again`) | 22:12:25.9, 26.3, 27.1 | +0.18, +0.63, +1.46 |
+| Converged, every worker ready | 22:12:27.7 | +2.0 |
+| The sweep: `a worker that was up before this server started has reported to it: the start grace holds the others no longer, and those that have not reported are lost` | 22:12:29.3 | |
+
+The error line was the one [backup](backup.md#replacing-a-lost-server) shows, with `waiting=3`, the three node IDs, `started=2026-11-18T22:08:54Z` and `start_grace_ended=2026-11-18T22:10:54Z`. Through the hold the server ran its own five replicas (`front`, `papi` 1, `spread` 0 and 4, `www` 1) and nothing else; no node was lost, no replica was placed again, and no container on a worker changed. Its router served again from 22:08:54.7, 0.4 s after `serve` started, with the workers' endpoints in its table while they waited. Through the workers' routers no request failed; one request per stream of `www` and `papi` took 2.0 s, a dial to the server's replica while it was down. Through the server's router 138 or 139 requests per stream failed, from the stop until 22:08:54.7.
+
+For the second after the first two workers had reported, `hivemind nodes` showed the third, hivemind-soakg-2, as `lost`, with a lease age of 251 s, until it reported 1.0 s later. Once one waiting worker has reported, the others are no longer waiting, and the sweep, every 5 s, marks them lost and places their replicas at its next pass; here that pass came after all three had reported.
+
+After the steady state the same was done again, with hivemind-soakg-2's rule taken off 12 s after the others' (`HEAL_LATE`), as a worker whose agent is in a longer backoff would come back:
+
+| | UTC |
+|---|---|
+| `serve` started; the grace ends with the error line and the three workers held, as above | 23:17:15.8, 23:19:15.8 |
+| The rules off on hivemind-soakg-3 and 4 | 23:20:45.7 |
+| hivemind-soakg-3 reaches the server; its router reads the table at 45.689, its agent is answered at 45.698 | 23:20:45.70 |
+| The sweep: the hold ends, and hivemind-soakg-4 and hivemind-soakg-2 are lost (`node lost` for each) | 23:20:45.78 |
+| hivemind-soakg-4 reaches the server, 0.52 s after it was marked lost; it ran no replica | 23:20:46.30 |
+| hivemind-soakg-2's six replicas without a volume (`api` 1, `papi` 0, `proot` 0, `spread` 1 and 5, `www` 2) started again, all on the server's machine | 23:20:47.9 to 49.5 |
+| The rule off on hivemind-soakg-2 | 23:20:57.7 |
+| hivemind-soakg-2 reaches the server; its routed containers leave its table and stop after the 5 s drain delay | 23:20:58.0 |
+| Its six containers removed; no replica on two machines | 23:21:03.4 to 08.3, 23:21:08.9 |
+
+The six replicas ran on two machines for 19.9 s, and stayed on the server's machine, which then ran 11 of the 18 while hivemind-soakg-2 and 4 ran none. Through hivemind-soakg-3's router, `api.soak.test` and `paths.soak.test/` answered `503` from 23:20:45.70 to 46.51, 9 requests on each stream: the table its router read as it came back had neither hivemind-soakg-2's endpoints, which stopped counting when the hold ended, nor its own, which count again once its agent has reported its containers (45.745); the router read the table again a second later. Both apps had no replica on the server. No other request through a worker's router failed.
+
+## Steady state
+
+On 6027284, 1 h 0 min 40 s, from 22:15:19.0 to 23:15:59.0, after the four rotations and the first hold, with no fault and no change to the apps: the 16 client streams, the probe loop, no watcher. Every node held a certificate from c63be9fc, the fourth rotation's CA, and trusted it alone. Placement in the window: the server, hivemind-soakg-6, ran `front`, `papi` 1, `spread` 0 and 4 and `www` 1; hivemind-soakg-2 `api` 1, `papi` 0, `proot` 0, `spread` 1 and 5 and `www` 2; hivemind-soakg-3 `api` 0, `cache`, `kv`, `proot` 1, `spread` 2 and 3 and `www` 0; hivemind-soakg-4, joined again in the second rotation, none.
+
+| Through the routers | |
+|---|---|
+| Requests, all 16 streams | 578441 |
+| Succeeded | 578441 (100 %) |
+| Misrouted (a `200` for a path from the other app) | 0 |
+| Requests of 1.5 s or more | 0 |
+| Longest gap between two successful requests on a stream | 0.13 s |
+| Total time per request (TCP connect, TLS handshake, request and reply), p50 / p90 / p99 / p99.9 / max | 2.5 / 3.1 / 4.0 / 7.6 / 28.6 ms |
+| TLS handshake, p50 / p99 / max | 1.5 / 2.7 / 22.5 ms |
+| TLS done to first byte of the reply, p50 / p99 / max | 0.6 / 1.3 / 18.7 ms |
+| Certificates issued in the window | 17 (6 for `www`, 6 for `api`, 5 for `paths`), each by a router whose node certificate was from c63be9fc, through the server's certificate storage |
+| Certificate checks (a fresh handshake with every router for each host every 30 s) | 1452, none failed |
+
+Per host and path, over the four routers:
+
+| Host and path | Requests | Succeeded | Misrouted | p50 / p99 / p99.9 / max (ms) |
+|---|---|---|---|---|
+| `api.soak.test/` | 144640 | 144640 | 0 | 2.4 / 3.9 / 7.3 / 25.9 |
+| `www.soak.test/` | 144600 | 144600 | 0 | 2.5 / 4.0 / 8.0 / 24.3 |
+| `paths.soak.test/` (proot) | 144602 | 144602 | 0 | 2.5 / 4.0 / 7.7 / 28.6 |
+| `paths.soak.test/api/x` (papi) | 144599 | 144599 | 0 | 2.5 / 4.0 / 7.3 / 26.6 |
+
+| Probe | Result |
+|---|---|
+| Status answered, converged, all 18 replicas running, no replica on two machines | 364 of 364 |
+| `kv` value read back, and the same as written | 364 of 364 |
+| `GET /v1/status`, `/v1/nodes`, `/v1/apps` on the server, 305 each | all 200; p50 2.4, 2.2 and 1.0 ms; p99 12.0, 10.0 and 6.0 ms; max 17.3, 13.3 and 12.8 ms |
+| Dangling Docker volumes, every node, every 60 s | 0 on three nodes; 1 on hivemind-soakg-4 in every sample since 22:02:25, the anonymous volume of its old `cache` container, which the harness's rejoin removed with `docker rm -f` and without `-v` |
+| Container log files | at most 2 files for one container, the largest 10000055 bytes |
+| Events: lost nodes, restarts, failed probes | none |
+
+The hivemind process on each node, 61 samples a minute apart:
+
+| Node | RSS first / last / max (MiB) | Threads first / last | Open fds first / last / max | CPU, % of one CPU | Restarts |
+|---|---|---|---|---|---|
+| hivemind-soakg-6 (server) | 26.8 / 27.1 / 27.3 | 9 / 9 | 40 / 40 / 45 | 4.07 | 0 |
+| hivemind-soakg-2 | 23.5 / 23.5 / 23.8 | 8 / 9 | 24 / 24 / 25 | 3.54 | 0 |
+| hivemind-soakg-3 | 23.4 / 23.7 / 23.7 | 9 / 9 | 22 / 23 / 24 | 3.07 | 0 |
+| hivemind-soakg-4 | 22.1 / 22.1 / 22.2 | 9 / 9 | 22 / 22 / 25 | 2.86 | 0 |
+
+Each process used 2.9 to 4.1 % of one CPU, against 2.7 to 4.1 % in the fourth soak, and its RSS stayed within 0.5 MiB over the hour. The store grew from 212 to 228 KiB (`hivemind.db`), with a 4027 KiB WAL at the end. The routers' counters in the server's `/metrics`, read at the window's two ends, against the clients' `200`s through each router:
+
+| Router | `api.soak.test` | `www.soak.test` | `paths.soak.test` |
+|---|---|---|---|
+| hivemind-soakg-6 (the server, read directly) | +18 | +18 | +15 |
+| hivemind-soakg-2 | -101 | -100 | -202 |
+| hivemind-soakg-3 | -100 | -100 | -200 |
+| hivemind-soakg-4 | +48 | +49 | +99 |
+
+The server's router counted 18, 18 and 15 more `200`s than its streams had: Pebble's three HTTP-01 validations for each of the 6, 6 and 5 issuances, all through the first address of the hosts' answers, the server's. A worker posts its counters every 15 s: hivemind-soakg-2's and 3's were 10 s further behind the clients at the second read than at the first (100 requests of each stream, at 10 a second), and hivemind-soakg-4's 4.9 s less behind.
+
+## What did not work, and what was not measured
+
+- The first hold ended without a node lost only because the sweep's pass came after the last of the three workers had reported; with one worker 12 s behind the others, its replicas ran twice and moved, and one router answered `503` for 0.8 s (above).
+- Each step ran as soon as its condition held, so each rotation took seconds. A rotation left in phase trust or renew for hours, with restarts, renewals and joins in between, was not run.
+- The powered-off worker was down before `start`, so it never saw the rotation. A worker that goes down after it trusts the new CA and before it renews was not run.
+- The backup was taken in phase renew, after every node had renewed. A backup from phase trust restored after the nodes renewed, for which the docs say to run `renew` again, was not run; nor a restore across `finish`.
+- No worker of an earlier build took part; integration-mixed.sh does that in Docker.
+- The harness's check of each worker's view aborted its handshakes with the join listener when the check failed, which the server logged as TLS errors (18 lines in the second rotation). It no longer aborts. Its rejoin removed the old containers with `docker rm -f`, which left the anonymous volume of the `cache` container (redis declares `VOLUME /data`) dangling on hivemind-soakg-4; it now removes them with `-v`.
+- The record's change was a line in `/etc/hosts` on every machine at once, as in the third and fourth soaks.
+- One hour of steady state is too short for leak figures.
+
+## Running it, with CA rotations
+
+As [with path routes](#running-it-with-path-routes):
+
+```sh
+export SOAK_DIR=$PWD/.scratch/run SOAK_ROUTES=1 SOAK_PATHS=1 SERVER_NAME=hivemind-server.soak.test
+scripts/soak/outside.sh setup
+BIN=path/to/hivemind scripts/soak/setup.sh
+scripts/soak/outside.sh client-start
+scripts/soak/scenario.sh probe-start
+scripts/soak/scenario.sh watch-start
+
+scripts/soak/scenario.sh ca-rotate
+scripts/soak/scenario.sh ca-offline node-4 &       # power node-4 off, and on, when the log says so
+scripts/soak/scenario.sh ca-abort
+scripts/soak/scenario.sh ca-restore-begin           # rotates to phase renew and takes the backup
+scripts/soak/scenario.sh server-move - - name ca-restore &   # ...power node-1 off, launch node-6, then:
+echo "node-6 10.0.0.9" >"$SOAK_DIR/new-server"
+scripts/soak/scenario.sh ca-finish ca-restore-finish
+scripts/soak/scenario.sh start-hold &               # stop the server's machine, then start it, when the log says so
+HEAL_LATE=node-2 scripts/soak/scenario.sh start-hold &
+
+scripts/soak/outside.sh fetch
+SOAK_DURATIONS=scripts/soak/durations-soak5.txt scripts/soak/report.sh "$SOAK_DIR/soak.log"
+scripts/soak/client-report.sh "$SOAK_DIR/soak.log" "$SOAK_DIR/client"
+```
