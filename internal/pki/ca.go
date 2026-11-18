@@ -10,6 +10,7 @@ import (
 	"crypto/sha256"
 	"crypto/x509"
 	"crypto/x509/pkix"
+	"encoding/hex"
 	"encoding/pem"
 	"errors"
 	"fmt"
@@ -25,6 +26,10 @@ const (
 	// CACertFile and CAKeyFile are the names of the CA files under the data dir.
 	CACertFile = "ca.crt"
 	CAKeyFile  = "ca.key"
+	// NextCACertFile and NextCAKeyFile hold the CA a rotation moves to,
+	// beside the current one, from its start until it ends.
+	NextCACertFile = "ca-next.crt"
+	NextCAKeyFile  = "ca-next.key"
 
 	caLifetime = 10 * 365 * 24 * time.Hour
 
@@ -52,6 +57,18 @@ type CA struct {
 // O_EXCL, so an existing CA is never overwritten. The key is written first, so
 // a failure can't leave a certificate without its key.
 func CreateCA(dir string) (*CA, error) {
+	return createCAFiles(dir, CACertFile, CAKeyFile, false)
+}
+
+// CreateNextCA makes the CA a rotation moves to, as CreateCA does, and
+// writes it to ca-next.key and ca-next.crt in dir. Its name carries the
+// first eight hex digits of its fingerprint, so that it reads apart from
+// the CA it replaces. Either file already there is ErrCAExists.
+func CreateNextCA(dir string) (*CA, error) {
+	return createCAFiles(dir, NextCACertFile, NextCAKeyFile, true)
+}
+
+func createCAFiles(dir, certName, keyName string, named bool) (*CA, error) {
 	if err := os.MkdirAll(dir, 0o700); err != nil {
 		return nil, err
 	}
@@ -63,10 +80,19 @@ func CreateCA(dir string) (*CA, error) {
 	if err != nil {
 		return nil, err
 	}
+	cn := "hivemind cluster CA"
+	if named {
+		spki, err := x509.MarshalPKIXPublicKey(&key.PublicKey)
+		if err != nil {
+			return nil, err
+		}
+		fp := sha256.Sum256(spki)
+		cn += " " + hex.EncodeToString(fp[:4])
+	}
 	now := time.Now()
 	tmpl := &x509.Certificate{
 		SerialNumber:          serial,
-		Subject:               pkix.Name{CommonName: "hivemind cluster CA", Organization: []string{"hivemind"}},
+		Subject:               pkix.Name{CommonName: cn, Organization: []string{"hivemind"}},
 		NotBefore:             now.Add(-clockSkew),
 		NotAfter:              now.Add(caLifetime),
 		KeyUsage:              x509.KeyUsageCertSign | x509.KeyUsageCRLSign | x509.KeyUsageDigitalSignature,
@@ -90,8 +116,8 @@ func CreateCA(dir string) (*CA, error) {
 	keyPEM := pem.EncodeToMemory(&pem.Block{Type: "EC PRIVATE KEY", Bytes: keyDER})
 	certPEM := pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: der})
 
-	keyPath := filepath.Join(dir, CAKeyFile)
-	certPath := filepath.Join(dir, CACertFile)
+	keyPath := filepath.Join(dir, keyName)
+	certPath := filepath.Join(dir, certName)
 	if err := writeExclusive(keyPath, keyPEM, 0o600); err != nil {
 		return nil, err
 	}
@@ -101,13 +127,48 @@ func CreateCA(dir string) (*CA, error) {
 		_ = os.Remove(keyPath)
 		return nil, err
 	}
+	// Both files are synced, and so is the directory, so a rotation that
+	// records the new CA after this call finds it after a crash.
+	if err := syncPath(keyPath); err != nil {
+		return nil, err
+	}
+	if err := syncPath(certPath); err != nil {
+		return nil, err
+	}
+	if err := syncPath(dir); err != nil {
+		return nil, err
+	}
 	return &CA{Cert: cert, CertPEM: certPEM, Key: key}, nil
+}
+
+// syncPath syncs a file or a directory.
+func syncPath(p string) error {
+	f, err := os.Open(p)
+	if err != nil {
+		return err
+	}
+	serr := f.Sync()
+	if cerr := f.Close(); serr == nil {
+		serr = cerr
+	}
+	return serr
 }
 
 // LoadCA reads the CA from dir. It refuses a key that is a symlink or
 // not a regular file, or that group or others can read.
 func LoadCA(dir string) (*CA, error) {
-	keyPath := filepath.Join(dir, CAKeyFile)
+	return LoadCAFiles(dir, CACertFile, CAKeyFile)
+}
+
+// LoadNextCA reads the CA a rotation moves to, from ca-next.crt and
+// ca-next.key in dir, with LoadCA's checks.
+func LoadNextCA(dir string) (*CA, error) {
+	return LoadCAFiles(dir, NextCACertFile, NextCAKeyFile)
+}
+
+// LoadCAFiles is LoadCA for the CA in certName and keyName in dir.
+func LoadCAFiles(dir, certName, keyName string) (*CA, error) {
+	keyPath := filepath.Join(dir, keyName)
 	info, err := os.Lstat(keyPath)
 	if err != nil {
 		return nil, err
@@ -134,13 +195,13 @@ func LoadCA(dir string) (*CA, error) {
 		return nil, errors.New("pki: CA key is not ECDSA P-256")
 	}
 
-	certPEM, err := os.ReadFile(filepath.Join(dir, CACertFile))
+	certPEM, err := os.ReadFile(filepath.Join(dir, certName))
 	if err != nil {
 		return nil, err
 	}
 	cblock, _ := pem.Decode(certPEM)
 	if cblock == nil || cblock.Type != "CERTIFICATE" {
-		return nil, fmt.Errorf("pki: %s is not a PEM certificate", CACertFile)
+		return nil, fmt.Errorf("pki: %s is not a PEM certificate", certName)
 	}
 	cert, err := x509.ParseCertificate(cblock.Bytes)
 	if err != nil {

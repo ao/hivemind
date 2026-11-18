@@ -100,7 +100,9 @@ func pinCA(fingerprint [32]byte, serverName string) func(tls.ConnectionState) er
 			}
 		}
 		if pinned == nil {
-			return fmt.Errorf("%w: server chain does not include the CA named by the join token", ErrFingerprintMismatch)
+			return fmt.Errorf("%w: server chain does not include the CA named by the join token; the token is another cluster's, "+
+				"or was issued before the server's certificate moved to a new cluster CA in a rotation: get a new one with hivemind join-token",
+				ErrFingerprintMismatch)
 		}
 		roots := x509.NewCertPool()
 		roots.AddCert(pinned)

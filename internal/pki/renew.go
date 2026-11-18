@@ -9,7 +9,8 @@ import (
 )
 
 // CAWarnBefore is how long before the CA expires the server starts to warn.
-// The CA cannot be rotated: when it expires, no node certificate verifies.
+// When it expires, no node certificate verifies, so it must be rotated
+// before then (docs/ca-rotation.md).
 const CAWarnBefore = 365 * 24 * time.Hour
 
 // minClippedLifetime is the shortest certificate IssueNodeCert issues when it
