@@ -4,10 +4,12 @@ import (
 	"cmp"
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"log/slog"
 	"net"
 	"net/http"
+	"net/http/httptrace"
 	"net/http/httputil"
 	"net/url"
 	"path"
@@ -16,6 +18,7 @@ import (
 	"strings"
 	"sync"
 	"sync/atomic"
+	"syscall"
 	"time"
 
 	"github.com/ao/hivemind/internal/spec"
@@ -85,6 +88,24 @@ type endpoint struct {
 	// mu orders its changes with downUntil's.
 	fails atomic.Int32
 	mu    sync.Mutex
+	// fresh is tr with no connections kept, made when a request first
+	// needs a new connection (freshTransport); under mu.
+	fresh *http.Transport
+}
+
+// freshTransport returns a transport like tr that opens a new connection
+// for each request and keeps none, for a request whose connection to
+// another replica failed: a pooled connection to this one may be as dead,
+// and would take TCP_USER_TIMEOUT to fail, where a new one fails at the dial
+// timeout.
+func (e *endpoint) freshTransport() *http.Transport {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	if e.fresh == nil {
+		e.fresh = e.tr.Clone()
+		e.fresh.DisableKeepAlives = true
+	}
+	return e.fresh
 }
 
 // failed marks the endpoint down after a failure at now, and returns for
@@ -317,6 +338,13 @@ type proxy struct {
 	// once the whole request is sent: upstreamResponseTimeout, but for
 	// tests. Endpoints take it when they are made.
 	responseTimeout time.Duration
+	// dial, if set, dials the replicas in place of the endpoints' own
+	// dialer. Tests set it, before the first table.
+	dial func(ctx context.Context, network, addr string) (net.Conn, error)
+	// userTimeout is upstreamUserTimeout, but for tests: a try whose
+	// pooled connection failed this long after the request was written on
+	// it is taken for a connection that timed out (errMachineTimedOut).
+	userTimeout time.Duration
 
 	mu        sync.RWMutex
 	table     map[string]*hostRoutes
@@ -324,7 +352,7 @@ type proxy struct {
 }
 
 func newProxy(log *slog.Logger, m *Metrics) *proxy {
-	p := &proxy{log: log, metrics: m, now: time.Now, responseTimeout: upstreamResponseTimeout,
+	p := &proxy{log: log, metrics: m, now: time.Now, responseTimeout: upstreamResponseTimeout, userTimeout: upstreamUserTimeout,
 		table: map[string]*hostRoutes{}, endpoints: map[epKey]*endpoint{}}
 	p.rp = p.reverseProxy(0)
 	// A negative FlushInterval flushes after every write. ReverseProxy
@@ -478,6 +506,11 @@ func (p *proxy) setTable(t Table) {
 					if e == nil {
 						if e = p.endpoints[k]; e == nil {
 							e = newEndpoint(a, h2c, p.responseTimeout)
+							dial := e.tr.DialContext
+							if p.dial != nil {
+								dial = p.dial
+							}
+							e.tr.DialContext = p.dialFor(dial)
 						}
 						eps[k] = e
 					}
@@ -708,6 +741,15 @@ func (p *proxy) upstreamFailed(w http.ResponseWriter, r *http.Request, err error
 // downForMost) and the next one is tried, as long as nothing of the request
 // body has been read: a request whose body has gone to one replica is not
 // sent to another.
+//
+// A connection that times out, as one to a machine that lost power does once
+// TCP_USER_TIMEOUT ends it, says the machine is gone, not the replica: every
+// endpoint at that address is marked down, and the request skips them. After
+// any failed connection the request goes on new connections, whose dial
+// timeout bounds a dead machine at 2 s, rather than on pooled ones, each of
+// which would take the whole 5 s to fail. In the second scale run, with two
+// of a route's dead replicas next to each other in its order, every router
+// that stayed up failed one GET at the client's 10 s limit, 5 s on each.
 type balancer struct{ p *proxy }
 
 func (b balancer) RoundTrip(req *http.Request) (*http.Response, error) {
@@ -720,30 +762,52 @@ func (b balancer) RoundTrip(req *http.Request) (*http.Response, error) {
 		guard = &bodyGuard{rc: req.Body}
 	}
 	var lastErr error
+	var gone []string // the addresses whose connection timed out
+	fresh := false    // a connection failed: the next tries dial anew
 	for _, e := range info.pool.order(b.p.now()) {
-		out := req.Clone(req.Context())
+		host := addrHost(e.addr)
+		if slices.Contains(gone, host) {
+			continue
+		}
+		out := req.Clone(b.p.tracked(req.Context()))
 		out.URL.Host = e.addr
 		if guard != nil {
 			out.Body = guard
 		}
-		resp, err := e.tr.RoundTrip(out)
+		tr := e.tr
+		if fresh {
+			tr = e.freshTransport()
+		}
+		resp, err := tr.RoundTrip(out)
 		if err == nil {
 			e.ok()
 			return resp, nil
 		}
 		lastErr = err
-		if !isDialError(err) {
-			// A connection that failed before any reply, as one to a
-			// machine that lost power does once TCP_USER_TIMEOUT ends it,
-			// is tried on the next replica too, for a request that can be
-			// sent twice: a method that is safe to repeat, and no body. This
-			// is nginx's proxy_next_upstream default (error, for
-			// idempotent methods). Other failures are a 502.
+		if timedOut(err) {
+			gone = append(gone, host)
+			n := b.p.machineDown(host, b.p.now())
+			b.p.metrics.upstreamError(info.host, "connection")
 			if !retryable(req, err) || guard != nil {
 				return nil, err
 			}
-			e.failed(b.p.now())
+			fresh = true
+			b.p.log.Debug("replica's connection timed out before it replied; its address is marked down; trying another address",
+				"host", info.host, "endpoint", e.addr, "endpoints_down", n, "err", err)
+			continue
+		}
+		if !isDialError(err) {
+			// A connection that failed before any reply is tried on the
+			// next replica too, for a request that can be sent twice: a
+			// method that is safe to repeat, and no body. This is nginx's
+			// proxy_next_upstream default (error, for idempotent methods).
+			// Other failures are a 502.
+			if !retryable(req, err) || guard != nil {
+				return nil, err
+			}
+			fresh = true
 			b.p.metrics.upstreamError(info.host, "connection")
+			e.failed(b.p.now())
 			b.p.log.Debug("replica's connection failed before it replied; trying the next", "host", info.host, "endpoint", e.addr, "err", err)
 			continue
 		}
@@ -758,6 +822,88 @@ func (b balancer) RoundTrip(req *http.Request) (*http.Response, error) {
 		lastErr = errors.New("router: no endpoints")
 	}
 	return nil, lastErr
+}
+
+// A request's connection to a machine that lost power fails at
+// TCP_USER_TIMEOUT, and http.Transport, for a GET on a connection it had
+// pooled, then sends it again on a new connection to the same replica, whose
+// dial takes the whole dial timeout to fail: in the second scale run, 7.5 s
+// for a request that met one dead replica. So each try carries an attempt in
+// its context, and the endpoint's dialer refuses at once, with
+// errMachineTimedOut, the dial of a try that wrote its request on a pooled
+// connection at least half the user timeout ago: that connection timed out.
+// A pooled connection that the replica had closed fails as soon as the
+// request is written, and its new dial goes ahead.
+
+// errMachineTimedOut is the dial error of a transport's second go at a
+// request whose pooled connection timed out.
+var errMachineTimedOut = fmt.Errorf("the connection to the replica's machine timed out: %w", syscall.ETIMEDOUT)
+
+type attemptKey struct{}
+
+// attempt is one try of a request on one endpoint.
+type attempt struct {
+	reused atomic.Bool
+	wrote  atomic.Int64 // unix nanoseconds: the request was written on a pooled connection
+}
+
+// tracked returns ctx with a new attempt, which a trace keeps up to date.
+func (p *proxy) tracked(ctx context.Context) context.Context {
+	a := &attempt{}
+	ctx = context.WithValue(ctx, attemptKey{}, a)
+	return httptrace.WithClientTrace(ctx, &httptrace.ClientTrace{
+		GotConn: func(i httptrace.GotConnInfo) { a.reused.Store(i.Reused) },
+		WroteRequest: func(httptrace.WroteRequestInfo) {
+			if a.reused.Load() {
+				a.wrote.CompareAndSwap(0, p.now().UnixNano())
+			}
+		},
+	})
+}
+
+// dialFor wraps an endpoint's dial: see errMachineTimedOut.
+func (p *proxy) dialFor(dial func(ctx context.Context, network, addr string) (net.Conn, error)) func(ctx context.Context, network, addr string) (net.Conn, error) {
+	return func(ctx context.Context, network, addr string) (net.Conn, error) {
+		if a, ok := ctx.Value(attemptKey{}).(*attempt); ok {
+			if w := a.wrote.Load(); w != 0 && p.now().Sub(time.Unix(0, w)) >= p.userTimeout/2 {
+				return nil, &net.OpError{Op: "dial", Net: network, Err: errMachineTimedOut}
+			}
+		}
+		return dial(ctx, network, addr)
+	}
+}
+
+// timedOut reports whether err is a connection to a replica that timed out,
+// after it was made, or before the transport's second go at the request.
+func timedOut(err error) bool {
+	return errors.Is(err, errMachineTimedOut) || (!isDialError(err) && errors.Is(err, syscall.ETIMEDOUT))
+}
+
+// machineDown marks every endpoint at host down at now, and closes its idle
+// connections, which go to the same machine: one connection to it timed
+// out. It returns how many it marked.
+func (p *proxy) machineDown(host string, now time.Time) int {
+	p.mu.RLock()
+	var on []*endpoint
+	for k, e := range p.endpoints {
+		if addrHost(k.addr) == host {
+			on = append(on, e)
+		}
+	}
+	p.mu.RUnlock()
+	for _, e := range on {
+		e.failed(now)
+		e.tr.CloseIdleConnections()
+	}
+	return len(on)
+}
+
+// addrHost is the host of an address:port.
+func addrHost(addr string) string {
+	if h, _, err := net.SplitHostPort(addr); err == nil {
+		return h
+	}
+	return addr
 }
 
 // retryable reports whether a request that failed with err, after its
