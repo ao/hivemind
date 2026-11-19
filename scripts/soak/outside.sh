@@ -53,6 +53,23 @@
 # certificate each router serves for each host, from a fresh handshake; the
 # routers are those in /var/lib/soak-client/routers, which client-add and
 # client-drop change.
+#
+# With SOAK_GRPC=1 (the sixth soak), two gRPC clients per router as well, to
+# the grpc app (lib.sh) at https://$PATH_HOST$GRPC_PATH:
+#   - a unary call every $GRPC_EVERY_MS ms (200), each one run of
+#     test/h2ctest's client ($H2CTEST, copied to the outside machine): a new
+#     process, TCP connection and TLS handshake, HTTP/2 with ALPN, and its
+#     checks (the message back, HTTP/2, grpc-status 0). One line per call in
+#     /var/lib/soak-client/grpc/unary@ROUTER.log:
+#       <end, Unix s.us> <exit code> <duration, us> <replica, or the error>
+#   - a held server stream: h2ctest's Server method asked for
+#     $GRPC_STREAM_N (1000) messages $GRPC_STREAM_MS (1000) ms apart, one
+#     HTTP/2 request with curl (--trace-time gives each message's arrival),
+#     and the next one when it ends, 1 s later. curl gives up after 10 s
+#     with no data (--speed-time). Lines of grpc/stream@ROUTER.log:
+#       <Unix s.us> start <seq>
+#       <Unix s.us> msg <seq> <index> <replica>
+#       <Unix s.us> end <seq> <http code> <curl exit> grpc=<grpc-status> msgs=<n> s=<total> <error...>
 set -euo pipefail
 . "$(dirname "$0")/lib.sh"
 
@@ -78,6 +95,12 @@ PRIVATE_IMAGES=${PRIVATE_IMAGES:-whoami:1=traefik/whoami:v1.10.3 whoami:2=traefi
 REG_USER=${REG_USER:-soak}
 PW_FILE=$SOAK_DIR/registry.pw
 CDIR=/var/lib/soak-client
+# test/h2ctest, built for the outside machine and the nodes (linux/arm64):
+# the grpc app's image and the gRPC clients.
+H2CTEST=${H2CTEST:-$SOAK_DIR/h2ctest}
+GRPC_EVERY_MS=${GRPC_EVERY_MS:-200}
+GRPC_STREAM_N=${GRPC_STREAM_N:-1000}
+GRPC_STREAM_MS=${GRPC_STREAM_MS:-1000}
 
 out() { on "$OUT_NAME" "$@"; }
 
@@ -164,6 +187,26 @@ push_images() {
 		ev outside "pushed $REGISTRY/soak/$name from $src $(out "sudo docker inspect -f '{{index .RepoDigests 0}}' $src")"
 	done
 	out "sudo docker logout $REGISTRY >/dev/null; sudo docker rmi $(for p in $PRIVATE_IMAGES; do printf '%s ' "$REGISTRY/soak/${p%%=*}"; done) >/dev/null"
+	[ "$SOAK_GRPC" = 1 ] && push_h2ctest
+	return 0
+}
+
+# push_h2ctest: test/h2ctest as an image, as docs/routing.md's test builds
+# it (the static binary alone, ENTRYPOINT /h2ctest, docker import), pushed
+# as $REGISTRY/soak/h2ctest:1 and :2, which differ only in a label; and the
+# binary in $CDIR for the gRPC clients.
+push_h2ctest() {
+	local v
+	[ -s "$H2CTEST" ] || die "no h2ctest binary at $H2CTEST"
+	SSH_TIMEOUT=120 out "sudo install -d -m 0755 /opt/soak/h2c $CDIR $CDIR/grpc && cat >/tmp/h2ctest.new && sudo install -m 0755 /tmp/h2ctest.new /opt/soak/h2c/h2ctest && sudo install -m 0755 /tmp/h2ctest.new $CDIR/h2ctest && rm -f /tmp/h2ctest.new" <"$H2CTEST" ||
+		die "copy h2ctest to $OUT_NAME"
+	out "sudo docker login $REGISTRY -u $REG_USER --password-stdin >/dev/null 2>&1" <"$PW_FILE" || die "docker login to $REGISTRY"
+	for v in 1 2; do
+		SSH_TIMEOUT=120 out "set -e; sudo tar -C /opt/soak/h2c -cf - h2ctest | sudo docker import --change 'ENTRYPOINT [\"/h2ctest\"]' --change 'LABEL soak.h2ctest=$v' - $REGISTRY/soak/h2ctest:$v >/dev/null; sudo docker push -q $REGISTRY/soak/h2ctest:$v >/dev/null" ||
+			die "push $REGISTRY/soak/h2ctest:$v"
+		ev outside "pushed $REGISTRY/soak/h2ctest:$v from test/h2ctest sha256=$(sha256sum "$H2CTEST" | cut -d' ' -f1) $(out "sudo docker inspect -f '{{index .RepoDigests 0}}' $REGISTRY/soak/h2ctest:$v")"
+	done
+	out "sudo docker logout $REGISTRY >/dev/null; sudo docker rmi $REGISTRY/soak/h2ctest:1 $REGISTRY/soak/h2ctest:2 >/dev/null"
 }
 
 # login: the registry credential, stored on the server, as docs/registries.md says.
@@ -243,7 +286,73 @@ while :; do
 done
 EOF
 
-# streams_to IP: start the streams of STREAMS to the router at IP.
+read -r -d '' GRPC_UNARY <<'EOF' || true
+#!/bin/bash
+# grpc-unary.sh ROUTER_IP HOST EVERY_MS: a unary call to grpc every EVERY_MS
+# ms through ROUTER_IP, each one run of h2ctest call (checked; a new
+# connection); one line per call: <end, Unix s.us> <exit> <us> <replica or error>.
+ip=$1 host=$2 every=$3 d=/var/lib/soak-client
+f=$d/grpc/unary@$ip.log
+while :; do
+	t0=$EPOCHREALTIME
+	o=$($d/h2ctest call -url "https://$host" -connect "$ip:443" -ca $d/root.pem unary 2>&1)
+	rc=$?
+	t1=$EPOCHREALTIME
+	us=$((${t1/./} - ${t0/./}))
+	echo "$t1 $rc $us ${o//$'\n'/ }" >>"$f"
+	s=$((every * 1000 - us))
+	[ "$s" -le 0 ] || sleep "$((s / 1000000)).$(printf '%06d' $((s % 1000000)))"
+done
+EOF
+
+read -r -d '' GRPC_STREAM <<'EOF' || true
+#!/bin/bash
+# grpc-stream.sh ROUTER_IP HOST N MS: a server stream held through
+# ROUTER_IP: h2ctest's Server method, N messages MS ms apart, one HTTP/2
+# request with curl; the next one 1 s after it ends. curl's trace gives each
+# message's arrival time and the trailers; awk writes one line for each.
+ip=$1 host=$2 n=$3 ms=$4 d=/var/lib/soak-client
+f=$d/grpc/stream@$ip.log
+m="$n $ms"
+fr=$d/grpc/server-$n-$ms.frame
+# gRPC's framing: not compressed, a 4-byte big-endian length (under 256 here), the message.
+[ -s "$fr" ] || printf "\\0\\0\\0\\0\\x$(printf %02x ${#m})%s" "$m" >"$fr"
+seq=0
+while :; do
+	seq=$((seq + 1))
+	echo "$EPOCHREALTIME start $seq" >>"$f"
+	curl -sS --http2 --connect-timeout 3 --speed-limit 1 --speed-time 10 --cacert $d/root.pem --resolve "$host:443:$ip" \
+		-H 'content-type: application/grpc' -H 'te: trailers' --data-binary @"$fr" \
+		--trace-ascii - --trace-time -o /dev/null \
+		-w '\n@@soak@@ %time{%s.%f} %{http_code} %{exitcode} %{time_total} @@ %{errormsg}\n' \
+		"https://$host/h2ctest.Echo/Server" 2>/dev/null |
+		awk -v seq="$seq" '
+		# HH:MM:SS.us of the trace (UTC) to Unix time, on the day of the stream
+		function ut(s,   a, t) { split(s, a, ":"); t = base + a[1] * 3600 + a[2] * 60 + a[3]; if (t < last - 43200) { base += 86400; t += 86400 } last = t; return t }
+		BEGIN { base = systime() - systime() % 86400; last = 0 }
+		/ <= Recv data, / { td = ut($1); data = 1; next }
+		/ <= Recv header, / { data = 0; next }
+		/^[0-9]+:[0-9]+:[0-9]+\.[0-9]+ / { data = 0; next }
+		/^[0-9a-f][0-9a-f][0-9a-f][0-9a-f]: grpc-status: / { gs = $3; next }
+		data && /^[0-9a-f][0-9a-f][0-9a-f][0-9a-f]: / {
+			s = substr($0, 7)
+			while (match(s, /[a-z0-9]+\/[0-9A-Za-z]*@[0-9A-Za-z_-]+:[0-9]+/)) {
+				x = substr(s, RSTART, RLENGTH); s = substr(s, RSTART + RLENGTH)
+				i = x; sub(/^.*:/, "", i); r = x; sub(/:[0-9]+$/, "", r)
+				printf "%.6f msg %d %s %s\n", td, seq, i, r; fflush(); nm++
+			}
+			next
+		}
+		/^@@soak@@ / {
+			e = $0; sub(/^.* @@ ?/, "", e)
+			printf "%s end %d %s %s grpc=%s msgs=%d s=%s %s\n", $2, seq, $3, $4, (gs == "" ? "-" : gs), nm, $5, e; fflush()
+		}' >>"$f"
+	sleep 1
+done
+EOF
+
+# streams_to IP: start the streams of STREAMS to the router at IP, and with
+# SOAK_GRPC=1 its two gRPC clients.
 streams_to() {
 	local ip=$1 s hp host path name
 	for s in $STREAMS; do
@@ -252,6 +361,10 @@ streams_to() {
 		host=${hp%%/*} path=/${hp#*/}
 		out "sudo env RATE=$STREAM_RATE setsid nohup $CDIR/stream.sh $ip $host '$path' $name >/dev/null 2>&1 </dev/null &"
 	done
+	if [ "$SOAK_GRPC" = 1 ]; then
+		out "sudo setsid nohup $CDIR/grpc-unary.sh $ip $PATH_HOST $GRPC_EVERY_MS >/dev/null 2>&1 </dev/null &"
+		out "sudo setsid nohup $CDIR/grpc-stream.sh $ip $PATH_HOST $GRPC_STREAM_N $GRPC_STREAM_MS >/dev/null 2>&1 </dev/null &"
+	fi
 }
 
 client_start() {
@@ -259,10 +372,17 @@ client_start() {
 	root
 	out "sudo tee $CDIR/stream.sh >/dev/null && sudo chmod 755 $CDIR/stream.sh" <<<"$STREAM"
 	out "sudo tee $CDIR/certwatch.sh >/dev/null && sudo chmod 755 $CDIR/certwatch.sh" <<<"$CERTWATCH"
+	if [ "$SOAK_GRPC" = 1 ]; then
+		out "test -x $CDIR/h2ctest" || die "no $CDIR/h2ctest on $OUT_NAME: run outside.sh setup with SOAK_GRPC=1"
+		out "sudo install -d -m 0755 $CDIR/grpc && sudo tee $CDIR/grpc-unary.sh >/dev/null && sudo chmod 755 $CDIR/grpc-unary.sh" <<<"$GRPC_UNARY"
+		out "sudo tee $CDIR/grpc-stream.sh >/dev/null && sudo chmod 755 $CDIR/grpc-stream.sh" <<<"$GRPC_STREAM"
+	fi
 	out "echo '${IPS[*]}' | sudo tee $CDIR/routers >/dev/null"
 	for ip in "${IPS[@]}"; do streams_to "$ip"; done
 	out "sudo setsid nohup $CDIR/certwatch.sh '$HOSTS' >/dev/null 2>&1 </dev/null &"
-	ev client "start streams=$((${#IPS[@]} * $(wc -w <<<"$STREAMS"))) hosts=$HOSTS streams_per_router=$(tr ' ' ',' <<<"$STREAMS") routers=${IPS[*]} curl=\"$(out 'curl --version | head -n 1')\""
+	ev client "start streams=$((${#IPS[@]} * $(wc -w <<<"$STREAMS"))) hosts=$HOSTS streams_per_router=$(tr ' ' ',' <<<"$STREAMS") routers=${IPS[*]} curl=\"$(out 'curl --version | head -n 1')\" curl_features=\"$(out 'curl --version | sed -n "s/^Features: //p"')\""
+	[ "$SOAK_GRPC" = 1 ] && ev client "grpc per_router=unary-every-${GRPC_EVERY_MS}ms,server-stream-${GRPC_STREAM_N}x${GRPC_STREAM_MS}ms url=https://$PATH_HOST$GRPC_PATH routers=${IPS[*]}"
+	return 0
 }
 
 # client_add IP: streams to the router at IP (a new machine, or an old one
@@ -278,7 +398,7 @@ client_add() {
 # gone), and take it off the certificate watcher's list.
 client_drop() {
 	local ip=$1
-	out "sudo pkill -f '/var/lib/soak-client/[s]tream.sh $ip '; sleep 0.5; sudo pkill -f '[-]-resolve [^ ]*:443:$ip '; true"
+	out "sudo pkill -f '/var/lib/soak-client/[s]tream.sh $ip '; sudo pkill -f '/var/lib/soak-client/[g]rpc-(unary|stream).sh $ip '; sleep 0.5; sudo pkill -f '[-]-resolve [^ ]*:443:$ip '; sudo pkill -f '[h]2ctest call .*-connect $ip:443 '; true"
 	out "tr ' ' '\n' <$CDIR/routers | grep -vx '$ip' | grep . | tr '\n' ' ' | sudo tee $CDIR/routers.new >/dev/null && sudo mv $CDIR/routers.new $CDIR/routers"
 	ev client "drop router=$ip watched=$(out "cat $CDIR/routers" | tr ' ' ',')"
 }
@@ -320,18 +440,21 @@ scratch_stop() {
 
 client_stop() {
 	# The brackets keep each pattern from matching the shell that runs pkill.
-	out "sudo pkill -f '/var/lib/soak-client/[s]tream.sh|/var/lib/soak-client/[c]ertwatch.sh'; sleep 0.5; sudo pkill -f '[-]-cacert /var/lib/soak-client/root.pem'; true"
+	out "sudo pkill -f '/var/lib/soak-client/[s]tream.sh|/var/lib/soak-client/[c]ertwatch.sh|/var/lib/soak-client/[g]rpc-(unary|stream).sh'; sleep 0.5; sudo pkill -f '[-]-cacert /var/lib/soak-client/root.pem'; sudo pkill -f '[h]2ctest call '; true"
 	ev client "stop"
 }
 
 client_status() {
 	out "cd $CDIR && for f in *@*.log; do awk -v f=\"\$f\" 'NF >= 8 { n++; if (\$2 != 200 || \$3 != 0) b++ } END { printf \"%s requests=%d failed=%d\n\", f, n, b }' \"\$f\"; done; tail -n 2 certs.log"
+	[ "$SOAK_GRPC" = 1 ] || return 0
+	out "cd $CDIR/grpc && for f in unary@*.log; do awk -v f=\"\$f\" 'NF >= 4 { n++; if (\$2 != 0) b++ } END { printf \"%s calls=%d failed=%d\n\", f, n, b }' \"\$f\"; done;
+		for f in stream@*.log; do awk -v f=\"\$f\" '\$2 == \"start\" { s++ } \$2 == \"msg\" { m++ } \$2 == \"end\" { e++; if (!(\$4 == 200 && \$5 == 0 && \$6 == \"grpc=0\")) b++ } END { printf \"%s streams=%d ended=%d broken=%d msgs=%d\n\", f, s, e, b, m }' \"\$f\"; tail -n 1 \"\$f\"; done"
 }
 
 fetch() {
 	mkdir -p "$SOAK_DIR/client"
 	# The stream logs grow while they are read: tar exits 1 for that, which is fine.
-	SSH_TIMEOUT=600 out "cd $CDIR && { tar --warning=no-file-changed -czf - *.log || [ \$? = 1 ]; }" | tar -xzf - -C "$SOAK_DIR/client"
+	SSH_TIMEOUT=600 out "cd $CDIR && { tar --warning=no-file-changed -czf - *.log \$(ls grpc/*.log 2>/dev/null) || [ \$? = 1 ]; }" | tar -xzf - -C "$SOAK_DIR/client"
 	SSH_TIMEOUT=60 out "sudo docker logs soak-pebble 2>&1" >"$SOAK_DIR/client/pebble.log"
 	ev client "fetched $(ls "$SOAK_DIR/client" | wc -l) files"
 }

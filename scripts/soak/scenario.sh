@@ -43,6 +43,8 @@
 #   scenario.sh start-hold                    the server's machine stopped and started
 #                                             with every worker cut off from it, past
 #                                             its start grace; then the workers back
+#                                             (HEAL_LAGS="W:0 W:5 W:20": each at its lag)
+#   scenario.sh ca-text NAME LABEL            hivemind ca status and status, as text
 #   scenario.sh end NAME
 #
 # A fault that needs the machine's owner (power off, power on, a new machine)
@@ -980,7 +982,7 @@ rollout() {
 	if [ "$apps" = www ]; then name=rollout; else name=rollout-${apps// /+}; fi
 	begin "$name" "$SERVER"
 	for a in $apps; do
-		ev event "$name $a fault deploy $REGISTRY/soak/whoami:$v"
+		ev event "$name $a fault deploy $(app_spec "$a" "$v" | jq -r .image)"
 		hm "$SERVER" "deploy -f -" <<<"$(app_spec "$a" "$v")" >/dev/null || die "$name: deploy $a"
 	done
 	end=$(($(date +%s) + 600))
@@ -1186,6 +1188,13 @@ ca_views() {
 	for ((i = 1; i < ${#NAMES[@]}; i++)); do ev event "$1 ca-$2 ${NAMES[$i]} $(ca_worker_view "${NAMES[$i]}")"; done
 }
 
+# ca_text NAME LABEL: what the operator reads: hivemind ca status as text,
+# and the lines of hivemind status that speak of the rotation.
+ca_text() {
+	ev event "$1 ca-status-$2 $(with_names "$(hm "$SERVER" ca status 2>&1 | tr -s ' ' | tr '\n' ';')")"
+	ev event "$1 status-$2 $(with_names "$(hm "$SERVER" status 2>&1 | grep -iE 'rotat|cluster CA' | tr -s ' ' | tr '\n' ';')")"
+}
+
 # ca_step NAME STEP [--force]: one step on the server, as the operator runs
 # it; its reply and exit code, and how long it took.
 ca_step() {
@@ -1292,11 +1301,11 @@ ca_after() {
 	ev event "$name kept $(all_kept "$pre" "$skip")"
 	ev event "$name ids $(ids_check)"
 	on "$SERVER" "sudo journalctl -u hivemind --since @$t0 -o short-iso-precise --no-pager" >"$SOAK_DIR/journal-$name-$SERVER.txt" 2>/dev/null || true
-	ev event "$name server-log tls_handshake_errors=$(grep -c 'TLS handshake error' "$SOAK_DIR/journal-$name-$SERVER.txt") cut_off_lines=$(grep -c 'certificate from a CA this cluster does not trust, and was refused\|a node refused this server.s certificate' "$SOAK_DIR/journal-$name-$SERVER.txt") refused=$(grep -c 'request refused' "$SOAK_DIR/journal-$name-$SERVER.txt") joined=$(grep -c 'node joined' "$SOAK_DIR/journal-$name-$SERVER.txt") errors=$(grep -c 'level=ERROR' "$SOAK_DIR/journal-$name-$SERVER.txt") warns=$(grep -c 'level=WARN' "$SOAK_DIR/journal-$name-$SERVER.txt")"
+	ev event "$name server-log tls_handshake_errors=$(grep -c 'TLS handshake error' "$SOAK_DIR/journal-$name-$SERVER.txt") cut_off_lines=$(grep -c 'certificate from a CA this cluster does not trust, and was refused\|a node refused this server.s certificate' "$SOAK_DIR/journal-$name-$SERVER.txt") refused=$(grep -c 'request refused' "$SOAK_DIR/journal-$name-$SERVER.txt") joined=$(grep -c 'node joined' "$SOAK_DIR/journal-$name-$SERVER.txt") errors=$(grep -c 'level=ERROR' "$SOAK_DIR/journal-$name-$SERVER.txt") warns=$(grep -c 'level=WARN' "$SOAK_DIR/journal-$name-$SERVER.txt") toward_new=$(grep -c 'the CA the rotation goes to, the new one' "$SOAK_DIR/journal-$name-$SERVER.txt") toward_old=$(grep -c 'the CA the rotation goes back to, the old one' "$SOAK_DIR/journal-$name-$SERVER.txt") says_new_cluster_ca=$(grep -c 'the new cluster CA' "$SOAK_DIR/journal-$name-$SERVER.txt")"
 	for ((i = 1; i < ${#NAMES[@]}; i++)); do
 		n=${NAMES[$i]}
 		on "$n" "sudo journalctl -u hivemind --since @$t0 -o short-iso-precise --no-pager" >"$SOAK_DIR/journal-$name-$n.txt" 2>/dev/null || true
-		ev event "$name $n worker-log tls_x509_lines=$(grep -ciE 'x509|tls:|handshake' "$SOAK_DIR/journal-$name-$n.txt") errors=$(grep -c 'level=ERROR' "$SOAK_DIR/journal-$name-$n.txt") warns=$(grep -c 'level=WARN' "$SOAK_DIR/journal-$name-$n.txt") ca_lines=$(grep -cE 'cluster CA|renew' "$SOAK_DIR/journal-$name-$n.txt")"
+		ev event "$name $n worker-log tls_x509_lines=$(grep -ciE 'x509|tls:|handshake' "$SOAK_DIR/journal-$name-$n.txt") errors=$(grep -c 'level=ERROR' "$SOAK_DIR/journal-$name-$n.txt") warns=$(grep -c 'level=WARN' "$SOAK_DIR/journal-$name-$n.txt") ca_lines=$(grep -cE 'cluster CA|renew' "$SOAK_DIR/journal-$name-$n.txt") renewals=$(grep 'renewing the node certificate' "$SOAK_DIR/journal-$name-$n.txt" | sed -n 's/.*\(ca=[0-9a-f]*\).*\(from=[0-9a-f]*\).*/\1:\2/p' | tr '\n' ',')"
 	done
 	ev event "$name node-cert-expiry $(with_names "$(on "$SERVER" "sudo bash -s" <<<"$REMOTE_CERT_EXPIRY" 2>/dev/null | tr '\n' ' ')")"
 }
@@ -1326,6 +1335,7 @@ ca_rotate() {
 	ca_wait "$name" renewed-all 300 "$C_RENEWED" || die "$name: not every node renewed"
 	ca_wait "$name" listener-moved 300 "$C_MOVED" || die "$name: the server's certificate did not move"
 	ca_views "$name" renew
+	ca_text "$name" renew
 	ca_step "$name" finish || die "$name: finish"
 	ca_wait_disk "$name" workers-one-ca 120 "$(ca_tag)"
 	sleep 5
@@ -1439,8 +1449,10 @@ ca_abort() {
 	ev event "$name $SERVER fault ca-renew-then-abort"
 	out=$(SSH_TIMEOUT=60 on "$SERVER" "sudo bash -s ${ABORT_MAX_MS:-10000}" <<<"$REMOTE_ABORT" 2>&1)
 	while read -r l; do ev event "$name $(with_names "$l")"; done <<<"$out"
+	ca_text "$name" after-abort
 	ca_wait "$name" turned-back 300 ".rotation.toward == \"current\" and $C_RENEWED and $C_MOVED" || die "$name: the turned rotation did not come back"
 	ca_views "$name" turned
+	ca_text "$name" turned
 	ca_step "$name" finish || die "$name: finish"
 	ca_wait_disk "$name" workers-one-ca 120 "$from"
 	sleep 5
@@ -1502,12 +1514,28 @@ ca_finish() {
 # its own machine, its status line, and its error line. Then the rules come
 # off, and until every worker is ready and the cluster has converged. With
 # HEAL_LATE=W (scenario start-hold-late), W's rule comes off HEAL_LAG (12) s
-# after the others', so that the hold ends with W not yet reported.
+# after the others', so that the hold ends with W not yet reported. With
+# HEAL_LAGS="W1:0 W2:5 W3:20" (scenario start-hold-stagger, the sixth soak),
+# each listed worker's rule comes off that many seconds after the heal
+# begins (a worker not listed: at once), each from its own timer. HOLD_NAME
+# names the scenario; a negative HOLD_AFTER heals inside the start grace,
+# with no hold (restart-cutoff: the server's machine restarted while its
+# workers cannot reach it, for the routers' stale tables).
 start_hold() {
 	local name=start-hold pre=$SOAK_DIR/pre-start-hold.tsv cur=$SOAK_DIR/measure-start-hold.tsv
 	local grace=${START_GRACE:-120} after=${HOLD_AFTER:-90} t0 t now d v i n s api=down p22=down up_at=0 heal_at=0
 	local lastn="" lastc="" lasts="" errl="" ready="" conv="" dupl="" end late=${HEAL_LATE:-} lag=${HEAL_LAG:-12} late_done=0
+	local lags=${HEAL_LAGS:-} maxlag=0 p w
+	declare -A lag_of
 	[ -z "$late" ] || name=start-hold-late
+	if [ -n "$lags" ]; then
+		name=start-hold-stagger late=""
+		for p in $lags; do
+			lag_of[${p%%:*}]=${p#*:}
+			[ "${p#*:}" -le "$maxlag" ] || maxlag=${p#*:}
+		done
+	fi
+	name=${HOLD_NAME:-$name}
 	pre=$SOAK_DIR/pre-$name.tsv cur=$SOAK_DIR/measure-$name.tsv
 	begin "$name" "$SERVER"
 	t0=$(date -u +%s)
@@ -1537,7 +1565,7 @@ start_hold() {
 			[ "$v" = up ] && [ "$up_at" = 0 ] && up_at=$now
 		}
 		if [ "$api" = up ]; then
-			v=$(with_names "$(hm "$SERVER" nodes --json 2>/dev/null | jq -r '[.[] | select(.server | not) | "\(.id)=\(.state)\(if .start_held then "+held" else "" end)"] | join(",")')")
+			v=$(with_names "$(hm "$SERVER" nodes --json 2>/dev/null | jq -r '[.[] | select(.server | not) | "\(.id)=\(.state)\(if .start_held then "+held" else "" end)\(if .start_hold_ended then "+hold-ended" else "" end)"] | join(",")')")
 			[ "$v" = "$lastn" ] || {
 				ev event "$name nodes $v"
 				lastn=$v
@@ -1556,6 +1584,20 @@ start_hold() {
 				errl=$(on "$SERVER" "sudo journalctl -u hivemind -b -o short-iso-precise --no-pager | grep -m1 'no worker has reported'" 2>/dev/null | cut -c1-900)
 				[ -z "$errl" ] || ev event "$name error-line $(with_names "$errl")"
 			fi
+		fi
+		if [ "$heal_at" = 0 ] && [ "$up_at" != 0 ] && [ "$now" -ge $((up_at + grace + after)) ] && [ -n "$lags" ]; then
+			ev event "$name heal: begins; lags $lags"
+			# the routing table at each change, every 200 ms, through the heal
+			SSH_TIMEOUT=$((maxlag + 80)) routes_watch $((maxlag + 60)) &
+			for ((i = 1; i < ${#NAMES[@]}; i++)); do
+				w=${NAMES[$i]}
+				(
+					[ "${lag_of[$w]:-0}" = 0 ] || sleep "${lag_of[$w]}"
+					on "$w" "sudo iptables -D OUTPUT -p tcp -d $SERVER_IP --dport 4484 -j DROP" || ev event "$name $w heal-failed"
+					ev event "$name heal: $w reaches $SERVER_IP:4484 again, lag ${lag_of[$w]:-0}s"
+				) &
+			done
+			heal_at=$now
 		fi
 		if [ "$heal_at" = 0 ] && [ "$up_at" != 0 ] && [ "$now" -ge $((up_at + grace + after)) ]; then
 			for ((i = 1; i < ${#NAMES[@]}; i++)); do
@@ -1595,7 +1637,7 @@ start_hold() {
 				ev event "$name dups ${d:-none}"
 				dupl=$d
 			}
-			if { [ "$conv" = yes ] && [ "$(wc -w <<<"$ready")" -eq $((${#NAMES[@]} - 1)) ] && { [ -z "$late" ] || [ "$late_done" = 1 ]; }; } || [ "$now" -ge $((heal_at + 300)) ]; then
+			if { [ "$conv" = yes ] && [ "$(wc -w <<<"$ready")" -eq $((${#NAMES[@]} - 1)) ] && { [ -z "$late" ] || [ "$late_done" = 1 ]; } && [ "$now" -ge $((heal_at + maxlag + 3)) ]; } || [ "$now" -ge $((heal_at + 300)) ]; then
 				break
 			fi
 		fi
@@ -1621,6 +1663,7 @@ old-back) old_back "$@" ;;
 cert-restart) cert_restart "$@" ;;
 ca-watch) ca_watch ;;
 ca-views) ca_views "${1:-ca}" "${2:-now}" ;;
+ca-text) ca_text "${1:-ca}" "${2:-now}" ;;
 ca-rotate) ca_rotate "$@" ;;
 ca-offline) ca_offline "$@" ;;
 ca-abort) ca_abort ;;
@@ -1653,7 +1696,7 @@ kv-check) kv_check "$@" ;;
 upgrade) upgrade ;;
 end) end_scenario "$@" ;;
 *)
-	sed -n '2,38p' "$0"
+	sed -n '2,40p' "$0"
 	exit 2
 	;;
 esac

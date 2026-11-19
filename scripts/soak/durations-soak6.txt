@@ -1,0 +1,29 @@
+start-hold-stagger: start request to port 22 open|scenario start-hold-stagger begin|event start-hold-stagger .* fault start|event start-hold-stagger .* port22-up
+start-hold-stagger: port 22 open to API up|scenario start-hold-stagger begin|event start-hold-stagger .* port22-up|event start-hold-stagger api-up
+start-hold-stagger: API up to every worker held (start_held)|scenario start-hold-stagger begin|event start-hold-stagger api-up|event start-hold-stagger nodes .*held.*held.*held
+start-hold-stagger: heal begins to hivemind-soaki-2 ready|scenario start-hold-stagger begin|event start-hold-stagger heal: begins|event start-hold-stagger hivemind-soaki-2 node-ready
+start-hold-stagger: heal begins to hivemind-soaki-3 ready|scenario start-hold-stagger begin|event start-hold-stagger heal: begins|event start-hold-stagger hivemind-soaki-3 node-ready
+start-hold-stagger: heal begins to hivemind-soaki-4 ready|scenario start-hold-stagger begin|event start-hold-stagger heal: begins|event start-hold-stagger hivemind-soaki-4 node-ready
+start-hold-stagger: heal begins to converged|scenario start-hold-stagger begin|event start-hold-stagger heal: begins|event start-hold-stagger converged-yes
+ca-rotate: start to every node trusting the new CA|scenario ca-rotate begin|event ca-rotate .* fault ca-start|event ca-rotate trust-all
+ca-rotate: renew to the server's certificate from the new CA (1 s watcher)|scenario ca-rotate begin|event ca-rotate .* fault ca-renew|ca server .*phase=renew .*moved=true
+ca-rotate: renew to every node renewed|scenario ca-rotate begin|event ca-rotate .* fault ca-renew|event ca-rotate renewed-all
+ca-rotate: finish to every worker with the new CA alone in ca.crt|scenario ca-rotate begin|event ca-rotate .* fault ca-finish|event ca-rotate workers-one-ca
+ca-rotate: start to finish returned|scenario ca-rotate begin|event ca-rotate .* fault ca-start|event ca-rotate ca-finish-done
+ca-abort: start to every node trusting the new CA|scenario ca-abort begin|event ca-abort .* fault ca-start|event ca-abort trust-all
+ca-abort: abort to every node renewed back and the server's certificate back|scenario ca-abort begin|event ca-abort abort rc=|event ca-abort turned-back
+ca-abort: finish to every worker with the old CA alone in ca.crt|scenario ca-abort begin|event ca-abort .* fault ca-finish|event ca-abort workers-one-ca
+rollout-grpc: deploy to rollout done, converged|scenario rollout-grpc begin|event rollout-grpc .* fault deploy|event rollout-grpc converged-yes
+rollout-proot+papi: deploy to rollout done, converged|scenario rollout-proot.papi begin|event rollout-proot.papi .* fault deploy|event rollout-proot.papi converged-yes
+poweroff-worker: power-off request to port 22 closed|scenario poweroff-worker begin|event poweroff-worker .* fault poweroff|event poweroff-worker .* port22-down
+poweroff-worker: port 22 closed to node lost|scenario poweroff-worker begin|event poweroff-worker .* port22-down|event poweroff-worker .* node-lost
+poweroff-worker: node lost to its replicas elsewhere|scenario poweroff-worker begin|event poweroff-worker .* node-lost|event poweroff-worker .* replicas-elsewhere
+poweroff-worker: node lost to converged (volume replica held)|scenario poweroff-worker begin|event poweroff-worker .* node-lost|event poweroff-worker converged-held-yes
+poweroff-worker: start request to port 22 open|scenario poweroff-worker begin|event poweroff-worker .* fault start|event poweroff-worker .* port22-up
+poweroff-worker: start request to node ready|scenario poweroff-worker begin|event poweroff-worker .* fault start|event poweroff-worker .* node-ready
+poweroff-worker: port 22 open to old containers removed|scenario poweroff-worker begin|event poweroff-worker .* port22-up|event poweroff-worker .* old-containers-removed
+poweroff-worker: port 22 open to converged|scenario poweroff-worker begin|event poweroff-worker .* port22-up|event poweroff-worker converged-yes
+restart-cutoff: stop request to port 22 closed|scenario restart-cutoff begin|event restart-cutoff .* fault stop|event restart-cutoff .* port22-down
+restart-cutoff: start request to port 22 open|scenario restart-cutoff begin|event restart-cutoff .* fault start|event restart-cutoff .* port22-up
+restart-cutoff: port 22 open to API up|scenario restart-cutoff begin|event restart-cutoff .* port22-up|event restart-cutoff api-up
+restart-cutoff: heal to converged|scenario restart-cutoff begin|event restart-cutoff heal: begins|event restart-cutoff converged-yes

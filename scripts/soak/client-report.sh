@@ -144,6 +144,94 @@ if [ "$ss" != 0 ]; then
 	echo
 fi
 
+# The gRPC clients (outside.sh, SOAK_GRPC=1), in grpc/unary@ROUTER.log and
+# grpc/stream@ROUTER.log, by the same windows. Unary: calls, failed (exit
+# code not 0) and why, the versions that answered (grpc/V), the longest gap
+# between two successful calls, and the duration of the successful ones
+# (process, TCP, TLS and call). Server streams: the streams that ended in
+# the window, those that ended complete (200, grpc-status 0, every message)
+# and the others with curl's exit code and error, the messages, and the
+# longest gap between two messages (a stream that ends complete is followed
+# by the next about 1.1 s later), with when it began.
+gname() { # gname FILE: node-N of the router of grpc/KIND@IP.log
+	local ip
+	ip=$(basename "$1" .log)
+	ip=${ip#*@}
+	awk -v ip="$ip" '$2 == ip { print $1 }' "$NODES_FILE" | sed 's/^.*-\([0-9]*\)$/node-\1/'
+}
+if ls "$DIR"/grpc/unary@*.log >/dev/null 2>&1; then
+	while read -r name ws we wf; do
+		echo "### $name, gRPC"
+		echo
+		echo "| Router | Unary calls | Failed | Why | Versions | Longest gap (s) | Gap began | First / last failure (s after the fault) | p50 / p99 / max (ms) | Streams ended | Complete | Broken, and why | Messages | Longest gap between messages (s) | Gap began |"
+		echo "|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|"
+		for f in "$DIR"/grpc/unary@*.log; do
+			s=$DIR/grpc/stream@$(basename "$f" .log | sed 's/^unary@//').log
+			u=$(gawk -v ws="$ws" -v we="$we" -v wf="$wf" '
+			function pct(p,   i) { i = int(p * nl + 0.999999); if (i < 1) i = 1; if (i > nl) i = nl; return sprintf("%.0f", lat[i] / 1000) }
+			NF < 4 || $1 + 0 < ws || $1 + 0 > we { next }
+			{
+				t = $1 + 0; n++; if (!t0) t0 = t - $3 / 1e6; tl = t
+				if ($2 == 0 && $4 ~ /^grpc\//) {
+					v = $4; sub(/@.*/, "", v); ver[v]++
+					g = t - (lastok ? lastok : t0); if (g > gap) { gap = g; gapat = (lastok ? lastok : t0) }
+					lastok = t; lat[++nl] = $3 + 0
+				} else {
+					bad++; e = $0; sub(/^[^ ]+ [^ ]+ [^ ]+ /, "", e); sub(/^h2ctest call: /, "", e)
+					gsub(/[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+:[0-9]+/, "IP:PORT", e); gsub(/"[^"]*"/, "\"...\"", e)
+					why[substr(e, 1, 70)]++
+					if (!ff) ff = t; lf = t
+				}
+			}
+			END {
+				if (!n) { printf "| - | - | - | - | - | - | - | - |"; exit }
+				if (lf > lastok) { g = tl - (lastok ? lastok : t0); if (g > gap) { gap = g; gapat = (lastok ? lastok : t0) } }
+				w = ""; for (k in why) w = w (w == "" ? "" : "; ") k " x" why[k]
+				vs = ""; for (k in ver) vs = vs (vs == "" ? "" : ", ") k " x" ver[k]
+				if (nl) asort(lat)
+				ref = (wf > 0 ? wf : ws)
+				printf "| %d | %d | %s | %s | %.2f | %s | %s | %s |", n, bad, (w == "" ? "-" : w), (vs == "" ? "-" : vs), gap,
+					(gapat ? strftime("%H:%M:%S", int(gapat), 1) : "-"), (bad ? sprintf("%+.1f / %+.1f", ff - ref, lf - ref) : "-"),
+					(nl ? pct(0.5) " / " pct(0.99) " / " pct(1) : "-")
+			}' "$f")
+			st=$(gawk -v ws="$ws" -v we="$we" '
+			$1 + 0 < ws || $1 + 0 > we { next }
+			$2 == "msg" { m++; t = $1 + 0; if (lastm) { g = t - lastm; if (g > gap) { gap = g; gapat = lastm } } lastm = t; next }
+			$2 == "end" {
+				e++
+				if ($4 == 200 && $5 == 0 && $6 == "grpc=0" && $7 == "msgs=" want) ok++
+				else { b++; r = $0; sub(/^([^ ]+ ){8}/, "", r); r = "exit " $5 " " $6 " " $7 (r == "" ? "" : " " substr(r, 1, 60)); why[r]++ }
+			}
+			END {
+				w = ""; for (k in why) w = w (w == "" ? "" : "; ") k " x" why[k]
+				printf " %d | %d | %s | %d | %.2f | %s |", e, ok, (b ? b ": " w : "0"), m, gap, (gapat ? strftime("%H:%M:%S", int(gapat), 1) : "-")
+			}' want="${GRPC_STREAM_N:-1000}" "$s" 2>/dev/null)
+			echo "| $(gname "$f") $u${st:- - | - | - | - | - | - |}"
+		done
+		echo
+	done <"$W"
+	read -r _ ss se _ < <(grep '^steady ' "$W" || echo "- 0 0 0")
+	if [ "$ss" != 0 ]; then
+		echo "### steady, gRPC, all routers"
+		echo
+		awk 1 "$DIR"/grpc/unary@*.log | gawk -v ws="$ss" -v we="$se" '
+		function pct(p,   i) { i = int(p * ok + 0.999999); if (i < 1) i = 1; if (i > ok) i = ok; return sprintf("%.1f", tt[i] / 1000) }
+		NF < 4 { next }
+		$1 + 0 < ws || $1 + 0 > we { next }
+		{ n++; if ($2 == 0 && $4 ~ /^grpc\//) { ok++; tt[ok] = $3 + 0 } }
+		END {
+			asort(tt)
+			printf "| Unary calls | Succeeded | Success rate | p50 / p90 / p99 / p99.9 / max (ms) |\n|---|---|---|---|\n"
+			printf "| %d | %d | %.5f %% | %s / %s / %s / %s / %s |\n\n", n, ok, (n ? 100 * ok / n : 0), pct(.5), pct(.9), pct(.99), pct(.999), pct(1)
+		}'
+		awk 1 "$DIR"/grpc/stream@*.log | gawk -v ws="$ss" -v we="$se" -v want="${GRPC_STREAM_N:-1000}" '
+		$1 + 0 < ws || $1 + 0 > we { next }
+		$2 == "msg" { m++; next }
+		$2 == "end" { e++; if ($4 == 200 && $5 == 0 && $6 == "grpc=0" && $7 == "msgs=" want) ok++ }
+		END { printf "| Server streams ended | Complete | Messages |\n|---|---|---|\n| %d | %d | %d |\n\n", e, ok, m }'
+	fi
+fi
+
 # Certificates: each issuance by Pebble, and when each router served it.
 if [ -f "$DIR/pebble.log" ] && [ -f "$DIR/certs.log" ]; then
 	echo "### Certificates"

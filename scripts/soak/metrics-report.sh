@@ -28,11 +28,21 @@ echo "| Node | Host | Counter increase, code 200 | Clients' 200s between the rea
 echo "|---|---|---|---|---|---|"
 # The counters are by host, with no path label, so the streams of every path
 # of a host through a router (HOST@IP.log, HOST+P@IP.log) are counted together.
-LIST=$(for f in "$DIR"/*@*.log; do
-	b=$(basename "$f" .log)
-	h=${b%@*}
-	printf '%s|%s|%s;' "${h%%+*}" "${b##*@}" "$f"
-done)
+# The gRPC clients' logs (grpc/unary@IP.log, grpc/stream@IP.log, the sixth
+# soak) count for $GRPC_HOST: each unary call that succeeded, and each server
+# stream that ended with HTTP 200, at its end.
+LIST=$(
+	for f in "$DIR"/*@*.log; do
+		b=$(basename "$f" .log)
+		h=${b%@*}
+		printf '%s|%s|%s;' "${h%%+*}" "${b##*@}" "$f"
+	done
+	for f in "$DIR"/grpc/unary@*.log "$DIR"/grpc/stream@*.log; do
+		[ -f "$f" ] || continue
+		b=$(basename "$f" .log)
+		printf '%s|%s|g:%s;' "${GRPC_HOST:-paths.soak.test}" "${b##*@}" "$f"
+	done
+)
 gawk -v lag="$LAG" -v list="$LIST" '
 BEGIN {
 	n = split(list, L, ";")
@@ -63,10 +73,13 @@ END {
 		a = 0; b = 0
 		nf = (addr != "" ? split(files[host SUBSEP addr], F, "\t") : 0)
 		for (j = 1; j <= nf; j++) {
-			f = F[j]
+			f = F[j]; g = 0
+			if (substr(f, 1, 2) == "g:") { f = substr(f, 3); g = (f ~ /\/unary@[^\/]*$/ ? "u" : "s") }
 			while ((getline line < f) > 0) {
 				n = split(line, x, " ")
-				if (n < 8 || x[2] != "200" || x[3] != "0") continue
+				if (g == "u") { if (n < 4 || x[2] != "0" || x[4] !~ /^grpc\//) continue }
+				else if (g == "s") { if (x[2] != "end" || x[4] != "200") continue }
+				else if (n < 8 || x[2] != "200" || x[3] != "0") continue
 				e = x[1] + 0
 				if (e > t1 && e <= t2) a++
 				if (e > t1 - lag && e <= t2 - lag) b++

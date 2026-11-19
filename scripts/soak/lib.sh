@@ -335,8 +335,15 @@ route_flags() {
 	printf ' --route-addr %s --acme-email %s --acme-ca %s' "$1" "$ACME_EMAIL" "$ACME_CA"
 }
 
-# worker_unit [IP]: IP is the worker's private address, for its router.
+# worker_unit [IP]: the worker's unit as docs/systemd.md gives it, with no
+# flags: join wrote the router's flags to $DATA/hivemind.yaml, and serve
+# --role worker reads them there. With WORKER_UNIT_FLAGS=1 the router's
+# flags go in ExecStart too (IP is the worker's private address), as the
+# docs say for a worker joined by a build before 2.2; the fifth soak and
+# earlier ran that way.
 worker_unit() {
+	local flags=""
+	[ "${WORKER_UNIT_FLAGS:-0}" = 1 ] && flags=$(route_flags "${1:-}")
 	cat <<EOF
 [Unit]
 Description=hivemind worker
@@ -345,7 +352,7 @@ Wants=network-online.target docker.service
 After=network-online.target docker.service
 
 [Service]
-ExecStart=/usr/local/bin/hivemind serve --role worker$(route_flags "${1:-}")
+ExecStart=/usr/local/bin/hivemind serve --role worker$flags
 Restart=on-failure
 RestartPreventExitStatus=3
 RestartSec=5
@@ -445,12 +452,32 @@ path_spec() {
 EOF
 }
 
-# app_spec APP VERSION: a routed whoami app at a version of the private image.
+# The gRPC app (the sixth soak). With SOAK_GRPC=1, grpc runs test/h2ctest's
+# server, a server of gRPC's wire format that speaks only HTTP/2 without
+# TLS, from the private image $REGISTRY/soak/h2ctest (outside.sh pushes
+# versions 1 and 2, the same binary), under $GRPC_PATH of $PATH_HOST, an h2c
+# route: so the host has http routes (proot, papi) and an h2c one. Its
+# health check is TCP, as docs/routing.md says for a server that speaks only
+# h2c. V in its environment is the version, which every reply names
+# ("grpc/2@<container>:ping").
+SOAK_GRPC=${SOAK_GRPC:-0}
+GRPC_PATH=${GRPC_PATH:-/h2ctest.Echo}
+grpc_spec() {
+	cat <<EOF
+{"name":"grpc","image":"$REGISTRY/soak/h2ctest:$1","replicas":2,"env":{"V":"$1"},
+ "command":["serve","-addr",":50051","-name","grpc"],
+ "routes":[{"host":"$PATH_HOST","path":"$GRPC_PATH","port":50051,"protocol":"h2c"}],
+ "health":{"tcp":{"port":50051},"interval":"2s","timeout":"1s"}}
+EOF
+}
+
+# app_spec APP VERSION: a routed app at a version of the private image.
 app_spec() {
 	case "$1" in
 	www) www_spec "$2" ;;
 	proot) path_spec proot / "$2" ;;
 	papi) path_spec papi /api "$2" ;;
+	grpc) grpc_spec "$2" ;;
 	*)
 		echo "soak: no spec for $1" >&2
 		return 1
@@ -470,5 +497,22 @@ join_worker() {
 	# join keeps running as the agent. Stop it, and let systemd run the worker.
 	on "$n" "sudo pkill -TERM -f '^$HM join' ; for i in \$(seq 1 20); do pgrep -f '^$HM join' >/dev/null || exit 0; sleep 0.5; done; exit 1" ||
 		die "$n: the foreground join did not stop"
+	# join writes the worker flags it was given to hivemind.yaml (docs/systemd.md),
+	# which the unit's plain serve --role worker reads. Its keys, mode and owner:
+	ev setup "$n hivemind.yaml $(on "$n" "sudo stat -c 'mode=%a owner=%U' $DATA/hivemind.yaml 2>/dev/null || echo missing") $(on "$n" "sudo cat $DATA/hivemind.yaml 2>/dev/null | grep -v '^#' | tr -s ' \n' ' '")"
 	install_unit "$n" "$(worker_unit "$ip")"
+	ev setup "$n unit ExecStart=$(on "$n" "systemctl show -p ExecStart --value hivemind.service | sed -n 's/.*argv\[\]=\([^;]*\);.*/\1/p'")"
+	if [ "$SOAK_ROUTES" = 1 ]; then
+		wait_for 60 router_up "$n" || die "$n: no router after the unit started: $(hm "$SERVER" nodes 2>&1 | tr -s ' \n' ' ')"
+		ev setup "$n router up: ROUTER yes in hivemind nodes; listening $(on "$n" "sudo ss -ltnH '( sport = :80 or sport = :443 )'" | awk '{ printf "%s ", $4 }')"
+	fi
+}
+
+# router_up NAME: hivemind nodes has router true for NAME's node (its
+# router read the routing table in the last minute), and NAME listens on 443.
+router_up() {
+	local id
+	id=$(on "$1" "sudo jq -r .node_id $DATA/node.json") || return 1
+	[ "$(hm "$SERVER" nodes --json | jq -r --arg i "$id" '.[] | select(.id == $i) | .router')" = true ] &&
+		on "$1" "sudo ss -ltnH '( sport = :443 )' | grep -q ."
 }

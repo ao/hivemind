@@ -17,7 +17,10 @@
 #      hivemind serve --advertise <its private address>;
 #   3. each worker: hivemind join with a join token from the server; once
 #      node.json exists, stop the foreground join and start the worker's unit,
-#      which runs hivemind serve --role worker;
+#      which runs hivemind serve --role worker with no flags: join wrote its
+#      router flags to hivemind.yaml (WORKER_UNIT_FLAGS=1 puts them in the
+#      unit too, as before the sixth soak); with SOAK_ROUTES=1, until
+#      hivemind nodes shows ROUTER yes for it;
 #   4. wait for every node to be ready, plus the 30 s --min-ready wait;
 #   5. deploy web (nginx, 3 replicas, 127.0.0.1:8080), spread (busybox sleep,
 #      6 replicas, no port) and kv (redis with --appendonly yes, a volume,
@@ -42,6 +45,11 @@
 # host, proot on $PATH_HOST and papi on $PATH_HOST/api (path_spec in lib.sh),
 # and check_paths logs which app answers each of a list of paths through
 # every router, and the paths the router refuses.
+#
+# With SOAK_GRPC=1 as well (the sixth soak), grpc runs test/h2ctest's server
+# under $PATH_HOST/h2ctest.Echo on an h2c route (grpc_spec in lib.sh), and
+# check_grpc makes one checked call of each kind through every router.
+#   SOAK_DIR=... scripts/soak/setup.sh check-grpc
 #
 # With SERVER_NAME set (the third soak), the server advertises that name
 # (--advertise NAME --cluster-addr <its address>), the workers join the name,
@@ -115,6 +123,39 @@ deploy_routed() {
 		deploy "$(path_spec papi /api 1)"
 		ev setup "deployed proot ($PATH_HOST/) and papi ($PATH_HOST/api)"
 	fi
+	if [ "$SOAK_GRPC" = 1 ]; then
+		deploy "$(grpc_spec 1)"
+		ev setup "deployed grpc ($PATH_HOST$GRPC_PATH, h2c, $REGISTRY/soak/h2ctest:1)"
+	fi
+}
+
+# check_grpc: through every router, one checked call of each kind to grpc
+# with test/h2ctest's client on the outside machine (the message back, from
+# one replica, HTTP/2, grpc-status 0): unary, a server stream of five
+# messages, a bidirectional stream, and a unary call over HTTP/1.1, which the
+# router sends on as HTTP/2. One "grpc" line per call: router, kind, exit
+# code and the replica that answered, or the error.
+check_grpc() {
+	local ip k kind flag cmd="" out
+	for ip in "${IPS[@]}"; do
+		for k in unary server bidi "unary -h1"; do
+			kind=${k%% *} flag=${k#"$kind"}
+			cmd+="printf '%s %s ' $ip '${k// /_}'; o=\$(/var/lib/soak-client/h2ctest call -url https://$PATH_HOST -connect $ip:443 -ca /var/lib/soak-client/root.pem$flag $kind 2>&1); echo \"rc=\$? \$o\" | tr '\n' ' '; echo; "
+		done
+	done
+	out=$(SSH_TIMEOUT=120 on "$OUT_NAME" "$cmd") || die "check_grpc on $OUT_NAME"
+	while read -r line; do ev grpc "$line"; done <<<"$out"
+	grep -q 'rc=[^0]' <<<"$out" && note "check_grpc: a call failed: $(grep 'rc=[^0]' <<<"$out" | head -n 3 | tr '\n' ';')"
+	return 0
+}
+
+# grpc_served: every router routes a unary call to grpc.
+grpc_served() {
+	local ip cmd=""
+	for ip in "${IPS[@]}"; do
+		cmd+="/var/lib/soak-client/h2ctest call -url https://$PATH_HOST -connect $ip:443 -ca /var/lib/soak-client/root.pem unary >/dev/null 2>&1 || exit 1; "
+	done
+	on "$OUT_NAME" "$cmd"
 }
 
 # check_paths: through every router, which app answers each path of
@@ -166,6 +207,8 @@ main() {
 	for ((i = 1; i < ${#NAMES[@]}; i++)); do join_worker "${NAMES[$i]}"; done
 	write_ids
 	wait_for 60 all_ready || die "not every node is ready: $(hm "$SERVER" nodes)"
+	# The table with its ROUTER column, as an operator reads it.
+	while read -r line; do ev nodes "$line"; done < <(hm "$SERVER" nodes 2>&1)
 	note "all ${#NAMES[@]} nodes ready; waiting 40 s, the --min-ready wait, before the first deploy"
 	sleep 40
 	if [ "${SETUP_APPS:-1}" = 0 ]; then
@@ -185,6 +228,10 @@ main() {
 	wait_for 300 converged_now || die "not converged 300 s after the deploy: $(check_converged "$SOAK_DIR/setup.tsv" | tr '\n' ';')"
 	[ "$SOAK_ROUTES" = 1 ] && "$HERE/outside.sh" wait-served 300
 	[ "$SOAK_ROUTES" = 1 ] && [ "$SOAK_PATHS" = 1 ] && check_paths
+	if [ "$SOAK_ROUTES" = 1 ] && [ "$SOAK_GRPC" = 1 ]; then
+		wait_for 120 grpc_served || die "not every router routes a unary call to grpc"
+		check_grpc
+	fi
 	n=$(kv_node) || die "kv has no node"
 	val="written-$(date -u +%FT%TZ)"
 	[ "$(kv_set "$n" "$val")" = "+OK" ] || die "could not write the kv value on $n"
@@ -225,5 +272,6 @@ rejoin() {
 case "${1:-}" in
 rejoin) rejoin "${2:?name}" ;;
 check-paths) check_paths ;;
+check-grpc) check_grpc ;;
 *) main "$@" ;;
 esac
