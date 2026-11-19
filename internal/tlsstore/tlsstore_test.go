@@ -188,3 +188,39 @@ func TestNewChecksTimings(t *testing.T) {
 		t.Fatal("a refresh as long as the lifetime was accepted")
 	}
 }
+
+// existsFails is a backend whose Exists fails, as a worker's node API calls
+// do while the server cannot be reached.
+type existsFails struct{ Backend }
+
+func (existsFails) Exists(context.Context, string) (bool, error) {
+	return false, errors.New(`calling the server: Post "https://10.0.0.1:4484/node/v1/tls/store": dial tcp 10.0.0.1:4484: i/o timeout`)
+}
+
+// A key whose check fails counts as existing, so certmagic takes the
+// renewal path, not the obtain path that orders a certificate the storage
+// may well hold (sixth soak). A key the backend answers for is as it says.
+func TestExistsWhenTheBackendFails(t *testing.T) {
+	st := newStore(t)
+	ok := newStorage(t, st, "node-a", Options{})
+	ctx := ctxT(t)
+	const key = "certificates/acme/www.example.com/www.example.com.crt"
+	if ok.Exists(ctx, key) {
+		t.Fatal("a missing key exists")
+	}
+	if err := ok.Store(ctx, key, []byte("x")); err != nil {
+		t.Fatal(err)
+	}
+	if !ok.Exists(ctx, key) {
+		t.Fatal("a stored key does not exist")
+	}
+	failing, err := New(existsFails{StoreBackend{St: st, NodeID: "node-a"}}, Options{Logger: slog.New(slog.NewTextHandler(io.Discard, nil))})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, k := range []string{key, "certificates/acme/missing.example.com/missing.example.com.crt"} {
+		if !failing.Exists(ctx, k) {
+			t.Errorf("%s: a failed check answers that it does not exist", k)
+		}
+	}
+}

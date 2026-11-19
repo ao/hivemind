@@ -198,10 +198,27 @@ func (s *Storage) Load(ctx context.Context, key string) ([]byte, error) { return
 // missing key is not an error.
 func (s *Storage) Delete(ctx context.Context, key string) error { return s.b.Delete(ctx, key) }
 
-// Exists implements certmagic.Storage. An error counts as not existing.
+// Exists implements certmagic.Storage. A backend that fails, as a worker's
+// does while it cannot reach the server, counts as the key existing:
+// certmagic's interface has no error here, and an answer of "missing" sends
+// it down the wrong path. Its renewal check, finding a certificate's files
+// missing, logs that they are not found "for any configured issuer" and
+// obtains a new certificate instead of renewing; that asks the CA for a
+// certificate the storage holds whenever the server answers again before
+// the order, which counts against the CA's limits on duplicate
+// certificates (sixth soak). With "exists", certmagic renews: its storage
+// check fails with the backend's own error and the renewal is tried again
+// at a later check, or, once the server answers, it loads the stored
+// certificate and renews it only if it is still due. An obtain finds the
+// files there and orders nothing; its certificate fails to load, and is
+// logged, until the server answers.
 func (s *Storage) Exists(ctx context.Context, key string) bool {
 	ok, err := s.b.Exists(ctx, key)
-	return err == nil && ok
+	if err != nil {
+		s.log.Debug("checking a key in the shared TLS storage failed; taking it to exist", "key", key, "err", err)
+		return true
+	}
+	return ok
 }
 
 // List implements certmagic.Storage.
