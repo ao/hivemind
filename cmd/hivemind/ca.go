@@ -136,6 +136,10 @@ func caStepCmd(step, short, long string, forceable bool) *cobra.Command {
 			fmt.Fprintln(out, "Started a rotation of the cluster CA. Take a backup now: one from before this has no key of the new CA.")
 		case step == "finish" || (step == "abort" && st.Rotation == nil):
 			fmt.Fprintln(out, endedMessage(st.Ended))
+			if st.Ended != nil && len(st.Ended.WentWithout) > 0 {
+				fmt.Fprintln(out, wentWithoutMessage(st.Ended.WentWithout))
+				printWaiting(out, st.Ended.WentWithout)
+			}
 		case step == "abort":
 			fmt.Fprintln(out, "The rotation turned round: the nodes renew back under the old CA. Run hivemind ca rotate finish once the list below is empty.")
 		}
@@ -232,6 +236,20 @@ func endedMessage(e *carotate.Ended) string {
 		return "The rotation has ended on the new CA (" + caFile(pki.CACertFile, e.Kept) + "). " +
 			"Backups taken before now hold the old CA's key, which the cluster no longer uses: take a new backup, and delete the old ones."
 	}
+}
+
+// wentWithoutMessage is what finish --force says of the nodes it went ahead
+// without. The server knows only that it has not seen them present a
+// certificate from the CA it kept: after a restore of a backup taken
+// before they renewed, they had, and in the fourth acceptance run the two
+// workers the server called cut off came back by themselves 0.5 s later.
+// Joining such a node again would give it a new ID and place its replicas
+// again for nothing.
+func wentWithoutMessage(w []carotate.Waiting) string {
+	return fmt.Sprintf("finish went ahead without %d node(s), which the server had not seen present a certificate from the CA it kept. "+
+		"One whose certificate is from the other CA is cut off, and must be removed with hivemind node remove <id> and joined again; "+
+		"one that renewed while the server did not see it, as after a restore of a backup, comes back by itself. "+
+		"Look at hivemind nodes in a minute before you join any of them again; the server logs, 30 s after finish, which have reached it:", len(w))
 }
 
 // caFile names a CA by its file and the first 8 digits of its fingerprint,

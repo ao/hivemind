@@ -307,13 +307,22 @@ fi
 grep -q "$OFF_ID" <<<"$out" && grep -q "is down" <<<"$out" && grep -q -- "--force" <<<"$out" ||
 	cl_fail "finish's refusal does not name $OFF_ID as down: $out"
 cl_note "finish refused, naming $OFF_ID as down"
-rotate finish --force
+# finish --force says it went ahead without the node, and that one that
+# renewed unseen comes back by itself; the server says the same, and 30 s
+# later that the node has not reached it.
+out=$(docker exec "$S" hivemind ca rotate finish --force 2>&1) || cl_fail "hivemind ca rotate finish --force: $out"
+grep -qF "finish went ahead without 1 node(s)" <<<"$out" && grep -qF "comes back by itself" <<<"$out" && grep -q "$OFF_ID" <<<"$out" ||
+	cl_fail "finish --force does not say it went ahead without $OFF_ID: $out"
+docker exec "$S" grep -q "CA rotation finish forced, without nodes this server has not seen present a certificate.*nodes=$OFF_ID" /var/log/hivemind.log ||
+	cl_fail "the server did not log the forced finish naming $OFF_ID: $(docker exec "$S" grep 'finish forced' /var/log/hivemind.log)"
 CA2=$(fsum "$S" "$DATA/ca.crt")
 serve_worker 2
 wait_for 60 docker exec "$W2" grep -q "rotated without this node" /var/log/hivemind.log ||
 	cl_fail "$W2 did not say the CA was rotated without it: $(docker exec "$W2" tail -n 5 /var/log/hivemind.log)"
 stop_hivemind "$W2"
 cl_note "finish --force cut $W2 off; started again, it says the CA was rotated without it"
+wait_for 60 docker exec "$S" grep -q "these have not reached the server in the 30 s since.*nodes=$OFF_ID" /var/log/hivemind.log ||
+	cl_fail "30 s after finish --force the server did not log that $OFF_ID has not reached it: $(docker exec "$S" grep 'forced finish went ahead' /var/log/hivemind.log)"
 docker exec "$S" hivemind node remove "$OFF_ID" >/dev/null || cl_fail "node remove $OFF_ID"
 docker exec "$W2" sh -c "docker rm -f \$(docker ps -aq --filter label=hivemind.app) >/dev/null 2>&1; rm -rf $DATA; true"
 join_worker 2

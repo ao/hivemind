@@ -98,6 +98,11 @@ type Manager struct {
 	kick     chan struct{}
 	listener chan struct{}
 	caWarned time.Time
+	// forced holds the nodes the last forced finish went ahead without,
+	// and forcedAt when, until recheckForced has looked at them again.
+	// Guarded by mu.
+	forced   []Waiting
+	forcedAt time.Time
 }
 
 // state is the CAs and the rotation at one moment. It is not changed once
@@ -413,6 +418,7 @@ func (m *Manager) Run(ctx context.Context) {
 	defer t.Stop()
 	for {
 		m.warnExpiry()
+		m.recheckForced(ctx)
 		if err := m.moveListener(ctx); err != nil && ctx.Err() == nil {
 			m.log.Warn("checking whether the server's certificate can move to the CA the rotation goes to", "err", err)
 		}

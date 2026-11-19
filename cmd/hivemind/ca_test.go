@@ -130,3 +130,15 @@ func TestEndedMessageSaysWhichBackups(t *testing.T) {
 		t.Errorf("forward: says older backups are good: %q", fwd)
 	}
 }
+
+// finish --force says it went ahead without nodes the server had not seen
+// renew, and that some of them may come back by themselves.
+func TestWentWithoutMessage(t *testing.T) {
+	m := wentWithoutMessage([]carotate.Waiting{{Node: "node-b"}, {Node: "node-c"}})
+	for _, want := range []string{"finish went ahead without 2 node(s)", "had not seen present a certificate from the CA it kept",
+		"is cut off", "comes back by itself", "Look at hivemind nodes in a minute before you join any of them again"} {
+		if !strings.Contains(m, want) {
+			t.Errorf("no %q in %q", want, m)
+		}
+	}
+}

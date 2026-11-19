@@ -42,6 +42,60 @@ type Ended struct {
 	// and Dropped that of the CA whose key was deleted.
 	Kept    string `json:"kept"`
 	Dropped string `json:"dropped"`
+	// WentWithout is, after finish --force, the nodes it went ahead
+	// without: those the server had not seen present a certificate from
+	// the CA it kept. A node whose certificate is from the other CA is cut
+	// off; one that renewed unseen, as after a restore, comes back.
+	WentWithout []Waiting `json:"went_without,omitempty"`
+}
+
+// cutOffRecheck is how long after a forced finish the server looks again
+// at the nodes it went ahead without: an agent that cannot reach the server
+// backs off to one pass every 30 s.
+const cutOffRecheck = 30 * time.Second
+
+// recheckForced logs, once cutOffRecheck has passed since a forced finish,
+// which of the nodes it went ahead without have reached the server since,
+// and which have not. A request after the finish passed the node
+// listener, which accepts the kept CA alone, so a node with a lease from
+// after it is not cut off. A node removed since is left out. Run calls it.
+func (m *Manager) recheckForced(ctx context.Context) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if len(m.forced) == 0 || m.now().Sub(m.forcedAt) < cutOffRecheck {
+		return
+	}
+	nodes, err := m.st.ListNodes(ctx)
+	if err != nil {
+		return
+	}
+	lease := map[string]time.Time{}
+	for _, n := range nodes {
+		lease[n.ID] = n.LastLease
+	}
+	var back, out []string
+	for _, w := range m.forced {
+		l, ok := lease[w.Node]
+		switch {
+		case !ok:
+		case l.After(m.forcedAt):
+			back = append(back, w.Node)
+		default:
+			out = append(out, w.Node)
+		}
+	}
+	at := m.forcedAt.UTC().Format(time.RFC3339)
+	m.forced, m.forcedAt = nil, time.Time{}
+	if len(back) > 0 {
+		m.log.Info("of the nodes the forced finish went ahead without, these have reached the server since, so their certificates "+
+			"are from the cluster CA, and they need nothing", "nodes", strings.Join(back, ","), "finished", at)
+	}
+	if len(out) > 0 {
+		m.log.Warn("of the nodes the forced finish went ahead without, these have not reached the server in the 30 s since: "+
+			"one whose certificate is from the CA the rotation dropped is cut off; remove it with hivemind node remove <id>, "+
+			"and join the machine again with an empty data directory. One that is down is listed too: once it is up, "+
+			"its own log says whether it was cut off", "nodes", strings.Join(out, ","), "finished", at)
+	}
 }
 
 // CAInfo describes one CA.
@@ -312,11 +366,19 @@ func (m *Manager) Finish(ctx context.Context, force bool) (Status, error) {
 	if err != nil {
 		return Status{}, err
 	}
-	if w := waitingForFinish(view, s.rot); len(w) > 0 {
+	w := waitingForFinish(view, s.rot)
+	if len(w) > 0 {
 		if !force {
 			return Status{}, &RefusedError{Step: "finish", Waiting: w}
 		}
-		m.log.Warn("CA rotation finish forced: these nodes are cut off, and each must join again", "nodes", nodeIDs(w))
+		// The server knows only what it has seen: after a restore of a
+		// backup taken before the nodes renewed, its marks are stale, and in
+		// the fourth acceptance run both workers it called cut off came back
+		// by themselves 0.5 s later. recheckForced says which did.
+		m.log.Warn("CA rotation finish forced, without nodes this server has not seen present a certificate from the CA the rotation goes to: "+
+			"a node whose certificate is from the other CA is cut off, and must be removed with hivemind node remove <id> and joined again; "+
+			"one that renewed while this server did not see it, as after a restore of a backup, comes back by itself. "+
+			"In 30 s this server logs which of them have reached it", "nodes", nodeIDs(w))
 	}
 	if s.rot.Listener != s.rot.Toward {
 		if err := m.setListenerLocked(ctx, s); err != nil {
@@ -325,10 +387,11 @@ func (m *Manager) Finish(ctx context.Context, force bool) (Status, error) {
 		s = m.cur.Load()
 	}
 	ended := &Ended{Back: s.rot.Toward == store.CACurrent, Kept: pki.FingerprintHex(s.to.Fingerprint()),
-		Dropped: pki.FingerprintHex(s.from.Fingerprint())}
+		Dropped: pki.FingerprintHex(s.from.Fingerprint()), WentWithout: w}
 	if err := m.endLocked(ctx, s); err != nil {
 		return Status{}, err
 	}
+	m.forced, m.forcedAt = w, m.now()
 	if ended.Back {
 		m.log.Info("CA rotation finished, back on the CA the cluster had before it: the cluster trusts that CA alone, and the new CA's key "+
 			"is deleted. Backups taken during the rotation hold that key, which the cluster no longer uses: delete them. "+

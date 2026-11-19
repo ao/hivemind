@@ -705,3 +705,63 @@ func TestRotationLinesNameTheDirection(t *testing.T) {
 		}
 	}
 }
+
+// finish --force knows only which nodes it has not seen present a
+// certificate from the CA it keeps; after a restore of a backup taken
+// before they renewed, they had. In the fourth acceptance run the server
+// logged both workers as cut off, and they came back by themselves 0.5 s
+// later. It now says what it knows, and 30 s later which of them reached
+// it and which did not.
+func TestForcedFinishSaysWhichNodesCameBack(t *testing.T) {
+	fx := newFixture(t, "node-a", "node-b", "node-c")
+	ctx := context.Background()
+	old, next := fx.mustStart()
+	for _, n := range []string{"node-a", "node-b", "node-c"} {
+		if err := fx.trust(n, old, old, next); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if _, err := fx.m.Renew(ctx, false); err != nil {
+		t.Fatal(err)
+	}
+	// node-a renews as the server sees; node-b renews unseen, as the
+	// marks of a restored backup would have it; node-c stays on the old CA.
+	if err := fx.trust("node-a", next, old, next); err != nil {
+		t.Fatal(err)
+	}
+	st, err := fx.m.Finish(ctx, true)
+	if err != nil || st.Ended == nil || waitingIDs(st.Ended.WentWithout) != "node-b,node-c" {
+		t.Fatalf("finish --force: %+v, %v; want it to name node-b and node-c", st.Ended, err)
+	}
+	l := fx.logs.String()
+	if !strings.Contains(l, "CA rotation finish forced, without nodes this server has not seen present a certificate from the CA the rotation goes to") ||
+		!strings.Contains(l, "comes back by itself") || !strings.Contains(l, "nodes=node-b,node-c") || strings.Contains(l, "these nodes are cut off") {
+		t.Fatalf("the forced finish logged:\n%s", l)
+	}
+
+	fx.clock.advance(10 * time.Second)
+	fx.m.recheckForced(ctx)
+	if strings.Contains(fx.logs.String(), "of the nodes the forced finish went ahead without") {
+		t.Fatalf("rechecked 10 s after the finish:\n%s", fx.logs.String())
+	}
+	if err := fx.st.RenewLease(ctx, "node-b"); err != nil { // node-b's request passed the listener
+		t.Fatal(err)
+	}
+	fx.clock.advance(21 * time.Second)
+	fx.m.recheckForced(ctx)
+	fx.m.recheckForced(ctx)
+	l = fx.logs.String()
+	reached := `level=INFO msg="of the nodes the forced finish went ahead without, these have reached the server since`
+	notReached := `level=WARN msg="of the nodes the forced finish went ahead without, these have not reached the server in the 30 s since`
+	if strings.Count(l, reached) != 1 || strings.Count(l, notReached) != 1 {
+		t.Fatalf("31 s after the finish, want one line of each:\n%s", l)
+	}
+	for _, line := range strings.Split(l, "\n") {
+		switch {
+		case strings.Contains(line, reached) && !strings.Contains(line, "nodes=node-b "):
+			t.Errorf("the nodes that reached the server: %s", line)
+		case strings.Contains(line, notReached) && (!strings.Contains(line, "nodes=node-c ") || !strings.Contains(line, "hivemind node remove <id>")):
+			t.Errorf("the nodes that did not: %s", line)
+		}
+	}
+}
