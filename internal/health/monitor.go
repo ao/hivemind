@@ -52,12 +52,14 @@ func (t *Tracker) Observe(now time.Time, err error) State {
 		t.unhealthySince = time.Time{}
 		return t.state
 	}
+	// The failure is kept even when it does not count: it is why the
+	// replica is not ready yet, which its status shows.
+	t.lastErr = truncate(err.Error(), maxErrLen)
 	if now.Sub(t.started) < t.startPeriod {
 		// Still inside the start period: the failure does not count.
 		return t.state
 	}
 	t.failures++
-	t.lastErr = truncate(err.Error(), maxErrLen)
 	if t.failures >= t.retries && t.state != Unhealthy {
 		t.state = Unhealthy
 		t.unhealthySince = now
@@ -84,7 +86,8 @@ type Result struct {
 	Failures int
 	// UnhealthySince is when the replica became unhealthy; zero otherwise.
 	UnhealthySince time.Time
-	// LastError is the last failure, truncated. Empty after a pass.
+	// LastError is the last failure, truncated, one in the start period
+	// too, which does not count. Empty after a pass.
 	LastError string
 	// CheckedAt is when the last probe finished; zero before the first.
 	CheckedAt time.Time

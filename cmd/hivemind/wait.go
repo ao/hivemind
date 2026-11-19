@@ -86,6 +86,8 @@ func (r waitReplica) waiting() string {
 			return "crash-looping: " + r.Error
 		}
 		return "crash-looping"
+	case r.State == "running" && r.Health == "starting" && r.Error != "":
+		return "running, not ready: " + r.Error
 	case r.State == "running" && r.Health == "starting":
 		return "running; its health check has not passed yet"
 	case r.State == "running" && r.Health == "unhealthy":

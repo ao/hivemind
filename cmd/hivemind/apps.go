@@ -402,7 +402,10 @@ replica that is running but unhealthy counts in RUNNING and not in READY.
 During a rollout, a copy at the old generation counts until it is replaced.
 
 DETAIL shows why a replica is pending or cannot run on its node, or else the
-engine's last error for it.
+engine's last error for it. A running replica whose health check has not passed
+shows the last check's failure, as "its last health check failed: tcp port
+50051: ... connection refused"; after a restart for failing its check, it
+shows that failure until the new container's own check passes or fails.
 
 A line "<app>: warning: ..." after the first table says what keeps the app from
 being served as its spec says, such as a router of a build before path routes,

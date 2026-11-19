@@ -57,6 +57,11 @@ type restartState struct {
 	// from then, and stays put on later passes.
 	futureExit time.Time
 	futureSeen time.Time
+	// healthFailure is why the agent last restarted the container for
+	// failing its health check. The restarted container's monitor starts
+	// with nothing to say, so its status keeps this until its own check
+	// passes or fails.
+	healthFailure string
 }
 
 // probe is the health monitor of one running container.
@@ -204,13 +209,14 @@ func (a *Agent) supervise(ctx context.Context, as store.Assignment, c runtime.Co
 			res := p.mon.Result()
 			st.Health, st.Ready = string(res.State), res.State == health.Healthy
 			if res.State == health.Unhealthy {
+				failed := fmt.Sprintf("failed its health check %d times in a row", res.Failures)
+				if res.LastError != "" {
+					failed += ": " + res.LastError
+				}
 				due := res.UnhealthySince.Add(backoff(rs.restarts))
 				if now.Before(due) {
 					a.schedule(rs, due, st)
-					st.Error = fmt.Sprintf("failed its health check %d times in a row", res.Failures)
-					if res.LastError != "" {
-						st.Error += ": " + res.LastError
-					}
+					st.Error = failed
 					return nil
 				}
 				if err := a.restartInPlace(ctx, c); err != nil {
@@ -219,11 +225,27 @@ func (a *Agent) supervise(ctx context.Context, as store.Assignment, c runtime.Co
 				rs.restarts++
 				a.clearSchedule(rs, st)
 				st.Health, st.Ready = string(health.Starting), false
+				rs.healthFailure = "restarted after it " + failed
+				st.Error = rs.healthFailure
 				log.Warn("restarted unhealthy container", "restarts", rs.restarts,
 					"failures", res.Failures, "error", res.LastError)
 				return nil
 			}
 			a.clearSchedule(rs, st)
+			// A replica that is not ready says why: the last check's
+			// failure, or, until the restarted container's own check
+			// says more, the one it was restarted for. Without it, an
+			// HTTP check on a server that speaks only h2c showed
+			// "starting" and no reason for minutes (fourth acceptance
+			// run), the reason only in this node's log.
+			switch {
+			case st.Ready:
+				rs.healthFailure = ""
+			case res.LastError != "":
+				st.Error = "its last health check failed: " + res.LastError
+			case rs.healthFailure != "":
+				st.Error = rs.healthFailure
+			}
 		}
 
 		// Reset the count once the container has run healthy for long enough.

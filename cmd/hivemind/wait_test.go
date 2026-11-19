@@ -178,3 +178,18 @@ func TestWaitFlagErrors(t *testing.T) {
 		}
 	}
 }
+
+// A replica whose health check has not passed gives the failure the agent
+// reported, so --wait says why it waits rather than only that it does.
+func TestDeployWaitSaysWhyTheCheckFails(t *testing.T) {
+	failing := `{"index":0,"node_id":"n1","generation":1,"desired":"running","state":"running","health":"starting",` +
+		`"error":"its last health check failed: tcp port 50051: dial tcp 172.17.0.5:50051: connect: connection refused","ready":false}`
+	waitAPI(t, putWeb1, status(1, 1, "", failing), status(1, 1, "", ready0))
+	out, _, err := run(t, "", "deploy", "--name", "web", "--image", "nginx:alpine", "--wait")
+	want := "web: created, generation 1, 1 replica\n" +
+		"web: replica 0: running, not ready: its last health check failed: tcp port 50051: dial tcp 172.17.0.5:50051: connect: connection refused\n" +
+		"web: 1 replica running and ready\n"
+	if err != nil || out != want {
+		t.Fatalf("deploy --wait: %v\n%s\nwant:\n%s", err, out, want)
+	}
+}

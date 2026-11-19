@@ -459,3 +459,59 @@ func TestClockSetBackDoesNotHoldARestart(t *testing.T) {
 		t.Error("the agent did not log the clock step")
 	}
 }
+
+// A replica whose health check has not passed says why in its status: the
+// last check's failure while it starts, and, after a restart for failing
+// its check, that failure until the new container's own check says more.
+// In the fourth acceptance run an HTTP check on a server that speaks only
+// h2c showed "starting" and no reason for four minutes, the reason only in
+// the node's log.
+func TestNotReadyReplicaSaysWhy(t *testing.T) {
+	e := newEnv(t)
+	app := web(1)
+	app.Ports = nil
+	app.Health = &spec.Health{Exec: []string{"probe"}, Interval: spec.Duration(time.Second),
+		Timeout: spec.Duration(500 * time.Millisecond), Retries: 2}
+	e.put(app)
+	var pass atomic.Bool
+	e.rt.setExec(func(context.Context, string, []string) (int, error) {
+		if pass.Load() {
+			return 0, nil
+		}
+		return 1, nil
+	})
+	var seen []string
+	note := func(st store.Status) {
+		if len(seen) == 0 || seen[len(seen)-1] != st.Error {
+			seen = append(seen, st.Error)
+		}
+	}
+	const failed = "exec: command exited with 1"
+	ok := reconcileFor(e, 10*time.Second, 0, func() bool {
+		st := e.status("web")[0]
+		note(st)
+		return st.Health == "starting" && st.Error == "its last health check failed: "+failed
+	})
+	if !ok {
+		t.Fatalf("a starting replica whose check fails gives no reason: %q", seen)
+	}
+	// The second failure makes it unhealthy; its restart is due 1 s later.
+	ok = reconcileFor(e, 20*time.Second, time.Second, func() bool {
+		st := e.status("web")[0]
+		note(st)
+		return st.RestartCount == 1 && st.Health == "starting" &&
+			st.Error == "restarted after it failed its health check 2 times in a row: "+failed
+	})
+	if !ok {
+		t.Fatalf("a replica restarted for failing its check does not say so: %q", seen)
+	}
+	pass.Store(true)
+	ok = reconcileFor(e, 10*time.Second, 0, func() bool {
+		st := e.status("web")[0]
+		note(st)
+		return st.Ready && st.Error == ""
+	})
+	if !ok {
+		t.Fatalf("a replica that passes its check keeps a reason: %q", seen)
+	}
+}

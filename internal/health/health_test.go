@@ -224,6 +224,10 @@ func TestTrackerStartPeriodSuppressesFailures(t *testing.T) {
 	if tr.failures != 0 {
 		t.Fatalf("counted %d failures inside the start period", tr.failures)
 	}
+	// The failure is kept all the same: it is why the replica is not ready.
+	if tr.lastErr != "refused" {
+		t.Fatalf("last error inside the start period %q, want refused", tr.lastErr)
+	}
 	// After it, the usual threshold applies.
 	if s := tr.Observe(start.Add(11*time.Second), fail); s != Starting {
 		t.Fatalf("first counted failure: %s", s)
