@@ -2,6 +2,8 @@ package store
 
 import (
 	"errors"
+	"fmt"
+	"path/filepath"
 	"slices"
 	"strings"
 	"testing"
@@ -457,5 +459,87 @@ func TestRouteTableAfterARestore(t *testing.T) {
 	e.report(nodeB, routedContainer("blocker", 0, 1, 33000), routedContainer("blocker", 1, 1, 33001))
 	if got := e.table()["b.example.com"]; !slices.Equal(got, want) {
 		t.Fatalf("after the worker's report: %v", got)
+	}
+}
+
+// The routing table keeps, when the hold ends, the endpoints of the
+// workers that still wait, for the grace that follows, and those of the
+// worker whose report ended it. The store notes a renewal before the
+// renewal commits, and the table reads committed leases: in the fifth soak
+// a router read it between the two, when the first worker back had ended
+// the hold and its lease was still the old one, and got neither that
+// worker's endpoints nor the others', which were no longer waiting; it
+// answered 503 for 0.8 s for the two apps whose replicas ran on those
+// workers. The plain start grace, with no hold, keeps a waiting worker's
+// endpoints for the whole grace, also while another worker's renewal is
+// noted and not yet committed.
+func TestRouteTableThroughTheEndOfTheHold(t *testing.T) {
+	for _, hold := range []bool{false, true} {
+		clock := &fakeClock{t: time.Unix(1_700_000_000, 0)}
+		onWorker := func(nodes []Node, placed []Assignment, app spec.App, idx int, now time.Time) (string, error) {
+			switch app.Name {
+			case "b":
+				return nodeB, nil
+			case "c":
+				return nodeC, nil
+			}
+			return FirstNode(nodes, placed, app, idx, now)
+		}
+		s := openT(t, filepath.Join(t.TempDir(), "data", "hivemind.db"), WithClock(clock.Now), WithPlacement(onWorker))
+		e := &rolloutEnv{t: t, s: s, clock: clock, ctx: ctxT(t)}
+		if err := e.s.InitCluster(e.ctx, Cluster{AdminTokenHash: [32]byte{1}, NodeID: node1}); err != nil {
+			t.Fatal(err)
+		}
+		e.renewAt(node1, "10.0.0.1")
+		e.renewAt(nodeB, "10.0.0.2")
+		e.renewAt(nodeC, "10.0.0.3")
+		e.put(routed("b", 1, "b.example.com"))
+		e.put(routed("c", 1, "c.example.com"))
+		e.report(nodeB, routedContainer("b", 0, 1, 33000))
+		e.report(nodeC, routedContainer("c", 0, 1, 34000))
+		wantB, wantC := []string{"10.0.0.2:33000"}, []string{"10.0.0.3:34000"}
+
+		e.clock.Advance(10 * time.Minute)
+		started := e.clock.Now()
+		if err := e.s.SetStarted(e.ctx, started, DefaultStartGrace); err != nil {
+			t.Fatal(err)
+		}
+		// nodeB is back first: in the grace, or after it, which ends the hold.
+		first := started.Add(30 * time.Second)
+		if hold {
+			first = started.Add(5 * time.Minute)
+		}
+		e.clock.t = first
+		e.renewAt(node1, "10.0.0.1")
+		check := func(when string, b, c []string) {
+			t.Helper()
+			tab := e.table()
+			if !slices.Equal(tab["b.example.com"], b) || !slices.Equal(tab["c.example.com"], c) {
+				t.Fatalf("hold %v, %s: b %v, c %v; want %v and %v", hold, when, tab["b.example.com"], tab["c.example.com"], b, c)
+			}
+		}
+		check("before nodeB is back", wantB, wantC)
+		// nodeB's renewal, noted and not yet committed.
+		e.s.noteReport(nodeB, e.clock.Now().UnixNano())
+		check("nodeB's renewal noted, not committed", wantB, wantC)
+		e.renewAt(nodeB, "10.0.0.2")
+		check("nodeB's renewal committed", wantB, wantC)
+
+		// nodeC is silent. It stays in the table until the grace ends, or, after
+		// the hold, until a grace after nodeB's report.
+		end := started.Add(DefaultStartGrace)
+		if hold {
+			end = first.Add(DefaultStartGrace)
+		}
+		for _, d := range []time.Duration{-DefaultStartGrace + 12*time.Second, -time.Second} {
+			if e.clock.t = end.Add(d); e.clock.t.Before(first) {
+				continue
+			}
+			e.renewAt(nodeB, "10.0.0.2")
+			check(fmt.Sprintf("%s before the end of the wait", -d), wantB, wantC)
+		}
+		e.clock.t = end
+		e.renewAt(nodeB, "10.0.0.2")
+		check("at the end of the wait", wantB, nil)
 	}
 }

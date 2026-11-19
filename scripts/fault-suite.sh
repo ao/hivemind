@@ -60,6 +60,20 @@
 #                 grace; no node is lost, and no worker's container changes,
 #                 before or after the delay is removed and the cluster
 #                 converges.
+#   start-hold-late
+#                 serve on the server is killed, every worker's packets to
+#                 port 4484 are dropped (iptables), and serve starts again
+#                 with --start-grace 30s. Past the grace no worker has
+#                 reported, so the server holds them: every worker waiting,
+#                 none lost, nothing placed again, and the error line. Then
+#                 the first worker's rule comes off, and 12 s later the
+#                 others': the first one's report ends the hold, the server
+#                 logs that the others wait for the start grace again, and
+#                 they report inside it. No worker is lost, and no container
+#                 on any node changes or appears. In the fifth soak, where the
+#                 hold ended for every worker at once, a worker 0.5 s behind
+#                 the first was lost, and one 12 s behind had its replicas
+#                 started again on the server's machine.
 #
 # After each restore, the old server comes back: the restored server stops,
 # the alias moves to the old container, which starts again at its old
@@ -635,6 +649,78 @@ scenario_lose_server_slow() {
 	result "$what" "PASS in $(($(now) - t_start)) s, restored at $NEW_IP with 2000 ms delay on a worker; every worker back ${t_back} s after serve started, none lost, no container changed; converged ${t_conv} s after serve started; old server refused"
 }
 
+# log_count PATTERN: how many lines of the server's log match PATTERN.
+log_count() { docker exec "$S" sh -c "grep -c '$1' /var/log/hivemind.log || true"; }
+
+scenario_start_hold_late() {
+	local what=start-hold-late first=${CL_NAMES[1]} first_id=${CL_IDS[1]} pre=$CL_WORK/pre-shl.tsv
+	local workers=("${CL_NAMES[@]:1}") ids=("${CL_IDS[@]:1}") rest=("${CL_NAMES[@]:2}") rest_ids=("${CL_IDS[@]:2}")
+	local lost0=() errors0 ended0 saved=${CL_SERVE_ARGS:-} c i id left t_start t_heal1 t_back1 t_heal2 t_back2
+	t_start=$(now)
+	place_spread
+	for id in "${ids[@]}"; do must_hold_spread "$id"; done
+	save_running "$pre"
+	for ((i = 0; i < ${#ids[@]}; i++)); do lost0[i]=$(lost_count "${ids[$i]}"); done
+	errors0=$(log_count 'no worker has reported to this server since it started')
+	ended0=$(log_count "which ends the start grace")
+
+	kill_server_process
+	for c in "${workers[@]}"; do
+		docker exec "$c" iptables -I OUTPUT -p tcp --dport 4484 -j DROP || cl_fail "$what: iptables in $c"
+	done
+	cl_note "$what: killed serve on $S, and dropped every worker's packets to port 4484, at $(date -u +%T)"
+	CL_SERVE_ARGS="$saved --start-grace 30s"
+	cl_serve_server
+	CL_SERVE_ARGS=$saved
+	wait_for 60 docker exec "$S" hivemind status || cl_fail "$what: the API did not answer after the restart"
+	SERVED_AT=$(now)
+	docker exec "$S" grep -q "workers that were up before this start wait for their first report.* waiting=${#workers[@]} " /var/log/hivemind.log ||
+		cl_fail "$what: serve did not log that ${#workers[@]} workers wait: $(docker exec "$S" grep 'wait for their first report' /var/log/hivemind.log | tail -n 1)"
+
+	# Past the 30 s grace, with no report: the hold.
+	at_since_served 40
+	all_state waiting "${ids[@]}" || cl_fail "$what: past the grace the workers are not all waiting: $(docker exec "$S" hivemind nodes | tr '\n' ';')"
+	docker exec "$S" hivemind nodes | grep -q 'none of them has reported since the server started' ||
+		cl_fail "$what: hivemind nodes does not say the server holds the workers: $(docker exec "$S" hivemind nodes | tr '\n' ';')"
+	[ "$(log_count 'no worker has reported to this server since it started')" -gt "$errors0" ] ||
+		cl_fail "$what: serve did not log the hold at error"
+	kept_ok "$pre" || cl_fail "$what: a container stopped or restarted in the hold"
+	new_containers_ok "$pre" || cl_fail "$what: a container was started in the hold"
+	cl_note "$what: $(($(now) - SERVED_AT)) s after the start, past its 30 s grace: every worker waiting, held, nothing placed again"
+
+	docker exec "$first" iptables -D OUTPUT -p tcp --dport 4484 -j DROP || cl_fail "$what: heal: iptables in $first"
+	t_heal1=$(now)
+	wait_for 30 state_is "$first_id" ready || cl_fail "$what: $first did not report within 30 s of its heal: $(docker exec "$S" hivemind nodes | tr '\n' ';')"
+	t_back1=$(($(now) - t_heal1))
+	cl_note "$what: $first healed, and reported ${t_back1} s later"
+	if [ "${#rest[@]}" -gt 0 ]; then
+		left=$((t_heal1 + 12 - $(now)))
+		[ "$left" -le 0 ] || sleep "$left"
+		all_state waiting "${rest_ids[@]}" || cl_fail "$what: 12 s after the first heal the others are not waiting: $(docker exec "$S" hivemind nodes | tr '\n' ';')"
+		[ "$(log_count "which ends the start grace")" -gt "$ended0" ] ||
+			cl_fail "$what: serve did not log the end of the hold: $(docker exec "$S" tail -n 5 /var/log/hivemind.log | tr '\n' ';')"
+		docker exec "$S" grep "which ends the start grace" /var/log/hivemind.log | tail -n 1 | grep -q "waiting=${#rest[@]} " ||
+			cl_fail "$what: the end of the hold does not name ${#rest[@]} workers waiting: $(docker exec "$S" grep "ends the start grace's hold" /var/log/hivemind.log | tail -n 1)"
+		for c in "${rest[@]}"; do
+			docker exec "$c" iptables -D OUTPUT -p tcp --dport 4484 -j DROP || cl_fail "$what: heal: iptables in $c"
+		done
+		t_heal2=$(now)
+		wait_for 30 all_state ready "${rest_ids[@]}" || cl_fail "$what: the others did not report within 30 s of their heal: $(docker exec "$S" hivemind nodes | tr '\n' ';')"
+		t_back2=$(($(now) - t_heal2))
+		cl_note "$what: the others healed $((t_heal2 - t_heal1)) s after $first, reported ${t_back2} s later"
+	fi
+	for ((i = 0; i < ${#ids[@]}; i++)); do
+		[ "$(lost_count "${ids[$i]}")" -eq "${lost0[$i]}" ] ||
+			cl_fail "$what: the server lost ${ids[$i]}: $(docker exec "$S" grep 'node lost' /var/log/hivemind.log | tail -n 3 | tr '\n' ';')"
+	done
+	kept_ok "$pre" || cl_fail "$what: a container stopped or restarted after the heals"
+	new_containers_ok "$pre" || cl_fail "$what: a replica was placed again after the heals"
+	wait_converged "$what"
+	kept_ok "$pre" || cl_fail "$what: a container stopped or restarted by convergence"
+	new_containers_ok "$pre" || cl_fail "$what: a container appeared by convergence"
+	result "$what" "PASS in $(($(now) - t_start)) s; held past a 30 s grace, $first reported ${t_back1} s after its heal, the others healed 12 s later and reported in ${t_back2:-0} s; none lost, no container changed"
+}
+
 setup
 scenario_kill_worker
 scenario_kill_server
@@ -643,6 +729,7 @@ scenario_slow
 scenario_flap
 scenario_lose_server_partition
 scenario_lose_server_slow
+scenario_start_hold_late
 
 cl_note "summary for $NODES nodes:"
 for r in "${RESULTS[@]}"; do cl_note "  $r"; done

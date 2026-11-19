@@ -117,7 +117,7 @@ func noteWaiting(ctx context.Context, st *store.Store, grace time.Duration, log 
 		}
 	}
 	if waiting > 0 {
-		log.Info("workers that were up before this start wait for their first report; when the start grace ends, those that have not reported are lost, unless none has, which keeps them all waiting",
+		log.Info("workers that were up before this start wait for their first report; when the start grace ends, those that have not reported are lost, unless none has: then they all wait until one reports, and the others the start grace again from that report",
 			"waiting", waiting, "start_grace", max(grace, scheduler.DefaultLeaseTimeout))
 	}
 }

@@ -579,9 +579,27 @@ func TestStatusAndNodesSayWhyWorkersWait(t *testing.T) {
 		}
 	}
 
-	// node-1 reports: the hold is over; node-2 is lost, and there is no
-	// line.
+	// node-1 reports: the hold is over, and node-2 has the start grace
+	// again, which the line counts down.
 	if err := st.RenewLease(ctx, "node-1"); err != nil {
+		t.Fatal(err)
+	}
+	both("1 worker is waiting for its first report since the server started: another worker's report ended the hold, "+
+		"and it has the start grace again (", "s left); its replicas show as unknown until it reports.")
+	out, _, err = run(t, "", "nodes", "--json")
+	if err != nil || strings.Count(out, `"start_hold_ended": `) != 1 || strings.Contains(out, "start_held") ||
+		strings.Count(out, `"start_grace_left_seconds": `) != 1 {
+		t.Fatalf("nodes --json after the hold: %v\n%s", err, out)
+	}
+	if l := waitingLine([]nodeRow{{NodeView: server.NodeView{State: "waiting", StartHoldEnded: &time.Time{}, StartGraceLeftSeconds: 3}},
+		{NodeView: server.NodeView{State: "waiting", StartHoldEnded: &time.Time{}, StartGraceLeftSeconds: 3}}}); l !=
+		"2 workers are waiting for their first report since the server started: another worker's report ended the hold, "+
+			"and they have the start grace again (3s left); their replicas show as unknown until they report." {
+		t.Errorf("two workers after the hold: %q", l)
+	}
+
+	// node-2 reports too: no one waits, and there is no line.
+	if err := st.RenewLease(ctx, "node-2"); err != nil {
 		t.Fatal(err)
 	}
 	both()

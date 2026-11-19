@@ -31,13 +31,15 @@ report from any of the workers that were waiting, they all stay waiting,
 until one of them reports or is removed with hivemind node remove: a server
 that hears from none of its workers is more often an old copy of a cluster
 restored elsewhere, or cut off from them, than one whose workers all died
-(docs/backup.md). A line after the table says how many workers wait, how
-long the start grace has left, or that it has ended and the server keeps
-them waiting, and what to do. A lease age of 48 hours or more is printed in
-days.
+(docs/backup.md). Once one of them reports, the others stay waiting for the
+start grace again, from that report, and are lost if they have not reported
+by its end. A line after the table says how many workers wait, how long the
+start grace has left, or that it has ended and the server keeps them
+waiting, and what to do. A lease age of 48 hours or more is printed in days.
 
 --json has, on a waiting node, "start_grace_left_seconds" while the grace
-lasts, and "start_held": true once it has ended with no report.
+lasts, or the grace after a hold, "start_held": true once it has ended with
+no report, and "start_hold_ended", when a hold ended, in the grace after it.
 
 ADDRESS is the node's private address, where its routed replicas publish
 their ports. "-" means it reported none: such a node takes no routed replicas.
@@ -137,7 +139,9 @@ func printNodes(out io.Writer, nodes []nodeRow) {
 // since the server started, and why: in the start grace, how long it has
 // left; once the grace has ended with no report from any of them
 // (start_held), that the server keeps them waiting, what that usually
-// means, and what to do. "" when no node is waiting. hivemind nodes and
+// means, and what to do; once one of them has reported after that
+// (start_hold_ended), that the others have the start grace again, and how
+// long it has left. "" when no node is waiting. hivemind nodes and
 // hivemind status print it, as the waiting workers' replicas show as
 // unknown and count as neither running nor ready; in the fourth soak status
 // showed 0 of 18 running for a minute while every app served. The line has
@@ -146,7 +150,7 @@ func printNodes(out io.Writer, nodes []nodeRow) {
 func waitingLine(nodes []nodeRow) string {
 	var n int
 	var left float64
-	held := false
+	held, ended := false, false
 	for _, r := range nodes {
 		if r.State != "waiting" || r.Server {
 			continue
@@ -154,6 +158,7 @@ func waitingLine(nodes []nodeRow) string {
 		n++
 		left = max(left, r.StartGraceLeftSeconds)
 		held = held || r.StartHeld
+		ended = ended || r.StartHoldEnded != nil
 	}
 	if n == 0 {
 		return ""
@@ -172,6 +177,17 @@ func waitingLine(nodes []nodeRow) string {
 	grace := ""
 	if left > 0 {
 		grace = " (start grace: " + leaseAge(time.Duration(left*float64(time.Second))) + " left)"
+	}
+	if ended {
+		if left > 0 {
+			grace = " (" + leaseAge(time.Duration(left*float64(time.Second))) + " left)"
+		}
+		if n == 1 {
+			return "1 worker is waiting for its first report since the server started: another worker's report ended the hold, " +
+				"and it has the start grace again" + grace + "; its replicas show as unknown until it reports."
+		}
+		return fmt.Sprintf("%d workers are waiting for their first report since the server started: another worker's report ended the hold, "+
+			"and they have the start grace again%s; their replicas show as unknown until they report.", n, grace)
 	}
 	if n == 1 {
 		return "1 worker is waiting for its first report since the server started" + grace + "; its replicas show as unknown until it reports."

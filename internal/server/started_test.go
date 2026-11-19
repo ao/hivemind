@@ -130,8 +130,9 @@ func TestReportsFromBeforeTheStartAreUnknown(t *testing.T) {
 // and has not reported to this process is "waiting", as the sweep does not
 // count it lost. When the grace ends with no report from any node that was
 // waiting, they all stay waiting (the store's hold); once one reports, it
-// is ready at once, and the others are lost. A node whose lease had lapsed
-// before the server went down is lost at once.
+// is ready at once, and the others wait for the start grace again, which
+// the view counts down. A node whose lease had lapsed before the server
+// went down is lost at once.
 func TestNodesWaitForTheirFirstReportAfterTheStart(t *testing.T) {
 	e := newStartedEnv(t)
 	ctx := context.Background()
@@ -181,8 +182,15 @@ func TestNodesWaitForTheirFirstReportAfterTheStart(t *testing.T) {
 	if err := e.st.RenewLease(ctx, "node-c"); err != nil {
 		t.Fatal(err)
 	}
-	if s := view(started); s["node-a"] != "lost" || s["node-c"] != "ready" {
-		t.Fatalf("125 s after a start with a 2-minute grace, once node-c reported: %v, want node-a lost, node-c ready", s)
+	if s := view(started); s["node-a"] != "waiting" || s["node-c"] != "ready" {
+		t.Fatalf("125 s after a start with a 2-minute grace, once node-c reported: %v, want node-a waiting, for the grace again, and node-c ready", s)
+	}
+	var nodes []NodeView
+	e.get(started, "/v1/nodes", &nodes)
+	for _, n := range nodes {
+		if n.ID == "node-a" && (n.StartHeld || n.StartGraceLeftSeconds < 100 || n.StartGraceLeftSeconds > 120) {
+			t.Fatalf("node-a once the hold ended: held %v, start grace left %.1f s; want not held, about 120 s left", n.StartHeld, n.StartGraceLeftSeconds)
+		}
 	}
 	if err := e.st.RenewLease(ctx, "node-a"); err != nil {
 		t.Fatal(err)

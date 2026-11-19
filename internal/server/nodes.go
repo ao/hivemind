@@ -26,16 +26,22 @@ type NodeView struct {
 	// start and has not reported to this process yet is "waiting": it is
 	// not lost, and its replicas stay where they are. When the grace ends
 	// with no report from any node that was waiting, they all stay
-	// "waiting" (StartHeld).
+	// "waiting" (StartHeld); once one of them reports, the others stay
+	// "waiting" for the start grace again, from that report.
 	State string `json:"state"`
 	// StartGraceLeftSeconds is, on a waiting node, how long the start
-	// grace has left. It is absent once the grace has ended.
+	// grace has left, or, after a hold has ended, the grace that followed
+	// it. It is absent once the grace has ended, and while it holds.
 	StartGraceLeftSeconds float64 `json:"start_grace_left_seconds,omitempty"`
 	// StartHeld is true on a waiting node once the start grace has ended
 	// with no report since the start from any node that was waiting: the
 	// server keeps them waiting, and places none of their replicas, until
 	// one of them reports or is removed (store.StartWait).
 	StartHeld bool `json:"start_held,omitempty"`
+	// StartHoldEnded is, on a waiting node, when the hold ended: the first
+	// report, after the grace, of a node that was waiting. The node then
+	// waits for the start grace again, from that moment.
+	StartHoldEnded *time.Time `json:"start_hold_ended,omitempty"`
 	// Server is true for the node that runs the server, which cannot be
 	// removed.
 	Server bool `json:"server"`
@@ -234,7 +240,11 @@ func (s *Server) listNodes(w http.ResponseWriter, r *http.Request) {
 		}
 		if waiting {
 			v.StartHeld = wait.Held
-			if left := wait.GraceEnds.Sub(now); left > 0 {
+			if !wait.HoldEnded.IsZero() {
+				t := wait.HoldEnded.UTC()
+				v.StartHoldEnded = &t
+			}
+			if left := wait.WaitEnds.Sub(now); !wait.WaitEnds.IsZero() && left > 0 {
 				v.StartGraceLeftSeconds = left.Seconds()
 			}
 		}

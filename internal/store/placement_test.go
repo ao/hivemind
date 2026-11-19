@@ -222,7 +222,7 @@ func TestStartGraceLeavesOutTheServersOwnLease(t *testing.T) {
 // waiting, they go on waiting: none is lost, and their replicas stay where
 // they were, for as long as that lasts. A node removed meanwhile has its
 // replicas placed again, as a removal always does. Once one of them
-// reports, the others are lost, as at the end of any grace.
+// reports, the others wait for the start grace again, and are lost after it.
 func TestStartGraceHoldsWhenNoWorkerReports(t *testing.T) {
 	e := newSchedEnv(t, 0, "node-s", "node-1", "node-2", "node-3")
 	if err := e.s.InitCluster(ctxT(t), Cluster{AdminTokenHash: [32]byte{1}, NodeID: "node-s"}); err != nil {
@@ -299,18 +299,141 @@ func TestStartGraceHoldsWhenNoWorkerReports(t *testing.T) {
 		t.Fatalf("after the removal: waiting %v, held %v", w, held())
 	}
 
-	// node-1 reports: the hold is over, and node-2, which has not, is lost.
+	// node-1 reports: the hold is over, and node-2, which has not, waits
+	// for the start grace again (TestStartHoldEndGivesTheOthersTheGrace),
+	// then is lost.
 	at(2*time.Hour + time.Minute)
 	e.renew("node-1")
+	if lost := e.sweep(); len(lost) != 0 {
+		t.Fatalf("after node-1's report: lost %v, want none", lost)
+	}
+	if w := waiting(); !slices.Equal(w, []string{"node-2"}) || held() {
+		t.Fatalf("after node-1's report: waiting %v, held %v", w, held())
+	}
+	at(2*time.Hour + 3*time.Minute)
+	e.renew("node-1")
 	if lost := e.sweep(); !slices.Equal(lost, []string{"node-2"}) {
-		t.Fatalf("after node-1's report: lost %v, want node-2", lost)
+		t.Fatalf("a grace after node-1's report: lost %v, want node-2", lost)
 	}
 	if w := waiting(); len(w) != 0 || held() {
-		t.Fatalf("after node-1's report: waiting %v, held %v", w, held())
+		t.Fatalf("a grace after node-1's report: waiting %v, held %v", w, held())
 	}
 	for i, n := range e.nodesOfWeb() {
 		if n == "node-2" || n == "node-3" {
 			t.Fatalf("web %d is still on %s", i, n)
+		}
+	}
+}
+
+// When the hold ends, at the first report of a worker that was waiting,
+// the others wait for the start grace again, from that report: a partition
+// that heals heals for each worker at its own moment. In the fifth soak the
+// hold ended for all of them at once: a worker 0.52 s behind the first was
+// lost, and one 12 s behind had its six replicas placed again on the
+// server's machine, where they ran twice for 20 s and stayed. Here workers
+// report at the hold's end, 0.5 s and 12 s after it, with a sweep before
+// and after each report: none is lost, and no replica moves. One that never
+// reports is lost a grace after the hold's end, and only then is its
+// replica placed again.
+func TestStartHoldEndGivesTheOthersTheGrace(t *testing.T) {
+	e := newSchedEnv(t, 0, "node-s", "node-1", "node-2", "node-3", "node-4")
+	if err := e.s.InitCluster(ctxT(t), Cluster{AdminTokenHash: [32]byte{1}, NodeID: "node-s"}); err != nil {
+		t.Fatal(err)
+	}
+	mustPut(t, e.s, web(5))
+	before := e.nodesOfWeb()
+	if slices.Contains(before, "") || !slices.Contains(before, "node-4") {
+		t.Fatalf("web on %v, want every replica placed, one on node-4", before)
+	}
+	e.clock.Advance(10 * time.Minute)
+	started := e.clock.Now()
+	if err := e.s.SetStarted(ctxT(t), started, 2*time.Minute); err != nil {
+		t.Fatal(err)
+	}
+	waiting := func() []string {
+		t.Helper()
+		nodes, err := e.s.ListNodes(ctxT(t))
+		if err != nil {
+			t.Fatal(err)
+		}
+		var out []string
+		for _, n := range nodes {
+			if e.s.Waiting(n, e.clock.Now()) {
+				out = append(out, n.ID)
+			}
+		}
+		return out
+	}
+	var back []string // the workers that have reported, which renew on
+	at := func(t0 time.Time) {
+		e.clock.t = t0
+		e.renew("node-s")
+		for _, id := range back {
+			e.renew(id)
+		}
+	}
+	at(started.Add(5 * time.Minute))
+	if lost := e.sweep(); len(lost) != 0 {
+		t.Fatalf("in the hold: lost %v", lost)
+	}
+	if w, _ := e.s.StartWait(e.clock.Now()); !w.Held || !w.WaitEnds.IsZero() || !w.HoldEnded.IsZero() {
+		t.Fatalf("in the hold: %+v", w)
+	}
+
+	lift := started.Add(5 * time.Minute)
+	for _, step := range []struct {
+		after   time.Duration
+		node    string
+		waiting []string
+	}{
+		{0, "node-1", []string{"node-2", "node-3", "node-4"}},
+		{500 * time.Millisecond, "node-2", []string{"node-3", "node-4"}},
+		{12 * time.Second, "node-3", []string{"node-4"}},
+	} {
+		at(lift.Add(step.after))
+		if lost := e.sweep(); len(lost) != 0 {
+			t.Fatalf("%s after the hold's end, before %s reports: lost %v, want none", step.after, step.node, lost)
+		}
+		e.renew(step.node)
+		back = append(back, step.node)
+		if lost := e.sweep(); len(lost) != 0 {
+			t.Fatalf("%s after the hold's end, %s reported: lost %v, want none", step.after, step.node, lost)
+		}
+		if w := waiting(); !slices.Equal(w, step.waiting) {
+			t.Fatalf("%s after the hold's end, %s reported: waiting %v, want %v", step.after, step.node, w, step.waiting)
+		}
+		if got := e.nodesOfWeb(); !slices.Equal(got, before) {
+			t.Fatalf("%s after the hold's end: web on %v, want it where it was, %v", step.after, got, before)
+		}
+	}
+	w, ok := e.s.StartWait(e.clock.Now())
+	if !ok || w.Held || !w.HoldEnded.Equal(lift) || !w.WaitEnds.Equal(lift.Add(2*time.Minute)) || !w.GraceEnds.Equal(started.Add(2*time.Minute)) {
+		t.Fatalf("after the hold's end: %+v, %v; want it ended at %s, the others waiting to %s", w, ok, lift, lift.Add(2*time.Minute))
+	}
+
+	// node-4 never reports: it waits to a grace after the hold's end.
+	for d := 20 * time.Second; d < 2*time.Minute; d += 10 * time.Second {
+		at(lift.Add(d))
+		if lost := e.sweep(); len(lost) != 0 {
+			t.Fatalf("%s after the hold's end: lost %v, want none", d, lost)
+		}
+		if got := e.nodesOfWeb(); !slices.Equal(got, before) {
+			t.Fatalf("%s after the hold's end: web on %v, want it where it was, %v", d, got, before)
+		}
+	}
+	at(lift.Add(2 * time.Minute))
+	if lost := e.sweep(); !slices.Equal(lost, []string{"node-4"}) {
+		t.Fatalf("a grace after the hold's end: lost %v, want node-4", lost)
+	}
+	if w := waiting(); len(w) != 0 {
+		t.Fatalf("a grace after the hold's end: waiting %v", w)
+	}
+	for i, n := range e.nodesOfWeb() {
+		switch {
+		case before[i] == "node-4" && (n == "node-4" || n == ""):
+			t.Fatalf("web %d is on %q after node-4 was lost", i, n)
+		case before[i] != "node-4" && n != before[i]:
+			t.Fatalf("web %d moved from %s to %s", i, before[i], n)
 		}
 	}
 }

@@ -454,7 +454,7 @@ hivemind init [flags]
 | `--route-http-port` | string | `80` | `HIVEMIND_ROUTE_HTTP_PORT` | port of the router's HTTP listener, for ACME HTTP-01 challenges and redirects to https |
 | `--route-https-port` | string | `443` | `HIVEMIND_ROUTE_HTTPS_PORT` | port of the router's HTTPS listener |
 | `--route-max-conns-per-ip` | string | `256` | `HIVEMIND_ROUTE_MAX_CONNS_PER_IP` | most connections the router keeps open from one client IP address (an IPv6 /64), over both its ports; 0 means no limit, for a router behind a proxy that does not pass client addresses |
-| `--start-grace` | string | `2m` | `HIVEMIND_START_GRACE` | how long after serve starts a worker that was up before it waits for its first report, keeping its replicas and its routes, before it is lost, unless no such worker has reported by then; at least 15s |
+| `--start-grace` | string | `2m` | `HIVEMIND_START_GRACE` | how long after serve starts a worker that was up before it waits for its first report, keeping its replicas and its routes, before it is lost; when no such worker has reported by then, they all wait until one does, and the others that long again from then; at least 15s |
 
 ### hivemind join
 
@@ -749,13 +749,15 @@ report from any of the workers that were waiting, they all stay waiting,
 until one of them reports or is removed with hivemind node remove: a server
 that hears from none of its workers is more often an old copy of a cluster
 restored elsewhere, or cut off from them, than one whose workers all died
-(docs/backup.md). A line after the table says how many workers wait, how
-long the start grace has left, or that it has ended and the server keeps
-them waiting, and what to do. A lease age of 48 hours or more is printed in
-days.
+(docs/backup.md). Once one of them reports, the others stay waiting for the
+start grace again, from that report, and are lost if they have not reported
+by its end. A line after the table says how many workers wait, how long the
+start grace has left, or that it has ended and the server keeps them
+waiting, and what to do. A lease age of 48 hours or more is printed in days.
 
 --json has, on a waiting node, "start_grace_left_seconds" while the grace
-lasts, and "start_held": true once it has ended with no report.
+lasts, or the grace after a hold, "start_held": true once it has ended with
+no report, and "start_hold_ended", when a hold ended, in the grace after it.
 
 ADDRESS is the node's private address, where its routed replicas publish
 their ports. "-" means it reported none: such a node takes no routed replicas.
@@ -1059,7 +1061,7 @@ hivemind serve [flags]
 | `--route-http-port` | string | `80` | `HIVEMIND_ROUTE_HTTP_PORT` | port of the router's HTTP listener, for ACME HTTP-01 challenges and redirects to https |
 | `--route-https-port` | string | `443` | `HIVEMIND_ROUTE_HTTPS_PORT` | port of the router's HTTPS listener |
 | `--route-max-conns-per-ip` | string | `256` | `HIVEMIND_ROUTE_MAX_CONNS_PER_IP` | most connections the router keeps open from one client IP address (an IPv6 /64), over both its ports; 0 means no limit, for a router behind a proxy that does not pass client addresses |
-| `--start-grace` | string | `2m` | `HIVEMIND_START_GRACE` | how long after serve starts a worker that was up before it waits for its first report, keeping its replicas and its routes, before it is lost, unless no such worker has reported by then; at least 15s |
+| `--start-grace` | string | `2m` | `HIVEMIND_START_GRACE` | how long after serve starts a worker that was up before it waits for its first report, keeping its replicas and its routes, before it is lost; when no such worker has reported by then, they all wait until one does, and the others that long again from then; at least 15s |
 
 ### hivemind status
 

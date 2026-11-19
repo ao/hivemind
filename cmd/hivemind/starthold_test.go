@@ -16,7 +16,8 @@ import (
 // When the start grace ends with no report from any worker that was
 // waiting, the sweep keeps them waiting and serve says so at error, with
 // what to do, once and then once an hour. When one of them reports, it
-// says the hold is over, and the others are lost.
+// says, once, that the hold is over and until when the others wait, and
+// they are lost only then.
 func TestStartHoldIsLogged(t *testing.T) {
 	ctx := context.Background()
 	var mu sync.Mutex
@@ -86,18 +87,81 @@ func TestStartHoldIsLogged(t *testing.T) {
 		t.Fatalf("logged %d times after an hour, want twice:\n%s", errorLines(), logs)
 	}
 
-	// node-1 reports.
+	// node-1 reports: node-2 waits for the start grace again, a minute
+	// here, from that report.
+	reported := clock()
 	if err := st.RenewLease(ctx, "node-1"); err != nil {
 		t.Fatal(err)
 	}
-	if lost := sweepAfter(time.Second); !slices.Equal(lost, []string{"node-2"}) {
-		t.Fatalf("after node-1's report: lost %v, want node-2", lost)
+	if lost := sweepAfter(time.Second); len(lost) != 0 {
+		t.Fatalf("1 s after node-1's report: lost %v, want none", lost)
 	}
-	if !strings.Contains(logs.String(), "the start grace holds the others no longer") {
-		t.Fatalf("the end of the hold was not logged:\n%s", logs)
+	l = logs.String()
+	for _, want := range []string{"which ends the start grace's hold", "wait for the start grace again", "waiting=1", "nodes=node-2",
+		"hold_ended=" + reported.UTC().Format(time.RFC3339), "wait_ends=" + reported.Add(time.Minute).UTC().Format(time.RFC3339)} {
+		if !strings.Contains(l, want) {
+			t.Errorf("the end of the hold does not say %q:\n%s", want, l)
+		}
+	}
+	// node-1 renews on, as a live worker does.
+	for range 6 {
+		advance(9 * time.Second)
+		if err := st.RenewLease(ctx, "node-1"); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if lost := sweepAfter(4 * time.Second); len(lost) != 0 {
+		t.Fatalf("59 s after node-1's report: lost %v, want none", lost)
+	}
+	if lost := sweepAfter(time.Second); !slices.Equal(lost, []string{"node-2"}) {
+		t.Fatalf("a minute after node-1's report: lost %v, want node-2", lost)
 	}
 	sweepAfter(2 * time.Hour)
-	if errorLines() != 2 || strings.Count(logs.String(), "holds the others no longer") != 1 {
+	if errorLines() != 2 || strings.Count(logs.String(), "ends the start grace's hold") != 1 {
 		t.Fatalf("after the hold:\n%s", logs)
+	}
+}
+
+// When every worker that was waiting has reported by the sweep after the
+// hold ends, the line says so, and names no wait.
+func TestStartHoldEndsWithEveryWorkerBack(t *testing.T) {
+	ctx := context.Background()
+	now := time.Unix(1_700_000_000, 0)
+	var mu sync.Mutex
+	clock := func() time.Time {
+		mu.Lock()
+		defer mu.Unlock()
+		return now
+	}
+	st, err := store.Open(ctx, filepath.Join(t.TempDir(), "hivemind.db"), store.WithClock(clock))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+	if err := st.UpsertNode(ctx, store.Node{ID: "node-1", Name: "node-1", CPU: 1, Memory: 1 << 30}); err != nil {
+		t.Fatal(err)
+	}
+	mu.Lock()
+	now = now.Add(10 * time.Minute)
+	mu.Unlock()
+	started := clock()
+	if err := st.SetStarted(ctx, started, time.Minute); err != nil {
+		t.Fatal(err)
+	}
+	logs := &syncLog{}
+	log := slog.New(slog.NewTextHandler(logs, nil))
+	var hold startHoldLog
+	mu.Lock()
+	now = now.Add(2 * time.Minute)
+	mu.Unlock()
+	hold.note(ctx, st, log, started)
+	if err := st.RenewLease(ctx, "node-1"); err != nil {
+		t.Fatal(err)
+	}
+	hold.note(ctx, st, log, started)
+	hold.note(ctx, st, log, started)
+	l := logs.String()
+	if strings.Count(l, "level=ERROR") != 1 || strings.Count(l, "every worker that was waiting has reported") != 1 || strings.Contains(l, "wait_ends") {
+		t.Fatalf("logs:\n%s", l)
 	}
 }
