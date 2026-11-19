@@ -143,6 +143,10 @@ func (s *Store) RemoveNode(ctx context.Context, id string, force bool) (Removal,
 		if _, err := tx.ExecContext(ctx, `INSERT INTO removed_nodes (id, name, removed_at) VALUES (?, ?, ?)`, id, name, ts); err != nil {
 			return err
 		}
+		onCommit(tx, func() {
+			s.noteRemoved(id)
+			s.forgetLease(id)
+		})
 		if err := purgeDeleted(ctx, tx); err != nil {
 			return err
 		}
@@ -151,9 +155,12 @@ func (s *Store) RemoveNode(ctx context.Context, id string, force bool) (Removal,
 	return out, err
 }
 
-// IsNodeRemoved reports whether id is on the denylist of removed nodes.
-func (s *Store) IsNodeRemoved(ctx context.Context, id string) (bool, error) {
-	return isRemoved(ctx, s.rdb, id)
+// IsNodeRemoved reports whether id is on the denylist of removed nodes. It
+// reads the list the store keeps in memory (routecache.go).
+func (s *Store) IsNodeRemoved(_ context.Context, id string) (bool, error) {
+	s.removedMu.RLock()
+	defer s.removedMu.RUnlock()
+	return s.removed[id], nil
 }
 
 type rowQuerier interface {

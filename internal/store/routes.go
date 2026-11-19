@@ -10,6 +10,7 @@ import (
 	"net/netip"
 	"slices"
 	"strconv"
+	"time"
 
 	"github.com/ao/hivemind/internal/scheduler"
 	"github.com/ao/hivemind/internal/spec"
@@ -117,8 +118,45 @@ func (r Route) Key() spec.RouteKey { return spec.RouteKey{Host: r.Host, Path: r.
 // "protocol":"h2c", as encoding/json writes an h2c route; the routes of
 // every other app are HTTP/1.1. A spec that holds that text elsewhere is
 // decoded for nothing.
+//
+// The table is kept between reads while nothing it reads changes
+// (routecache.go). The two reads behind it are made in one read transaction,
+// so its routes and its endpoints come from the same commit.
 func (s *Store) RouteTable(ctx context.Context) ([]Route, error) {
-	rows, err := s.rdb.QueryContext(ctx, `SELECT h.host, h.path, h.app, h.port,
+	now := s.now()
+	ver := s.routeVer.Load()
+	// Nodes waiting for their first report after the start keep their
+	// endpoints for a window that moves with time and with their reports
+	// (start.go): the table is read every time while it is open.
+	from, before := s.waitWindow(now)
+	keep := from >= before
+	if keep {
+		if t, ok := s.cachedRoutes(ver, now.UnixNano()); ok {
+			return t, nil
+		}
+	}
+	var out []Route
+	var until int64
+	err := s.read(ctx, func(tx *sql.Tx) error {
+		var err error
+		if out, err = s.readRouteTable(ctx, tx, now); err != nil {
+			return err
+		}
+		until, err = routesUntil(ctx, tx, now)
+		return err
+	})
+	if err != nil {
+		return nil, err
+	}
+	if keep {
+		s.keepRoutes(ver, until, out)
+	}
+	return out, nil
+}
+
+// readRouteTable reads the routing table at now.
+func (s *Store) readRouteTable(ctx context.Context, tx *sql.Tx, now time.Time) ([]Route, error) {
+	rows, err := tx.QueryContext(ctx, `SELECT h.host, h.path, h.app, h.port,
 		CASE WHEN instr(a.spec, '"protocol":"h2c"') > 0 THEN a.spec ELSE '' END
 		FROM app_routes h JOIN apps a ON a.name = h.app
 		WHERE a.deleted = 0 ORDER BY h.host, h.path`)
@@ -174,11 +212,10 @@ func (s *Store) RouteTable(ctx context.Context) ([]Route, error) {
 	// gone, and its agent reports again within a pass. The soak through the
 	// routers saw 502s for a second after a restore, from the restored
 	// machine's stale endpoints.
-	now := s.now()
 	cutoff := now.UnixNano() - int64(scheduler.DefaultLeaseTimeout)
 	waitFrom, waitBefore := s.waitWindow(now)
 	started := s.startedAt()
-	rows, err = s.rdb.QueryContext(ctx, `SELECT c.app, c.route_ports, n.address FROM container_status c JOIN nodes n ON n.id = c.node_id
+	rows, err = tx.QueryContext(ctx, `SELECT c.app, c.route_ports, n.address FROM container_status c JOIN nodes n ON n.id = c.node_id
 		WHERE c.ready = 1 AND c.route_ports != '' AND n.address != ''
 		AND (n.last_lease >= ? OR (n.last_lease >= ? AND n.last_lease < ?))
 		AND NOT (c.node_id = (SELECT node_id FROM cluster WHERE id = 1) AND c.updated_at < ?)

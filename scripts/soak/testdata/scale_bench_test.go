@@ -273,6 +273,62 @@ func BenchmarkScaleRollPut(b *testing.B) {
 	}
 }
 
+// GET /v1/routes, which reads the routing table as the routers' polls do,
+// with 15 routed apps of 5 replicas beside the others, as in the second
+// scale run, each replica reported Ready with its route port. With
+// reports=true, before every second read one node sends a report the same
+// as its last (not timed), as ten nodes reporting every 2 s do beside ten
+// routers reading every second.
+func BenchmarkScaleRoutes(b *testing.B) {
+	for _, reports := range []bool{false, true} {
+		for _, n := range benchSizes {
+			b.Run(fmt.Sprintf("reports=%v/replicas=%d", reports, n*5), func(b *testing.B) {
+				e := benchStore(b, n, false)
+				ctx := context.Background()
+				for i, id := range e.nodes {
+					if err := e.st.UpsertNode(ctx, store.Node{ID: id, Name: id, CPU: 2, Memory: 4 << 30, Address: fmt.Sprintf("10.0.0.%d", i+1)}); err != nil {
+						b.Fatal(err)
+					}
+				}
+				for i := 0; i < 15; i++ {
+					a := spec.App{Name: fmt.Sprintf("routed-%02d", i), Image: "nginx:alpine", Replicas: 5,
+						Routes: []spec.Route{{Host: fmt.Sprintf("rt-%02d.scale.test", i), Port: 80}}}
+					if _, err := e.st.PutApp(ctx, a); err != nil {
+						b.Fatal(err)
+					}
+				}
+				for _, id := range e.nodes {
+					rep := reportFor(b, e.st, id)
+					for j := range rep {
+						if len(rep[j].App) > 7 && rep[j].App[:7] == "routed-" {
+							rep[j].RoutePorts = []store.RoutePort{{Port: 80, HostPort: 32768 + j}}
+						}
+					}
+					e.reports[id] = rep
+					if err := e.st.ReportStatus(ctx, id, rep); err != nil {
+						b.Fatal(err)
+					}
+				}
+				if size := e.get(b, "/v1/routes"); size < 1000 {
+					b.Fatalf("the table is %d bytes", size)
+				}
+				b.ResetTimer()
+				for i := 0; i < b.N; i++ {
+					if reports && i%2 == 0 {
+						b.StopTimer()
+						id := e.nodes[(i/2)%len(e.nodes)]
+						if err := e.st.ReportStatus(ctx, id, e.reports[id]); err != nil {
+							b.Fatal(err)
+						}
+						b.StartTimer()
+					}
+					e.get(b, "/v1/routes")
+				}
+			})
+		}
+	}
+}
+
 // One node's report when it changed since the last: one container's
 // readiness flips at every report, so every report writes its rows.
 func BenchmarkScaleReportChanged(b *testing.B) {

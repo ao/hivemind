@@ -37,6 +37,11 @@ type txCache struct {
 	placed   []Assignment
 	placedFP [sha256.Size]byte
 	placedOK bool
+	// routesKept is set by a transaction that leaves the routing table as
+	// it is, whatever rows it changes (routecache.go).
+	routesKept bool
+	// onCommit runs once the transaction has committed.
+	onCommit []func()
 }
 
 type specKey struct {

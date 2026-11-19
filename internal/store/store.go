@@ -257,11 +257,15 @@ type Store struct {
 	minReadySet bool
 	log         *slog.Logger
 
-	// reportMu makes one status report at a time, and guards reported: the
-	// digest of each node's last report this process stored. A report the
-	// same as the last one renews the lease and does not rewrite its rows.
+	// reportMu makes one status report at a time, and guards reported and
+	// rewrote. reported is the digest of each node's last report this
+	// process stored. A report the same as the last one renews the lease and
+	// does not rewrite its rows.
 	reportMu sync.Mutex
 	reported map[string][sha256.Size]byte
+	// rewrote is when this process last wrote each node's rows in full,
+	// rather than stamping them (routecache.go).
+	rewrote map[string]int64
 
 	// defaultPlace is true when place is the scheduler, which reads nothing
 	// but its arguments, so a placement whose inputs did not change can be
@@ -277,6 +281,24 @@ type Store struct {
 	// credMu guards it.
 	credMu    sync.Mutex
 	credSizes map[string]int
+
+	// routeVer is the version of the routing table: raised after each
+	// write that may change it. routeCache is the table last read, and
+	// routeMu guards it (routecache.go).
+	routeVer   atomic.Uint64
+	routeMu    sync.Mutex
+	routeCache *routeCache
+	// leases is each node's lease as this process last committed it, by
+	// node ID; leaseMu guards it.
+	leaseMu sync.Mutex
+	leases  map[string]int64
+	// removed is the denylist of removed nodes; removedMu guards it.
+	removedMu sync.RWMutex
+	removed   map[string]bool
+	// changes is SELECT total_changes(), prepared on db (Store.tx).
+	changes *sql.Stmt
+	// lastChanges is the count of changes after the last transaction.
+	lastChanges atomic.Int64
 
 	// afterReplicaRead, if set, runs in AssignmentsForNode between its read
 	// of the replicas and its read of the surges. Tests set it.
@@ -309,7 +331,7 @@ func Open(ctx context.Context, path string, opts ...Option) (*Store, error) {
 	// One connection for writes: they are serialised in the process. Other
 	// processes are kept out by SQLite's locks and wait up to busy_timeout.
 	db.SetMaxOpenConns(1)
-	s := &Store{db: db, now: time.Now, reported: map[string][sha256.Size]byte{}}
+	s := &Store{db: db, now: time.Now, reported: map[string][sha256.Size]byte{}, rewrote: map[string]int64{}}
 	for _, o := range opts {
 		o(s)
 	}
@@ -320,6 +342,14 @@ func Open(ctx context.Context, path string, opts ...Option) (*Store, error) {
 		s.place, s.defaultPlace = s.schedulerPlace, true
 	}
 	if err := s.init(ctx); err != nil {
+		db.Close()
+		return nil, fmt.Errorf("opening %s: %w", path, err)
+	}
+	if err := s.loadRemoved(ctx); err != nil {
+		db.Close()
+		return nil, fmt.Errorf("opening %s: %w", path, err)
+	}
+	if s.changes, err = db.PrepareContext(ctx, `SELECT total_changes()`); err != nil {
 		db.Close()
 		return nil, fmt.Errorf("opening %s: %w", path, err)
 	}
@@ -378,22 +408,44 @@ func (s *Store) init(ctx context.Context) error {
 }
 
 // Close closes the database.
-func (s *Store) Close() error { return errors.Join(s.rdb.Close(), s.db.Close()) }
+func (s *Store) Close() error { return errors.Join(s.changes.Close(), s.rdb.Close(), s.db.Close()) }
 
 // tx runs fn in one IMMEDIATE transaction and commits it if fn returns nil.
-// The transaction has a txCache (placecache.go) while it is open.
+// The transaction has a txCache (placecache.go) while it is open. Once it
+// has committed, a transaction that changed a row raises the version of the
+// routing table, unless it said that it leaves the table as it is
+// (routecache.go), and then its onCommit functions run.
 func (s *Store) tx(ctx context.Context, fn func(*sql.Tx) error) error {
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
 		return err
 	}
-	txCaches.Store(tx, &txCache{})
+	c := &txCache{}
+	txCaches.Store(tx, c)
 	defer txCaches.Delete(tx)
 	defer tx.Rollback()
 	if err := fn(tx); err != nil {
 		return err
 	}
-	return tx.Commit()
+	// The count is the connection's, and every write is on this one
+	// connection, which the transaction holds: a count other than the one
+	// the last transaction left is a change since, this one's, or one of a
+	// write outside a transaction, or of a transaction that rolled back,
+	// which only costs a read of the table.
+	n, err := s.totalChanges(ctx, tx)
+	if err != nil {
+		return err
+	}
+	if err := tx.Commit(); err != nil {
+		return err
+	}
+	if n != s.lastChanges.Swap(n) && !c.routesKept {
+		s.routesChanged()
+	}
+	for _, f := range c.onCommit {
+		f()
+	}
+	return nil
 }
 
 // read runs fn in a read transaction on the read pool. In WAL mode every
@@ -996,6 +1048,7 @@ func (s *Store) UpsertNode(ctx context.Context, n Node) error {
 			return err
 		}
 		s.noteReport(n.ID, now)
+		onCommit(tx, func() { s.noteLease(n.ID, now) })
 		return s.placePending(ctx, tx)
 	})
 }
@@ -1083,7 +1136,13 @@ func checkNodeDials(d string) error {
 // registered ErrNotFound.
 func (s *Store) RenewLease(ctx context.Context, nodeID string) error {
 	return s.tx(ctx, func(tx *sql.Tx) error {
-		return s.renewLease(ctx, tx, nodeID, s.now().UnixNano())
+		now := s.now().UnixNano()
+		// The routing table counts a node with a current lease; renewing it
+		// leaves the node counted.
+		if s.leaseCurrent(nodeID, now) {
+			keepsRoutes(tx)
+		}
+		return s.renewLease(ctx, tx, nodeID, now)
 	})
 }
 
@@ -1105,6 +1164,7 @@ func (s *Store) renewLease(ctx context.Context, tx *sql.Tx, nodeID string, now i
 		return fmt.Errorf("node %q: %w", nodeID, ErrNotFound)
 	}
 	s.noteReport(nodeID, now)
+	onCommit(tx, func() { s.noteLease(nodeID, now) })
 	return nil
 }
 
@@ -1144,6 +1204,7 @@ func (s *Store) ReportStatus(ctx context.Context, nodeID string, st []Status) er
 	delete(s.reported, nodeID)
 	err := s.tx(ctx, func(tx *sql.Tx) error {
 		now := s.now().UnixNano()
+		current := s.leaseCurrent(nodeID, now)
 		if err := s.renewLease(ctx, tx, nodeID, now); err != nil {
 			return err
 		}
@@ -1178,7 +1239,23 @@ func (s *Store) ReportStatus(ctx context.Context, nodeID string, st []Status) er
 		}
 		// Purged replicas free their host ports and capacity, so a replica that
 		// was pending on them can be placed now rather than at the next sweep.
-		return s.placePending(ctx, tx)
+		placed, err := s.placePendingRows(ctx, tx)
+		if err != nil {
+			return err
+		}
+		// A report the same as the last, from a node whose lease was current,
+		// that placed nothing, leaves the routing table as it is. The stamps
+		// are the time, which the table reads only for the server's own
+		// node's rows from before the start, and the rows it deletes are of
+		// replicas and surges marked for removal and of deleted apps, which
+		// the table leaves out.
+		if current && !rewrite && len(placed) == 0 && s.rewrote[nodeID] >= s.startedAt() {
+			keepsRoutes(tx)
+		}
+		if rewrite {
+			onCommit(tx, func() { s.rewrote[nodeID] = now })
+		}
+		return nil
 	})
 	if err == nil {
 		s.reported[nodeID] = sum

@@ -137,6 +137,8 @@ func (s *Store) SetStarted(ctx context.Context, t time.Time, grace time.Duration
 		}
 	}
 	s.start.Store(st)
+	// The table reads the start (routecache.go).
+	s.routesChanged()
 	return nil
 }
 
