@@ -179,3 +179,65 @@ func TestHivemindExtensionHealthRefuses(t *testing.T) {
 		})
 	}
 }
+
+// One run lists every problem: a route's and a health check's values that
+// the app spec refuses are reported with the service's other problems, not
+// after them. In the fourth acceptance run protocol "grpc" was reported
+// only once the unknown key beside it was fixed.
+func TestConvertListsExtensionProblemsWithTheOthers(t *testing.T) {
+	file := web(`restart: on-failure
+x-hivemind:
+  routes:
+    - {host: www.example.com, path: /shop.Cart, port: 50051, protocol: grpc, tls: true}
+    - {host: www.example.com, path: /shop.Cart/, port: 50051}
+  health: {tcp: {port: 0}, interval: 500ms, timeout: 200ms}`)
+	_, err := Convert([]byte(file), Options{Lookup: env(nil)})
+	var ce *Error
+	if !errors.As(err, &ce) {
+		t.Fatalf("converted: %v", err)
+	}
+	want := []Problem{
+		{"services.web", `routes[0]: protocol "grpc": use http or h2c`},
+		{"services.web", `routes[1]: host "www.example.com" with path "/shop.Cart" listed twice`},
+		{"services.web", "health.tcp.port: must be between 1 and 65535"},
+		{"services.web", "health.interval: must be between 1s and 1h"},
+		{"services.web.restart", "not supported: hivemind restarts every replica that exits"},
+		{"services.web.x-hivemind.routes[0].tls", "not supported: a route has host, port, path and protocol only"},
+	}
+	for _, w := range want {
+		found := false
+		for _, p := range ce.Problems {
+			found = found || p.Path == w.Path && strings.HasPrefix(p.Msg, w.Msg)
+		}
+		if !found {
+			t.Errorf("no problem %q at %s in:\n%v", w.Msg, w.Path, err)
+		}
+	}
+	if len(ce.Problems) != len(want) {
+		t.Errorf("%d problems, want %d:\n%v", len(ce.Problems), len(want), err)
+	}
+
+	// A value that could not be read is not checked again: a route whose
+	// port is not a number has one problem for it, and the routes are left
+	// to the next run; so is a health check whose interval is not a
+	// duration.
+	file = web(`restart: on-failure
+x-hivemind:
+  routes: [{host: www.example.com, port: http, protocol: grpc}]
+  health: {tcp: {port: 0}, interval: 5}`)
+	_, err = Convert([]byte(file), Options{Lookup: env(nil)})
+	if !errors.As(err, &ce) {
+		t.Fatalf("converted: %v", err)
+	}
+	if len(ce.Problems) != 3 || strings.Contains(err.Error(), "protocol") || strings.Contains(err.Error(), "health.tcp.port") {
+		t.Fatalf("problems:\n%v", err)
+	}
+	// The health check of a service that also has a healthcheck is not
+	// used, so it is not checked either.
+	file = web(`healthcheck: {test: [CMD, x]}
+x-hivemind: {health: {tcp: {port: 0}}}`)
+	_, err = Convert([]byte(file), Options{Lookup: env(nil)})
+	if !errors.As(err, &ce) || len(ce.Problems) != 1 || !strings.Contains(err.Error(), "not both") {
+		t.Fatalf("problems:\n%v", err)
+	}
+}

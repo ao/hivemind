@@ -8,7 +8,7 @@ hivemind compose deploy compose.yaml    # create or update the apps
 hivemind compose delete compose.yaml    # delete the apps
 ```
 
-Only part of the [Compose specification](https://github.com/compose-spec/compose-spec/blob/main/spec.md) is read. Each key that is read maps onto a field of the app spec, and any other key is refused with its path and a reason. Nothing is dropped without a word: a file either converts completely, or the command fails and lists every problem.
+Only part of the [Compose specification](https://github.com/compose-spec/compose-spec/blob/main/spec.md) is read. Each key that is read maps onto a field of the app spec, and any other key is refused with its path and a reason. Nothing is dropped without a word: a file either converts completely, or the command fails and lists every problem in one run, with one exception: in a service with other problems, the app spec's limits are checked only for its `x-hivemind` routes and health check, so a value such as `deploy.replicas: 101` or a `healthcheck` interval of `500ms` is reported once the service's other problems are fixed.
 
 ## Commands
 

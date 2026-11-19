@@ -324,57 +324,78 @@ func (a *App) Validate() error {
 		add("resources.memory: must be 0 (no limit) or at least 6Mi")
 	}
 
-	if h := a.Health; h != nil {
-		n := 0
-		if h.HTTP != nil {
-			n++
-			if !validPort(h.HTTP.Port) {
-				add("health.http.port: must be between 1 and 65535")
-			}
-			if !strings.HasPrefix(h.HTTP.Path, "/") || len(h.HTTP.Path) > maxPathLen || strings.ContainsAny(h.HTTP.Path, " \t\r\n#") {
-				add("health.http.path %q: must start with / and contain no spaces", h.HTTP.Path)
-			}
+	errs = append(errs, ValidateHealth(a.Health)...)
+	errs = append(errs, ValidateRoutes(a.Routes)...)
+	return errors.Join(errs...)
+}
+
+// ValidateHealth returns every problem with a normalised health check, as
+// Validate reports them, each naming its field, as health.tcp.port. A nil
+// check has none.
+func ValidateHealth(h *Health) []error {
+	if h == nil {
+		return nil
+	}
+	var errs []error
+	add := func(format string, args ...any) { errs = append(errs, fmt.Errorf(format, args...)) }
+	n := 0
+	if h.HTTP != nil {
+		n++
+		if !validPort(h.HTTP.Port) {
+			add("health.http.port: must be between 1 and 65535")
 		}
-		if h.TCP != nil {
-			n++
-			if !validPort(h.TCP.Port) {
-				add("health.tcp.port: must be between 1 and 65535")
-			}
-		}
-		if len(h.Exec) > 0 {
-			n++
-			if len(h.Exec) > maxArgs {
-				add("health.exec: at most %d arguments", maxArgs)
-			}
-			for _, arg := range h.Exec {
-				if len(arg) > maxArgLen || strings.ContainsRune(arg, 0) {
-					add("health.exec: arguments are at most %d bytes and contain no NUL", maxArgLen)
-					break
-				}
-			}
-		}
-		if n != 1 {
-			add("health: set exactly one of http, tcp and exec")
-		}
-		if h.Interval.D() < time.Second || h.Interval.D() > time.Hour {
-			add("health.interval: must be between 1s and 1h")
-		}
-		if h.Timeout.D() < 100*time.Millisecond || h.Timeout.D() > h.Interval.D() {
-			add("health.timeout: must be at least 100ms and no longer than the interval")
-		}
-		if h.Retries < 1 || h.Retries > 10 {
-			add("health.retries: must be between 1 and 10")
-		}
-		if h.StartPeriod < 0 || h.StartPeriod.D() > time.Hour {
-			add("health.start_period: must be between 0 and 1h")
+		if !strings.HasPrefix(h.HTTP.Path, "/") || len(h.HTTP.Path) > maxPathLen || strings.ContainsAny(h.HTTP.Path, " \t\r\n#") {
+			add("health.http.path %q: must start with / and contain no spaces", h.HTTP.Path)
 		}
 	}
+	if h.TCP != nil {
+		n++
+		if !validPort(h.TCP.Port) {
+			add("health.tcp.port: must be between 1 and 65535")
+		}
+	}
+	if len(h.Exec) > 0 {
+		n++
+		if len(h.Exec) > maxArgs {
+			add("health.exec: at most %d arguments", maxArgs)
+		}
+		for _, arg := range h.Exec {
+			if len(arg) > maxArgLen || strings.ContainsRune(arg, 0) {
+				add("health.exec: arguments are at most %d bytes and contain no NUL", maxArgLen)
+				break
+			}
+		}
+	}
+	if n != 1 {
+		add("health: set exactly one of http, tcp and exec")
+	}
+	if h.Interval.D() < time.Second || h.Interval.D() > time.Hour {
+		add("health.interval: must be between 1s and 1h")
+	}
+	if h.Timeout.D() < 100*time.Millisecond || h.Timeout.D() > h.Interval.D() {
+		add("health.timeout: must be at least 100ms and no longer than the interval")
+	}
+	if h.Retries < 1 || h.Retries > 10 {
+		add("health.retries: must be between 1 and 10")
+	}
+	if h.StartPeriod < 0 || h.StartPeriod.D() > time.Hour {
+		add("health.start_period: must be between 0 and 1h")
+	}
+	return errs
+}
 
-	if len(a.Routes) > MaxRoutes {
+// ValidateRoutes returns every problem with an app's normalised routes, as
+// Validate reports them: their number, each route's host, path, port and
+// protocol, and a host and path listed twice. Each problem names its
+// route, as routes[1].
+func ValidateRoutes(rs []Route) []error {
+	var errs []error
+	add := func(format string, args ...any) { errs = append(errs, fmt.Errorf(format, args...)) }
+	if len(rs) > MaxRoutes {
 		add("routes: at most %d", MaxRoutes)
 	}
 	routes := map[RouteKey]bool{}
-	for i, r := range a.Routes {
+	for i, r := range rs {
 		if err := ValidateHost(r.Host); err != nil {
 			add("routes[%d]: %v", i, err)
 		}
@@ -396,7 +417,7 @@ func (a *App) Validate() error {
 			routes[k] = true
 		}
 	}
-	return errors.Join(errs...)
+	return errs
 }
 
 // RouteKey is what a route is known by: its host and path. Two routes with
