@@ -349,6 +349,10 @@ for p in "a node trusts the CA the rotation goes back to, the old one in ca.crt,
 	[ "$(docker exec "$S" grep -c "$p.* ca=${TO3:0:16} leaving=${FROM3:0:16}" /var/log/hivemind.log)" -ge 2 ] ||
 		cl_fail "the server did not log, for both workers, \"$p\" with ca=${TO3:0:16}: $(docker exec "$S" grep 'a node ' /var/log/hivemind.log | tail -n 4)"
 done
+out=$(docker exec "$S" hivemind ca status)
+grep -qF "back towards the old CA, ca.crt ${TO3:0:8}, after an abort" <<<"$out" && grep -qF "TRUSTS TARGET" <<<"$out" &&
+	[ "$(grep -c "ca.crt ${TO3:0:8}\$" <<<"$out")" -ge 2 ] ||
+	cl_fail "hivemind ca status does not name ${TO3:0:8} in ca.crt as the target, and the workers' certificates as from it: $out"
 cl_note "abort: both sides named ${TO3:0:16} as the CA the rotation goes back to"
 rotate finish
 [ "$(fsum "$S" "$DATA/ca.crt")" = "$CA2" ] || cl_fail "after the abort, ca.crt is not the CA from before"

@@ -464,7 +464,7 @@ hivemind nodes).`,
 			var ca carotate.Status
 			if err := c.call(cmd.Context(), "GET", "/v1/ca", nil, &ca); err == nil && ca.Rotation != nil && len(ca.Rotation.Waiting) > 0 {
 				out := cmd.OutOrStdout()
-				fmt.Fprintf(out, "\nCluster CA rotation, phase %s: hivemind ca rotate %s waits for:\n", ca.Rotation.Phase, ca.Rotation.NextStep)
+				fmt.Fprintf(out, "\nCluster CA rotation, phase %s%s: hivemind ca rotate %s waits for:\n", ca.Rotation.Phase, rotationDirection(ca.Rotation), ca.Rotation.NextStep)
 				printWaiting(out, ca.Rotation.Waiting)
 			}
 		}

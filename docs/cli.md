@@ -206,7 +206,8 @@ hivemind ca rotate start [flags]
 Show the cluster CA: its fingerprint and expiry, and which CA the server's
 certificate is from, which join tokens name. During a rotation, also the new
 CA, the phase, and for each node whether it is live, whether it trusts the CA
-the rotation goes to, which CA its certificate is from, and whether it is a
+the rotation goes to (its target: the new CA, or after an abort the old one),
+which CA its certificate is from, by file and fingerprint, and whether it is a
 build without rotation; then the next step and the nodes it waits for.
 
 Compare the fingerprints with the ones the workers log when they add a CA.

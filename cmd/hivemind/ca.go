@@ -9,6 +9,7 @@ import (
 	"github.com/spf13/cobra"
 
 	"github.com/ao/hivemind/internal/carotate"
+	"github.com/ao/hivemind/internal/pki"
 	"github.com/ao/hivemind/internal/server"
 )
 
@@ -31,7 +32,8 @@ func caStatusCmd() *cobra.Command {
 		Long: `Show the cluster CA: its fingerprint and expiry, and which CA the server's
 certificate is from, which join tokens name. During a rotation, also the new
 CA, the phase, and for each node whether it is live, whether it trusts the CA
-the rotation goes to, which CA its certificate is from, and whether it is a
+the rotation goes to (its target: the new CA, or after an abort the old one),
+which CA its certificate is from, by file and fingerprint, and whether it is a
 build without rotation; then the next step and the nodes it waits for.
 
 Compare the fingerprints with the ones the workers log when they add a CA.`,
@@ -160,27 +162,33 @@ func printCAStatus(out io.Writer, st carotate.Status) {
 		fmt.Fprintln(out, "No rotation is in progress.")
 		return
 	}
-	toward := "towards the new CA"
+	// The CA the rotation goes to, the target, and the one it leaves, by
+	// file and fingerprint: after an abort the rotation goes back to the CA
+	// in ca.crt, and in the fourth acceptance run columns named new and old
+	// read the wrong way round then.
+	target, leaving := caFile(pki.NextCACertFile, r.To), caFile(pki.CACertFile, r.From)
+	toward := "towards the new CA, " + target
 	if r.Toward == "current" {
-		toward = "back towards the CA in ca.crt, after an abort"
+		target, leaving = caFile(pki.CACertFile, r.To), caFile(pki.NextCACertFile, r.From)
+		toward = "back towards the old CA, " + target + ", after an abort"
 	}
 	fmt.Fprintf(out, "Rotation: phase %s, %s, started %s.\n", r.Phase, toward, r.StartedAt.Format(time.RFC3339))
 	if len(st.Nodes) > 0 {
 		fmt.Fprintln(out)
 		tw := tabwriter.NewWriter(out, 0, 4, 2, ' ', 0)
-		fmt.Fprintln(tw, "NODE\tNAME\tVERSION\tLEASE\tTRUSTS NEW\tCERTIFICATE FROM")
+		fmt.Fprintln(tw, "NODE\tNAME\tVERSION\tLEASE\tTRUSTS TARGET\tCERTIFICATE FROM")
 		for _, n := range st.Nodes {
 			lease := "live"
 			if !n.Live {
 				lease = "lost"
 			}
-			trusts, from := "no", "old CA"
+			trusts, from := "no", leaving
 			if n.Trusts {
 				trusts = "yes"
 			}
 			switch {
 			case n.Renewed:
-				from = "new CA"
+				from = target
 			case !n.Seen:
 				from, trusts = "-", "-"
 			}
@@ -199,6 +207,20 @@ func printCAStatus(out io.Writer, st carotate.Status) {
 	}
 	fmt.Fprintf(out, "Next: hivemind ca rotate %s, which waits for:\n", r.NextStep)
 	printWaiting(out, r.Waiting)
+}
+
+// caFile names a CA by its file and the first 8 digits of its fingerprint,
+// as "ca-next.crt 83d3dd58".
+func caFile(file, fp string) string { return file + " " + fp[:min(len(fp), 8)] }
+
+// rotationDirection is how hivemind status names a rotation's direction:
+// "" towards the new CA, as the step names say, and the way back after an
+// abort.
+func rotationDirection(r *carotate.RotationInfo) string {
+	if r.Toward == "current" {
+		return ", back towards the old CA in ca.crt after an abort"
+	}
+	return ""
 }
 
 func printWaiting(out io.Writer, w []carotate.Waiting) {

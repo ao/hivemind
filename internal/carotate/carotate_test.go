@@ -451,6 +451,12 @@ func TestAbortInRenew(t *testing.T) {
 			t.Fatalf("marks kept across the turn: %+v", n)
 		}
 	}
+	// The reasons say the rotation turned round, not that it started.
+	for _, w := range st.Rotation.Waiting {
+		if w.Reason != "has not made a request since the rotation turned round" {
+			t.Fatalf("right after the turn, %s: %q", w.Node, w.Reason)
+		}
+	}
 	// Both CAs are still accepted, the bundle says renew under the old CA,
 	// with the old CA cross-signed by the new one for a node that trusts
 	// only the new.
@@ -484,8 +490,8 @@ func TestAbortInRenew(t *testing.T) {
 		t.Fatal("the listener did not go back to the old CA")
 	}
 	fx.restart()
-	if _, err := fx.m.Finish(ctx, false); err == nil {
-		t.Fatal("finish before the nodes renewed back")
+	if _, err := fx.m.Finish(ctx, false); err == nil || !strings.Contains(err.Error(), "has not renewed its certificate back under the old CA yet") {
+		t.Fatalf("finish before the nodes renewed back: %v", err)
 	}
 	for _, n := range []string{"node-a", "node-b"} {
 		if err := fx.trust(n, old, old, next); err != nil {

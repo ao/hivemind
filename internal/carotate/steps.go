@@ -101,38 +101,45 @@ func (m *Manager) view(ctx context.Context, s *state) ([]NodeStatus, error) {
 
 // waitingForRenew lists the live nodes that do not trust the CA the
 // rotation goes to.
-func waitingForRenew(view []NodeStatus) []Waiting {
+func waitingForRenew(view []NodeStatus, rot *store.CARotation) []Waiting {
 	var w []Waiting
 	for _, n := range view {
 		if !n.Live || n.Trusts {
 			continue
 		}
-		w = append(w, Waiting{Node: n.ID, Name: n.Name, Reason: notTrusting(n)})
+		w = append(w, Waiting{Node: n.ID, Name: n.Name, Reason: notTrusting(n, rot)})
 	}
 	return w
 }
 
 // waitingForFinish lists the nodes that have not renewed under the CA the
 // rotation goes to.
-func waitingForFinish(view []NodeStatus) []Waiting {
+func waitingForFinish(view []NodeStatus, rot *store.CARotation) []Waiting {
 	var w []Waiting
 	for _, n := range view {
 		if n.Renewed {
 			continue
 		}
-		reason := "has not renewed its certificate yet"
+		reason := "has not renewed its certificate under the new CA yet"
+		if back(rot) {
+			reason = "has not renewed its certificate back under the old CA yet"
+		}
 		switch {
 		case !n.Live:
 			reason = "is down: its last lease was at " + n.LastLease.Format(time.RFC3339)
 		case !n.Trusts:
-			reason = notTrusting(n)
+			reason = notTrusting(n, rot)
 		}
 		w = append(w, Waiting{Node: n.ID, Name: n.Name, Reason: reason})
 	}
 	return w
 }
 
-func notTrusting(n NodeStatus) string {
+// notTrusting says why a node does not trust the CA the rotation goes to,
+// by the rotation's direction. After an abort turned the rotation round,
+// the marks start again, and the acceptance run read "has not made a
+// request since the rotation started" of nodes that had made hundreds.
+func notTrusting(n NodeStatus, rot *store.CARotation) string {
 	switch {
 	case n.OldBuild:
 		v := n.Version
@@ -140,12 +147,20 @@ func notTrusting(n NodeStatus) string {
 			v = "older than 2.2"
 		}
 		return "is a build without CA rotation (" + v + "): upgrade it, or remove it"
+	case !n.Seen && back(rot):
+		return "has not made a request since the rotation turned round"
 	case !n.Seen:
 		return "has not made a request since the rotation started"
+	case back(rot):
+		return "does not trust the old CA, which the rotation goes back to, yet"
 	default:
 		return "does not trust the new CA yet"
 	}
 }
+
+// back reports whether an abort has turned the rotation round, towards
+// the CA in ca.crt.
+func back(rot *store.CARotation) bool { return rot != nil && rot.Toward == store.CACurrent }
 
 // Status describes the CAs and the rotation.
 func (m *Manager) Status(ctx context.Context) (Status, error) {
@@ -162,9 +177,9 @@ func (m *Manager) Status(ctx context.Context) (Status, error) {
 	ri := &RotationInfo{Phase: s.rot.Phase, Toward: s.rot.Toward, From: pki.FingerprintHex(s.from.Fingerprint()),
 		To: pki.FingerprintHex(s.to.Fingerprint()), StartedAt: s.rot.StartedAt.UTC(), ListenerMoved: s.rot.Listener == s.rot.Toward}
 	if s.rot.Phase == store.CAPhaseTrust {
-		ri.NextStep, ri.Waiting = "renew", waitingForRenew(view)
+		ri.NextStep, ri.Waiting = "renew", waitingForRenew(view, s.rot)
 	} else {
-		ri.NextStep, ri.Waiting = "finish", waitingForFinish(view)
+		ri.NextStep, ri.Waiting = "finish", waitingForFinish(view, s.rot)
 	}
 	if ri.Waiting == nil {
 		ri.Waiting = []Waiting{}
@@ -232,7 +247,7 @@ func (m *Manager) Renew(ctx context.Context, force bool) (Status, error) {
 	if err != nil {
 		return Status{}, err
 	}
-	if w := waitingForRenew(view); len(w) > 0 {
+	if w := waitingForRenew(view, s.rot); len(w) > 0 {
 		if !force {
 			return Status{}, &RefusedError{Step: "renew", Waiting: w}
 		}
@@ -279,7 +294,7 @@ func (m *Manager) Finish(ctx context.Context, force bool) (Status, error) {
 	if err != nil {
 		return Status{}, err
 	}
-	if w := waitingForFinish(view); len(w) > 0 {
+	if w := waitingForFinish(view, s.rot); len(w) > 0 {
 		if !force {
 			return Status{}, &RefusedError{Step: "finish", Waiting: w}
 		}
