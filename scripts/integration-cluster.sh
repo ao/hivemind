@@ -56,6 +56,11 @@
 #     roll at once. No rollout pauses, every one finishes, the sleep
 #     containers are gone in under 45 s (one after another, a node's eight
 #     would take 80 s), and no node is lost meanwhile
+#   - rollouts of apps without a health check: three rolling updates back to
+#     back of 12 busybox sleep apps of 4 replicas, each started with 12 PUTs
+#     at once while the last one's old copies still stop. hivemind status,
+#     read every 0.5 s from the first PUT until the old copies are gone,
+#     never has a bb app with fewer running or ready replicas than its count
 #   - node removal: removing w1 while it runs is refused without --force.
 #     With --force, its spread replica moves to another node, its web replica
 #     waits on the host port, hivemind nodes no longer lists it, its worker
@@ -548,6 +553,126 @@ for i in $HC; do
 done
 hc_gone() { local i; for i in $HC; do [ -z "$(containers_of "hc-$i")" ] || return 1; done; }
 wait_for 60 hc_gone || cl_fail "the hc apps' containers were not removed"
+
+# Three rolling updates back to back of apps without a health check, while
+# the old copies, which ignore SIGTERM, are still being removed: what the
+# second scale run's third 50-app rollout did when one replica of a sleep app
+# was below its count for 8 s. bb-1 to bb-12 run busybox sleep, 4 replicas
+# each. The 12 PUTs of a rollout go at once, and the next rollout starts as
+# soon as the last one is done, so each node has the old copies of the last
+# moves still stopping (10 s each) while it starts the next surges. A sampler
+# on the server reads hivemind status every 0.5 s from the first PUT until
+# every old copy is gone, and the step fails on any sample in which a bb
+# app's RUNNING or READY is below its DESIRED.
+docker exec -i "$S" sh -c 'cat >/tmp/sampler.sh' <<'EOF'
+# Reads hivemind status every 0.5 s until /tmp/sampler.stop exists. Each
+# sample is a line "UPTIME TIME sample N" in /tmp/samples.txt, N the bb apps
+# it lists, after a line "UPTIME TIME below APP desired=D running=R ready=Y"
+# for each bb app below its count; the whole status of such a sample goes to
+# /tmp/below.txt.
+while [ ! -e /tmp/sampler.stop ]; do
+	t=$(cut -d' ' -f1 /proc/uptime)
+	w=$(date -u +%T)
+	if hivemind status >/tmp/sample.out 2>&1; then
+		awk -v t="$t" -v w="$w" '
+			/^APP[ \t]+IMAGE/ { tab = 1; next }
+			tab && NF == 0 { exit }
+			tab && NF == 6 && $1 ~ /^bb-[0-9]+$/ {
+				n++
+				if ($5 + 0 < $4 + 0 || $6 + 0 < $4 + 0)
+					printf "%s %s below %s desired=%s running=%s ready=%s\n", t, w, $1, $4, $5, $6
+			}
+			END { printf "%s %s sample %d\n", t, w, n }' /tmp/sample.out >/tmp/sample.lines
+		cat /tmp/sample.lines >>/tmp/samples.txt
+		if grep -q ' below ' /tmp/sample.lines; then
+			{ echo "== $t $w"; cat /tmp/sample.out; } >>/tmp/below.txt
+		fi
+	else
+		echo "$t $w error $(head -c 300 /tmp/sample.out | tr '\n' ' ')" >>/tmp/samples.txt
+	fi
+	sleep 0.5
+done
+EOF
+BB="1 2 3 4 5 6 7 8 9 10 11 12"
+bb_spec() { # bb_spec N V: the spec of bb-N with V in its environment
+	cat <<EOF
+name: bb-$1
+image: busybox:1.36
+replicas: 4
+command: ["sleep", "3600"]
+env:
+  V: "$2"
+EOF
+}
+# bb_at GEN: every bb app has its four replicas running at generation GEN, and
+# no rollout in progress or paused.
+bb_at() {
+	local out i
+	out=$(docker exec "$S" hivemind status) || return 1
+	for i in $BB; do
+		grep -q "^bb-$i: " <<<"$out" && return 1
+		[ "$(awk -v a="bb-$i" -v g="$1" '$1 == a && $2 ~ /^[0-9]+$/ && $4 == g && $5 == "running"' <<<"$out" | wc -l)" -eq 4 ] || return 1
+	done
+}
+# bb_settled: no bb container is left but the 48 replicas'.
+bb_settled() {
+	local i n=0
+	for i in $BB; do n=$((n + $(containers_of "bb-$i" | wc -l))); done
+	[ "$n" -eq 48 ]
+}
+for i in $BB; do
+	bb_spec "$i" 1 | docker exec -i "$S" hivemind deploy -f - >/dev/null || cl_fail "deploy bb-$i"
+done
+wait_for 180 bb_at 1 || cl_fail "the bb apps did not reach four running replicas: $(docker exec "$S" hivemind status | grep '^bb-' | tr '\n' ';')"
+wait_for 60 bb_settled || cl_fail "the bb apps have containers beside their replicas: $(for i in $BB; do containers_of "bb-$i"; done | tr '\n' ';')"
+docker exec "$S" rm -f /tmp/sampler.stop /tmp/samples.txt /tmp/below.txt
+docker exec -d "$S" sh /tmp/sampler.sh
+rolls_started=$(date +%s)
+for v in 2 3 4; do
+	pids=()
+	for i in $BB; do
+		bb_spec "$i" "$v" | docker exec -i "$S" hivemind deploy -f - >/dev/null &
+		pids+=($!)
+	done
+	for p in "${pids[@]}"; do
+		wait "$p" || cl_fail "a PUT of rollout $((v - 1)) of the bb apps failed"
+	done
+	roll_start=$(date +%s)
+	until bb_at "$v"; do
+		if paused=$(docker exec "$S" hivemind status | grep '^bb-[0-9]*: rollout to generation .* stopped'); then
+			cl_fail "a bb rollout paused: $(tr '\n' ';' <<<"$paused")"
+		fi
+		[ $(($(date +%s) - roll_start)) -lt 180 ] ||
+			cl_fail "rollout $((v - 1)) of the bb apps did not finish in 180 s: $(docker exec "$S" hivemind status | grep '^bb-' | tr '\n' ';')"
+		sleep 1
+	done
+	cl_note "bb rollout $((v - 1)) of 3 (12 apps, 48 replicas) finished in $(($(date +%s) - roll_start)) s"
+done
+wait_for 60 bb_settled || cl_fail "the old copies of the bb apps were not removed: $(for i in $BB; do containers_of "bb-$i"; done | tr '\n' ';')"
+docker exec "$S" touch /tmp/sampler.stop
+sleep 1
+samples=$(docker exec "$S" grep -c ' sample 12$' /tmp/samples.txt || true)
+elapsed=$(($(date +%s) - rolls_started))
+# One sample takes 0.5 s and the status read, so at least one a second.
+[ "${samples:-0}" -ge "$elapsed" ] ||
+	cl_fail "the sampler took $samples samples of the 12 bb apps in $elapsed s: $(docker exec "$S" grep -v ' sample 12$' /tmp/samples.txt | head -n 5 | tr '\n' ';')"
+if below=$(docker exec "$S" grep ' below ' /tmp/samples.txt); then
+	for c in "${CL_NAMES[@]}"; do
+		echo "cluster: --- container lines of $c for the apps below their count" >&2
+		for a in $(awk '{ print $4 }' <<<"$below" | sort -u); do
+			docker exec "$c" grep -E "app=$a |name=hivemind-$a-" /var/log/hivemind.log | grep -E 'created|started|removed|stopping' >&2 || true
+		done
+	done
+	echo "cluster: --- the first status below the count" >&2
+	docker exec "$S" sh -c "awk '/^== / { n++ } n == 1' /tmp/below.txt | head -n 120" >&2 || true
+	cl_fail "in $(wc -l <<<"$below") of $samples samples a bb app was below its count during the rollouts: $(head -n 20 <<<"$below" | tr '\n' ';')"
+fi
+cl_note "three bb rollouts back to back took $elapsed s; in $samples samples, one every 0.5 s, no bb app was below its count of running or ready replicas"
+for i in $BB; do
+	docker exec "$S" hivemind delete "bb-$i" >/dev/null || cl_fail "delete bb-$i"
+done
+bb_gone() { local i; for i in $BB; do [ -z "$(containers_of "bb-$i")" ] || return 1; done; }
+wait_for 90 bb_gone || cl_fail "the bb apps' containers were not removed"
 
 # worker_stopped NODE: no hivemind process runs in NODE.
 worker_stopped() { ! docker exec "$1" pgrep -x hivemind >/dev/null 2>&1; }

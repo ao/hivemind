@@ -277,6 +277,10 @@ type Store struct {
 	// credMu guards it.
 	credMu    sync.Mutex
 	credSizes map[string]int
+
+	// afterReplicaRead, if set, runs in AssignmentsForNode between its read
+	// of the replicas and its read of the surges. Tests set it.
+	afterReplicaRead func()
 }
 
 // readConns is the size of the read-only pool.
@@ -387,6 +391,18 @@ func (s *Store) tx(ctx context.Context, fn func(*sql.Tx) error) error {
 		return err
 	}
 	return tx.Commit()
+}
+
+// read runs fn in a read transaction on the read pool. In WAL mode every
+// statement in it sees the commit that was the last when its first statement
+// ran, whatever the writer commits meanwhile.
+func (s *Store) read(ctx context.Context, fn func(*sql.Tx) error) error {
+	tx, err := s.rdb.BeginTx(ctx, &sql.TxOptions{ReadOnly: true})
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	return fn(tx)
 }
 
 // cleanSpec returns a normalised, validated deep copy of a.
@@ -912,17 +928,32 @@ func (s *Store) Replicas(ctx context.Context, app string) ([]Replica, error) {
 // as an assignment for the same replica index, at the surge's generation.
 // Each one that is to run carries the credential stored for its image's
 // registry, if there is one, so the node can pull the image.
+//
+// The replicas and the surges are read in one read transaction, so both come
+// from the same commit. Read apart, a surge promoted between the two reads
+// was in neither: its node, which runs the new copy, found the copy assigned
+// to nothing and began to remove it, and a removal once begun is not called
+// off, so the replica was down until the copy had stopped and been made
+// again (in the second scale run, one replica of a busybox sleep app for
+// about 10 s during a 50-app rollout).
 func (s *Store) AssignmentsForNode(ctx context.Context, nodeID string) ([]Assignment, error) {
-	out, err := queryAssignments(ctx, s.rdb, `r.node_id = ?`, nodeID)
+	var out []Assignment
+	err := s.read(ctx, func(tx *sql.Tx) error {
+		var err error
+		if out, err = queryAssignments(ctx, tx, `r.node_id = ?`, nodeID); err != nil {
+			return err
+		}
+		if s.afterReplicaRead != nil {
+			s.afterReplicaRead()
+		}
+		surges, err := querySurges(ctx, tx, `s.node_id = ?`, nodeID)
+		if err != nil {
+			return err
+		}
+		out = append(out, surges...)
+		return attachRegistryAuth(ctx, tx, out)
+	})
 	if err != nil {
-		return nil, err
-	}
-	surges, err := querySurges(ctx, s.rdb, `s.node_id = ?`, nodeID)
-	if err != nil {
-		return nil, err
-	}
-	out = append(out, surges...)
-	if err := attachRegistryAuth(ctx, s.rdb, out); err != nil {
 		return nil, err
 	}
 	return out, nil

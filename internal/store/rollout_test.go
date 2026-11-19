@@ -634,3 +634,55 @@ func TestReplicaWantedAgainAfterARolloutTakesItsGeneration(t *testing.T) {
 	}
 	checkInvariants(t, e.s)
 }
+
+// A node's assignments come from one commit. In the second scale run a surge
+// was promoted while its node read its assignments, after the read of the
+// replicas and before that of the surges, so the new copy was in neither: the
+// node began to remove it, and the replica was down for the 10 s its sleep
+// container took to stop, then made again. The node must see the copy once,
+// as the surge or as the replica.
+func TestAssignmentsReadDuringAPromotionHaveTheCopy(t *testing.T) {
+	e := newRolloutEnv(t, node1, nodeB)
+	e.put(web(1)) // on node1
+	e.put(withEnv(1, "2"))
+	e.advance() // a surge of replica 0 on nodeB, at generation 2
+	e.report(nodeB, container("web", 0, 2))
+
+	promoted := false
+	e.s.afterReplicaRead = func() {
+		if !promoted {
+			promoted = true
+			e.advance()
+		}
+	}
+	onB, err := e.s.AssignmentsForNode(e.ctx, nodeB)
+	e.s.afterReplicaRead = nil
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !promoted {
+		t.Fatal("the hook did not run")
+	}
+	if got := e.nodesOf("web"); !eqStrings(got, []string{nodeB}) {
+		t.Fatalf("the surge was not promoted during the read: replica 0 on %v", got)
+	}
+	copies := func(as []Assignment) int {
+		n := 0
+		for _, a := range as {
+			if a.App == "web" && a.Index == 0 && a.Generation == 2 && a.Desired == Running && a.NodeID == nodeB {
+				n++
+			}
+		}
+		return n
+	}
+	if n := copies(onB); n != 1 {
+		t.Fatalf("nodeB read %d assignments for its copy of web/0 at generation 2 during the promotion, want 1: %+v", n, onB)
+	}
+	onB, err = e.s.AssignmentsForNode(e.ctx, nodeB)
+	if err != nil || copies(onB) != 1 {
+		t.Fatalf("after the promotion: %+v %v", onB, err)
+	}
+	if onA, err := e.s.AssignmentsForNode(e.ctx, node1); err != nil || len(onA) != 0 {
+		t.Fatalf("node1 after the promotion: %+v %v", onA, err)
+	}
+}
