@@ -656,7 +656,7 @@ func runWorker(ctx context.Context, cfg *config.Config, log *slog.Logger, rt run
 	// the node API, so it needs nothing from this machine but its listeners.
 	if cfg.RouteAddr != "" {
 		routes := nodeRoutes(client, w.state.NodeID, nodeapi.NewMissingRoute(client, "routing table", log.With("component", "router")))
-		rtr, err := newRouter(cfg, log, routes, client.TLS(w.state.NodeID))
+		rtr, err := newRouter(cfg, log, routes, client.TLS(w.state.NodeID), nil)
 		if err != nil {
 			return err
 		}

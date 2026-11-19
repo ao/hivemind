@@ -641,8 +641,19 @@ func runServe(ctx context.Context, cfg *config.Config, log *slog.Logger, rt runt
 	// The router opens only with --route-addr. It is the one listener that
 	// may bind every address: it serves the apps' public traffic.
 	var routerReport func() nodeapi.RouterReport
+	// reported is closed after the agent's first pass, which reports this
+	// node's containers: the store leaves the server's own replicas out of
+	// the routing table until this start's first report, and the router,
+	// whose first table is read as it starts, often before that, reads the
+	// table again then. Until it has, a request that none of its route's
+	// replicas takes waits for that table rather than get 502 or 503; in
+	// the seventh soak this router answered 502 for up to a second after
+	// each start for an app whose replica on the server was running.
+	var reported chan struct{}
+	var reportedOnce sync.Once
 	if cfg.RouteAddr != "" {
-		if rtr, err = newRouter(cfg, log, storeRoutes(st), tlsstore.StoreBackend{St: st, NodeID: cl.NodeID}); err != nil {
+		reported = make(chan struct{})
+		if rtr, err = newRouter(cfg, log, storeRoutes(st), tlsstore.StoreBackend{St: st, NodeID: cl.NodeID}, reported); err != nil {
 			return err
 		}
 		routerReport = rtr.Report
@@ -704,6 +715,9 @@ func runServe(ctx context.Context, cfg *config.Config, log *slog.Logger, rt runt
 	// reports.
 	agentLog := log.With("component", "agent")
 	onPass := func(d time.Duration, err error) {
+		if reported != nil {
+			reportedOnce.Do(func() { close(reported) })
+		}
 		m.ObserveReconcile(d, err)
 		if aerr := st.AdvanceRollouts(context.Background()); aerr != nil {
 			agentLog.Warn("advance rollouts", "err", aerr)

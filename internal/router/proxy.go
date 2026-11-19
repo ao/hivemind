@@ -44,6 +44,12 @@ const (
 	// replica's machine has not acknowledged may wait before the connection
 	// fails (see setUserTimeout).
 	upstreamUserTimeout = 5 * time.Second
+
+	// staleTable is how old the table must be for a request that no
+	// replica of its route took to read it again (newerTable). A table read
+	// less than this ago is taken as current, and the request gets 502 at
+	// once.
+	staleTable = 500 * time.Millisecond
 )
 
 // Table is the routing table: the routes of each host. A host in the table
@@ -345,6 +351,16 @@ type proxy struct {
 	// pooled connection failed this long after the request was written on
 	// it is taken for a connection that timed out (errMachineTimedOut).
 	userTimeout time.Duration
+	// refresh and awaitWhole are the router's (Router.refresh and
+	// Router.awaitWhole), for a request whose route has no replica that
+	// takes it (newerTable). Either may be nil. New sets them before
+	// anything is served.
+	refresh    func(ctx context.Context)
+	awaitWhole func(ctx context.Context) bool
+	// staleAfter is staleTable, but for tests.
+	staleAfter time.Duration
+	// tableAt is when the table was last set, in unix nanoseconds of now.
+	tableAt atomic.Int64
 
 	mu        sync.RWMutex
 	table     map[string]*hostRoutes
@@ -353,7 +369,7 @@ type proxy struct {
 
 func newProxy(log *slog.Logger, m *Metrics) *proxy {
 	p := &proxy{log: log, metrics: m, now: time.Now, responseTimeout: upstreamResponseTimeout, userTimeout: upstreamUserTimeout,
-		table: map[string]*hostRoutes{}, endpoints: map[epKey]*endpoint{}}
+		staleAfter: staleTable, table: map[string]*hostRoutes{}, endpoints: map[epKey]*endpoint{}}
 	p.rp = p.reverseProxy(0)
 	// A negative FlushInterval flushes after every write. ReverseProxy
 	// does that for a reply without a Content-Length anyway, which a gRPC
@@ -534,6 +550,7 @@ func (p *proxy) setTable(t Table) {
 		}
 	}
 	p.table, p.endpoints = hosts, eps
+	p.tableAt.Store(p.now().UnixNano())
 	p.mu.Unlock()
 	for _, e := range gone {
 		e.tr.CloseIdleConnections()
@@ -566,6 +583,9 @@ type ctxKey struct{}
 
 type reqInfo struct {
 	host string
+	// path is the route's path, and pool its endpoints in the table the
+	// request was routed by.
+	path string
 	pool *pool
 	// h2c is set for a request on an h2c route, and stream then holds its
 	// idle limit, if it has one.
@@ -581,35 +601,50 @@ type reqInfo struct {
 // no Ready replica gets 503. The request's path goes to the replica as the
 // client sent it: the router matches on it and does not rewrite it. A
 // request on an h2c route goes through serveH2C.
+//
+// On the server's router at its start, a route with no replica may be one
+// whose replicas are all on the server, which the table has only once the
+// server's own node has reported: the request waits for that table
+// (awaitWhole) before it gets 503.
 func (p *proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	host := requestHost(r)
 	if r.TLS != nil && r.TLS.ServerName != "" && !strings.EqualFold(r.TLS.ServerName, host) {
 		http.Error(w, "misdirected request", http.StatusMisdirectedRequest)
 		return
 	}
-	hr := p.lookup(host)
-	if hr == nil {
-		http.Error(w, "not found", http.StatusNotFound)
+	rt, code, msg := p.routeFor(host, r.URL)
+	if code == http.StatusServiceUnavailable && p.awaitWhole != nil && p.awaitWhole(r.Context()) && r.Context().Err() == nil {
+		rt, code, msg = p.routeFor(host, r.URL)
+	}
+	if code != 0 {
+		http.Error(w, msg, code)
 		return
 	}
-	rt, bad := hr.match(r.URL)
-	switch {
-	case bad != "":
-		http.Error(w, "bad request: the path has "+bad, http.StatusBadRequest)
-		return
-	case rt == nil:
-		http.Error(w, "not found", http.StatusNotFound)
-		return
-	case len(rt.pool.endpoints) == 0:
-		http.Error(w, "no replica is ready", http.StatusServiceUnavailable)
-		return
-	}
-	info := reqInfo{host: host, pool: rt.pool, h2c: rt.h2c}
+	info := reqInfo{host: host, path: rt.path, pool: rt.pool, h2c: rt.h2c}
 	if rt.h2c {
 		p.serveH2C(w, r, info)
 		return
 	}
 	p.rp.ServeHTTP(w, r.WithContext(context.WithValue(r.Context(), ctxKey{}, info)))
+}
+
+// routeFor returns the route that takes a request for host and u, or the
+// status and body of the reply that refuses it.
+func (p *proxy) routeFor(host string, u *url.URL) (rt *route, code int, msg string) {
+	hr := p.lookup(host)
+	if hr == nil {
+		return nil, http.StatusNotFound, "not found"
+	}
+	rt, bad := hr.match(u)
+	switch {
+	case bad != "":
+		return nil, http.StatusBadRequest, "bad request: the path has " + bad
+	case rt == nil:
+		return nil, http.StatusNotFound, "not found"
+	case len(rt.pool.endpoints) == 0:
+		return nil, http.StatusServiceUnavailable, "no replica is ready"
+	}
+	return rt, 0, ""
 }
 
 // serveH2C proxies a request on an h2c route to a replica over HTTP/2. The
@@ -750,6 +785,15 @@ func (p *proxy) upstreamFailed(w http.ResponseWriter, r *http.Request, err error
 // which would take the whole 5 s to fail. In the second scale run, with two
 // of a route's dead replicas next to each other in its order, every router
 // that stayed up failed one GET at the client's 10 s limit, 5 s on each.
+//
+// A request that every endpoint of its route failed in one of those ways,
+// and that can still go to another, tries the endpoints of the route in a
+// newer table that it has not tried, if there is one (newerTable), before it
+// gets 502: the replica that would take it may have come into the table
+// since the router last read it. In the seventh soak, the server's router,
+// whose first table was read before the server's own node had reported,
+// answered 502 for up to a second after each start for an app whose replica
+// on the server ran, while the app's other replicas were down.
 type balancer struct{ p *proxy }
 
 func (b balancer) RoundTrip(req *http.Request) (*http.Response, error) {
@@ -757,42 +801,83 @@ func (b balancer) RoundTrip(req *http.Request) (*http.Response, error) {
 	if !ok {
 		return nil, errors.New("router: request without a route")
 	}
-	var guard *bodyGuard
+	t := &tries{p: b.p, req: req, info: info, tried: map[*endpoint]bool{}}
 	if req.Body != nil && req.Body != http.NoBody {
-		guard = &bodyGuard{rc: req.Body}
+		t.guard = &bodyGuard{rc: req.Body}
 	}
-	var lastErr error
-	var gone []string // the addresses whose connection timed out
-	fresh := false    // a connection failed: the next tries dial anew
-	for _, e := range info.pool.order(b.p.now()) {
+	if resp, more, err := t.run(info.pool); !more {
+		return resp, err
+	}
+	// The table the router set while the request was tried, if it did, and
+	// then the one newerTable waits for.
+	if pl := b.p.poolOf(info); pl != nil && pl != info.pool {
+		if resp, more, err := t.run(pl); !more {
+			return resp, err
+		}
+	}
+	if req.Context().Err() == nil && b.p.newerTable(req.Context()) {
+		if pl := b.p.poolOf(info); pl != nil {
+			if resp, more, err := t.run(pl); !more {
+				return resp, err
+			}
+		}
+	}
+	if t.lastErr == nil {
+		t.lastErr = errors.New("router: no endpoints")
+	}
+	return nil, t.lastErr
+}
+
+// tries is one request's tries of its route's endpoints.
+type tries struct {
+	p     *proxy
+	req   *http.Request
+	info  reqInfo
+	guard *bodyGuard // the request's body, if it has one
+	tried map[*endpoint]bool
+	gone  []string // the addresses whose connection timed out
+	fresh bool     // a connection failed: the next tries dial anew
+	// lastErr is the last try's error.
+	lastErr error
+}
+
+// run tries the endpoints of pl that the request has not tried, in the
+// pool's order, until one takes it. It returns the reply, or the error that
+// ends the request; or, with more set, nothing, when every one of them
+// failed before it took the request and the request may still go to
+// another.
+func (t *tries) run(pl *pool) (*http.Response, bool, error) {
+	req, info := t.req, t.info
+	for _, e := range pl.order(t.p.now()) {
 		host := addrHost(e.addr)
-		if slices.Contains(gone, host) {
+		if t.tried[e] || slices.Contains(t.gone, host) {
 			continue
 		}
-		out := req.Clone(b.p.tracked(req.Context()))
+		t.tried[e] = true
+		out := req.Clone(t.p.tracked(req.Context()))
 		out.URL.Host = e.addr
-		if guard != nil {
-			out.Body = guard
+		if t.guard != nil {
+			out.Body = t.guard
 		}
 		tr := e.tr
-		if fresh {
+		if t.fresh {
 			tr = e.freshTransport()
 		}
 		resp, err := tr.RoundTrip(out)
 		if err == nil {
 			e.ok()
-			return resp, nil
+			return resp, false, nil
 		}
-		lastErr = err
+		t.lastErr = err
 		if timedOut(err) {
-			gone = append(gone, host)
-			n := b.p.machineDown(host, b.p.now())
-			b.p.metrics.upstreamError(info.host, "connection")
-			if !retryable(req, err) || guard != nil {
-				return nil, err
+			t.gone = append(t.gone, host)
+			n := t.p.machineDown(host, t.p.now())
+			t.p.metrics.upstreamError(info.host, "connection")
+			if !retryable(req, err) || t.guard != nil {
+				return nil, false, err
 			}
-			fresh = true
-			b.p.log.Debug("replica's connection timed out before it replied; its address is marked down; trying another address",
+			t.fresh = true
+			t.p.log.Debug("replica's connection timed out before it replied; its address is marked down; trying another address",
 				"host", info.host, "endpoint", e.addr, "endpoints_down", n, "err", err)
 			continue
 		}
@@ -802,26 +887,53 @@ func (b balancer) RoundTrip(req *http.Request) (*http.Response, error) {
 			// method that is safe to repeat, and no body. This is nginx's
 			// proxy_next_upstream default (error, for idempotent methods).
 			// Other failures are a 502.
-			if !retryable(req, err) || guard != nil {
-				return nil, err
+			if !retryable(req, err) || t.guard != nil {
+				return nil, false, err
 			}
-			fresh = true
-			b.p.metrics.upstreamError(info.host, "connection")
-			e.failed(b.p.now())
-			b.p.log.Debug("replica's connection failed before it replied; trying the next", "host", info.host, "endpoint", e.addr, "err", err)
+			t.fresh = true
+			t.p.metrics.upstreamError(info.host, "connection")
+			e.failed(t.p.now())
+			t.p.log.Debug("replica's connection failed before it replied; trying the next", "host", info.host, "endpoint", e.addr, "err", err)
 			continue
 		}
-		skip := e.failed(b.p.now())
-		b.p.metrics.upstreamError(info.host, "dial")
-		b.p.log.Debug("replica unreachable; trying the next", "host", info.host, "endpoint", e.addr, "skipped_for", skip, "err", err)
-		if guard != nil && guard.read.Load() {
-			return nil, err
+		skip := e.failed(t.p.now())
+		t.p.metrics.upstreamError(info.host, "dial")
+		t.p.log.Debug("replica unreachable; trying the next", "host", info.host, "endpoint", e.addr, "skipped_for", skip, "err", err)
+		if t.guard != nil && t.guard.read.Load() {
+			return nil, false, err
 		}
 	}
-	if lastErr == nil {
-		lastErr = errors.New("router: no endpoints")
+	return nil, true, nil
+}
+
+// poolOf returns the endpoints of the request's route in the table now, or
+// nil when the route is not in it with the request's protocol. Each table
+// has its own pools, so the pool is the request's own while the table is.
+func (p *proxy) poolOf(info reqInfo) *pool {
+	r := p.lookup(info.host).find(info.path)
+	if r == nil || r.h2c != info.h2c {
+		return nil
 	}
-	return nil, lastErr
+	return r.pool
+}
+
+// newerTable waits for a newer table, for a request that no endpoint of its
+// route took, and reports whether one may be set: the request then tries
+// its route's endpoints there. On the server's router at its start, before
+// its table has the server's own replicas, it waits for that table
+// (awaitWhole). Otherwise it reads the table again if the table is at least
+// staleAfter old, under refresh's limit of one read a second, which every
+// request that comes meanwhile waits for too; a younger table is taken as
+// current, and nothing is waited for.
+func (p *proxy) newerTable(ctx context.Context) bool {
+	if p.awaitWhole != nil && p.awaitWhole(ctx) {
+		return ctx.Err() == nil
+	}
+	if p.refresh == nil || p.now().Sub(time.Unix(0, p.tableAt.Load())) < p.staleAfter {
+		return false
+	}
+	p.refresh(ctx)
+	return ctx.Err() == nil
 }
 
 // A request's connection to a machine that lost power fails at

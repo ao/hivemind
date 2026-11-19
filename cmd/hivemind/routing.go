@@ -17,8 +17,11 @@ import (
 
 // newRouter builds the node's router from the config: its listeners on
 // --route-addr, the routing table from routes, and the shared TLS storage on
-// backend. The caller serves it, and shuts it down.
-func newRouter(cfg *config.Config, log *slog.Logger, routes func(context.Context) (router.Table, error), backend tlsstore.Backend) (*router.Router, error) {
+// backend. whole, if set, is closed once the table routes returns has this
+// node's own replicas (router.Config.Whole). The caller serves it, and
+// shuts it down.
+func newRouter(cfg *config.Config, log *slog.Logger, routes func(context.Context) (router.Table, error), backend tlsstore.Backend,
+	whole <-chan struct{}) (*router.Router, error) {
 	ts, err := tlsstore.New(backend, tlsstore.Options{Logger: log.With("component", "tls-storage")})
 	if err != nil {
 		return nil, err
@@ -30,7 +33,7 @@ func newRouter(cfg *config.Config, log *slog.Logger, routes func(context.Context
 		perIP = -1
 	}
 	rt, err := router.New(router.Config{Addr: cfg.RouteAddr, HTTPPort: cfg.RouteHTTPPort, HTTPSPort: cfg.RouteHTTPSPort,
-		Routes: routes, Storage: ts, Email: cfg.ACMEEmail, CA: cfg.ACMECA, MaxConnsPerAddr: perIP,
+		Routes: routes, Storage: ts, Email: cfg.ACMEEmail, CA: cfg.ACMECA, MaxConnsPerAddr: perIP, Whole: whole,
 		Logger: log.With("component", "router"), Metrics: router.NewMetrics()})
 	if err != nil {
 		return nil, fmt.Errorf("--route-addr %s: %w", cfg.RouteAddr, err)

@@ -5,9 +5,11 @@
 // host or a path prefix of it; a request goes to the route with the longest
 // prefix of its path, and round-robin to that route's replicas through
 // net/http/httputil.ReverseProxy; a replica that cannot be dialled is
-// skipped for a few seconds, and the next one is tried. The router speaks
-// HTTP/1.1 to the replicas of a route, or HTTP/2 with prior knowledge to
-// those of an h2c route, such as gRPC servers.
+// skipped for a few seconds, and the next one is tried. A request that none
+// of its route's replicas takes tries those of a newer table before it
+// gets 502, when the table it had is half a second old (see balancer). The
+// router speaks HTTP/1.1 to the replicas of a route, or HTTP/2 with prior
+// knowledge to those of an h2c route, such as gRPC servers.
 //
 // Certificates come from an ACME CA through certmagic, for the hosts in the
 // table only: there is no on-demand issuance. HTTP-01 is the only challenge.
@@ -100,10 +102,22 @@ type Config struct {
 	// means the system roots.
 	CARoots *x509.CertPool
 	// Poll is how often the table is read. Zero means DefaultPoll.
-	Poll    time.Duration
+	Poll time.Duration
+	// Whole, if set, is closed once the table Routes returns has every
+	// replica it should: on the server, once its own node has reported
+	// after the start, as the store leaves that node's replicas out of the
+	// table until then. The router then reads the table at once. Until
+	// that read has ended, or WholeWait after Serve began, a request whose
+	// route has no endpoint that takes it, or no endpoint at all, waits for
+	// it rather than get 502 or 503. Nil means every table is whole.
+	Whole   <-chan struct{}
 	Logger  *slog.Logger
 	Metrics *Metrics
 }
+
+// WholeWait is the longest a router waits for Config.Whole after Serve
+// began.
+const WholeWait = 2 * time.Second
 
 // Router is a pair of bound listeners and the certificate manager.
 type Router struct {
@@ -125,13 +139,20 @@ type Router struct {
 	bg sync.WaitGroup
 
 	// refreshMu, lastRefresh and refreshing limit the table reads that
-	// challenges for unknown hosts cause (see refresh). lastRefresh is when
-	// the last of those reads started, or is to start. refreshing is closed
-	// when the read that has not started yet ends; it is nil when none
-	// waits to start.
+	// challenges for unknown hosts, and requests that no replica took,
+	// cause (see refresh). lastRefresh is when the last of those reads
+	// started, or is to start. refreshing is closed when the read that has
+	// not started yet ends; it is nil when none waits to start.
 	refreshMu   sync.Mutex
 	lastRefresh time.Time
 	refreshing  chan struct{}
+
+	// whole is closed once the table is whole (Config.Whole), or
+	// wholeWait after Serve began; from New when Config.Whole is nil.
+	whole     chan struct{}
+	wholeOnce sync.Once
+	// wholeWait is WholeWait, but for tests.
+	wholeWait time.Duration
 
 	// mu guards the fields below, and orders Shutdown's cancel with the
 	// start of background work.
@@ -183,9 +204,15 @@ func New(cfg Config) (*Router, error) {
 	if log == nil {
 		log = slog.Default()
 	}
-	rt := &Router{cfg: cfg, log: log, managed: map[string]bool{}}
+	rt := &Router{cfg: cfg, log: log, managed: map[string]bool{}, whole: make(chan struct{}), wholeWait: WholeWait}
 	rt.proxy = newProxy(log, cfg.Metrics)
 	rt.proxy.upgradeIdle = cfg.UpgradeIdleTimeout
+	rt.proxy.refresh = rt.refresh
+	if cfg.Whole == nil {
+		rt.endWhole()
+	} else {
+		rt.proxy.awaitWhole = rt.awaitWhole
+	}
 	rt.limits = newConnLimits(cfg.MaxConns, cfg.MaxConnsPerAddr, log, cfg.Metrics)
 
 	// The listeners are bound before certmagic is told about any host, so
@@ -284,11 +311,13 @@ func (rt *Router) HTTPSPort() int { return rt.tlsLn.Addr().(*net.TCPAddr).Port }
 func (rt *Router) Serve() error {
 	errc := make(chan error, 2)
 	go func() { errc <- rt.httpSrv.Serve(rt.httpLn) }()
+	wholeBy := time.Now().Add(rt.wholeWait)
 	// The table and the certificates already in storage first: a router
 	// that took TLS connections before it had them failed the first
 	// handshakes after every start. The listener is bound, so connections
 	// that arrive meanwhile wait in its backlog rather than fail.
 	rt.warm()
+	rt.readWhenWhole(wholeBy)
 	go func() { errc <- rt.tlsSrv.ServeTLS(rt.tlsLn, "", "") }()
 	go rt.poll()
 	rt.log.Info("router listening", "http", rt.HTTPAddr(), "https", rt.HTTPSAddr(), "acme_ca", rt.cfg.CA,
@@ -418,12 +447,74 @@ func (rt *Router) renewAtStart(hosts []string) {
 	}()
 }
 
+// readWhenWhole reads the table, in the background, once Config.Whole is
+// closed, and then lets the requests that wait for it go on (awaitWhole). At
+// by, or at Shutdown, it lets them go on without a read. It does nothing
+// without Config.Whole. On the server, Whole closes after its own node's
+// first pass, and the read is the first to have that node's replicas: the
+// router's first table, read as it starts, often comes before that report.
+// If Whole is closed already, warm's read may have had them, and this one
+// costs a read.
+func (rt *Router) readWhenWhole(by time.Time) {
+	if rt.cfg.Whole == nil {
+		return
+	}
+	rt.mu.Lock()
+	defer rt.mu.Unlock()
+	if rt.ctx.Err() != nil {
+		rt.endWhole()
+		return
+	}
+	rt.bg.Add(1)
+	go func() {
+		defer rt.bg.Done()
+		defer rt.endWhole()
+		t := time.NewTimer(time.Until(by))
+		defer t.Stop()
+		select {
+		case <-rt.cfg.Whole:
+		case <-t.C:
+			rt.log.Info("the routing table does not have this node's own replicas yet; requests no longer wait for them",
+				"waited", rt.wholeWait)
+			return
+		case <-rt.ctx.Done():
+			return
+		}
+		ctx, cancel := context.WithTimeout(rt.ctx, refreshTimeout)
+		defer cancel()
+		if tab, err := rt.cfg.Routes(ctx); err == nil {
+			rt.SetTable(tab)
+		}
+	}()
+}
+
+// endWhole lets the requests that wait for the whole table go on.
+func (rt *Router) endWhole() { rt.wholeOnce.Do(func() { close(rt.whole) }) }
+
+// awaitWhole waits, while the table is not whole (readWhenWhole), until it
+// is, ctx ends or the router stops, and reports whether it waited.
+func (rt *Router) awaitWhole(ctx context.Context) bool {
+	select {
+	case <-rt.whole:
+		return false
+	default:
+	}
+	select {
+	case <-rt.whole:
+	case <-ctx.Done():
+	case <-rt.ctx.Done():
+	}
+	return true
+}
+
 // acmeChallengePath is where an HTTP-01 challenge is fetched (RFC 8555, 8.3).
 const acmeChallengePath = "/.well-known/acme-challenge/"
 
-// refreshEvery limits the table reads that challenges for unknown hosts
-// cause, so that requests for made-up hosts cannot make the router read the
-// table more than once a second. refreshTimeout bounds one such read.
+// refreshEvery limits the table reads that challenges for unknown hosts,
+// and requests that no replica took (newerTable), cause, so that requests
+// for made-up hosts, or for a route whose replicas are all down, cannot make
+// the router read the table more than once a second. refreshTimeout bounds
+// one such read.
 const (
 	refreshEvery   = time.Second
 	refreshTimeout = 5 * time.Second

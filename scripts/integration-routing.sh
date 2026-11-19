@@ -53,6 +53,12 @@
 #     ports they had, and 45 s of requests and gRPC calls through the
 #     workers' routers, with the table from before, all pass, reach the
 #     server's replicas too, and none reaches another app
+#   - the server's own router as its hivemind starts again, while the
+#     table still lists the workers' copies of an app, which are stopped,
+#     and has the server's own copy only once the server's node reports:
+#     every request through it, from before the stop to 5 s after the API
+#     answers, is a 200 from the app that owns the path, or finds no
+#     router listening; none is a 502
 #   - a node that runs a replica is killed: requests through the other two
 #     routers keep getting 200s while the replica is placed again
 #
@@ -722,6 +728,41 @@ read -r calls cbad conserver <<<"$(docker exec "$CLIENT" awk -v g="$S_GRPC" '{ n
 [ "$cbad" -eq 0 ] || cl_fail "$cbad of $calls gRPC calls after the restart failed: $(docker exec "$CLIENT" grep -v ' ok ' /tmp/rs2grpc | sort | uniq -c | head -n 20 | tr '\n' ';')"
 [ "$conserver" -gt 0 ] || cl_fail "no gRPC call after the restart reached the server's grpc replica ($S_GRPC)"
 cl_note "server restart, through the workers' routers: during it $total1 requests, none to another app, and $calls1 gRPC calls, $cbad1 failed; after it, with the table from before, $total requests ($onserver to the server's replicas) and $calls gRPC calls ($conserver to the server's), none failed or reached another app"
+
+# The server's own router in the seconds after its hivemind starts. who's
+# copies on the workers are stopped, and the workers, still cut off, cannot
+# say so, so the table keeps their endpoints, which refuse connections; the
+# store leaves the server's own copy out of the table until the server's
+# node reports after the start. The server's hivemind is stopped and
+# started, and every request through its router, from before the stop to
+# 5 s after its API answers again, must be a 200 from the app that owns the
+# path, or find no router listening. In the seventh soak this router
+# answered 502 for up to a second after each start: its first table, read
+# as it started, came before the server's node's first report.
+for i in 1 2; do
+	c=${CL_NAMES[$i]}
+	id=$(docker exec "$c" docker ps -q --filter label=hivemind.app=who)
+	[ -n "$id" ] || cl_fail "$c runs no who container"
+	docker exec "$c" docker stop -t 1 "$id" >/dev/null || cl_fail "could not stop who's container on $c"
+done
+docker exec -d "$CLIENT" sh /tmp/paths.sh /tmp/rs3 "$HOST" "$HTTPS_PORT" "$S_IP"
+sleep 2
+for p in $(hm_pids "$S"); do docker exec "$S" kill -TERM "$p" 2>/dev/null || true; done
+wait_for 30 hm_stopped "$S" || cl_fail "hivemind did not stop on $S"
+docker exec -d -e SSL_CERT_FILE=/etc/pebble-minica.pem "$S" sh -c \
+	"exec hivemind serve --advertise $S_IP --min-ready 0s --start-grace 5m $(route_flags 0.0.0.0) >>/var/log/hivemind.log 2>&1"
+wait_for 30 docker exec "$S" hivemind status || cl_fail "the API did not answer after hivemind started again"
+sleep 5
+docker exec "$CLIENT" touch /tmp/rs3.stop
+sleep 16
+read -r total bad down after <<<"$(docker exec "$CLIENT" awk '{ n++ }
+	$2 == "000" { d++; a = 0; next }
+	($1 == "/" && $2 == "200" && $3 == "who") || ($1 == "/v1/x" && $2 == "200" && $3 == "api") { a++; next }
+	{ bad++ } END { print n+0, bad+0, d+0, a+0 }' /tmp/rs3)"
+[ "$bad" -eq 0 ] || cl_fail "$bad of $total requests through the server's router around its start failed or reached the wrong app: $(docker exec "$CLIENT" sort /tmp/rs3 | uniq -c | sort -rn | head -n 20 | tr '\n' ';')"
+[ "$down" -gt 0 ] || cl_fail "no request found the server's router stopped, so this did not test its start"
+[ "$after" -ge 40 ] || cl_fail "only $after requests through the server's router after its start"
+cl_note "server's hivemind restarted with who's copies on the workers stopped: $total requests through its router, $down while no router listened, $after after it started, none failed"
 
 # The workers reach the server again, and the apps go back to two replicas
 # each for the node loss below.
