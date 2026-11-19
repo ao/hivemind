@@ -456,8 +456,13 @@ done
 seen=$(docker exec "$CLIENT" curl -s --max-time 10 --cacert /tmp/root.pem --resolve "$HOST:$HTTPS_PORT:$W2_IP" \
 	"https://$HOST:$HTTPS_PORT/v1/users/7?q=a%2Fb" | tr -d '\r')
 grep -qxF "GET /v1/users/7?q=a%2Fb HTTP/1.1" <<<"$seen" || cl_fail "api did not get the path as sent: $(tr '\n' ';' <<<"$seen")"
-routes_out=$(docker exec "$S" hivemind routes 2>&1)
-grep -qE "^$HOST +/ +who +80 +http +[0-9.:]+,[0-9.:]+$" <<<"$routes_out" && grep -qE "^$HOST +/v1 +api +80 +http +[0-9.:]+,[0-9.:]+$" <<<"$routes_out" ||
+# A replica is in the table once its check passes, which can be a pass of
+# its agent after it runs: rolled waits for running only.
+path_routes_shown() {
+	routes_out=$(docker exec "$S" hivemind routes 2>&1)
+	grep -qE "^$HOST +/ +who +80 +http +[0-9.:]+,[0-9.:]+$" <<<"$routes_out" && grep -qE "^$HOST +/v1 +api +80 +http +[0-9.:]+,[0-9.:]+$" <<<"$routes_out"
+}
+wait_for 30 path_routes_shown ||
 	cl_fail "hivemind routes does not show both routes with two endpoints each: $(tr '\n' ';' <<<"$routes_out")"
 if grep -qE "before (path routes|route protocols)" <<<"$routes_out"; then
 	cl_fail "hivemind routes warns about a router of this build: $routes_out"
@@ -558,8 +563,13 @@ for x in "/ who" "/v1/x api"; do
 	got=$(name_at "$W1_IP" "${x% *}")
 	[ "$got" = "${x#* }" ] || cl_fail "with the h2c route on the host, ${x% *} reached \"$got\""
 done
-routes_out=$(docker exec "$S" hivemind routes 2>&1)
-grep -qE "^$HOST +/h2ctest\.Echo +grpc +50051 +h2c +[0-9.:]+,[0-9.:]+$" <<<"$routes_out" ||
+# Both replicas run, and calls reach one, but the second is in the table
+# only once its TCP check passes, a second or two later.
+h2c_route_shown() {
+	routes_out=$(docker exec "$S" hivemind routes 2>&1)
+	grep -qE "^$HOST +/h2ctest\.Echo +grpc +50051 +h2c +[0-9.:]+,[0-9.:]+$" <<<"$routes_out"
+}
+wait_for 30 h2c_route_shown ||
 	cl_fail "hivemind routes does not show the h2c route with two endpoints: $(tr '\n' ';' <<<"$routes_out")"
 cl_note "h2c: through each of the three routers, unary, server-stream and bidirectional calls over HTTP/2, and a unary call over HTTP/1.1, reach grpc with grpc-status 0"
 
