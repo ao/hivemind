@@ -239,10 +239,10 @@ that starts with HIVEMIND_, such as HIVEMIND_TOKEN, is refused, and so is a
 .env that sets one. A port with no address is published on 127.0.0.1, where
 Compose would publish it on every interface. Apps do not find each other by
 service name. A service's HTTPS routes go under x-hivemind: {routes: [...]},
-each with host, port and an optional path, and so does a health check in the
-app spec's form, such as health: {tcp: {port: 50051}}, which Compose cannot
-give; it is used in place of healthcheck, and the two together are refused.
-See docs/compose.md.
+each with host, port, an optional path and an optional protocol, http or h2c,
+and so does a health check in the app spec's form, such as
+health: {tcp: {port: 50051}}, which Compose cannot give; it is used in place
+of healthcheck, and the two together are refused. See docs/compose.md.
 
 ```
 hivemind compose
@@ -370,7 +370,9 @@ path on the host in place of the name, a bind mount, is not supported.
 The words after -- are the container's command, in place of the image's. A
 health check, resources and routes need a file. A route has a host, a
 container port and, optionally, a path prefix (path: /api), so several apps
-can share a host under different paths; hivemind routes shows them all. -f -
+can share a host under different paths, and a protocol: http (HTTP/1.1), the
+default, or h2c (protocol: h2c), HTTP/2 without TLS, for a gRPC server or
+another that speaks it. hivemind routes shows them all. -f -
 reads the spec from standard input. A key the spec does not have is refused
 with its line, and the key it is closest to.
 

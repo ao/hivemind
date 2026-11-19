@@ -50,7 +50,9 @@ path on the host in place of the name, a bind mount, is not supported.
 The words after -- are the container's command, in place of the image's. A
 health check, resources and routes need a file. A route has a host, a
 container port and, optionally, a path prefix (path: /api), so several apps
-can share a host under different paths; hivemind routes shows them all. -f -
+can share a host under different paths, and a protocol: http (HTTP/1.1), the
+default, or h2c (protocol: h2c), HTTP/2 without TLS, for a gRPC server or
+another that speaks it. hivemind routes shows them all. -f -
 reads the spec from standard input. A key the spec does not have is refused
 with its line, and the key it is closest to.
 

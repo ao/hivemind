@@ -249,3 +249,19 @@ func TestRoutesCommandAndProtocols(t *testing.T) {
 		t.Errorf("status warns about a router that holds back none of the app's routes:\n%s", out)
 	}
 }
+
+// The help that says what a route has names its protocol: in the fourth
+// acceptance run deploy --help and compose --help gave a host, a port and a
+// path only, and docs/cli.md, made from them, the same.
+func TestHelpGivesRouteProtocols(t *testing.T) {
+	root := newRoot(strings.NewReader(""), io.Discard, io.Discard)
+	for _, name := range []string{"deploy", "compose", "routes"} {
+		cmd, _, err := root.Find([]string{name})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !strings.Contains(cmd.Long, "protocol") || !strings.Contains(cmd.Long, "h2c") {
+			t.Errorf("%s --help does not give a route's protocol:\n%s", name, cmd.Long)
+		}
+	}
+}

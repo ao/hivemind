@@ -37,10 +37,10 @@ that starts with HIVEMIND_, such as HIVEMIND_TOKEN, is refused, and so is a
 .env that sets one. A port with no address is published on 127.0.0.1, where
 Compose would publish it on every interface. Apps do not find each other by
 service name. A service's HTTPS routes go under x-hivemind: {routes: [...]},
-each with host, port and an optional path, and so does a health check in the
-app spec's form, such as health: {tcp: {port: 50051}}, which Compose cannot
-give; it is used in place of healthcheck, and the two together are refused.
-See docs/compose.md.`,
+each with host, port, an optional path and an optional protocol, http or h2c,
+and so does a health check in the app spec's form, such as
+health: {tcp: {port: 50051}}, which Compose cannot give; it is used in place
+of healthcheck, and the two together are refused. See docs/compose.md.`,
 	}
 	cmd.AddCommand(composeConvertCmd(), composeDeployCmd(), composeDeleteCmd())
 	return cmd
