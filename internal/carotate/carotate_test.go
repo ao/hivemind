@@ -9,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -32,6 +33,7 @@ type fixture struct {
 	clock *clock
 	m     *Manager
 	first [32]byte // the CA init made
+	logs  *logBuf  // what every Manager opened on the fixture logged
 }
 
 func newFixture(t *testing.T, nodes ...string) *fixture {
@@ -47,7 +49,7 @@ func newFixture(t *testing.T, nodes ...string) *fixture {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { st.Close() })
-	fx := &fixture{t: t, dir: dir, st: st, clock: c, first: ca.Fingerprint()}
+	fx := &fixture{t: t, dir: dir, st: st, clock: c, first: ca.Fingerprint(), logs: &logBuf{}}
 	for _, id := range append([]string{serverNode}, nodes...) {
 		if err := st.UpsertNode(context.Background(), store.Node{ID: id, Name: "host-" + id, CPU: 1, Memory: 1 << 30}); err != nil {
 			t.Fatal(err)
@@ -62,7 +64,7 @@ func newFixture(t *testing.T, nodes ...string) *fixture {
 func (fx *fixture) open() *Manager {
 	fx.t.Helper()
 	m, err := Open(context.Background(), Options{Dir: fx.dir, Store: fx.st, LocalNode: serverNode,
-		Logger: slog.New(slog.NewTextHandler(io.Discard, nil)), Now: fx.clock.now})
+		Logger: slog.New(slog.NewTextHandler(fx.logs, nil)), Now: fx.clock.now})
 	if err != nil {
 		fx.t.Fatalf("Open: %v", err)
 	}
@@ -620,5 +622,79 @@ func TestFixedManager(t *testing.T) {
 	}
 	if st, err := m.Status(context.Background()); err != nil || st.Rotation != nil {
 		t.Fatalf("Status on Fixed: %v", err)
+	}
+}
+
+// logBuf is a log a Manager writes to while a test reads it.
+type logBuf struct {
+	mu sync.Mutex
+	b  strings.Builder
+}
+
+func (l *logBuf) Write(p []byte) (int, error) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return l.b.Write(p)
+}
+
+func (l *logBuf) String() string {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return l.b.String()
+}
+
+// The lines a rotation logs for each node name the CA it goes to by the
+// rotation's direction: the new one, or, after an abort turned it round,
+// the old one it goes back to, with both fingerprints. In the fifth soak
+// they called the old CA "the new cluster CA" after an abort.
+func TestRotationLinesNameTheDirection(t *testing.T) {
+	fx := newFixture(t, "node-a")
+	ctx := context.Background()
+	old, next := fx.mustStart()
+	if err := fx.trust("node-a", old, old, next); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := fx.m.Renew(ctx, false); err != nil {
+		t.Fatal(err)
+	}
+	if err := fx.trust("node-a", next, old, next); err != nil {
+		t.Fatal(err)
+	}
+	fields := func(to, from [32]byte) string { return "node=node-a ca=" + short(to) + " leaving=" + short(from) }
+	forward := fx.logs.String()
+	for _, want := range []string{
+		`msg="a node trusts the CA the rotation goes to, the new one in ca-next.crt" ` + fields(next, old),
+		`msg="a node presents a certificate from the CA the rotation goes to, the new one in ca-next.crt" ` + fields(next, old),
+	} {
+		if !strings.Contains(forward, want) {
+			t.Errorf("towards the new CA, no line %q in:\n%s", want, forward)
+		}
+	}
+	if strings.Contains(forward, "goes back to") {
+		t.Errorf("towards the new CA, a line says the rotation goes back:\n%s", forward)
+	}
+
+	if _, err := fx.m.Abort(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if err := fx.trust("node-a", next, old, next); err != nil {
+		t.Fatal(err)
+	}
+	if err := fx.trust("node-a", old, old, next); err != nil {
+		t.Fatal(err)
+	}
+	back := strings.TrimPrefix(fx.logs.String(), forward)
+	for _, want := range []string{
+		`msg="a node trusts the CA the rotation goes back to, the old one in ca.crt, after an abort" ` + fields(old, next),
+		`msg="a node presents a certificate from the CA the rotation goes back to, the old one in ca.crt, after an abort" ` + fields(old, next),
+	} {
+		if !strings.Contains(back, want) {
+			t.Errorf("back towards the old CA, no line %q in:\n%s", want, back)
+		}
+	}
+	for _, l := range strings.Split(back, "\n") {
+		if strings.Contains(l, "a node ") && strings.Contains(l, "new one") {
+			t.Errorf("back towards the old CA, a line names the new CA as the one it goes to: %s", l)
+		}
 	}
 }

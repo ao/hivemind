@@ -95,8 +95,15 @@ func (r *renewer) renewIfDue(ctx context.Context) (bool, error) {
 		return false, nil
 	}
 	if under != nil {
-		r.log.Info("renewing the node certificate under the cluster's new CA, as the CA rotation's renew phase asks",
-			"ca", pki.FingerprintHex(*under)[:16])
+		// Named by both fingerprints, not as new or old: after an abort the
+		// rotation goes back to the old CA, and in the fifth soak this line
+		// called that one the new CA.
+		from := "-"
+		if iss := r.trust().Issuer(leaf); iss != nil {
+			from = pki.FingerprintHex(pki.Fingerprint(iss))[:16]
+		}
+		r.log.Info("renewing the node certificate under the CA the cluster's CA rotation goes to, as its renew phase asks",
+			"ca", pki.FingerprintHex(*under)[:16], "from", from)
 	}
 	return true, r.renew(ctx)
 }

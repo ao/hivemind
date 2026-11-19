@@ -268,6 +268,8 @@ func TestWorkerFollowsAnAbortInRenew(t *testing.T) {
 	dir := filepath.Join(t.TempDir(), "w")
 	s.join(t, dir)
 	tw := startTestWorker(t, dir)
+	wlogs := &syncLog{}
+	tw.r.log = slog.New(slog.NewTextHandler(wlogs, nil))
 	if err := tw.register(); err != nil {
 		t.Fatal(err)
 	}
@@ -294,6 +296,16 @@ func TestWorkerFollowsAnAbortInRenew(t *testing.T) {
 		}
 	}
 	firstIs("after the renewal under the new CA", next)
+	// The renewal's line names the CA it goes to and the one it leaves by
+	// fingerprint, which reads right both ways; in the fifth soak it
+	// called the old CA new after the abort.
+	renewLine := func(to, from *pki.CA) string {
+		return "renewing the node certificate under the CA the cluster's CA rotation goes to, as its renew phase asks\" ca=" +
+			pki.FingerprintHex(to.Fingerprint())[:16] + " from=" + pki.FingerprintHex(from.Fingerprint())[:16]
+	}
+	if l := wlogs.String(); !strings.Contains(l, renewLine(next, old)) {
+		t.Fatalf("the renewal under the new CA logged:\n%s", l)
+	}
 	if _, err := s.m.Abort(ctx); err != nil {
 		t.Fatal(err)
 	}
@@ -304,6 +316,9 @@ func TestWorkerFollowsAnAbortInRenew(t *testing.T) {
 	// The CA of its certificate is first again. In the fifth soak the
 	// dropped CA stayed first until finish.
 	firstIs("after the renewal back under the old CA", old)
+	if l := wlogs.String(); !strings.Contains(l, renewLine(old, next)) || strings.Count(l, "renewing the node certificate") != 2 {
+		t.Fatalf("the renewal back under the old CA logged:\n%s", l)
+	}
 	if pki.Fingerprint(tw.keeper.Trust().CAs()[0]) != old.Fingerprint() {
 		t.Fatal("the set in memory does not have the old CA first")
 	}

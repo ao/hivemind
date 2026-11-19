@@ -41,7 +41,7 @@ const maxCATrust = 4
 // leaves, for a node that has presented one from the CA it goes to.
 const (
 	CAUntrustedMessage  = "the client certificate is from a CA this cluster no longer trusts"
-	CASupersededMessage = "this node has a certificate from the cluster's new CA, so one from the old CA is refused for it"
+	CASupersededMessage = "this node has presented a certificate from the CA the cluster's CA rotation goes to, so one from the CA it leaves is refused for it"
 )
 
 // ErrCAUntrusted and ErrCASuperseded are what the client returns for them.

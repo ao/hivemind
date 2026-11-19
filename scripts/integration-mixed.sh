@@ -389,7 +389,7 @@ cl_note "start: $W1 trusts the new CA ${NEXT_FP:0:16}; ca status and status name
 
 rotate renew --force
 wait_for 90 is_true "$W1_ID" renewed || cl_fail "$W1 did not renew under the new CA: $(ca_json)"
-docker exec "$W1" grep -q "renewing the node certificate under the cluster's new CA" /var/log/hivemind.log || cl_fail "$W1 did not log its renewal"
+docker exec "$W1" grep -q "renewing the node certificate under the CA the cluster's CA rotation goes to" /var/log/hivemind.log || cl_fail "$W1 did not log its renewal"
 [ "$(ca_q '.rotation.listener_moved')" = false ] || cl_fail "the server's certificate moved while $W2_ID trusts the old CA only"
 # n2 works on the old CA: its ca.crt is the old CA alone, its certificate is
 # from it, its lease is current, and it takes a new replica, with the two
@@ -429,7 +429,7 @@ wait_for 30 w2_old_gone || cl_fail "the $OLD_VERSION worker on $W2 did not stop"
 docker exec -d "$W2" sh -c "exec hivemind serve --role worker >>/var/log/hivemind.log 2>&1"
 up2=$(date +%s)
 wait_for 120 is_true "$W2_ID" renewed || cl_fail "$W2 did not renew under the new CA after its upgrade: $(ca_json)"
-for p in "trusts a new cluster CA.*ca=$NEXT_FP" "renewing the node certificate under the cluster's new CA"; do
+for p in "trusts a new cluster CA.*ca=$NEXT_FP" "renewing the node certificate under the CA the cluster's CA rotation goes to"; do
 	docker exec "$W2" grep -q "$p" /var/log/hivemind.log || cl_fail "$W2 did not log \"$p\" after its upgrade: $(docker exec "$W2" tail -n 5 /var/log/hivemind.log)"
 done
 if is_true "$W2_ID" old_build; then cl_fail "$W2_ID is still marked a build without rotation after its upgrade"; fi

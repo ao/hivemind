@@ -265,8 +265,12 @@ rotate renew
 wait_for 120 waiting_none || cl_fail "the workers did not renew: $(ca_json)"
 wait_for 60 listener_moved || cl_fail "the server's certificate did not move: $(ca_json)"
 for c in "$W1" "$W2"; do
-	docker exec "$c" grep -q "renewing the node certificate under the cluster's new CA" /var/log/hivemind.log ||
-		cl_fail "$c did not renew under the new CA"
+	docker exec "$c" grep -q "renewing the node certificate under the CA the cluster's CA rotation goes to.* ca=${NEXT_FP:0:16} " /var/log/hivemind.log ||
+		cl_fail "$c did not renew under the new CA, or its line does not name it: $(docker exec "$c" grep 'renewing the node certificate' /var/log/hivemind.log)"
+done
+for p in "a node trusts the CA the rotation goes to, the new one in ca-next.crt" "a node presents a certificate from the CA the rotation goes to, the new one in ca-next.crt"; do
+	[ "$(docker exec "$S" grep -c "$p.* ca=${NEXT_FP:0:16} " /var/log/hivemind.log)" -ge 2 ] ||
+		cl_fail "the server did not log, for both workers, \"$p\" with ca=${NEXT_FP:0:16}: $(docker exec "$S" grep 'a node ' /var/log/hivemind.log | tail -n 4)"
 done
 cl_note "renew: both workers renewed under the new CA, then the server's certificate moved"
 rotate finish
@@ -329,6 +333,23 @@ wait_for 120 some_renewed || cl_fail "no worker renewed: $(ca_json)"
 rotate abort
 [ "$(ca_q '.rotation.toward')" = current ] || cl_fail "abort in the renew phase did not turn the rotation round: $(ca_json)"
 wait_for 120 waiting_none || cl_fail "the workers did not renew back: $(ca_json)"
+# The lines on both sides name the CA the rotation goes back to as that,
+# by its fingerprint. In the fifth soak they called it the new CA.
+TO3=$(ca_q '.rotation.to')
+FROM3=$(ca_q '.rotation.from')
+for c in "$W1" "$W2"; do
+	# A worker that had not renewed under the new CA before the abort has
+	# nothing to renew back.
+	docker exec "$c" grep -q "renewing the node certificate under the CA the cluster's CA rotation goes to.* ca=${FROM3:0:16} " /var/log/hivemind.log || continue
+	docker exec "$c" grep -q "renewing the node certificate under the CA the cluster's CA rotation goes to.* ca=${TO3:0:16} from=${FROM3:0:16}" /var/log/hivemind.log ||
+		cl_fail "$c did not log its renewal back with ca=${TO3:0:16} from=${FROM3:0:16}: $(docker exec "$c" grep 'renewing the node certificate' /var/log/hivemind.log | tail -n 2)"
+done
+for p in "a node trusts the CA the rotation goes back to, the old one in ca.crt, after an abort" \
+	"a node presents a certificate from the CA the rotation goes back to, the old one in ca.crt, after an abort"; do
+	[ "$(docker exec "$S" grep -c "$p.* ca=${TO3:0:16} leaving=${FROM3:0:16}" /var/log/hivemind.log)" -ge 2 ] ||
+		cl_fail "the server did not log, for both workers, \"$p\" with ca=${TO3:0:16}: $(docker exec "$S" grep 'a node ' /var/log/hivemind.log | tail -n 4)"
+done
+cl_note "abort: both sides named ${TO3:0:16} as the CA the rotation goes back to"
 rotate finish
 [ "$(fsum "$S" "$DATA/ca.crt")" = "$CA2" ] || cl_fail "after the abort, ca.crt is not the CA from before"
 wait_one_ca "$CA2"

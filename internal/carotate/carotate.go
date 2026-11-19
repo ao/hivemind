@@ -380,10 +380,10 @@ func (m *Manager) Observe(ctx context.Context, node string, trusts [][32]byte, s
 		m.log.Warn("a node of a build without CA rotation is in the cluster: it trusts the old CA only, holds back the server's "+
 			"certificate and hivemind ca rotate finish, and must be upgraded, removed, or cut off with finish --force", "node", node)
 	case n.Trusts && !old.Trusts:
-		m.log.Info("a node trusts the new cluster CA", "node", node, "ca", short(toFP))
+		m.log.Info("a node trusts "+towardCA(s.rot), "node", node, "ca", short(toFP), "leaving", short(fromFP))
 	}
 	if n.Renewed && !old.Renewed {
-		m.log.Info("a node presents a certificate from the new cluster CA", "node", node, "ca", short(toFP))
+		m.log.Info("a node presents a certificate from "+towardCA(s.rot), "node", node, "ca", short(toFP), "leaving", short(fromFP))
 	}
 	if n.Trusts != old.Trusts || n.Renewed != old.Renewed {
 		select {
@@ -414,7 +414,7 @@ func (m *Manager) Run(ctx context.Context) {
 	for {
 		m.warnExpiry()
 		if err := m.moveListener(ctx); err != nil && ctx.Err() == nil {
-			m.log.Warn("checking whether the server's certificate can move to the new cluster CA", "err", err)
+			m.log.Warn("checking whether the server's certificate can move to the CA the rotation goes to", "err", err)
 		}
 		select {
 		case <-ctx.Done():
@@ -575,6 +575,18 @@ func syncDir(dir string) error {
 
 // short is the first 16 hex digits of a fingerprint, for logs.
 func short(fp [32]byte) string { return pki.FingerprintHex(fp)[:16] }
+
+// towardCA names the CA a rotation goes to, for log lines: the new one, or,
+// once an abort has turned the rotation round, the old one it goes back to.
+// In the fifth soak the lines called the CA the rotation went back to "the
+// new cluster CA", which an operator checking an abort by its fingerprint
+// reads the wrong way round.
+func towardCA(rot *store.CARotation) string {
+	if rot != nil && rot.Toward == store.CACurrent {
+		return "the CA the rotation goes back to, the old one in ca.crt, after an abort"
+	}
+	return "the CA the rotation goes to, the new one in ca-next.crt"
+}
 
 // live reports whether a node's lease is current at now.
 func live(n store.Node, now time.Time) bool {
