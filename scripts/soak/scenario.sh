@@ -1282,7 +1282,9 @@ ids_check() {
 }
 
 # ca_after NAME T0 PRE [SKIP]: after a rotation: the containers (all_kept),
-# the node IDs, the TLS handshake errors and refusals in the server's log
+# the node IDs, the TLS handshake errors and the lines that name a node
+# whose handshake was refused (cut_off_lines, which replace the first for
+# such a node) and refusals in the server's log
 # since T0 (Unix s), the TLS and x509 lines in each worker's, the joins, the
 # node certificates' expiry the server records, and the journals to files.
 ca_after() {
@@ -1290,7 +1292,7 @@ ca_after() {
 	ev event "$name kept $(all_kept "$pre" "$skip")"
 	ev event "$name ids $(ids_check)"
 	on "$SERVER" "sudo journalctl -u hivemind --since @$t0 -o short-iso-precise --no-pager" >"$SOAK_DIR/journal-$name-$SERVER.txt" 2>/dev/null || true
-	ev event "$name server-log tls_handshake_errors=$(grep -c 'TLS handshake error' "$SOAK_DIR/journal-$name-$SERVER.txt") refused=$(grep -c 'request refused' "$SOAK_DIR/journal-$name-$SERVER.txt") joined=$(grep -c 'node joined' "$SOAK_DIR/journal-$name-$SERVER.txt") errors=$(grep -c 'level=ERROR' "$SOAK_DIR/journal-$name-$SERVER.txt") warns=$(grep -c 'level=WARN' "$SOAK_DIR/journal-$name-$SERVER.txt")"
+	ev event "$name server-log tls_handshake_errors=$(grep -c 'TLS handshake error' "$SOAK_DIR/journal-$name-$SERVER.txt") cut_off_lines=$(grep -c 'certificate from a CA this cluster does not trust, and was refused\|a node refused this server.s certificate' "$SOAK_DIR/journal-$name-$SERVER.txt") refused=$(grep -c 'request refused' "$SOAK_DIR/journal-$name-$SERVER.txt") joined=$(grep -c 'node joined' "$SOAK_DIR/journal-$name-$SERVER.txt") errors=$(grep -c 'level=ERROR' "$SOAK_DIR/journal-$name-$SERVER.txt") warns=$(grep -c 'level=WARN' "$SOAK_DIR/journal-$name-$SERVER.txt")"
 	for ((i = 1; i < ${#NAMES[@]}; i++)); do
 		n=${NAMES[$i]}
 		on "$n" "sudo journalctl -u hivemind --since @$t0 -o short-iso-precise --no-pager" >"$SOAK_DIR/journal-$name-$n.txt" 2>/dev/null || true

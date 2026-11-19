@@ -134,8 +134,10 @@ type Cluster struct {
 	mln   net.Listener
 	jln   net.Listener
 	certs *serverCertSource
-	stop  context.CancelFunc
-	ctx   context.Context
+	// refused logs the node listener's failed handshakes (handshake.go).
+	refused *refusedLog
+	stop    context.CancelFunc
+	ctx     context.Context
 }
 
 // NewNodeID returns a new node ID: "node-" and 12 random hex digits. It is a
@@ -207,7 +209,9 @@ func Listen(cfg Config) (*Cluster, error) {
 	if cfg.Logs == nil {
 		cfg.Logs = logrelay.New(logrelay.Options{})
 	}
-	c := &Cluster{log: log, logs: cfg.Logs, mln: mln, jln: jln, certs: certs}
+	c := &Cluster{log: log, logs: cfg.Logs, mln: mln, jln: jln, certs: certs,
+		refused: &refusedLog{log: log, now: cfg.now(), trusted: func() [][32]byte { return cfg.Rotation.Accept().Load().Fingerprints() },
+			nodeAt: storeNodeAt(cfg.Store)}}
 	c.ctx, c.stop = context.WithCancel(context.Background())
 	c.mtls = newHTTPServer(nodeRoutes(cfg, log))
 	c.join = newHTTPServer(joinRoutes(cfg, limiter, log))
@@ -264,7 +268,12 @@ func (c *Cluster) Serve() error {
 		c.certs.run(c.ctx)
 	}()
 	errc := make(chan error, 2)
-	go func() { errc <- c.mtls.ServeTLS(c.mln, "", "") }()
+	// The node listener's handshakes are done before http.Server gets the
+	// connections, with the same config, so that refused ones can be told
+	// apart (handshake.go).
+	go func() {
+		errc <- c.mtls.Serve(newHandshakeListener(c.mln, c.mtls.TLSConfig, readHeaderTimeout, c.refused.note))
+	}()
 	go func() { errc <- c.join.ServeTLS(c.jln, "", "") }()
 	err := <-errc
 	if errors.Is(err, http.ErrServerClosed) {

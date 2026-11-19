@@ -319,6 +319,15 @@ CA2=$(fsum "$S" "$DATA/ca.crt")
 serve_worker 2
 wait_for 60 docker exec "$W2" grep -q "rotated without this node" /var/log/hivemind.log ||
 	cl_fail "$W2 did not say the CA was rotated without it: $(docker exec "$W2" tail -n 5 /var/log/hivemind.log)"
+# The server names it, by the address it registered, once a minute, and
+# logs no unnamed handshake errors for it.
+wait_for 30 docker exec "$S" grep -q "a node refused this server's certificate.*node=$OFF_ID" /var/log/hivemind.log ||
+	cl_fail "the server did not name $OFF_ID as refusing its certificate: $(docker exec "$S" grep -i 'handshake\|refused this server' /var/log/hivemind.log | tail -n 3)"
+sleep 12
+[ "$(docker exec "$S" grep -c "a node refused this server's certificate.*node=$OFF_ID" /var/log/hivemind.log)" = 1 ] ||
+	cl_fail "the server named $OFF_ID more than once in a minute: $(docker exec "$S" grep "refused this server's certificate" /var/log/hivemind.log)"
+[ "$(docker exec "$S" sh -c "grep 'TLS handshake error' /var/log/hivemind.log | grep -c 'remote=$W2_IP:' || true")" = 0 ] ||
+	cl_fail "the server logged unnamed handshake errors for $W2: $(docker exec "$S" grep 'TLS handshake error' /var/log/hivemind.log | tail -n 3)"
 stop_hivemind "$W2"
 cl_note "finish --force cut $W2 off; started again, it says the CA was rotated without it"
 wait_for 60 docker exec "$S" grep -q "these have not reached the server in the 30 s since.*nodes=$OFF_ID" /var/log/hivemind.log ||
