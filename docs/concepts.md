@@ -272,6 +272,8 @@ The restart policy in the container itself is `no`. The agent is the only thing 
 
 Status reports the state of each replica, its node, its generation, its health, its restart count and its last error. While a restart waits out its backoff, the replica is crash-looping, and status says why the container stopped and when the next restart is: `hivemind status` prints "crash-looping: exited with code 1, next restart in 40s", "crash-looping: killed for going over its memory limit of 64Mi (out of memory), ..." or "crash-looping: failed its health check 3 times in a row: ...".
 
+A replica that runs and has not passed its health check yet says why under `DETAIL`: "its last health check failed: tcp port 50051: dial tcp 172.17.0.5:50051: connect: connection refused", a failure in the start period included; and just after a restart for failing its check, "restarted after it failed its health check 3 times in a row: ...", until the new container's own check passes or fails.
+
 ## Ports
 
 A port in the spec is published on a host address. The default address is `127.0.0.1`, so the host port is reachable from the machine only; the other containers on the node can still reach the container port itself (see below). Write `0.0.0.0:8080:80` or another address to publish it elsewhere. The protocol is `tcp` by default, and `udp` is allowed. An IPv6 address goes in brackets, such as `[::1]:8080:80`.
