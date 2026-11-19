@@ -281,6 +281,9 @@ type Store struct {
 	// afterReplicaRead, if set, runs in AssignmentsForNode between its read
 	// of the replicas and its read of the surges. Tests set it.
 	afterReplicaRead func()
+	// bytesChecked, if set, gets the bytes a put's check made for after
+	// the put, when the check ran (putBytes). Tests set it.
+	bytesChecked func(after map[string]int64)
 }
 
 // readConns is the size of the read-only pool.
@@ -452,7 +455,7 @@ func (s *Store) putApp(ctx context.Context, a spec.App, o PutOptions, then after
 	tmpl := c.Template()
 	var out App
 	err = s.tx(ctx, func(tx *sql.Tx) error {
-		before, berr := nodeBytes(ctx, tx, "", 0)
+		bound, berr := s.startBytesCheck(ctx, tx, c.Name, len(specJSON))
 		if berr != nil {
 			return berr
 		}
@@ -521,19 +524,14 @@ func (s *Store) putApp(ctx context.Context, a spec.App, o PutOptions, then after
 				return err
 			}
 		}
-		if err := s.placePending(ctx, tx); err != nil {
+		placedNow, err := s.placePendingRows(ctx, tx)
+		if err != nil {
 			return err
 		}
 		if err := syncRoutes(ctx, tx, c); err != nil {
 			return err
 		}
-		// Placement kept every new copy within MaxNodeAssignmentBytes; the
-		// replicas the app has may get the new spec in place.
-		after, err := nodeBytes(ctx, tx, c.Name, len(specJSON))
-		if err != nil {
-			return err
-		}
-		if err := checkNodeBytes(before, after, "app "+c.Name+"'s spec", "use fewer replicas on that node, a smaller spec, or more nodes"); err != nil {
+		if err := bound.finish(ctx, tx, placedNow); err != nil {
 			return err
 		}
 		if then != nil {
@@ -646,13 +644,20 @@ func (s *Store) syncReplicas(ctx context.Context, tx *sql.Tx, app string, n, gen
 // the placement function, it does nothing when what it reads is the same as
 // when it last ran and placed nothing (placecache.go).
 func (s *Store) placePending(ctx context.Context, tx *sql.Tx) error {
+	_, err := s.placePendingRows(ctx, tx)
+	return err
+}
+
+// placePendingRows is placePending, and returns the replicas it placed, as
+// they are now.
+func (s *Store) placePendingRows(ctx context.Context, tx *sql.Tx) ([]Assignment, error) {
 	rows, err := queryPending(ctx, tx)
 	if err != nil || len(rows) == 0 {
-		return err
+		return nil, err
 	}
 	nodes, err := listNodes(ctx, tx)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	at := s.now()
 	var fp *[sha256.Size]byte
@@ -660,24 +665,24 @@ func (s *Store) placePending(ctx context.Context, tx *sql.Tx) error {
 	if s.defaultPlace {
 		f, err := placedPrint(ctx, tx)
 		if err != nil {
-			return err
+			return nil, err
 		}
 		fp = &f
 		for i, r := range rows {
 			reasons[i] = r.as.PendingReason
 		}
 		if s.placeSkip(s.placeInputs(nodes, rows, reasons, f, at)) {
-			return nil
+			return nil, nil
 		}
 	}
 	// Every replica that still has a container on a node holds its host
 	// ports and capacity, marked for removal or not, and so does every surge.
 	placed, err := placedFrom(ctx, tx, fp)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	now := at.UnixNano()
-	placedAny := false
+	var out []Assignment
 	for k, r := range rows {
 		p := r.as
 		var id string
@@ -702,24 +707,24 @@ func (s *Store) placePending(ctx context.Context, tx *sql.Tx) error {
 			reasons[k] = perr.Error()
 			if _, err := tx.ExecContext(ctx, `UPDATE replicas SET pending_reason = ?, updated_at = ? WHERE app = ? AND idx = ?`,
 				reasons[k], now, p.App, p.Index); err != nil {
-				return err
+				return nil, err
 			}
 			continue
 		}
 		if _, err := tx.ExecContext(ctx, `UPDATE replicas SET node_id = ?, pending_reason = '', updated_at = ? WHERE app = ? AND idx = ?`,
 			id, now, p.App, p.Index); err != nil {
-			return err
+			return nil, err
 		}
 		p.NodeID, p.PendingReason = id, ""
 		placed = append(placed, p)
-		placedAny = true
+		out = append(out, p)
 	}
 	// Nothing was placed, so the rows are as they were but for the reasons
 	// just written: the next run with the same inputs reaches the same end.
-	if fp != nil && !placedAny {
+	if fp != nil && len(out) == 0 {
 		s.placeDone(s.placeInputs(nodes, rows, reasons, *fp, at))
 	}
-	return nil
+	return out, nil
 }
 
 type querier interface {

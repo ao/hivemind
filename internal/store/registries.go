@@ -92,7 +92,7 @@ func (s *Store) PutRegistry(ctx context.Context, host, username, password string
 	var out Registry
 	defer s.forgetRegistryBytes()
 	err = s.tx(ctx, func(tx *sql.Tx) error {
-		before, berr := nodeBytes(ctx, tx, "", 0)
+		before, berr := nodeBytes(ctx, tx)
 		if berr != nil {
 			return berr
 		}
@@ -121,7 +121,7 @@ func (s *Store) PutRegistry(ctx context.Context, host, username, password string
 			return err
 		}
 		// The credential goes with each running replica of an image from h.
-		after, err := nodeBytes(ctx, tx, "", 0)
+		after, err := nodeBytes(ctx, tx)
 		if err != nil {
 			return err
 		}

@@ -5,6 +5,7 @@ import (
 	"errors"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/ao/hivemind/internal/spec"
 )
@@ -127,5 +128,134 @@ func TestJSONLenBoundsTheEncoder(t *testing.T) {
 		if got := jsonLen(s); got < len(b) {
 			t.Errorf("jsonLen(%q) = %d, the encoder wrote %d", s, got, len(b))
 		}
+	}
+}
+
+// A node already past the bound, as one could be before it, takes a put that
+// does not grow it: a rollout to a spec of the same length, and a put that
+// lowers the replica count. A longer spec is still refused.
+func TestPutThatDoesNotGrowANodePastTheBoundIsTaken(t *testing.T) {
+	// FirstNode ignores the bound, as placement before it did.
+	s := newT(t, WithPlacement(FirstNode))
+	ctx := ctxT(t)
+	a := big("web", 90, 200)
+	a.Env = map[string]string{"V": "1"}
+	if _, err := s.PutApp(ctx, a); err != nil {
+		t.Fatal(err)
+	}
+	sizes, err := s.AssignmentBytes(ctx)
+	if err != nil || sizes[node1] <= MaxNodeAssignmentBytes {
+		t.Fatalf("setup: node %s has %d bytes, want more than %d: %v", node1, sizes[node1], MaxNodeAssignmentBytes, err)
+	}
+	a.Env = map[string]string{"V": "2"}
+	if _, err := s.PutApp(ctx, a); err != nil {
+		t.Fatalf("a rollout to a spec of the same length: %v", err)
+	}
+	a.Replicas = 80
+	if _, err := s.PutApp(ctx, a); err != nil {
+		t.Fatalf("a put that lowers the replica count: %v", err)
+	}
+	a.Env = map[string]string{"V": "33"}
+	if _, err := s.PutApp(ctx, a); !errors.Is(err, ErrConflict) {
+		t.Fatalf("a rollout to a longer spec: %v", err)
+	}
+}
+
+// The bytes a put's check makes for after the put, from those before it, are
+// those read after it, with each of the app's copies on a node at the longer
+// of its stored spec and the new one: through a series of puts that grow,
+// scale down, scale up again replicas still marked for removal, and change
+// the image, of an app beside another with a credential for its registry,
+// while the put's placement also places the other app's waiting replica.
+func TestPutBytesAfterIsWhatIsReadAfterThePut(t *testing.T) {
+	clock := &fakeClock{t: time.Unix(1_700_000_000, 0)}
+	s := newT(t, WithClock(clock.Now), WithMinReady(20*time.Second))
+	ctx := ctxT(t)
+	renew := func(ids ...string) {
+		t.Helper()
+		for range 2 {
+			clock.Advance(10 * time.Second)
+			for _, id := range ids {
+				if err := s.RenewLease(ctx, id); err != nil {
+					t.Fatal(err)
+				}
+			}
+		}
+	}
+	if err := s.UpsertNode(ctx, Node{ID: "node-2", Name: "two", CPU: 4, Memory: 8 << 30}); err != nil {
+		t.Fatal(err)
+	}
+	renew(node1, "node-2")
+	if _, err := s.PutRegistry(ctx, "reg.example.com", "u", "token"); err != nil {
+		t.Fatal(err)
+	}
+	// Three replicas of a host port on two nodes: one waits.
+	other := spec.App{Name: "other", Image: "reg.example.com/o:1", Replicas: 3, Ports: []spec.Port{{Host: 9000, Container: 80}}}
+	if _, err := s.PutApp(ctx, other); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.PutApp(ctx, spec.App{Name: "web", Image: "reg.example.com/w:1", Replicas: 4}); err != nil {
+		t.Fatal(err)
+	}
+	// A third node, ready once its wait is over; nothing places meanwhile.
+	if err := s.UpsertNode(ctx, Node{ID: "node-3", Name: "three", CPU: 4, Memory: 8 << 30}); err != nil {
+		t.Fatal(err)
+	}
+	renew(node1, "node-2", "node-3")
+	if n, _ := placedCount(t, s, "other"); n != 2 {
+		t.Fatalf("setup: %d replicas of other placed, want 2", n)
+	}
+
+	steps := []spec.App{
+		// Longer, and more replicas; other's third replica goes to node-3.
+		{Name: "web", Image: "reg.example.com/w:1", Replicas: 6, Env: map[string]string{"A": "a longer value"}},
+		// Fewer: four replicas are marked for removal.
+		{Name: "web", Image: "reg.example.com/w:1", Replicas: 2, Env: map[string]string{"A": "a much, much longer value"}},
+		// Three of them wanted again, with their credential.
+		{Name: "web", Image: "reg.example.com/w:1", Replicas: 5, Env: map[string]string{"A": "a much, much, much longer value"}},
+		// Another image, from no registry with a credential.
+		{Name: "web", Image: "nginx:alpine", Replicas: 5, Env: map[string]string{"A": "a much, much, much, much longer value"}},
+		// Shorter, with replicas still marked for removal.
+		{Name: "web", Image: "nginx:alpine", Replicas: 3},
+	}
+	for i, a := range steps {
+		c, err := cleanSpec(a)
+		if err != nil {
+			t.Fatal(err)
+		}
+		js, _ := json.Marshal(c)
+		var made map[string]int64
+		s.bytesChecked = func(after map[string]int64) { made = after }
+		if _, err := s.PutApp(ctx, a); err != nil {
+			t.Fatalf("step %d: %v", i, err)
+		}
+		s.bytesChecked = nil
+		if made == nil {
+			t.Fatalf("step %d: the check did not run", i)
+		}
+		placed, err := placedOn(ctx, s.rdb)
+		if err != nil {
+			t.Fatal(err)
+		}
+		creds, err := registryBytes(ctx, s.rdb)
+		if err != nil {
+			t.Fatal(err)
+		}
+		read := map[string]int64{}
+		for _, x := range placed {
+			n := x.specLen
+			if x.App == "web" {
+				n = max(n, len(js))
+			}
+			read[x.NodeID] += assignmentBytes(x, n, credFor(creds, x.Desired, x.Spec))
+		}
+		for _, n := range []string{node1, "node-2", "node-3"} {
+			if made[n] != read[n] {
+				t.Errorf("step %d, node %s: the check made %d bytes, %d are read after the put", i, n, made[n], read[n])
+			}
+		}
+	}
+	if n, _ := placedCount(t, s, "other"); n != 3 {
+		t.Fatalf("%d replicas of other placed, want 3: the puts' placement placed none of them", n)
 	}
 }

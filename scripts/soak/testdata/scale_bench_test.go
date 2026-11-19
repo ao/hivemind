@@ -243,6 +243,36 @@ func BenchmarkScalePut(b *testing.B) {
 	}
 }
 
+// The PUT that starts a rolling update of one app of 5 replicas: an
+// environment value of the same length each time, as the scale run's 50-app
+// rollouts changed, or a longer one each time, so the put checks the nodes'
+// assignment bytes.
+func BenchmarkScaleRollPut(b *testing.B) {
+	for _, longer := range []bool{false, true} {
+		for _, n := range benchSizes {
+			b.Run(fmt.Sprintf("longer=%v/replicas=%d", longer, n*5), func(b *testing.B) {
+				e := benchStore(b, n, false)
+				ctx := context.Background()
+				a := spec.App{Name: "rolled", Image: "nginx:alpine", Replicas: 5, Env: map[string]string{"V": "start"}}
+				if _, err := e.st.PutApp(ctx, a); err != nil {
+					b.Fatal(err)
+				}
+				b.ResetTimer()
+				for i := 0; i < b.N; i++ {
+					v := fmt.Sprintf("%05d", i)
+					if longer {
+						v = fmt.Sprintf("%0*d", i+6, i)
+					}
+					a.Env = map[string]string{"V": v}
+					if _, err := e.st.PutApp(ctx, a); err != nil {
+						b.Fatal(err)
+					}
+				}
+			})
+		}
+	}
+}
+
 // One node's report when it changed since the last: one container's
 // readiness flips at every report, so every report writes its rows.
 func BenchmarkScaleReportChanged(b *testing.B) {

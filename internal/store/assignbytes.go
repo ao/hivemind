@@ -2,8 +2,10 @@ package store
 
 import (
 	"context"
+	"database/sql"
 	"encoding/json"
 	"fmt"
+	"maps"
 	"slices"
 
 	"github.com/ao/hivemind/internal/spec"
@@ -101,10 +103,8 @@ func credFor(creds map[string]int, desired Desired, sp spec.App) int {
 }
 
 // nodeBytes returns, for each node, a bound on the bytes of its assignment
-// list. Each of app's assignments counts with a spec of at least
-// atLeast bytes: a put checks its new spec against the replicas the app
-// has, which a rollout may move to it in place.
-func nodeBytes(ctx context.Context, q querier, app string, atLeast int) (map[string]int64, error) {
+// list.
+func nodeBytes(ctx context.Context, q querier) (map[string]int64, error) {
 	placed, err := placedOn(ctx, q)
 	if err != nil {
 		return nil, err
@@ -115,13 +115,108 @@ func nodeBytes(ctx context.Context, q querier, app string, atLeast int) (map[str
 	}
 	out := map[string]int64{}
 	for _, a := range placed {
-		n := a.specLen
-		if a.App == app {
-			n = max(n, atLeast)
-		}
-		out[a.NodeID] += assignmentBytes(a, n, credFor(creds, a.Desired, a.Spec))
+		out[a.NodeID] += assignmentBytes(a, a.specLen, credFor(creds, a.Desired, a.Spec))
 	}
 	return out, nil
+}
+
+// putBytes is a put's check against MaxNodeAssignmentBytes, begun before the
+// put changes anything (startBytesCheck) and finished after its placement.
+//
+// A put can grow a node's list only through the copies its app already has
+// on a node: one at the generation the put writes gets the new spec at once,
+// and the others may get it later, from a rollout's move in place, so each
+// counts with the longer of its own spec and the new one; a replica marked
+// for removal that the put wants again also gets its image's credential
+// back. Placement keeps every new copy within the bound. So when every copy
+// the app has on a node is a running replica or a surge, with a stored spec
+// at least as long as the new one, as for a new app, a rollout that changes
+// a value for one of the same length, or a change of the replica count
+// alone, the check reads nothing more. Otherwise it reads every node's bytes
+// once, before the put, and makes the after from them: the app's copies
+// before come out, its copies after go in, and so do the other apps'
+// replicas the put's placement placed; nothing else in a put changes an
+// assignment on a node. Reading them again after the put, as it did, made a
+// put twice as slow (the second scale run).
+type putBytes struct {
+	app     string
+	specLen int
+	own     []Assignment     // the app's copies on a node before the put
+	before  map[string]int64 // every node's bytes before; nil when the check is skipped
+	creds   map[string]int
+	checked func(after map[string]int64) // Store.bytesChecked
+}
+
+// ownPlaced returns app's replicas on a node and its surges, with whether any
+// of those replicas is marked for removal.
+func ownPlaced(ctx context.Context, q querier, app string) ([]Assignment, bool, error) {
+	reps, err := queryAssignments(ctx, q, `r.app = ? AND r.node_id IS NOT NULL`, app)
+	if err != nil {
+		return nil, false, err
+	}
+	removed := slices.ContainsFunc(reps, func(a Assignment) bool { return a.Desired != Running })
+	surges, err := querySurges(ctx, q, `s.app = ?`, app)
+	if err != nil {
+		return nil, false, err
+	}
+	return append(reps, surges...), removed, nil
+}
+
+// startBytesCheck begins the check of a put of app with a spec of specLen
+// bytes.
+func (s *Store) startBytesCheck(ctx context.Context, tx *sql.Tx, app string, specLen int) (*putBytes, error) {
+	own, removed, err := ownPlaced(ctx, tx, app)
+	if err != nil {
+		return nil, err
+	}
+	b := &putBytes{app: app, specLen: specLen, own: own, checked: s.bytesChecked}
+	if !removed && !slices.ContainsFunc(own, func(a Assignment) bool { return a.specLen < specLen }) {
+		return b, nil
+	}
+	placed, err := placedOn(ctx, tx)
+	if err != nil {
+		return nil, err
+	}
+	if b.creds, err = registryBytes(ctx, tx); err != nil {
+		return nil, err
+	}
+	b.before = map[string]int64{}
+	for _, a := range placed {
+		b.before[a.NodeID] += b.bytes(a, a.specLen)
+	}
+	return b, nil
+}
+
+func (b *putBytes) bytes(a Assignment, specLen int) int64 {
+	return assignmentBytes(a, specLen, credFor(b.creds, a.Desired, a.Spec))
+}
+
+// finish refuses the put when it leaves a node past the bound and larger
+// than before. placed is what the put's placement placed.
+func (b *putBytes) finish(ctx context.Context, tx *sql.Tx, placed []Assignment) error {
+	if b.before == nil {
+		return nil
+	}
+	own, _, err := ownPlaced(ctx, tx, b.app)
+	if err != nil {
+		return err
+	}
+	after := maps.Clone(b.before)
+	for _, a := range b.own {
+		after[a.NodeID] -= b.bytes(a, a.specLen)
+	}
+	for _, a := range own {
+		after[a.NodeID] += b.bytes(a, max(a.specLen, b.specLen))
+	}
+	for _, a := range placed {
+		if a.App != b.app {
+			after[a.NodeID] += b.bytes(a, a.specLen)
+		}
+	}
+	if b.checked != nil {
+		b.checked(after)
+	}
+	return checkNodeBytes(b.before, after, "app "+b.app+"'s spec", "use fewer replicas on that node, a smaller spec, or more nodes")
 }
 
 // checkNodeBytes refuses a change that leaves a node's assignments past
@@ -192,5 +287,5 @@ func (s *Store) forgetRegistryBytes() {
 // the bytes of its assignment list that placement and the writes keep
 // within MaxNodeAssignmentBytes.
 func (s *Store) AssignmentBytes(ctx context.Context) (map[string]int64, error) {
-	return nodeBytes(ctx, s.rdb, "", 0)
+	return nodeBytes(ctx, s.rdb)
 }
