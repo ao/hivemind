@@ -72,10 +72,15 @@ type connLimits struct {
 	mu     sync.Mutex
 	n      int
 	byAddr map[netip.Prefix]int
+	// conns holds every connection accepted and not closed yet, hijacked
+	// ones included, which the router's Shutdown closes at the end of its
+	// wait (closeAll).
+	conns map[*limitConn]struct{}
 }
 
 func newConnLimits(total, perAddr int, log *slog.Logger, m *Metrics) *connLimits {
-	return &connLimits{total: total, perAddr: perAddr, log: log, metrics: m, byAddr: map[netip.Prefix]int{}}
+	return &connLimits{total: total, perAddr: perAddr, log: log, metrics: m, byAddr: map[netip.Prefix]int{},
+		conns: map[*limitConn]struct{}{}}
 }
 
 // clientKey is what the per-address cap counts a connection from addr by.
@@ -111,13 +116,37 @@ func (l *connLimits) admit(addr net.Addr) (netip.Prefix, string) {
 	return key, ""
 }
 
-func (l *connLimits) release(key netip.Prefix) {
+// track records c, an admitted connection, as open.
+func (l *connLimits) track(c *limitConn) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	l.conns[c] = struct{}{}
+}
+
+// release gives back the count of c, which is closed.
+func (l *connLimits) release(c *limitConn) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	l.n--
-	if l.byAddr[key]--; l.byAddr[key] <= 0 {
-		delete(l.byAddr, key)
+	if l.byAddr[c.key]--; l.byAddr[c.key] <= 0 {
+		delete(l.byAddr, c.key)
 	}
+	delete(l.conns, c)
+}
+
+// closeAll closes every connection still open, and returns how many it
+// closed.
+func (l *connLimits) closeAll() int {
+	l.mu.Lock()
+	open := make([]*limitConn, 0, len(l.conns))
+	for c := range l.conns {
+		open = append(open, c)
+	}
+	l.mu.Unlock()
+	for _, c := range open {
+		_ = c.Close()
+	}
+	return len(open)
 }
 
 // open returns the number of connections open now.
@@ -146,7 +175,9 @@ func (ln *limitListener) Accept() (net.Conn, error) {
 		}
 		key, reason := ln.limits.admit(c.RemoteAddr())
 		if reason == "" {
-			return &limitConn{Conn: c, limits: ln.limits, key: key, writeTimeout: ln.writeTimeout}, nil
+			lc := &limitConn{Conn: c, limits: ln.limits, key: key, writeTimeout: ln.writeTimeout}
+			ln.limits.track(lc)
+			return lc, nil
 		}
 		_ = c.Close()
 		ln.limits.metrics.connRefused(reason)
@@ -165,7 +196,7 @@ type limitConn struct {
 
 func (c *limitConn) Close() error {
 	err := c.Conn.Close()
-	c.once.Do(func() { c.limits.release(c.key) })
+	c.once.Do(func() { c.limits.release(c) })
 	return err
 }
 

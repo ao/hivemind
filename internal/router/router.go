@@ -56,7 +56,9 @@ const (
 	idleTimeout    = 2 * time.Minute
 	maxHeaderBytes = 64 << 10
 	// DefaultPoll is how often the router reads the routing table.
-	DefaultPoll     = time.Second
+	DefaultPoll = time.Second
+	// shutdownTimeout is how long Shutdown waits for requests in flight
+	// before it closes the connections still open.
 	shutdownTimeout = 10 * time.Second
 )
 
@@ -151,8 +153,12 @@ type Router struct {
 	// wholeWait after Serve began; from New when Config.Whole is nil.
 	whole     chan struct{}
 	wholeOnce sync.Once
-	// wholeWait is WholeWait, but for tests.
-	wholeWait time.Duration
+	// wholeWait is WholeWait, and shutdownWait shutdownTimeout, but for
+	// tests.
+	wholeWait, shutdownWait time.Duration
+	// stopOnce makes Shutdown's work happen once; stopErr is its result.
+	stopOnce sync.Once
+	stopErr  error
 
 	// mu guards the fields below, and orders Shutdown's cancel with the
 	// start of background work.
@@ -204,7 +210,8 @@ func New(cfg Config) (*Router, error) {
 	if log == nil {
 		log = slog.Default()
 	}
-	rt := &Router{cfg: cfg, log: log, managed: map[string]bool{}, whole: make(chan struct{}), wholeWait: WholeWait}
+	rt := &Router{cfg: cfg, log: log, managed: map[string]bool{}, whole: make(chan struct{}),
+		wholeWait: WholeWait, shutdownWait: shutdownTimeout}
 	rt.proxy = newProxy(log, cfg.Metrics)
 	rt.proxy.upgradeIdle = cfg.UpgradeIdleTimeout
 	rt.proxy.refresh = rt.refresh
@@ -333,22 +340,52 @@ func (rt *Router) Serve() error {
 }
 
 // Shutdown stops certificate work, closes the listeners and waits for
-// requests in flight, up to shutdownTimeout. It may be called on a router
-// that was never served.
+// requests in flight, up to shutdownTimeout. Then it closes the connections
+// still open, and logs how many at info: those of requests that have not
+// ended, such as streams, and the upgraded ones, such as WebSockets, which
+// http.Server leaves to the handler that took them over and does not wait
+// for. Before, the router returned the wait's "context deadline exceeded",
+// which the caller logged as a warning that said nothing of the
+// connections (seventh soak), and left them to the process's exit. It may
+// be called on a router that was never served, and more than once: later
+// calls return the first one's result.
 func (rt *Router) Shutdown() error {
+	rt.stopOnce.Do(func() { rt.stopErr = rt.shutdown() })
+	return rt.stopErr
+}
+
+func (rt *Router) shutdown() error {
 	// Under mu, so that no background work starts after the cancel (see
 	// renewAtStart) and bg's count is complete before the Wait below.
 	rt.mu.Lock()
 	rt.cancel()
 	rt.mu.Unlock()
-	ctx, cancel := context.WithTimeout(context.Background(), shutdownTimeout)
+	start := time.Now()
+	ctx, cancel := context.WithTimeout(context.Background(), rt.shutdownWait)
 	defer cancel()
-	err := errors.Join(rt.httpSrv.Shutdown(ctx), rt.tlsSrv.Shutdown(ctx))
+	err := errors.Join(waited(rt.httpSrv.Shutdown(ctx)), waited(rt.tlsSrv.Shutdown(ctx)))
+	if n := rt.limits.closeAll(); n > 0 {
+		rt.log.Info("router stopped; closed the connections still open after its wait for requests in flight",
+			"connections", n, "waited", time.Since(start).Round(time.Millisecond), "wait", rt.shutdownWait)
+	}
+	if ctx.Err() != nil {
+		_ = rt.httpSrv.Close()
+		_ = rt.tlsSrv.Close()
+	}
 	// A listener that was never served is not closed by Shutdown.
 	_ = rt.httpLn.Close()
 	_ = rt.tlsLn.Close()
 	rt.bg.Wait()
 	rt.cache.Stop()
+	return err
+}
+
+// waited is a server's Shutdown error, without the end of the wait, which
+// shutdown deals with.
+func waited(err error) error {
+	if errors.Is(err, context.DeadlineExceeded) {
+		return nil
+	}
 	return err
 }
 
