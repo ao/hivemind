@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/ao/hivemind/internal/auth"
+	"github.com/ao/hivemind/internal/nodeapi"
 	"github.com/ao/hivemind/internal/server"
 	"github.com/ao/hivemind/internal/spec"
 	"github.com/ao/hivemind/internal/store"
@@ -119,9 +120,9 @@ func TestNodesCommands(t *testing.T) {
 	}
 	for _, want := range []map[string]string{
 		{"ID": "node-s", "NAME": "srv", "ROLE": "server", "ADDRESS": "10.0.0.5 (hivemind.example.internal)", "VERSION": "v2.2.0", "CPU": "4", "MEMORY": "8.0Gi", "STATE": "ready",
-			"ELIGIBILITY": "eligible", "REPLICAS": "1", "CERT EXPIRES": "-"},
+			"ELIGIBILITY": "eligible", "REPLICAS": "1", "ROUTER": "no", "CERT EXPIRES": "-"},
 		{"ID": "node-w", "NAME": "wrk", "ROLE": "worker", "ADDRESS": "-", "VERSION": "-", "CPU": "2", "MEMORY": "1.0Gi", "STATE": "ready",
-			"ELIGIBILITY": "eligible", "REPLICAS": "1", "CERT EXPIRES": "-"},
+			"ELIGIBILITY": "eligible", "REPLICAS": "1", "ROUTER": "no", "CERT EXPIRES": "-"},
 	} {
 		if !hasRow(rows, want) {
 			t.Errorf("no row %v in:\n%s", want, out)
@@ -584,4 +585,74 @@ func TestStatusAndNodesSayWhyWorkersWait(t *testing.T) {
 		t.Fatal(err)
 	}
 	both()
+}
+
+// ROUTER says which nodes run a router, from the server's "router": "yes"
+// and "no" for a ready node, and "-" where the server cannot tell, for a
+// node that is not ready and has not been heard from, or does not say, as a
+// server older than 2.2 does not.
+func TestNodesRouterColumn(t *testing.T) {
+	yes, no := true, false
+	for _, c := range []struct {
+		router *bool
+		state  string
+		want   string
+	}{
+		{&yes, "ready", "yes"},
+		{&yes, "waiting", "yes"},
+		{&no, "ready", "no"},
+		{&no, "lost", "-"},
+		{&no, "waiting", "-"},
+		{nil, "ready", "-"},
+	} {
+		n := nodeRow{Router: c.router}
+		n.State = c.state
+		if got := routerColumn(n); got != c.want {
+			t.Errorf("router %v, state %s: %q, want %q", c.router, c.state, got, c.want)
+		}
+	}
+
+	// From the real API: the server's node runs a router, and so does the
+	// worker whose router read the routing table.
+	isolate(t)
+	ctx := context.Background()
+	st, err := store.Open(ctx, filepath.Join(t.TempDir(), storeFileName), store.WithMinReady(0))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+	for _, n := range []store.Node{{ID: "node-s", Name: "srv"}, {ID: "node-r", Name: "routes"}, {ID: "node-n", Name: "plain"}} {
+		if err := st.UpsertNode(ctx, n); err != nil {
+			t.Fatal(err)
+		}
+	}
+	readers := nodeapi.NewRouteReaders()
+	readers.Seen("node-r", nodeapi.RouteRead{Paths: true, Protocols: true}, time.Now())
+	tok, _ := auth.NewToken()
+	sess, _ := auth.NewSessions(time.Hour)
+	authn, _ := auth.NewAuthenticator(auth.HashToken(tok), sess)
+	api, err := server.New(server.Config{Store: st, Runtime: fakeRuntime{}, NodeID: "node-s", Auth: authn, RouteReaders: readers,
+		RouterReport: func() nodeapi.RouterReport { return nodeapi.RouterReport{} }, Logger: slog.New(slog.NewTextHandler(io.Discard, nil))})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ts := httptest.NewServer(api.Handler())
+	defer ts.Close()
+	t.Setenv(envServer, ts.URL)
+	t.Setenv(envToken, tok)
+	out, _, err := run(t, "", "nodes")
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := map[string]string{}
+	for _, r := range tableRows(t, out) {
+		got[r["ID"]] = r["ROUTER"]
+	}
+	if got["node-s"] != "yes" || got["node-r"] != "yes" || got["node-n"] != "no" {
+		t.Fatalf("ROUTER column %v in:\n%s", got, out)
+	}
+	out, _, err = run(t, "", "nodes", "--json")
+	if err != nil || strings.Count(out, `"router": true`) != 2 || strings.Count(out, `"router": false`) != 1 {
+		t.Fatalf("nodes --json: %v\n%s", err, out)
+	}
 }

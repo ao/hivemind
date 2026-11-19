@@ -72,7 +72,7 @@ sudo systemctl daemon-reload
 sudo systemctl enable --now hivemind
 ```
 
-On the server, `sudo hivemind nodes` lists the worker as `ready`.
+On the server, `sudo hivemind nodes` lists the worker as `ready`, with `yes` under ROUTER if it runs a router.
 
 `join` writes the worker flags it was given, such as `--route-addr`, `--acme-email` and `--acme-ca`, to `/var/lib/hivemind/hivemind.yaml` (mode 0600), so this unit runs the [router](routing.md) the worker was joined with. A flag in `ExecStart` overrides the file. A worker joined by a build before 2.2 has no such file: give it the flags in `ExecStart`, as in `hivemind serve --role worker --route-addr 0.0.0.0 --acme-email ops@example.com`, or write `route-addr:` and `acme-email:` to that file; without them the unit runs the agent and no router. The server's unit takes the same flags after `--advertise`.
 

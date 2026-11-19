@@ -772,6 +772,14 @@ one that does not (hivemind node eligibility), "draining" during a drain, and
 "drained" after one, until the node is made eligible again or removed. "-"
 means the server does not say, as a server older than 2.2 does not.
 
+ROUTER is "yes" for a node that runs an HTTPS router (docs/routing.md): the
+server's node when serve has --route-addr, and a worker whose router read the
+routing table from the server in the last minute, as a running router does
+every second. "no" means a ready node runs none, as a worker started without
+--route-addr does. "-" means the server cannot tell: the node is not ready,
+and its router has not read the table in that minute, or the server is older
+than 2.2.
+
 CERT EXPIRES is when the node's certificate expires, as the server recorded it
 when it issued the certificate. A worker renews its certificate once two thirds
 of its lifetime have passed, on day 243 of 365. One that is a day late is

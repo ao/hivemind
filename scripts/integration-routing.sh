@@ -16,6 +16,9 @@
 #   - listeners: the routers on 0.0.0.0 on the server and on each worker's
 #     address; the API, cluster and join ports as before, never on a
 #     wildcard; each node's private address in hivemind nodes
+#   - join writes the router's flags to a worker's hivemind.yaml, mode
+#     0600 and no token, and a plain serve --role worker runs the router
+#     again; hivemind nodes shows yes under ROUTER for all three nodes
 #   - an app with a route and two replicas runs them on two nodes, each
 #     publishing port 80 on an ephemeral port of its node's address
 #   - the certificate: one is issued, once, though all three routers asked
@@ -203,6 +206,14 @@ wait_for 30 sh -c "docker exec $W1 cat /proc/net/tcp | awk '\$4 == \"0A\" { prin
 	cl_fail "$W1's router is not on $W1_IP:$HTTPS_PORT after serve --role worker: $(cl_listeners "$W1" | tr '\n' ' ')"
 grep -qx "$(cl_hexip "$W1_IP"):$HP" <<<"$(cl_listeners "$W1")" || cl_fail "$W1's router is not on $W1_IP:$HTTP_PORT after serve --role worker"
 cl_note "join wrote the router's flags to $W1's hivemind.yaml (mode 600, no token); a plain serve --role worker runs the router again"
+# hivemind nodes says which nodes run a router: all three, W1 too after the
+# restart.
+three_routers() {
+	[ "$(docker exec "$S" hivemind nodes --json | grep -c '"router": true')" -eq 3 ] &&
+		[ "$(docker exec "$S" hivemind nodes | grep -c ' yes ')" -eq 3 ]
+}
+wait_for 30 three_routers || cl_fail "hivemind nodes does not show three routers: $(docker exec "$S" hivemind nodes | tr '\n' ';')"
+cl_note "hivemind nodes shows yes under ROUTER for all three nodes"
 
 # The app: two replicas of whoami, which answers with its host name, the
 # name it is given with -name, and the request it got.

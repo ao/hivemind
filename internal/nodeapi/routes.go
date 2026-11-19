@@ -169,6 +169,25 @@ func (rr *RouteReaders) Old(now time.Time) []OldRouter {
 	return out
 }
 
+// Reading returns the nodes whose router read the routing table within
+// RouteReaderMaxAge before now, whatever it asked for: the workers that run
+// a router, for hivemind nodes. A router reads the table every second, so
+// one that stopped, or whose node is cut off, drops out within that time.
+func (rr *RouteReaders) Reading(now time.Time) map[string]bool {
+	if rr == nil {
+		return nil
+	}
+	rr.mu.Lock()
+	defer rr.mu.Unlock()
+	out := map[string]bool{}
+	for node, r := range rr.m {
+		if now.Sub(r.at) <= RouteReaderMaxAge {
+			out[node] = true
+		}
+	}
+	return out
+}
+
 // orEmpty is a copy of s, or an empty list for none.
 func orEmpty(s []string) []string {
 	if s == nil {

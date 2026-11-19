@@ -59,6 +59,14 @@ one that does not (hivemind node eligibility), "draining" during a drain, and
 "drained" after one, until the node is made eligible again or removed. "-"
 means the server does not say, as a server older than 2.2 does not.
 
+ROUTER is "yes" for a node that runs an HTTPS router (docs/routing.md): the
+server's node when serve has --route-addr, and a worker whose router read the
+routing table from the server in the last minute, as a running router does
+every second. "no" means a ready node runs none, as a worker started without
+--route-addr does. "-" means the server cannot tell: the node is not ready,
+and its router has not read the table in that minute, or the server is older
+than 2.2.
+
 CERT EXPIRES is when the node's certificate expires, as the server recorded it
 when it issued the certificate. A worker renews its certificate once two thirds
 of its lifetime have passed, on day 243 of 365. One that is a day late is
@@ -87,13 +95,15 @@ record yet.`,
 	return cmd
 }
 
-// nodeRow is a node of GET /v1/nodes as the CLI reads it. Eligible is a
-// pointer, so that a server older than 2.2, which sends no eligible field,
-// reads as unknown rather than as ineligible. It is the shallower field, so
-// JSON reads "eligible" into it rather than into the NodeView's.
+// nodeRow is a node of GET /v1/nodes as the CLI reads it. Eligible and
+// Router are pointers, so that a server older than 2.2, which sends neither
+// field, reads as unknown rather than as ineligible or as no router. They
+// are the shallower fields, so JSON reads "eligible" and "router" into them
+// rather than into the NodeView's.
 type nodeRow struct {
 	server.NodeView
 	Eligible *bool `json:"eligible"`
+	Router   *bool `json:"router"`
 }
 
 func printNodes(out io.Writer, nodes []nodeRow) {
@@ -102,7 +112,9 @@ func printNodes(out io.Writer, nodes []nodeRow) {
 		return
 	}
 	tw := tabwriter.NewWriter(out, 0, 4, 2, ' ', 0)
-	fmt.Fprintln(tw, "ID\tNAME\tROLE\tADDRESS\tVERSION\tCPU\tMEMORY\tLEASE AGE\tSTATE\tELIGIBILITY\tREPLICAS\tCERT EXPIRES")
+	// ROUTER comes after REPLICAS, so that the columns scripts read by
+	// position, up to VERSION, stay where they were.
+	fmt.Fprintln(tw, "ID\tNAME\tROLE\tADDRESS\tVERSION\tCPU\tMEMORY\tLEASE AGE\tSTATE\tELIGIBILITY\tREPLICAS\tROUTER\tCERT EXPIRES")
 	now := time.Now()
 	for _, n := range nodes {
 		role := "worker"
@@ -110,9 +122,9 @@ func printNodes(out io.Writer, nodes []nodeRow) {
 			role = "server"
 		}
 		age := leaseAge(time.Duration(n.LeaseAgeSeconds * float64(time.Second)))
-		fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%s\t%d\t%s\t%s\t%s\t%s\t%d\t%s\n", termSafe(n.ID), termSafe(firstNonEmpty(n.Name, "-")), role,
+		fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%s\t%d\t%s\t%s\t%s\t%s\t%d\t%s\t%s\n", termSafe(n.ID), termSafe(firstNonEmpty(n.Name, "-")), role,
 			termSafe(nodeAddress(n)), termSafe(firstNonEmpty(n.Version, "-")), n.CPU, bytesIEC(n.Memory), age, termSafe(n.State),
-			eligibility(n), n.Replicas, certExpiry(n.CertNotAfter, n.CertNotRenewing, now))
+			eligibility(n), n.Replicas, routerColumn(n), certExpiry(n.CertNotAfter, n.CertNotRenewing, now))
 	}
 	tw.Flush()
 	if l := waitingLine(nodes); l != "" {
@@ -180,6 +192,21 @@ func nodeAddress(n nodeRow) string {
 		return addr
 	}
 	return addr + " (" + n.Advertise + ")"
+}
+
+// routerColumn is the ROUTER column of hivemind nodes: "yes" for a node
+// that runs a router, "no" for a ready one that runs none, and "-" when the
+// server cannot tell, as for a lost node, or does not say.
+func routerColumn(n nodeRow) string {
+	switch {
+	case n.Router == nil:
+		return "-"
+	case *n.Router:
+		return "yes"
+	case n.State != "ready":
+		return "-"
+	}
+	return "no"
 }
 
 // eligibility is the ELIGIBILITY column of hivemind nodes: "-" when the

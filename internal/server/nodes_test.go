@@ -9,6 +9,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/ao/hivemind/internal/nodeapi"
 	"github.com/ao/hivemind/internal/store"
 )
 
@@ -212,5 +213,49 @@ func TestDrainTheServersNode(t *testing.T) {
 	reps, err := h.store.Replicas(context.Background(), "api")
 	if err != nil || len(reps) != 1 || reps[0].NodeID != "" || reps[0].PendingReason != "every ready node is ineligible for new replicas" {
 		t.Fatalf("api on a cluster with no eligible node: %+v, %v", reps, err)
+	}
+}
+
+// GET /v1/nodes says which nodes run a router: the server's own when serve
+// runs one, and a worker whose router read the routing table in the last
+// minute. In the fourth acceptance run two workers ran none after a
+// restart, and nothing the server showed said so.
+func TestNodesSayWhichRunARouter(t *testing.T) {
+	readers := nodeapi.NewRouteReaders()
+	h := newHarness(t, func(c *Config) {
+		c.RouteReaders = readers
+		c.RouterReport = func() nodeapi.RouterReport { return nodeapi.RouterReport{} }
+	})
+	ctx := context.Background()
+	for _, id := range []string{"node-r", "node-old", "node-n", "node-stale"} {
+		if err := h.store.UpsertNode(ctx, store.Node{ID: id, Name: id, CPU: 1, Memory: 1 << 30}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	now := time.Now()
+	readers.Seen("node-r", nodeapi.RouteRead{Version: "v2.2.0", Paths: true, Protocols: true}, now)
+	// A router of a build before path routes routes all the same.
+	readers.Seen("node-old", nodeapi.RouteRead{}, now.Add(-30*time.Second))
+	readers.Seen("node-stale", nodeapi.RouteRead{Paths: true, Protocols: true}, now.Add(-nodeapi.RouteReaderMaxAge-time.Second))
+	got := map[string]bool{}
+	for _, n := range nodesOf(t, h) {
+		got[n.ID] = n.Router
+	}
+	want := map[string]bool{testNode: true, "node-r": true, "node-old": true, "node-n": false, "node-stale": false}
+	for id, w := range want {
+		if got[id] != w {
+			t.Errorf("%s: router %v, want %v", id, got[id], w)
+		}
+	}
+
+	// A server without a router of its own, and no cluster listener.
+	h = newHarness(t)
+	for _, n := range nodesOf(t, h) {
+		if n.Router {
+			t.Errorf("%s: router true on a server without one", n.ID)
+		}
+	}
+	if body := h.do(t, "GET", "/v1/nodes", "").Body.String(); !strings.Contains(body, `"router":false`) {
+		t.Errorf("GET /v1/nodes has no router field: %s", body)
 	}
 }

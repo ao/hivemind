@@ -72,6 +72,12 @@ type NodeView struct {
 	// registered it from its node.json. It is absent on the server's node,
 	// and for a worker of an earlier build, which does not send it.
 	Dials string `json:"dials,omitempty"`
+	// Router is true for a node that runs a router: the server's node when
+	// serve has --route-addr, and a worker whose router read the routing
+	// table from the server in the last minute (it reads it every second).
+	// It is false for a node that runs none, and for one whose router the
+	// server has not heard from in that time, such as a lost node's.
+	Router bool `json:"router"`
 }
 
 // EligibilityRequest is the body of POST /v1/nodes/{id}/eligibility.
@@ -201,6 +207,9 @@ func (s *Server) listNodes(w http.ResponseWriter, r *http.Request) {
 	}
 	now := time.Now()
 	wait, _ := s.cfg.Store.StartWait(now)
+	// The workers' routers read the routing table through the cluster
+	// listener every second; the server's own runs in this process.
+	routing := s.cfg.RouteReaders.Reading(now)
 	out := make([]NodeView, 0, len(nodes))
 	for _, n := range nodes {
 		age := max(now.Sub(n.LastLease), 0)
@@ -219,7 +228,10 @@ func (s *Server) listNodes(w http.ResponseWriter, r *http.Request) {
 		}
 		v := NodeView{ID: n.ID, Name: n.Name, CPU: n.CPU, Memory: n.Memory, LastLease: n.LastLease.UTC(),
 			LeaseAgeSeconds: age.Seconds(), State: state, Server: n.ID == s.cfg.NodeID, Replicas: count[n.ID],
-			Eligible: n.Eligible, Address: n.Address, Version: n.Version, Dials: n.Dials}
+			Eligible: n.Eligible, Address: n.Address, Version: n.Version, Dials: n.Dials, Router: routing[n.ID]}
+		if n.ID == s.cfg.NodeID {
+			v.Router = s.cfg.RouterReport != nil
+		}
 		if waiting {
 			v.StartHeld = wait.Held
 			if left := wait.GraceEnds.Sub(now); left > 0 {
