@@ -59,7 +59,7 @@ A worker's data directory is created with mode 0700.
 | `cluster-epoch` | 0600 | The highest cluster epoch the worker has seen from a server of its cluster, once one has sent more than 0. `cluster-epoch.next` is there only while it is replaced |
 | `node.key.next`, `node.crt.next` | 0600 | Only during a renewal: the new pair, before it is renamed into place |
 | `hivemind.lock` | 0600 | The pid of the `join` or `serve --role worker` that holds it locked |
-| `hivemind.yaml` | as you create it | Optional settings for `serve --role worker`, such as the router's. `join` does not write it |
+| `hivemind.yaml` | 0600 when `join` writes it; as you create it otherwise | Optional settings for `serve --role worker`, such as the router's. `join` writes the worker flags it was given here, never the join token; nothing else writes it. A `token` key in it is refused |
 
 A worker has no CA key, no database and no admin token.
 

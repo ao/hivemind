@@ -289,7 +289,7 @@ hivemind status web
 curl -s http://127.0.0.1:4483/v1/routes -H "Authorization: Bearer $HIVEMIND_TOKEN"
 ```
 
-`join` runs the worker in the foreground and does not keep its flags. To run the worker as a service, or start it again with `hivemind serve --role worker`, give it the router's flags again, or write them to `<data-dir>/hivemind.yaml` (`route-addr: 0.0.0.0`, `acme-email: ops@example.com`); `serve --role worker` without them runs no router, and says nothing of it. See [systemd](systemd.md#worker).
+`join` runs the worker in the foreground, and writes the router's flags it was given to `<data-dir>/hivemind.yaml` (`route-addr: "0.0.0.0"`, `acme-email: "ops@example.com"`), so the worker keeps its router when it runs as a service or is started again with `hivemind serve --role worker`; a flag given to `serve` overrides the file. See [systemd](systemd.md#worker).
 
 Once the certificate is issued, `https://www.example.com/` answers from any of the three machines. In the integration test, against Pebble with its validation delays off, all three routers served the host 7 seconds after the deploy (three Docker-in-Docker nodes on one EC2 c8g.4xlarge); a real CA takes as long as it takes. A second deploy that changes the spec rolls the replicas over without a failed request.
 

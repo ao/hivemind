@@ -89,7 +89,7 @@ hivemind join-token
 hivemind join 10.0.0.5 --token hivemind-join-v1.<fingerprint>.<secret>
 ```
 
-`join` stays in the foreground and runs the worker's agent. Stop it with Ctrl-C. Its containers keep running. To start it again later, run `hivemind serve --role worker` with the same data directory, and the same `--route-addr` and `--acme-*` flags if `join` had them: `join` does not keep them. To run the server and the workers as services that come back after a reboot, see [systemd](docs/systemd.md).
+`join` stays in the foreground and runs the worker's agent. Stop it with Ctrl-C. Its containers keep running. To start it again later, run `hivemind serve --role worker` with the same data directory. `join` writes the worker flags it was given, such as `--route-addr` and `--acme-email`, to `<data-dir>/hivemind.yaml`, so the restart keeps them, the router included. To run the server and the workers as services that come back after a reboot, see [systemd](docs/systemd.md).
 
 A token works once, and it expires after 24 hours. `hivemind join-token --ttl 1h` sets a shorter lifetime, up to 168 hours. Deploy as before. The NODE column of `hivemind status` shows where each replica runs.
 

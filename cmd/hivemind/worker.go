@@ -21,6 +21,7 @@ import (
 	"time"
 
 	"github.com/spf13/cobra"
+	"github.com/spf13/pflag"
 
 	"github.com/ao/hivemind/internal/agent"
 	"github.com/ao/hivemind/internal/config"
@@ -87,8 +88,13 @@ server. --token is read from the flag only, not from HIVEMIND_TOKEN, which is
 the admin token.
 
 A joined machine keeps its state. After a restart, run
-"hivemind serve --role worker" with the same data directory. A worker has no
-API listener, so --advertise does not apply to it.
+"hivemind serve --role worker" with the same data directory. join writes the
+worker settings it is given as flags, such as --route-addr and --acme-email,
+to <data-dir>/hivemind.yaml, with mode 0600, as init does for serve, so that
+serve --role worker keeps them, the router included; a flag given to serve
+overrides the file. A config file that exists, such as one given with
+--config, is not changed: join refuses worker flags then, before it uses the
+token. A worker has no API listener, so --advertise does not apply to it.
 
 The worker registers the local address of its connection to the server as
 its private address; its routed replicas publish their ports there.
@@ -121,6 +127,10 @@ certificates through the server.`,
 				return fmt.Errorf("%s is the default join port, but join takes the server's cluster port, %s, or no port, and dials the join port above it",
 					net.JoinHostPort(host, strconv.Itoa(port)), net.JoinHostPort(host, strconv.Itoa(defaultClusterPort)))
 			}
+			settings, err := joinSettings(cmd.Flags(), cfg)
+			if err != nil {
+				return err
+			}
 			log, err := newLogger(cfg, cmd.ErrOrStderr())
 			if err != nil {
 				return err
@@ -136,6 +146,13 @@ certificates through the server.`,
 			if err := enroll(cmd.Context(), log, cfg.DataDir, host, port, token); err != nil {
 				return err
 			}
+			if len(settings) > 0 {
+				if err := config.WriteFile(cfg.ConfigFile, joinConfigHeader, settings); err != nil {
+					return fmt.Errorf("this machine joined the cluster, but writing %s failed: %w; run hivemind serve --role worker with the same flags", cfg.ConfigFile, err)
+				}
+				log.Info("the worker settings join was given are in the config file, which serve --role worker reads",
+					"settings", settingFlags(settings), "file", cfg.ConfigFile)
+			}
 			rt, err := docker.New(cfg.DockerHost)
 			if err != nil {
 				return err
@@ -149,6 +166,34 @@ certificates through the server.`,
 	cmd.Flags().Lookup("advertise").Hidden = true
 	cmd.Flags().Lookup("cluster-addr").Hidden = true
 	return cmd
+}
+
+// joinConfigHeader is the comment line of the config file join writes.
+const joinConfigHeader = "Written by hivemind join: the worker settings it was given. serve --role worker reads this file."
+
+// joinSettings returns the worker settings join was given as flags, which it
+// writes to the config file once it has joined, so that serve --role worker
+// keeps them: without them a worker joined with --route-addr ran no router
+// after the documented restart. As init does, it refuses them when the
+// config file exists, which is the user's, before the token is used. A
+// directory that holds a joined node is left to enroll, which refuses it
+// with the reason.
+func joinSettings(flags *pflag.FlagSet, cfg *config.Config) ([]config.Setting, error) {
+	settings, err := config.GivenFlags(flags)
+	if err != nil || len(settings) == 0 {
+		return nil, err
+	}
+	if _, err := os.Lstat(filepath.Join(cfg.DataDir, workerStateFile)); err == nil {
+		return nil, nil
+	}
+	switch _, err := os.Lstat(cfg.ConfigFile); {
+	case err == nil:
+		return nil, fmt.Errorf("%s exists, and join writes the worker settings it is given (%s) to it: put them in that file and run join without them, or remove the file",
+			cfg.ConfigFile, settingFlags(settings))
+	case !errors.Is(err, fs.ErrNotExist):
+		return nil, err
+	}
+	return settings, nil
 }
 
 // runWorkerServe is serve --role worker: it runs an already joined node,

@@ -77,7 +77,8 @@ var pathKeys = map[string]bool{"api-tls-cert": true, "api-tls-key": true}
 
 // GivenFlags returns the node settings set with a flag on fs, in the order
 // Bind registers them, except config and data-dir, which say where the file
-// is. File paths are made absolute. These are what init writes for serve.
+// is. File paths are made absolute. These are what init writes for serve,
+// and join for serve --role worker.
 func GivenFlags(fs *pflag.FlagSet) ([]Setting, error) {
 	var out []Setting
 	for _, s := range settings(Options{}.withDefaults()) {

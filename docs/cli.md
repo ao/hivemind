@@ -472,8 +472,13 @@ server. --token is read from the flag only, not from HIVEMIND_TOKEN, which is
 the admin token.
 
 A joined machine keeps its state. After a restart, run
-"hivemind serve --role worker" with the same data directory. A worker has no
-API listener, so --advertise does not apply to it.
+"hivemind serve --role worker" with the same data directory. join writes the
+worker settings it is given as flags, such as --route-addr and --acme-email,
+to <data-dir>/hivemind.yaml, with mode 0600, as init does for serve, so that
+serve --role worker keeps them, the router included; a flag given to serve
+overrides the file. A config file that exists, such as one given with
+--config, is not changed: join refuses worker flags then, before it uses the
+token. A worker has no API listener, so --advertise does not apply to it.
 
 The worker registers the local address of its connection to the server as
 its private address; its routed replicas publish their ports there.

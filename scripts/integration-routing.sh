@@ -180,6 +180,30 @@ for ip in "${IPS[@]}"; do
 done
 cl_note "each node registered its private address"
 
+# join keeps the worker flags it was given in the worker's hivemind.yaml,
+# mode 0600, so a plain serve --role worker, as docs/systemd.md's unit runs
+# it, runs the router again. W1 is stopped and started that way.
+hm_pids() { # hm_pids NODE: the PIDs of hivemind processes in NODE
+	docker exec "$1" sh -c 'for p in /proc/[0-9]*; do [ "$(cat $p/comm 2>/dev/null)" = hivemind ] && echo ${p#/proc/}; done; true'
+}
+hm_stopped() { [ -z "$(hm_pids "$1")" ]; }
+yaml=$(docker exec "$W1" cat /var/lib/hivemind/hivemind.yaml)
+for l in "route-addr: \"$W1_IP\"" "route-https-port: \"$HTTPS_PORT\"" "acme-email: \"$EMAIL\"" "acme-ca: \"$ACME_CA\""; do
+	grep -qxF "$l" <<<"$yaml" || cl_fail "$W1's hivemind.yaml has no $l: $(tr '\n' ';' <<<"$yaml")"
+done
+if grep -qi token <<<"$yaml"; then
+	cl_fail "$W1's hivemind.yaml names a token: $(tr '\n' ';' <<<"$yaml")"
+fi
+m=$(docker exec "$W1" stat -c %a /var/lib/hivemind/hivemind.yaml)
+[ "$m" = 600 ] || cl_fail "$W1's hivemind.yaml has mode $m, want 600"
+for p in $(hm_pids "$W1"); do docker exec "$W1" kill -TERM "$p" 2>/dev/null || true; done
+wait_for 30 hm_stopped "$W1" || cl_fail "join did not stop on $W1"
+docker exec -d -e SSL_CERT_FILE=/etc/pebble-minica.pem "$W1" sh -c 'exec hivemind serve --role worker >>/var/log/hivemind.log 2>&1'
+wait_for 30 sh -c "docker exec $W1 cat /proc/net/tcp | awk '\$4 == \"0A\" { print \$2 }' | grep -qx $(cl_hexip "$W1_IP"):$SP" ||
+	cl_fail "$W1's router is not on $W1_IP:$HTTPS_PORT after serve --role worker: $(cl_listeners "$W1" | tr '\n' ' ')"
+grep -qx "$(cl_hexip "$W1_IP"):$HP" <<<"$(cl_listeners "$W1")" || cl_fail "$W1's router is not on $W1_IP:$HTTP_PORT after serve --role worker"
+cl_note "join wrote the router's flags to $W1's hivemind.yaml (mode 600, no token); a plain serve --role worker runs the router again"
+
 # The app: two replicas of whoami, which answers with its host name, the
 # name it is given with -name, and the request it got.
 deploy() { # deploy VERSION
