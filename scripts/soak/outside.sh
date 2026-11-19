@@ -76,7 +76,10 @@ set -euo pipefail
 [ -n "$OUT_NAME" ] || die "no outside machine in $OUTSIDE_FILE"
 if [ "$SOAK_PATHS" = 1 ]; then
 	HOSTS=${ROUTED_HOSTS:-www.soak.test api.soak.test $PATH_HOST}
-	STREAMS=${STREAMS:-www.soak.test/ api.soak.test/ $PATH_HOST/=proot $PATH_HOST/api/x=papi}
+	# Every stream checks the app that answers (the seventh soak): www and the
+	# path apps by whoami's "Name:" line; api's nginx has none, so its
+	# replies are "name=-", and one with a "Name:" line came from a whoami app.
+	STREAMS=${STREAMS:-www.soak.test/=www api.soak.test/=api $PATH_HOST/=proot $PATH_HOST/api/x=papi}
 else
 	HOSTS=${ROUTED_HOSTS:-www.soak.test api.soak.test}
 fi

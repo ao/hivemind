@@ -45,6 +45,13 @@
 #                                             its start grace; then the workers back
 #                                             (HEAL_LAGS="W:0 W:5 W:20": each at its lag)
 #   scenario.sh ca-text NAME LABEL            hivemind ca status and status, as text
+#   scenario.sh reboot-cutoff W               worker W's machine powered off and started
+#                                             while the other workers' routers serve
+#                                             their last table (the server's hivemind
+#                                             stopped, then started; the others cut off)
+#   scenario.sh rollout-all [ROUNDS]          ROUNDS (3) rolling updates of every app back
+#                                             to back, a status sampler every 0.5 s
+#   scenario.sh ports LABEL                   each node's routed containers and host ports
 #   scenario.sh end NAME
 #
 # A fault that needs the machine's owner (power off, power on, a new machine)
@@ -93,12 +100,27 @@ begin() {
 	snapshot "$pre" || die "$name: no status"
 	ev scenario "$name ready target=$T movable=$(movable "$pre" "$id" | tr '\n' ' ') held=$(held_on "$pre" "$id" | tr '\n' ' ') containers=$(awk -F'\t' -v n="$T" '$1 == "C" && $2 == n { printf "%s:%s|%s,", $3, $6, $7 }' "$pre")"
 	ev scenario "$name placement $(awk -F'\t' 'FILENAME == ARGV[1] { split($0, x, " "); nm[x[1]] = x[2]; next } $1 == "R" { printf "%s|%s@%s ", $2, $3, nm[$4] }' "$IDS_FILE" "$pre")"
+	ports_log "$name before"
 }
 
 end_scenario() {
 	local name=$1
 	snapshot "$SOAK_DIR/now.tsv" || true
+	ports_log "$name after"
 	ev scenario "$name end converged=$(check_converged "$SOAK_DIR/now.tsv" >/dev/null && echo yes || echo no) placement $(awk -F'\t' 'FILENAME == ARGV[1] { split($0, x, " "); nm[x[1]] = x[2]; next } $1 == "R" { printf "%s|%s@%s ", $2, $3, nm[$4] }' "$IDS_FILE" "$SOAK_DIR/now.tsv")"
+}
+
+# ports_log LABEL: with SOAK_ROUTES=1, one "ports" line per node: its routed
+# containers, stopped ones included, with their host ports (routed_ports in
+# lib.sh), or "unreachable". The seventh soak compares a scenario's "before"
+# and "after" lines: a routed container keeps its host ports for its life.
+ports_log() {
+	local n v
+	[ "$SOAK_ROUTES" = 1 ] || return 0
+	for n in "${NAMES[@]}"; do
+		v=$(SSH_CT=2 routed_ports "$n" 2>/dev/null) || v=unreachable
+		ev ports "$1 $n ${v:-none}"
+	done
 }
 
 # old_on FILE PRE T KEYS: the pre-fault containers of T, for the replicas in
@@ -1524,7 +1546,7 @@ ca_finish() {
 start_hold() {
 	local name=start-hold pre=$SOAK_DIR/pre-start-hold.tsv cur=$SOAK_DIR/measure-start-hold.tsv
 	local grace=${START_GRACE:-120} after=${HOLD_AFTER:-90} t0 t now d v i n s api=down p22=down up_at=0 heal_at=0
-	local lastn="" lastc="" lasts="" errl="" ready="" conv="" dupl="" end late=${HEAL_LATE:-} lag=${HEAL_LAG:-12} late_done=0
+	local lastn="" lastc="" lastp="" lasts="" errl="" ready="" conv="" dupl="" end late=${HEAL_LATE:-} lag=${HEAL_LAG:-12} late_done=0
 	local lags=${HEAL_LAGS:-} maxlag=0 p w
 	declare -A lag_of
 	[ -z "$late" ] || name=start-hold-late
@@ -1574,6 +1596,12 @@ start_hold() {
 			[ "$v" = "$lastc" ] || {
 				ev event "$name server-containers ${v:-none}"
 				lastc=$v
+			}
+			# the server's routed containers and their host ports, at each change
+			v=$(SSH_CT=1 routed_ports "$SERVER" 2>/dev/null) || v=fail
+			[ "$v" = "$lastp" ] || {
+				ev event "$name server-ports ${v:-none}"
+				lastp=$v
 			}
 			v=$(hm "$SERVER" status 2>/dev/null | grep -iE 'waiting|grace|report' | tr '\n' ';' | cut -c1-600)
 			[ "$v" = "$lasts" ] || {
@@ -1654,10 +1682,245 @@ start_hold() {
 	end_scenario "$name"
 }
 
+# router_lines NAME FILE: in a journal of NAME, the router's lines about the
+# table, counted: "reading the routing table; serving the last one" and
+# "reading the routing table again".
+router_lines() {
+	printf '%s last=%s again=%s' "$1" "$(grep -c 'serving the last one' "$2")" "$(grep -c 'reading the routing table again' "$2")"
+}
+
+# reboot_cutoff W: a worker's machine restarted while the other workers'
+# routers serve their last table (the seventh soak). The server's hivemind
+# is stopped (its machine and containers stay up), so no router can read
+# the table; the other workers are cut off from its cluster port; the
+# operator powers W off when the log says so, and starts its machine; once
+# W's port 22 opens the server's hivemind is started again, so its start
+# grace begins. W reaches the server, its agent starts its routed containers
+# again, and the other workers' routers, still cut off, send requests to
+# W's replicas at the addresses of their table from before W went down.
+# OBSERVE seconds (45) after every routed container of W runs again, or
+# HEAL_BEFORE seconds (20) before the start grace ends, whichever is first,
+# the other workers are healed. Logged: W's routed containers and their
+# ports at each change, the table at each change (every 200 ms) from the
+# server's start, the nodes, and at the end each node's journal.
+reboot_cutoff() {
+	local W=${1:?worker} name=${HOLD_NAME:-reboot-cutoff} grace=${START_GRACE:-120} observe=${OBSERVE:-45} before=${HEAL_BEFORE:-20}
+	local pre cur t0 t now d v i n s api=down w22=down srv=stopped up_at=0 back_at=0 heal_at=0 end wb nb lastn="" lastw="" ready="" conv="" dupl="" others=() rw=""
+	pre=$SOAK_DIR/pre-$name.tsv cur=$SOAK_DIR/measure-$name.tsv
+	[ "$W" != "$SERVER" ] || die "$name: W must be a worker"
+	for ((i = 1; i < ${#NAMES[@]}; i++)); do [ "${NAMES[$i]}" = "$W" ] || others+=("${NAMES[$i]}"); done
+	begin "$name" "$W"
+	t0=$(date -u +%s)
+	wb=$(routed_ports "$W") || die "$name: no routed containers read on $W"
+	nb=$(wc -w <<<"$wb")
+	ev event "$name $W routed-before n=$nb $wb"
+	ev event "$name routes-before $(hm "$SERVER" routes 2>&1 | tr -s ' \n' ' ')"
+	SSH_TIMEOUT=60 on "$SERVER" "sudo systemctl stop hivemind" || die "$name: stop hivemind on $SERVER"
+	ev event "$name $SERVER fault stop hivemind"
+	for n in "${others[@]}"; do
+		on "$n" "sudo iptables -I OUTPUT -p tcp -d $SERVER_IP --dport 4484 -j DROP" || die "$name: iptables on $n"
+		ev event "$name $n fault drop to $SERVER_IP:4484"
+	done
+	note "$name: power $W off now"
+	wait_for 600 port22_down "$W" || die "$name: $W did not go down"
+	ev event "$name $W port22-down"
+	forget_host "$W"
+	note "$name: start $W's machine now"
+	end=$(($(date +%s) + 900))
+	while [ "$(date +%s)" -lt "$end" ]; do
+		t=$(now_ms)
+		now=$(date +%s)
+		if port22 "$W"; then v=up; else v=down; fi
+		[ "$v" = "$w22" ] || {
+			ev event "$name $W port22-$v"
+			w22=$v
+		}
+		# The server's hivemind starts once W's machine is booting, so its
+		# start grace, which the other workers' cut-off needs, does not run
+		# while the machine stops and starts.
+		if [ "$srv" = stopped ] && [ "$w22" = up ]; then
+			SSH_TIMEOUT=60 on "$SERVER" "sudo systemctl start hivemind" || die "$name: start hivemind on $SERVER"
+			ev event "$name $SERVER fault start hivemind"
+			srv=started
+		fi
+		if SSH_CT=1 SSH_TIMEOUT=4 on "$SERVER" "curl -fsS -m 2 http://127.0.0.1:4483/healthz" >/dev/null 2>&1; then v=up; else v=down; fi
+		[ "$v" = "$api" ] || {
+			ev event "$name api-$v"
+			api=$v
+			if [ "$v" = up ] && [ "$up_at" = 0 ]; then
+				up_at=$now
+				SSH_TIMEOUT=$((grace + 120)) routes_watch $((grace + 100)) &
+				rw=$!
+			fi
+		}
+		if [ "$api" = up ]; then
+			v=$(with_names "$(hm "$SERVER" nodes --json 2>/dev/null | jq -r '[.[] | select(.server | not) | "\(.id)=\(.state)\(if .start_held then "+held" else "" end)\(if .start_hold_ended then "+hold-ended" else "" end)"] | join(",")')")
+			[ "$v" = "$lastn" ] || {
+				ev event "$name nodes $v"
+				lastn=$v
+			}
+		fi
+		if [ "$w22" = up ]; then
+			v=$(SSH_CT=1 SSH_TIMEOUT=4 routed_ports "$W" 2>/dev/null) || v=fail
+			[ "$v" = "$lastw" ] || {
+				ev event "$name $W routed $v"
+				lastw=$v
+			}
+			# back: as many routed containers as before, all running
+			if [ "$back_at" = 0 ] && [ "$v" != fail ] && [ "$(wc -w <<<"$v")" = "$nb" ] && ! grep -qE '\|(exited|created|restarting|dead|paused)\|' <<<"$v"; then
+				back_at=$now
+				ev event "$name $W routed-back $(if [ "$(ports_key "$v")" = "$(ports_key "$wb")" ]; then echo same-ports; else echo "ports-changed before=$(ports_key "$wb") after=$(ports_key "$v")"; fi)"
+			fi
+		fi
+		if [ "$heal_at" = 0 ] && [ "$up_at" != 0 ] && { { [ "$back_at" != 0 ] && [ "$now" -ge $((back_at + observe)) ]; } || [ "$now" -ge $((up_at + grace - before)) ]; }; then
+			for n in "${others[@]}"; do
+				on "$n" "sudo iptables -D OUTPUT -p tcp -d $SERVER_IP --dport 4484 -j DROP" || ev event "$name $n heal-failed"
+			done
+			ev event "$name heal: ${others[*]} reach $SERVER_IP:4484 again, $((now - up_at)) s after the API answered$([ "$back_at" = 0 ] && echo ", before $W's containers were back")"
+			heal_at=$now
+		fi
+		if [ "$heal_at" != 0 ]; then
+			collect "$cur" nodes
+			if api_ok "$cur"; then
+				for ((i = 1; i < ${#NAMES[@]}; i++)); do
+					n=${NAMES[$i]}
+					s=$(node_state "$cur" "$(id_of "$n")")
+					case " $ready " in *" $n "*) ;; *)
+						if [ "$s" = ready ]; then
+							ev event "$name $n node-ready"
+							ready="$ready $n"
+						fi
+						;;
+					esac
+				done
+				if check_converged "$cur" 0 >/dev/null; then v=yes; else v=no; fi
+				[ "$v" = "$conv" ] || {
+					ev event "$name converged-$v $(running "$cur")"
+					conv=$v
+				}
+			fi
+			d=$(dups "$cur" | tr '\n' ';')
+			[ "$d" = "$dupl" ] || {
+				ev event "$name dups ${d:-none}"
+				dupl=$d
+			}
+			if { [ "$conv" = yes ] && [ "$(wc -w <<<"$ready")" -eq $((${#NAMES[@]} - 1)) ] && [ "$now" -ge $((heal_at + 3)) ]; } || [ "$now" -ge $((heal_at + 300)) ]; then
+				break
+			fi
+		fi
+		d=$((1000 - ($(now_ms) - t)))
+		[ "$d" -le 0 ] || sleep "$((d / 1000)).$(printf '%03d' $((d % 1000)))"
+	done
+	[ -z "$rw" ] || kill "$rw" 2>/dev/null
+	on "$SERVER" "sudo journalctl -u hivemind --since @$t0 -o short-iso-precise --no-pager" >"$SOAK_DIR/journal-$name-$SERVER.txt" 2>/dev/null || true
+	v=""
+	for ((i = 1; i < ${#NAMES[@]}; i++)); do
+		n=${NAMES[$i]}
+		on "$n" "sudo journalctl -u hivemind --since @$t0 -o short-iso-precise --no-pager" >"$SOAK_DIR/journal-$name-$n.txt" 2>/dev/null || true
+		v+="$(router_lines "$n" "$SOAK_DIR/journal-$name-$n.txt") "
+	done
+	ev event "$name router-lines $v"
+	ev event "$name server-journal lost=$(grep -c 'node lost' "$SOAK_DIR/journal-$name-$SERVER.txt") errors=$(grep -c 'level=ERROR' "$SOAK_DIR/journal-$name-$SERVER.txt") $(with_names "$(grep -E 'start grace|has reported|waiting=' "$SOAK_DIR/journal-$name-$SERVER.txt" | cut -c1-500 | tr '\n' ';')")"
+	ev event "$name $W journal restarted=$(grep -c 'restarted exited container' "$SOAK_DIR/journal-$name-$W.txt") created=$(grep -c 'created container' "$SOAK_DIR/journal-$name-$W.txt") removed=$(grep -c 'removed container' "$SOAK_DIR/journal-$name-$W.txt")"
+	ev event "$name workers-kept $(worker_kept "$pre")"
+	ev event "$name ids $(ids_check)"
+	end_scenario "$name"
+}
+
+# The sampler of rollout-all, run on the server: hivemind status --json
+# every 0.5 s until FILE.stop exists. One line per sample in FILE:
+#   <Unix s.ms> sample <apps> [APP:desired=D,running=R,ready=Y,gen=G ...]
+# listing each app whose running or ready count is below its desired count;
+# the whole status of such a sample goes to FILE.below.
+read -r -d '' REMOTE_SAMPLER <<'EOF' || true
+f=$1
+rm -f "$f" "$f.stop" "$f.below"
+while [ ! -e "$f.stop" ]; do
+	t=$(date -u +%s.%3N)
+	if o=$(sudo /usr/local/bin/hivemind status --json 2>&1); then
+		l=$(printf '%s\n' "$o" | jq -r --arg t "$t" '"\($t) sample \(length)" + ([.[] | select(.running < .desired or .ready < .desired) | " \(.name):desired=\(.desired),running=\(.running),ready=\(.ready),gen=\(.generation)"] | join(""))' 2>&1)
+		echo "$l" >>"$f"
+		case "$l" in *"sample "*" "*) printf '== %s\n%s\n' "$t" "$(printf '%s' "$o" | jq -c '.[] | {name, desired, running, ready, generation, rollout, replicas: [.replicas[] | {index, node_id, state, ready, generation, desired}]}')" >>"$f.below" ;; esac
+	else
+		echo "$t error $(printf '%s' "$o" | head -c 200 | tr '\n' ' ')" >>"$f"
+	fi
+	sleep 0.5
+done
+EOF
+
+# rollout_all [ROUNDS]: ROUNDS (3) rolling updates of every app back to
+# back (the seventh soak; fixes11's consistent read): each round PUTs every
+# app at once with a new ROLL in its environment (lib.sh), the image apps
+# at version 2 in odd rounds and 1 in even ones, and the compose project
+# shop again; the next round starts as soon as no app has a rollout in
+# progress. The sampler on the server reads hivemind status --json every
+# 0.5 s from before the first PUT until the cluster has converged after the
+# last round (the old copies gone), and the scenario logs the samples in
+# which an app was below its count. kv has a volume, so its replica moves in
+# place and is down while its new container starts (docs/concepts.md); the
+# others surge.
+rollout_all() {
+	local rounds=${1:-3} name=rollout-all r a v t end st s busy seen pids f=/var/tmp/soak-samples.txt t0 tr
+	local apps="www api spread kv proot papi grpc"
+	begin "$name" "$SERVER"
+	on "$SERVER" "cat >/var/tmp/soak-sampler.sh" <<<"$REMOTE_SAMPLER" || die "$name: sampler to $SERVER"
+	on "$SERVER" "setsid nohup bash /var/tmp/soak-sampler.sh $f >/dev/null 2>&1 </dev/null &" || die "$name: sampler on $SERVER"
+	sleep 2
+	t0=$(date +%s)
+	for ((r = 1; r <= rounds; r++)); do
+		v=$((r % 2 == 1 ? 2 : 1))
+		export ROLL="r$r-$t0"
+		pids=()
+		for a in $apps; do
+			hm "$SERVER" "deploy -f -" <<<"$(app_spec "$a" "$v")" >/dev/null &
+			pids+=($!)
+		done
+		hm "$SERVER" "compose deploy -" < <(shop_compose) >/dev/null &
+		pids+=($!)
+		for a in "${pids[@]}"; do wait "$a" || die "$name: a PUT of round $r failed"; done
+		ev event "$name round $r fault deploy ROLL=$ROLL version=$v"
+		tr=$(date +%s)
+		end=$((tr + 600))
+		s="" seen=0
+		while [ "$(date +%s)" -lt "$end" ]; do
+			t=$(now_ms)
+			st=$(hm "$SERVER" status --json 2>/dev/null) || st=""
+			busy=$(jq -r '[.[] | select(.rollout.state? == "in_progress")] | length' <<<"$st" 2>/dev/null)
+			[ "${busy:-0}" = 0 ] || seen=1
+			v=$(jq -r '[.[] | select(.rollout != null) | "\(.name):\(.rollout.state // "-")"] | join(",")' <<<"$st" 2>/dev/null)
+			[ "$v" = "$s" ] || {
+				ev event "$name round $r rollouts ${v:-none}"
+				s=$v
+			}
+			# done: no rollout in progress (a paused one is logged above), once one
+			# was seen, or 10 s after the PUTs if none ever was
+			if [ -n "$st" ] && [ "$busy" = 0 ] && { [ "$seen" = 1 ] || [ "$(date +%s)" -ge $((tr + 10)) ]; }; then
+				ev event "$name round $r done $(($(date +%s) - tr)) s"
+				break
+			fi
+			d=$((1000 - ($(now_ms) - t)))
+			[ "$d" -le 0 ] || sleep "$((d / 1000)).$(printf '%03d' $((d % 1000)))"
+		done
+		[ "$(date +%s)" -lt "$end" ] || ev event "$name round $r timeout"
+	done
+	unset ROLL
+	wait_for 300 converged_now && ev event "$name converged-yes"
+	on "$SERVER" "touch $f.stop"
+	sleep 2
+	on "$SERVER" "cat $f" >"$SOAK_DIR/rollout-all-samples.txt" 2>/dev/null || true
+	on "$SERVER" "cat $f.below 2>/dev/null" >"$SOAK_DIR/rollout-all-below.txt" 2>/dev/null || true
+	f=$SOAK_DIR/rollout-all-samples.txt
+	ev event "$name sampler samples=$(grep -c ' sample ' "$f") errors=$(grep -c ' error ' "$f") seconds=$(($(date +%s) - t0)) below=$(grep -cE ' sample [0-9]+ ' "$f") below_not_kv=$(grep -E ' sample [0-9]+ ' "$f" | grep -cE ' (www|api|spread|proot|papi|grpc|front|cache):') first=$(grep -m1 -E ' sample [0-9]+ ' "$f" | cut -c1-300)"
+	end_scenario "$name"
+}
+
 cmd=${1:-}
 shift || true
 case "$cmd" in
 fault) ev event "$1 $2 fault ${*:3}" ;;
+ports) ports_log "${*:-now}" ;;
+reboot-cutoff) reboot_cutoff "$@" ;;
+rollout-all) rollout_all "$@" ;;
 rollout) rollout "$@" ;;
 old-back) old_back "$@" ;;
 cert-restart) cert_restart "$@" ;;
@@ -1696,7 +1959,7 @@ kv-check) kv_check "$@" ;;
 upgrade) upgrade ;;
 end) end_scenario "$@" ;;
 *)
-	sed -n '2,40p' "$0"
+	sed -n '2,48p' "$0"
 	exit 2
 	;;
 esac

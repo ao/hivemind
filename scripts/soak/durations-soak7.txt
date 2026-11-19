@@ -1,0 +1,24 @@
+restart-cutoff: stop request to port 22 closed|scenario restart-cutoff begin|event restart-cutoff .* fault stop|event restart-cutoff .* port22-down
+restart-cutoff: start request to port 22 open|scenario restart-cutoff begin|event restart-cutoff .* fault start|event restart-cutoff .* port22-up
+restart-cutoff: port 22 open to API up|scenario restart-cutoff begin|event restart-cutoff .* port22-up|event restart-cutoff api-up
+restart-cutoff: heal to converged|scenario restart-cutoff begin|event restart-cutoff heal: begins|event restart-cutoff converged-yes
+start-hold-stagger: start request to port 22 open|scenario start-hold-stagger begin|event start-hold-stagger .* fault start|event start-hold-stagger .* port22-up
+start-hold-stagger: port 22 open to API up|scenario start-hold-stagger begin|event start-hold-stagger .* port22-up|event start-hold-stagger api-up
+start-hold-stagger: API up to every worker held (start_held)|scenario start-hold-stagger begin|event start-hold-stagger api-up|event start-hold-stagger nodes .*held.*held.*held
+start-hold-stagger: heal begins to hivemind-soakj-2 ready|scenario start-hold-stagger begin|event start-hold-stagger heal: begins|event start-hold-stagger hivemind-soakj-2 node-ready
+start-hold-stagger: heal begins to hivemind-soakj-3 ready|scenario start-hold-stagger begin|event start-hold-stagger heal: begins|event start-hold-stagger hivemind-soakj-3 node-ready
+start-hold-stagger: heal begins to hivemind-soakj-4 ready|scenario start-hold-stagger begin|event start-hold-stagger heal: begins|event start-hold-stagger hivemind-soakj-4 node-ready
+start-hold-stagger: heal begins to converged|scenario start-hold-stagger begin|event start-hold-stagger heal: begins|event start-hold-stagger converged-yes
+reboot-cutoff: power-off request to port 22 closed|scenario reboot-cutoff begin|event reboot-cutoff .* fault poweroff|event reboot-cutoff .* port22-down
+reboot-cutoff: hivemind started on the server to API up|scenario reboot-cutoff begin|event reboot-cutoff .* fault start hivemind|event reboot-cutoff api-up
+reboot-cutoff: start request to port 22 open|scenario reboot-cutoff begin|event reboot-cutoff .* fault start$|event reboot-cutoff .* port22-up
+reboot-cutoff: port 22 open to its routed containers running again|scenario reboot-cutoff begin|event reboot-cutoff .* port22-up|event reboot-cutoff .* routed-back
+reboot-cutoff: heal to converged|scenario reboot-cutoff begin|event reboot-cutoff heal: |event reboot-cutoff converged-yes
+rollout-all: round 1, deploy to no rollout in progress|scenario rollout-all begin|event rollout-all round 1 fault deploy|event rollout-all round 1 done
+rollout-all: round 2, deploy to no rollout in progress|scenario rollout-all begin|event rollout-all round 2 fault deploy|event rollout-all round 2 done
+rollout-all: round 3, deploy to no rollout in progress|scenario rollout-all begin|event rollout-all round 3 fault deploy|event rollout-all round 3 done
+rollout-all: first deploy to converged, old copies gone|scenario rollout-all begin|event rollout-all round 1 fault deploy|event rollout-all converged-yes
+ca-rotate: start to every node trusting the new CA|scenario ca-rotate begin|event ca-rotate .* fault ca-start|event ca-rotate trust-all
+ca-rotate: renew to every node renewed|scenario ca-rotate begin|event ca-rotate .* fault ca-renew|event ca-rotate renewed-all
+ca-rotate: finish to every worker with the new CA alone in ca.crt|scenario ca-rotate begin|event ca-rotate .* fault ca-finish|event ca-rotate workers-one-ca
+ca-rotate: start to finish returned|scenario ca-rotate begin|event ca-rotate .* fault ca-start|event ca-rotate ca-finish-done

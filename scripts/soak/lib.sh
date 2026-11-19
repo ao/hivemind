@@ -422,10 +422,11 @@ prepare_node() {
 }
 
 # www_spec VERSION: the routed app on the private image; scenario.sh deploys
-# version 2 for the rolling update.
+# version 2 for the rolling update. WHOAMI_NAME makes every reply name the
+# app ("Name: www"), so its streams can check who answered (the seventh soak).
 www_spec() {
 	cat <<EOF
-{"name":"www","image":"$REGISTRY/soak/whoami:$1","replicas":3,
+{"name":"www","image":"$REGISTRY/soak/whoami:$1","replicas":3,"env":{"WHOAMI_NAME":"www"$(roll_env)},
  "routes":[{"host":"www.soak.test","port":80}],
  "health":{"http":{"port":80,"path":"/health"},"interval":"2s","timeout":"1s"}}
 EOF
@@ -446,7 +447,7 @@ path_spec() {
 		route="{\"host\":\"$PATH_HOST\",\"path\":\"$2\",\"port\":80}"
 	fi
 	cat <<EOF
-{"name":"$1","image":"$REGISTRY/soak/whoami:$3","replicas":2,"env":{"WHOAMI_NAME":"$1"},
+{"name":"$1","image":"$REGISTRY/soak/whoami:$3","replicas":2,"env":{"WHOAMI_NAME":"$1"$(roll_env)},
  "routes":[$route],
  "health":{"http":{"port":80,"path":"/health"},"interval":"2s","timeout":"1s"}}
 EOF
@@ -464,20 +465,71 @@ SOAK_GRPC=${SOAK_GRPC:-0}
 GRPC_PATH=${GRPC_PATH:-/h2ctest.Echo}
 grpc_spec() {
 	cat <<EOF
-{"name":"grpc","image":"$REGISTRY/soak/h2ctest:$1","replicas":2,"env":{"V":"$1"},
+{"name":"grpc","image":"$REGISTRY/soak/h2ctest:$1","replicas":2,"env":{"V":"$1"$(roll_env)},
  "command":["serve","-addr",":50051","-name","grpc"],
  "routes":[{"host":"$PATH_HOST","path":"$GRPC_PATH","port":50051,"protocol":"h2c"}],
  "health":{"tcp":{"port":50051},"interval":"2s","timeout":"1s"}}
 EOF
 }
 
-# app_spec APP VERSION: a routed app at a version of the private image.
+# ROLL, when set, goes in every app's environment as ROLL, so that each
+# value is a new spec and a rolling update (scenario.sh rollout-all, the
+# seventh soak). roll_env: ',"ROLL":"N"' after an app's other variables;
+# roll_env_field: '"env":{"ROLL":"N"},' for an app with none. Both print
+# nothing without ROLL, which gives the specs of the earlier soaks.
+ROLL=${ROLL:-}
+roll_env() { [ -z "$ROLL" ] || printf ',"ROLL":"%s"' "$ROLL"; }
+roll_env_field() { [ -z "$ROLL" ] || printf '"env":{"ROLL":"%s"},' "$ROLL"; }
+
+# The other apps of the routing soak, as setup.sh deploys them.
+WEB_IMAGE=${WEB_IMAGE:-nginx:alpine}
+SPREAD_IMAGE=${SPREAD_IMAGE:-busybox:stable}
+KV_IMAGE=${KV_IMAGE:-redis:7-alpine}
+api_spec() {
+	echo "{\"name\":\"api\",\"image\":\"$WEB_IMAGE\",\"replicas\":2,$(roll_env_field)\"routes\":[{\"host\":\"api.soak.test\",\"port\":80}],\"health\":{\"http\":{\"port\":80,\"path\":\"/\"},\"interval\":\"2s\",\"timeout\":\"1s\"}}"
+}
+spread_spec() {
+	echo "{\"name\":\"spread\",\"image\":\"$SPREAD_IMAGE\",\"replicas\":6,$(roll_env_field)\"command\":[\"sleep\",\"86400\"]}"
+}
+kv_spec() {
+	echo "{\"name\":\"kv\",\"image\":\"$KV_IMAGE\",$(roll_env_field)\"command\":[\"redis-server\",\"--appendonly\",\"yes\"],\"ports\":[{\"host\":6379,\"container\":6379,\"bind\":\"127.0.0.1\"}],\"volumes\":[{\"name\":\"data\",\"path\":\"/data\"}]}"
+}
+# shop_compose: compose-shop.yaml, with ROLL in each service's environment
+# when it is set.
+shop_compose() {
+	if [ -z "$ROLL" ]; then
+		cat "$SOAK_REPO/scripts/soak/compose-shop.yaml"
+	else
+		sed "s/^    image: \(.*\)$/    image: \1\n    environment:\n      ROLL: \"$ROLL\"/" "$SOAK_REPO/scripts/soak/compose-shop.yaml"
+	fi
+}
+
+# routed_ports NAME: one word per routed container on NAME, stopped ones
+# included, sorted: app/replica|state|label|published|container, label the
+# host ports as the hivemind.route-ports label records them
+# (container:host, comma separated), published the address:port Docker
+# publishes for a running container, container its ID (12). A replica keeps
+# its host ports for the life of its container (docs/routing.md#route-host-ports).
+read -r -d '' REMOTE_ROUTED_PORTS <<'EOF' || true
+ids=$(sudo docker ps -aq --filter label=hivemind.routed=true) || exit 1
+[ -z "$ids" ] || sudo docker inspect -f '{{index .Config.Labels "hivemind.app"}}/{{index .Config.Labels "hivemind.replica"}}|{{.State.Status}}|{{index .Config.Labels "hivemind.route-ports"}}|{{range $p, $b := .NetworkSettings.Ports}}{{range $b}}{{.HostIp}}:{{.HostPort}},{{end}}{{end}}|{{printf "%.12s" .Id}}' $ids | sort | tr '\n' ' '
+EOF
+routed_ports() { on "$1" "$REMOTE_ROUTED_PORTS"; }
+# ports_key WORDS: routed_ports' words without the state, published ports
+# and ID: "app/replica|label" each, sorted, for comparing two reads.
+ports_key() { tr ' ' '\n' <<<"$1" | grep . | cut -d'|' -f1,3 | sort | tr '\n' ' '; }
+
+# app_spec APP VERSION: an app at a version (of the private image, for the
+# routed apps that run one; the others have one version).
 app_spec() {
 	case "$1" in
 	www) www_spec "$2" ;;
 	proot) path_spec proot / "$2" ;;
 	papi) path_spec papi /api "$2" ;;
 	grpc) grpc_spec "$2" ;;
+	api) api_spec ;;
+	spread) spread_spec ;;
+	kv) kv_spec ;;
 	*)
 		echo "soak: no spec for $1" >&2
 		return 1

@@ -113,10 +113,10 @@ deploy() { # deploy JSON
 
 deploy_routed() {
 	deploy "$(www_spec 1)"
-	deploy "{\"name\":\"api\",\"image\":\"$WEB_IMAGE\",\"replicas\":2,\"routes\":[{\"host\":\"api.soak.test\",\"port\":80}],\"health\":{\"http\":{\"port\":80,\"path\":\"/\"},\"interval\":\"2s\",\"timeout\":\"1s\"}}"
-	deploy "{\"name\":\"spread\",\"image\":\"$SPREAD_IMAGE\",\"replicas\":6,\"command\":[\"sleep\",\"86400\"]}"
-	deploy "{\"name\":\"kv\",\"image\":\"$KV_IMAGE\",\"command\":[\"redis-server\",\"--appendonly\",\"yes\"],\"ports\":[{\"host\":6379,\"container\":6379,\"bind\":\"127.0.0.1\"}],\"volumes\":[{\"name\":\"data\",\"path\":\"/data\"}]}"
-	hm "$SERVER" "compose deploy -" <"$HERE/compose-shop.yaml" >/dev/null || die "compose deploy shop"
+	deploy "$(api_spec)"
+	deploy "$(spread_spec)"
+	deploy "$(kv_spec)"
+	hm "$SERVER" "compose deploy -" < <(shop_compose) >/dev/null || die "compose deploy shop"
 	ev setup "deployed www api spread kv; compose project shop: front cache"
 	if [ "$SOAK_PATHS" = 1 ]; then
 		deploy "$(path_spec proot / 1)"
@@ -242,6 +242,7 @@ main() {
 		# the log options the agent gave each container, and Docker's default driver
 		ev logconfig "$n driver=$(on "$n" "docker info --format '{{.LoggingDriver}}'") $(on "$n" "ids=\$(docker ps -q --filter label=hivemind.app); [ -z \"\$ids\" ] || docker inspect -f '{{index .Config.Labels \"hivemind.app\"}}:{{.HostConfig.LogConfig.Type}}:{{.HostConfig.LogConfig.Config}}' \$ids" | tr ' \n' '_ ')"
 		ev volumes "$n dangling=$(on "$n" "docker volume ls -qf dangling=true | wc -l") all=$(on "$n" "docker volume ls -q | tr '\n' ','")"
+		if [ "$SOAK_ROUTES" = 1 ]; then ev ports "setup $n $(routed_ports "$n")"; fi
 	done
 	# compose must refuse a file that reads a HIVEMIND_ variable
 	n=$(printf 'services:\n  leak:\n    image: busybox:stable\n    environment:\n      T: ${HIVEMIND_TOKEN:-x}\n' | hm "$SERVER" "compose convert -" 2>&1) &&
