@@ -1,6 +1,6 @@
 # Scale test: ten machines, 100 apps, 500 replicas
 
-hivemind is meant for one to ten machines. This test ran it at ten: one server and nine workers, 100 apps with 500 replicas between them. It deployed them one after another and 20 at once, left them alone for 30 minutes, powered off three workers at once, rolled 50 apps at once, drained a worker, removed a powered-off one, scaled every portless app to twice its count and back, restarted the server, and restored it from a backup on a new machine. Every time below comes from the harness's log or the machines' journals; the benchmark section is marked as such. The harness is [scripts/soak](../scripts/soak), with `scale.sh` for this test; the last section says how to run it.
+hivemind is meant for one to ten machines. This test ran it at ten: one server and nine workers, 100 apps with 500 replicas between them. It deployed them one after another and 20 at once, left them alone for 30 minutes, powered off three workers at once, rolled 50 apps at once, drained a worker, removed a powered-off one, scaled every portless app to twice its count and back, restarted the server, and restored it from a backup on a new machine. Every time below comes from the harness's log or the machines' journals; the benchmark section is marked as such. The harness is [scripts/soak](../scripts/soak), with `scale.sh` for this test; the last section says how to run it. The test ran again on 2026-11-19, on a later build and with every node running a router: see [Second run](#second-run-every-node-routing).
 
 ## What broke or was slow
 
@@ -278,6 +278,141 @@ The same benchmarks, with two more, on the build host (c8g.4xlarge, 16 vCPU Grav
 - The perf breakdown covers the first 6.4 minutes of the steady state, as above.
 - The power-off command's ssh to the machine timed out after 20 s, as it should: the machine is gone. The log has the time the machine stopped answering.
 
+## Second run: every node routing
+
+On 2026-11-19 the test ran again on ten new c7g.large machines, with commit fc4ac4b. Since the first run the code has the fixes above, path routes, route protocols (h2c), workers posting their routers' counters to the server, CA rotation, the cluster epoch that a restore raises, and the bound of 15 MiB on a node's assignments. Every node API request is now checked against the CA set and the epoch, and for a removed node, which is a store read. The load and the method are those of the first run, with these differences:
+
+- Every node ran a router on its private address, ports 80 and 443 (`--route-addr <address> --acme-email ops@soak.test --acme-ca https://pebble:14000/dir`). Certificates came from Pebble, a test ACME CA, run with pebble-challtestsrv on the second machine, which is also a worker; challtestsrv answered every routed host with the ten addresses, the server's first. Certificates were valid for two hours, so the routers renewed them during the run.
+- The same 100 apps and 500 replicas, except that five of the ten `ng` apps were replaced by five routed apps of 9 replicas: `pr-01` to `pr-03`, nginx on the path `/api` of `rt-01.scale.test` to `rt-03.scale.test`, each with a page at `/api/` that names it, and `gr-01` and `gr-02`, [test/h2ctest](../test/h2ctest) (a server of gRPC's wire format that speaks only h2c), routed as `h2c-01.scale.test` and `h2c-02.scale.test` with `protocol: h2c` and a TCP health check. So 15 routed apps with 75 replicas, 12 hosts and 15 routes, against 10, 30, 10 and 10. The five `ng` apps left were named `ng-1` to `ng-5`, not `ng-01` to `ng-05` (a harness slip, fixed since), so the first 50-app rollout sent four requests for apps that did not exist; it was run again.
+- Clients, on the second machine: through each router, 2 requests a second to `rt-01.scale.test/` and to `rt-01.scale.test/api/`, each on a new TLS connection with a 10 s limit; a unary h2c call to `h2c-01.scale.test` through each router in turn, then a 1 s pause; and every 30 s a TLS handshake with each router for each host, to read the certificate it serves. They ran from the end of the deploys to the end.
+- The deploy one after another ran twice, the first time while the routers were getting their certificates, then the deploy with 20 at once. `perf record -F 99 -g` ran on the server for 60 s of the second sequential deploy, 45 s of the parallel one, the 30 minutes of the steady state and 20 s of the last rollout, and for 120 s on one worker after the steady state; the reports were read on the control machine with `perf report --symfs` in a container.
+- After the restarts, a CA rotation ran under the same load, then the backup and the restore.
+- Amazon Linux 2023.12.20261118 (the same kernel, 6.18.62, and Docker 25.0.18), clocks within 2 µs of each other (chrony). The drained worker was made eligible again before the scale-up. The worker powered off and removed was a different one from the first run's, with 51 replicas.
+
+### What was slower, or failed
+
+In order of damage.
+
+1. A deploy, and the start of a rolling update, holds the store's write connection about twice as long as before, so concurrent ones queue twice as long. With 20 deploys in flight a request took 145.9 ms at the median and 1130.7 ms at most, against 72.8 and 331.7 ms in the first run; the 50 `PUT`s of a rolling update, all at once, 287.1 and 936.3 ms against 78.9 and 228.4 ms; one after another, 15.4 and 39.9 ms against 8.2 and 23.5 ms. The server was not short of CPU: during the 20-at-once burst perf found it busy 63% of the time in the first second and 32% in the next. The cause is commit 0bd650b ("keep a node's assignments within 15 MiB"): `putApp` now computes every node's assignment bytes before and after its change, and each computation reads every placed replica with its spec (`nodeBytes` → `placedOn`), on top of the read placement does. In the benchmark below, `PutApp` of one more app takes 9.30 ms at 500 replicas and 28.65 ms at 2000 on 0bd650b, against 5.04 and 13.54 ms on its parent; a CPU profile of the benchmark at 2000 replicas puts 41.6% of it in `nodeBytes`. Scaling up is slower by less, 13.0 to 15.6 ms at the median; it does not call `nodeBytes`, but its placement now counts the bytes of every placed replica (not measured apart).
+2. In one of the three 50-app rolling updates, one replica of `bb-11` was not running for about 8 s: in eight samples a second apart, 499 of the 500 replicas ran, one was `pending`, and `bb-11` had 8 of its 9; in the two samples before them one replica (of an app the sample does not name) ran but was not ready. The other two rollouts, 205 samples, had no app below its count or its ready count. The machines' journals were gone before this was seen, so the cause is not known.
+3. The routers' reads of the routing table are now the largest single cost on the server. Each router reads it every second, and each read runs `RouteTable`, two SQL statements compiled again each time, one of them a join of the containers' status with the nodes, with two `EXISTS` subqueries for each routed container. In the 30 minutes of the steady state they were 25.7% of the server's CPU samples, which is most of the rise from 3.89% to 6.34% of one CPU. The check for a removed node on every node API request was another 6.0% (`IsNodeRemoved`, a statement compiled and run per request); the CA and epoch checks cost nothing measurable outside a rotation.
+4. The first validation of 8 of the 12 hosts' certificates failed. The routed apps were deployed a few tens of milliseconds apart, Pebble validated each on the first address of its answer, the server's router, and that router answered `404` for a host it had not yet read in the table: a challenge for an unknown host makes it read the table at once, but at most once a second, and a challenge that comes within the second after another is not read again. certmagic retried each 60 s later, and they all succeeded, so those eight hosts had no certificate for about a minute after their deploy.
+5. When three workers lost power, each of the seven routers that stayed up failed one GET to `rt-01.scale.test/api/`, at the client's 10 s limit. `pr-01` had 3 of its 9 replicas on the three machines, two of them next to each other in the route's endpoint order. A request sent on an idle connection to a dead replica fails after 5 s (TCP_USER_TIMEOUT), and the router then tries the next endpoint, which was the other dead one: 5 s more. Through each of them one request to `rt-01.scale.test/`, which had one replica on those machines, took 7.5 s and succeeded. Three h2c calls got `502` after 5.3 s, at the two power-offs: a POST is not retried, as [routing](routing.md#limits) says.
+6. Scaling up to 933 replicas, every replica ran 24.2 s after the first request, as in the first run, but the last was ready at 36.2 s, against 27.2 s. The rejoined worker had no replicas and took 93 of the 433 new ones, which its agent created in one pass of 21 s. Its 34 health-checked replicas, of 32 apps, were started 05:50:56 to 05:51:04 and all turned ready together at 05:51:23, 13 s after the pass ended. That fits how the agent works: a health monitor starts when a pass supervises its container, and checks first one interval (10 s) later; started with their containers, they would have been ready by about 05:51:16. Deploys, where no node creates that many at once, were as fast to ready as before.
+
+Nothing else failed. The first run's findings are fixed in the numbers: deleting the 100 apps took 35.3 s to the last container (184.8 s before), scaling back 54.4 s (367.3 s), the 50-app rollout finished in 100.5 s with none paused, the held volume replicas of lost nodes were `unknown` and not counted, and a removed worker exits with status 3. No replica ran on two machines outside the surges of the rollouts and the drain, no node that was up was marked lost, and no API request got an error status but the four of the harness slip above. Every router served every host, path and h2c route (150 checks) after the deploys and again after the restore.
+
+### The numbers, against the first run
+
+Measured as in the first run's sections; "first run" is f80c1aa on 2026-11-16. Times of day are UTC.
+
+| Measure | First run | This run |
+|---|---|---|
+| Deploy one after another: request p50 / p99 / max | 8.2 / 23.2 / 23.5 ms | 15.4 / 38.3 / 39.9 ms (12.9 / 36.1 / 62.5 the first time) |
+| Same, `compose deploy` min / p50 / max | 8.7 / 11.4 / 14.7 ms | 18.3 / 24.0 / 25.3 ms |
+| Same, first request to all 500 running / ready | 14.1 / 26.1 s | 13.1 / 25.2 s (14.1 / 25.2) |
+| Deploy, 20 at once: request p50 / p99 / max | 72.8 / 304.1 / 331.7 ms | 145.9 / 882.3 / 1130.7 ms |
+| Same, `compose deploy` min / p50 / max | 24.5 / 128.0 / 260.2 ms | 76.5 / 320.4 / 416.1 ms |
+| Same, all running / ready; `GET /v1/status` meanwhile, max | 14.1 / 25.1 s; 510.6 ms | 14.1 / 24.2 s; 21.8 ms |
+| Delete the 100: request p50 / max; last container gone | 3.4 / 5.4 ms; 184.8 s | 3.2 / 4.8 ms; 35.3 s (32.3 s the second time) |
+| Steady, server: RSS first / last / max | 27.8 / 27.6 / 29.9 MiB | 33.2 / 35.5 / 37.4 MiB |
+| Steady, server: CPU, threads, open fds | 3.89% of one CPU, 10, 42 to 43 | 6.34%, 9 to 10, 71 to 76 |
+| Steady, server: store, WAL | 404 KiB, 4.0 MiB | 452 to 488 KiB, 4.0 MiB |
+| Steady, workers: RSS max, CPU | 22.5 to 23.1 MiB, 0.25 to 0.27% | 24.2 to 25.8 MiB, 0.86 to 0.97% |
+| `GET /v1/status` p50 / p99 / max, the probe's | 12.8 / 38.7 / 69.3 ms | 23.6 / 47.6 / 63.4 ms (see the harness notes) |
+| `GET /v1/status`, 100 in a row after the window | - | 11.2 / 13.8 / 15.2 ms |
+| `GET /v1/nodes`, the probe's; 100 in a row | 3.7 / 7.1 / 10.6 ms; - | 8.6 / 27.8 / 31.0 ms; 3.7 / 6.3 / 7.5 ms |
+| `GET /v1/apps`, the probe's; 100 in a row | 1.3 / 4.7 / 4.8 ms; - | 3.6 / 14.8 / 21.6 ms; 1.4 / 2.6 / 2.6 ms |
+| `GET /v1/routes`, 100 in a row (reply) | 1.1 / 5.6 / 5.8 ms (1325 bytes) | 1.7 / 4.1 / 4.3 ms (3068 bytes) |
+| Status reply at 500 and at 933 replicas | 114600, 205753 bytes | 114957, 206422 bytes |
+| `GET /metrics` | - | 16 to 21 ms, 72.6 KB, 241 router series from 10 nodes |
+| Sweep: CPU per sweep from perf; benchmark | about 4 ms; 1.36 ms | about 3.6 ms; 1.38 ms |
+| 3 workers off: port 22 closed to lost; lost to every replica without a volume elsewhere | 11.5 to 13.5 s; 10.1 s | 12.0 to 14.0 s; 9.5 to 12.6 s (sampled every 3 s) |
+| Same, back on: port 22, `ready`, old containers gone and converged | 14.7 to 15.5, 17.6 to 18.6, 23.6 s (10 s probe) | 13.1 to 15.1, 17.2 to 19.2, 19.1 s (1 s sampler) |
+| Rolling update of 50: `PUT` p50 / max | 78.9 / 228.4 ms | 287.1 / 936.3 ms (228.4 / 746.5 the second time) |
+| Same, to done; paused | 20 in 4:10 to 6:22, 30 paused (112.5 s alone) | 100.5 s, none (101.5 s the second time) |
+| Same, apps below their count, in the samples | none in 819 | none in 205; `bb-11` in 8 of 103 (finding 2) |
+| Same, `GET /v1/status` p50 / p99 / max | 11.5 / 27.6 / 230.7 ms | 12.8 / 33.5 / 39.2 ms |
+| Drain of the busiest worker | 64 replicas, 188.6 s, 63 moved | 71 replicas, 26.3 s, 69 moved, 2 with a volume stay |
+| Power off and remove a worker: lost after port 22; elsewhere; `DELETE`; join again | 14.2 s; +13.1 s; 4.2 ms; 1.5 s | 14.3 s; +13.2 s; 4.2 ms; 1.6 s |
+| Scale x2: request p50 / max; all running; containers match; all ready | 13.0 / 28.8 ms; 24.2 s; 24.3 s; 27.2 s | 15.6 / 33.2 ms; 24.2 s; 24.3 s; 36.2 s |
+| Scale back: request p50 / max; containers match | 2.8 / 10.4 ms; 367.3 s | 4.1 / 10.9 ms; 54.4 s |
+| Server restart: API after `systemctl` returned; all nodes ready; converged | 0.03 s; 0.30 s; 2.26 s after the API | 0.035 s; 0.31 to 0.32 s; 2.28 to 2.29 s |
+| Restore on a new machine: outage; of it the new machine; workers `ready` after the API; converged after the API | 105.8 s; 103.8 s; 0.3 to 1.4 s; 21.4 s | 106.8 s; 103.6 s; 0.33 to 0.37 s; 20.4 s at most |
+
+The workers' CPU went up with their routers: in 120 s of perf on one worker, 23% of the samples were TLS handshakes for the clients' new connections, and the agent was 13%. The restore's "restore" step, 0.56 s in the first run, took 1.76 s here, as the harness also set up the new machine's trust store and imported the h2c image before it.
+
+### Where the server's CPU went in the steady state
+
+12,128 samples in the 30 minutes, 6.7% of one CPU. Each row counts the samples with that function on the stack.
+
+| Function | This run | First run |
+|---|---|---|
+| Node API, the workers' calls (`withEpoch`) | 49.1% | 45.7% |
+| `store.(*Store).RouteTable`, the routers' table reads | 25.7% | - |
+| `nodeAPI.postStatus`, the reports | 8.8% | 30.3% (`ReportStatus`) |
+| `nodeAPI.assignments` | 8.1% | 9.4% |
+| TLS handshakes | 6.5% | - |
+| `store.(*Store).IsNodeRemoved`, on every node API request | 6.0% | - |
+| `GET /v1/status`, the probe's | 4.3% | 6.2% |
+| `nodeAPI.routerMetrics`, the workers' router counters | 1.6% | - |
+| The sweep (`main.sweep`) | 1.1% | 1.6% |
+| Compiling SQL statements (`prepareV2`) | 11.3% | 20.5% |
+
+Of the samples in `RouteTable`, 65% ran its statements, 16% compiled them and 8.5% decoded the h2c apps' specs.
+
+### CA rotation under the load
+
+`scenario.sh ca-rotate`, with the 500 replicas, the routers and the clients running. Each step ran as soon as the one before it was done.
+
+| | UTC | Seconds from `start` |
+|---|---|---|
+| `hivemind ca rotate start` returned (62 ms) | 05:55:41.08 | 0 |
+| Each worker trusts the new CA | 05:55:41.09 to 41.85 | 0.01 to 0.77 |
+| `ca status`: every node trusts it; `renew` | 05:55:42.25; 05:55:43.21 | 1.17; 2.13 |
+| Each worker renews its certificate | 05:55:43.44 to 44.14 | 2.36 to 3.06 |
+| The server has seen every new certificate, and its own has moved | 05:55:45.52 | 4.44 |
+| `finish` returned (58 ms) | 05:55:46.51 | 5.42 |
+| Each worker drops the old CA | 05:55:46.51 to 47.44 | 5.43 to 6.36 |
+| Every worker's `ca.crt` holds the new CA alone | 05:55:48.46 | 7.38 |
+
+On four nodes, in the fifth soak, `finish` came 3.90 s after `start`. No container changed, every node kept its ID, the server logged no TLS handshake error, refusal or warning, and the workers no TLS or x509 line. No client request failed during the rotation.
+
+### Routing under the load
+
+- Each of the 20 request streams made about 7,200 requests. Through the routers that stayed up, the only failures were the seven of finding 5 and one request to the server's router during the first server restart. Through the routers whose machine was powered off, removed or replaced, the requests failed while it was away: 42 to 44 for each of the three, 168 to 169 for the removed one, 155 to 157 for the server's during its replacement.
+- 3,224 h2c calls through each router, 6 ms at the median and 15 ms at p99. Besides the three `502`s of finding 5, the failures were dial errors to routers whose machine was away.
+- Pebble issued 29 certificates for the 12 hosts: the first 12 (8 of them after the retry of finding 4), 4 when the deleted apps were deployed again although the stored ones were valid (`rt-10.scale.test` twice, 9 s apart), and 13 renewals. Pebble's renewal windows (ARI) begin at issuance, which may explain the four; they were not looked into further. While the server was being replaced, the workers' renewal checks failed to reach the shared storage and logged it, as documented, and succeeded after. With two-hour certificates the workers logged certmagic's "emergency renewal window" warning, an effect of the short lifetime.
+- The workers posted their counters: `/metrics` had router series for all ten nodes throughout, and again within a minute of the restore.
+
+### Benchmarks
+
+The benchmarks of the first run, on the build host (c8g.4xlarge, `golang:1.27` in Docker, `-benchtime 50x`), for fc4ac4b (one run), with the figures after the fixes (the mean of two) for comparison:
+
+| Operation | 500 replicas, after the fixes → fc4ac4b | 2000 replicas |
+|---|---|---|
+| `GET /v1/status` | 6.85 → 7.19 ms | 29.57 → 30.93 ms |
+| `GET /v1/apps`, `/v1/nodes` | 0.47, 1.98 → 0.48, 2.09 ms | 1.79, 8.02 → 1.85, 8.49 ms |
+| Sweep, nothing pending; one replica no node can take | 1.35, 1.80 → 1.38, 1.83 ms | 4.97, 6.34 → 5.00, 6.42 ms |
+| One node's assignments and report, unchanged; changed | 1.95, 2.11 → 1.97, 2.16 ms | 3.41, 4.48 → 3.59, 3.31 ms |
+| `GET /v1/status` while ten nodes report | 7.38 → 7.67 ms | 31.67 → 32.56 ms |
+| `PutApp` of one more app | 4.77 → 9.46 ms | 12.89 → 27.63 ms |
+
+`PutApp` on 0bd650b, its parent and fc4ac4b, two runs each, alternated:
+
+| Commit | 100 | 500 | 1000 | 2000 replicas |
+|---|---|---|---|---|
+| 0bd650b's parent | 2.86 ms | 5.04 ms | 8.09 ms | 13.54 ms |
+| 0bd650b | 3.85 ms | 9.30 ms | 15.94 ms | 28.65 ms |
+| fc4ac4b | 3.90 ms | 9.54 ms | 16.15 ms | 28.78 ms |
+
+### Harness notes
+
+- `scale.sh` has `SCALE_MIX=2` for this run's apps, and `served`, `h2c-start`, `h2c-stop`, `metrics` and `perf-start`, `perf-fetch`, `perf-report`. `outside.sh` has `OUTSIDE_REGISTRY=0`, an outside machine without the registry, so it can be a node whose router has port 443, and `STREAM_RATE`; `lib.sh` imports the h2c image on each node.
+- The units `lib.sh` installs lacked `RestartPreventExitStatus=3`, which docs/systemd.md has had since the fix of finding 5, so the removed worker, which exited with status 3 and the documented message, was restarted 6 times in 40 s. They have it now; the rejoined worker and the restored server ran with it.
+- The probe's latency samples run beside its own resource script on the server, which since the first run also counts dangling volumes and each container's log files (a `find` per container). Those samples were about twice the latency of 100 requests in a row after the window. With that script and the probe's other calls run in a loop on the server, 60 requests in a row gave 16.9, 6.4 and 2.4 ms at the median for status, nodes and apps, against 11.2, 3.7 and 1.4 ms without; so the probe's figures above are not comparable with the first run's, and the requests in a row are the ones to compare.
+- The h2c loop recorded the exit status of `tr`, not of the call, so its failures were counted from the replies; it records the call's status now.
+
 ## Running it
 
 On a control machine with ssh access to ten nodes (passwordless sudo, Docker, jq, curl on each), and a linux build of hivemind:
@@ -326,3 +461,23 @@ scripts/soak/report.sh "$SOAK_DIR/soak.log"
 ```
 
 `scale.sh` with no argument lists its commands. Each one logs a `mark` line at its start and end, and `event` lines the first time each condition holds, to the same log as the rest of the harness.
+
+For the second run, every node runs a router, and the outside machine of the routing soak (Pebble and its DNS, no registry) is one of the workers, named in `$SOAK_DIR/outside`. `test/h2ctest` is built for the nodes into `$SOAK_DIR/h2ctest`, and each node imports it as an image:
+
+```sh
+export SOAK_ROUTES=1 OUTSIDE_REGISTRY=0 SCALE_MIX=2 CERT_LIFETIME=7200 STREAM_RATE=2/s
+export ROUTED_HOSTS="$(printf 'rt-%02d.scale.test ' $(seq 1 10))h2c-01.scale.test h2c-02.scale.test"
+export STREAMS="rt-01.scale.test/ rt-01.scale.test/api/"
+echo "node-2 10.0.0.6" >"$SOAK_DIR/outside"
+scripts/soak/outside.sh setup
+SETUP_APPS=0 BIN=path/to/hivemind scripts/soak/setup.sh
+scripts/soak/scale.sh specs
+scripts/soak/scale.sh pull
+#    ...the deploys, as above, then:
+scripts/soak/scale.sh served
+scripts/soak/outside.sh client-start
+scripts/soak/scale.sh h2c-start
+scripts/soak/scale.sh perf-start 1800     # with the steady state
+#    ...the rest as above; the CA rotation before the backup:
+scripts/soak/scenario.sh ca-rotate
+```
