@@ -1328,3 +1328,266 @@ scripts/soak/outside.sh fetch
 SOAK_DURATIONS=scripts/soak/durations-soak5.txt scripts/soak/report.sh "$SOAK_DIR/soak.log"
 scripts/soak/client-report.sh "$SOAK_DIR/soak.log" "$SOAK_DIR/client"
 ```
+
+# Sixth soak: gRPC through the routers, a partial heal after the hold
+
+The fifth soak's set-up on five new machines, on 2026-11-19, on fc4ac4b, with a gRPC app on an h2c route beside the path-routed pair, and each worker run by the unit [systemd](systemd.md) gives, `serve --role worker` with no flags. Besides the 16 HTTP streams, the outside machine ran two gRPC clients through each router: a unary call every 200 ms, and a server stream held for 1000 messages, one a second. Under them: the server's machine stopped and started with every worker cut off from it past its start grace, and the workers healed 0, 5 and 20 s apart; a CA rotation, and one aborted in phase renew; rolling updates of the gRPC app and of the path apps; a worker powered off; and an hour of steady state. The first scenario showed the workers' routers sending requests to the host ports the server's replicas had before its machine restarted, which other replicas held after it, so after the steady state the server's machine was restarted once more with the workers cut off, and healed inside the grace, to measure that. Times are UTC; the machines' private addresses are shown renumbered, 10.0.0.N for hivemind-soaki-N.
+
+## The scenarios
+
+| | Failed HTTP requests | Misrouted (a 200 from another app) | Failed unary gRPC calls | Held server streams that ended early |
+|---|---|---|---|---|
+| The hold, healed 0, 5 and 20 s apart (the workers' routers) | 0 | not measured for `api` (below) | 1424, `502` | 1 of 3, on the server's replica, at the stop |
+| A CA rotation | 0 | 0 | 0 | 0 of 4 |
+| A rotation aborted in phase renew | 0 | 0 | 0 | 0 of 4 |
+| Rolling update of `grpc` | 0 | 0 | 0 | 4 of 4, 13 s after their copy left the table |
+| Rolling update of `proot` and `papi` | 0 | 0 | 0 | 0 of 4 |
+| A worker powered off (the other three routers) | 0 | 0 | 3, `502`, one per router | 1 of 3, on the powered-off worker's replica |
+| Steady state, 1 h 1 min 49 s | 0 of 588984 | 0 | 0 of 73491 | 0 of 14 |
+| The server's machine restarted, workers cut off (the workers' routers) | 0 | 716, `papi`'s requests answered by `proot` | 712, `502` | 2 of 3, on the server's replicas |
+
+No node was lost in either hold, no replica ran twice, and no request got a `503` through any router.
+
+## The machines and the build
+
+| | |
+|---|---|
+| Machines | 5 EC2 c7g.large in one subnet: 2 vCPU (Graviton3), 3.7 GiB (MemTotal 3897240 kB), Amazon Linux 2023.12.20261118, kernel 6.18.62-127.179.amzn2023.aarch64, Docker 25.0.18 |
+| Roles | hivemind-soaki-1 the server, 2 to 4 workers, 5 the outside machine |
+| hivemind | fc4ac4b, `CGO_ENABLED=0 go build -trimpath -ldflags "-s -w -X main.version=v2.0.0-278-gfc4ac4b -X main.commit=fc4ac4b1815c" ./cmd/hivemind`, Go 1.27.4, linux/arm64, sha256 bc6703b0...67a50c42, for the whole run; `hivemind nodes` showed v2.0.0-278-gfc4ac4b under VERSION |
+| The gRPC server and client | `test/h2ctest`, built the same way without `-ldflags`, sha256 39b3bbf6...6b29fffb. The image is the binary alone, made with `docker import` and `ENTRYPOINT ["/h2ctest"]` as [routing](routing.md#tests)'s test makes it, pushed to the private registry as `soak/h2ctest:1` and `soak/h2ctest:2`, which differ in a label |
+| Service | The units of [systemd](systemd.md), with `RestartPreventExitStatus=3`: the server's `serve --advertise hivemind-server.soak.test --cluster-addr <its address>` with the router's flags; each worker's `serve --role worker` with no flags |
+| Outside machine | Pebble (revision 5caaab3), pebble-challtestsrv, registry:2, curl 8.21.0 with nghttp2 1.59.0 |
+| Network | The fifth soak's security group, not checked port by port this time; every port the run used answered. Clocks: chrony put every machine within 1 microsecond of the Amazon Time Sync Service at the start |
+
+## Set-up
+
+As in the fifth soak, with `grpc` as well: 20 replicas. Each worker was joined as [systemd](systemd.md#worker) says, `hivemind join hivemind-server.soak.test --token ... --route-addr <its address> --acme-email ops@soak.test --acme-ca https://pebble:14000/dir`. join wrote the three router flags to `/var/lib/hivemind/hivemind.yaml`, mode 0600, owned by root, and nothing else; then the foreground join was stopped and the unit started. On each worker its router listened on the worker's address, ports 80 and 443, and `hivemind nodes` showed `yes` under ROUTER, 0.2 s after the unit started. The worker that was powered off later ran its router again from the same unit when it came back.
+
+`grpc` runs `h2ctest serve -addr :50051 -name grpc`, 2 replicas, with `V` in its environment naming the version in every reply, on the route `paths.soak.test` `/h2ctest.Echo`, port 50051, `protocol: h2c`, and a TCP health check, so the host has two http routes and an h2c one. `hivemind routes` showed it with `h2c` under PROTOCOL and both endpoints. Through each of the four routers, a unary call, a server stream of five messages, a bidirectional stream, and a unary call over HTTP/1.1, which the router sends on as HTTP/2, reached `grpc` and ended with `grpc-status` 0. It took 61 s from the binaries' install to every router serving the three hosts, and the fourth soak's paths went to the same apps through each router, with the same `301` and `400`s.
+
+## Method
+
+The fifth soak's harness and its 16 HTTP streams. New in [scripts/soak](../scripts/soak):
+
+- Two gRPC clients through each router (`outside.sh`, `SOAK_GRPC=1`), to `https://paths.soak.test/h2ctest.Echo`. One makes a unary call every 200 ms, each a run of `h2ctest call`: a new process, TCP connection and TLS handshake, HTTP/2 by ALPN, and its checks, that the message comes back from one replica over HTTP/2 with `grpc-status` 0. Its time is the whole run of the process. The other holds a server stream: one POST to `Server` with curl over HTTP/2, asking for 1000 messages 1 s apart, each message's arrival taken from curl's trace (`--trace-time`); when a stream ends, the next one starts 1 s later, and curl gives up after 10 s with no data. `client-report.sh` gives both per window: the calls, failures and why, the versions that answered, the longest gap between two successful calls; the streams that ended, those that ended complete (1000 messages, `grpc-status` 0), the others with curl's error, and the longest gap between two messages.
+- `start-hold` with `HEAL_LAGS="W:0 W:5 W:20"` takes each worker's rule off at its own lag after the heal begins, and logs the routing table (`GET /v1/routes`) at each change, every 200 ms, through the heal. With `HOLD_NAME` and a negative `HOLD_AFTER` it heals inside the start grace, with no hold.
+- After an abort, `ca-abort` logs `hivemind ca status` and `hivemind status` as an operator reads them, and again once every node has renewed back. After each rotation the harness counts the server's lines that name the CA by the rotation's direction, and each worker's renewals with their `ca=` and `from=`.
+
+## Results
+
+### The start grace's hold, healed 0, 5 and 20 s apart
+
+The server, hivemind-soaki-1, ran `api` 0, `grpc` 1, `kv`, `proot` 1 and `spread` 2. Its machine was stopped (`aws ec2 stop-instances --force`), every worker's packets to its port 4484 were dropped once its port 22 had closed, and the machine was started again. Past the end of its grace, the rules came off hivemind-soaki-2 first, hivemind-soaki-3 5 s later and hivemind-soaki-4 20 s later.
+
+| | UTC | Seconds |
+|---|---|---|
+| Stop request | 04:51:05 | |
+| Port 22 closed; the rules on the three workers | 04:51:06.5 | |
+| Start request | 04:51:50.7 | |
+| Port 22 open | 04:52:06.9 | +16.3 |
+| `serve` started, `waiting=3 start_grace=2m0s`; API up | 04:52:07.5, 08.0 | |
+| Its five containers started again | 04:52:08.3 to 09.1 | |
+| The grace ends: the error line; in `hivemind nodes` the three workers `waiting`, with `start_held` | 04:54:07.5 | start + 120.0 |
+| The rule off hivemind-soaki-2; it reaches the server (`the server answers again`) | 04:55:38.0, 38.2 | grace + 90.5 |
+| `hivemind nodes`: hivemind-soaki-3 and 4 `waiting`, with `start_hold_ended`. `hivemind status`: `2 workers are waiting for their first report since the server started: another worker's report ended the hold, and they have the start grace again (1m59s left); ...` | 04:55:38.8 | |
+| The sweep: `... which ends the start grace's hold: the workers that have not reported yet wait for the start grace again, from that report, until wait_ends ...`, `waiting=2`, `hold_ended=2026-11-19T04:55:38Z`, `wait_ends=2026-11-19T04:57:38Z` | 04:55:42.5 | |
+| The rule off hivemind-soaki-3; it reaches the server | 04:55:43.0, 43.4 | +5.0 |
+| The rule off hivemind-soaki-4; it reaches the server | 04:55:58.0, 58.1 | +20.0 |
+| Every worker ready; converged, 20 of 20 running | 04:55:59.2 | +21.3 |
+
+No node was lost (no `node lost` in the server's journal), no replica was placed again, none ran on two machines, no container on a worker changed, and every node kept its ID. The routing table, read every 200 ms from the start of the heal, did not change through it: the endpoints of the workers that still waited stayed in it. No request got a `503` through any router. Through the workers' routers no HTTP request failed; on each stream of `api` and `proot`, with a replica on the server, two requests took 2.0 s, a dial to it while it was down. Through the server's router 231 or 232 per stream failed, from the stop until it served again at 04:52:07; none after. Of the held gRPC streams, the two through hivemind-soaki-2's and 4's routers were on `grpc` 0, at hivemind-soaki-4, and ran through it all, a message every 1.00 s; the one through hivemind-soaki-3's router was on the server's replica and was reset at the stop.
+
+But from 04:52:34, 26 s after the server's API answered, until each worker reached the server again, about every second unary call through the workers' routers failed with `502 bad gateway`: 468, 454 and 502 through hivemind-soaki-3's, 2's and 4's, the last of each less than 0.5 s before that worker reached the server.
+
+### The server's replicas on new host ports, and the workers' routers' old table
+
+A routed replica's port is published on an ephemeral host port, and Docker picks a new one at each start of the container; the agent reports the new port, and the table follows. A router that cannot read the table serves its last one (`reading the routing table; serving the last one`). When the server's machine restarted, its agent started its three routed containers again, and they came back on each other's ports:
+
+| Replica on hivemind-soaki-1 | Host port before the stop | After the start |
+|---|---|---|
+| `api` 0 (nginx) | 32770 | 32768 |
+| `proot` 1 (whoami) | 32769 | 32770 |
+| `grpc` 1 (h2ctest, HTTP/2 only) | 32768 | 32769 |
+
+The workers' routers, cut off, sent each app's requests to its old address once their backoff for those endpoints, which had failed to dial while the machine was down (3 s, doubling to 30 s), let them try again. gRPC calls went to `api`'s nginx: its log on the server has 1424 lines `"PRI * HTTP/2.0" 400` from the workers' addresses between 04:52:34 and 04:55:57, the number of the clients' `502`s, and the workers' routers counted 469 and 455 `502`s in `/metrics` (hivemind-soaki-4's counters started again with its power-off later). `proot`'s requests went to `grpc`, which speaks only HTTP/2: the connection failed before a reply, the router sent each GET to `proot`'s other replica, and none failed. `api`'s requests went to `proot`'s whoami, which answers any path with a `200`. The `api` streams do not check which app answers, so this was not counted; by the share of `api`'s two endpoints, about half of the `api` requests through the workers' routers from 04:52:34 to their reconnection were answered by `proot`.
+
+After the steady state, to count it, a stream that checks the answering app was added for `api` through each router (`api.soak.test/index.html`, `name=-` for nginx's page, `misroute=proot` for whoami's), every worker was cut off, the server's machine stopped and started again, and the rules removed 70 s after its API answered: inside the start grace, so with no hold.
+
+| | UTC |
+|---|---|
+| Stop request; port 22 closed, the rules on the three workers | 06:08:46.0, 06:08:52.3 |
+| Start request; port 22 open; API up | 06:10:13.7, 06:10:28.0, 06:10:30.1 |
+| Its eight containers started again | 06:10:30.4 to 32.2 |
+| The first misrouted request and the first `502` through a worker's router | 06:10:53.2 |
+| The rules removed | 06:11:40.5 |
+| The last misrouted request and `502` | 06:11:41.7 |
+| Every worker ready; converged | 06:11:42.7 |
+
+| Replica on hivemind-soaki-1 | Before the stop | After the start |
+|---|---|---|
+| `api` 0 | 32768 | 32768 |
+| `grpc` 1 | 32772 | 32769 |
+| `papi` 0 | 32771 | 32770 |
+| `proot` 1 | 32773 | 32771 |
+| `www` 2 | 32774 | 32772 |
+
+Through hivemind-soaki-3's, 2's and 4's routers, 238, 237 and 241 requests for `paths.soak.test/api/x` got a `200` from `proot` instead of `papi`, whose old port was `proot`'s new one, and 237, 235 and 240 gRPC calls got a `502`, `grpc`'s old port being `www`'s new one: all from 06:10:53.2, 23 s after the server's API answered, to 06:11:41.7, as each router read the table again after the heal. `api` kept its port, and none of its requests went elsewhere; `proot`'s and `www`'s old ports were free, so their requests went to their other replicas. No node was lost, and nothing was misrouted before the stop or after the heal.
+
+### A CA rotation, and an abort in phase renew
+
+| | A rotation | Aborted in phase renew |
+|---|---|---|
+| CAs | init's to ddf77477 | ddf77477 to 685eced1, then back |
+| `start` to every node trusting the new CA | 0.68 s | 1.25 s |
+| The server's certificate moves to the new CA | in the `renew` step | in the `renew` step, and back within 1.9 s of the abort (1 s watcher) |
+| `renew` to every node renewed | 1.79 s | aborted 71 ms after `renew`, with 1 of 3 renewed |
+| `abort` to every node renewed back, the server's certificate back | | 2.39 s |
+| `finish` to every worker with that CA alone in `ca.crt` | 0.40 s | 1.43 s |
+| `start` to `finish` returned | 3.46 s | 4.75 s |
+| Failed HTTP requests and gRPC calls; held streams that ended | 0; 0; 0 | 0; 0; 0 |
+| TLS handshake errors, warnings, errors and joins in the server's log; TLS or x509 lines in the workers' | 0 | 0 |
+| Containers changed; node IDs | none; the same | none; the same |
+
+Each step's command returned in 54 to 65 ms. The slowest HTTP request in the two rotations took 15 ms and the slowest unary call 18 ms, and the held streams gave a message every 1.00 s throughout.
+
+What the fifth soak found wrong in an abort now reads the right way round:
+
+- `ca.crt`: from each worker's renewal back until `finish`, ddf77477 first and 685eced1 second, with `node.crt` from ddf77477: the CA of the node's own certificate first, as [ca-rotation](ca-rotation.md) says. The forward renewals, under 685eced1, came and went between two of the watcher's samples, 2 s apart, so the order in that second was not seen.
+- The logs: before the abort, the server's four lines `a node trusts the CA the rotation goes to, the new one in ca-next.crt` and `a node presents a certificate from the CA the rotation goes to, ...`; after it, six lines `... the CA the rotation goes back to, the old one in ca.crt, after an abort`, with `ca=` the old CA and `leaving=` the new one; no line says "the new cluster CA". Each worker logged two renewals, `renewing the node certificate under the CA the cluster's CA rotation goes to, as its renew phase asks` with `ca=685eced1... from=ddf77477...`, then with `ca=ddf77477... from=685eced1...`.
+- `hivemind ca status` right after the abort: `Rotation: phase renew, back towards the old CA, ca.crt ddf77477, after an abort`, the columns TRUSTS TARGET and CERTIFICATE FROM, hivemind-soaki-2 with `yes` and `ca-next.crt 685eced1` (it had renewed forward and not back yet), and under `Next: hivemind ca rotate finish, which waits for:` hivemind-soaki-2 `has not renewed its certificate back under the old CA yet` and each of the other two `has not made a request since the rotation turned round`. `hivemind status`: `Cluster CA rotation, phase renew, back towards the old CA in ca.crt after an abort: hivemind ca rotate finish waits for: ...`. Once every node had renewed back, each showed `yes` and `ca.crt ddf77477`, and `Next: hivemind ca rotate finish.`
+- `finish` of the aborted rotation said `The rotation has ended, back on the CA the cluster had before it started (ca.crt ddf77477). Backups taken during the rotation hold the new CA's key, which the cluster no longer uses: delete them. Backups from before the rotation started are still good.`, and of the whole one `The rotation has ended on the new CA (ca.crt ddf77477). Backups taken before now hold the old CA's key, which the cluster no longer uses: take a new backup, and delete the old ones.`
+
+### Rolling updates of grpc and of the path apps
+
+`grpc` to version 2 (`h2ctest:2`, `V=2`): deploy at 04:59:42.7, rollout done 04:59:52.9, converged 05:00:02.6.
+
+| | UTC |
+|---|---|
+| Replica 0's new copy started, on hivemind-soaki-3 | 04:59:43.8 |
+| Its old copy, on hivemind-soaki-4, leaves the table (`stopping it after the drain delay`) | 04:59:48.1 |
+| Replica 1's new copy started, on hivemind-soaki-4 | 04:59:48.4 |
+| Replica 1's old copy, on the server, leaves the table; removed | 04:59:53.5, 58.8 |
+| The four held streams, all on replica 0's old copy, reset | 05:00:01.1 |
+| Replica 0's old copy removed | 05:00:01.4 |
+
+Through each router 329 unary calls, none failed, 38 to 41 answered by version 1 and the rest by version 2. The held streams ended with `HTTP/2 stream 1 reset by server (error 0x2 INTERNAL_ERROR)` 13.0 s after their copy left the table: the 5 s drain delay, then the 8 s that h2ctest gives open calls after SIGTERM, within the 15 s that [routing](routing.md#streams-and-their-limits) says a stream on the old copy has. Each client's next stream had its first message 1.2 to 1.9 s after the last of the one before. No HTTP request failed.
+
+`proot` and `papi` to `whoami:2` at once: deploy at 05:00:49.1, both done at 05:01:02.4, converged at 05:01:09.6. On the path streams no request failed or reached the wrong app, the slowest took 56 ms, and the gRPC calls and streams on the same host carried on: none failed, no stream ended.
+
+### A worker powered off
+
+hivemind-soaki-4 (10.0.0.4), with `grpc` 1, `proot` 1, `spread` 1 and 5 and `www` 2, was powered off with `sysrq o`; the clients' requests to it stalled from 05:01:43. Its port 22 closed at 05:01:50.4, it was lost 9.6 s later, and its five replicas ran elsewhere 6.4 s after that, four on the server and `spread` 1 on hivemind-soaki-3. Started again, its port 22 opened 15.7 s after the start request, at 05:03:28.0, its old containers were removed 0.2 s later, and it was ready at 05:03:29.2, with its router up from the same flagless unit.
+
+Through the other three routers no HTTP request failed; on each stream of `www` and `proot` two took longer, one of 7.5 s on a kept connection to it, then a 2.0 s dial, as in the fourth and fifth soaks. One unary gRPC call through each of them failed, with a `502` after 5.5 s: the call in flight on that router's connection to `grpc` 1 when the machine died, ended by TCP_USER_TIMEOUT. A gRPC call is a POST, which the router does not send again ([routing](routing.md#protocols)); the clients make one call at a time, so a client with many in flight would lose each call the router had sent to that replica in those 5 s. The held stream through hivemind-soaki-2's router was on `grpc` 1 and was reset, and the next one's first message came 7.2 s after its last; the other two went on. Through hivemind-soaki-4's own router 80 requests per stream failed, until 05:03:28.
+
+## Steady state
+
+On fc4ac4b, 1 h 1 min 49 s, from 05:05:46.2 to 06:07:35.5, after the scenarios above and before the second restart: the 16 HTTP streams, the 8 gRPC clients, the probe loop, no watcher. Every node held a certificate from ddf77477, the first rotation's CA. Placement in the window: the server, hivemind-soaki-1, ran `api` 0, `grpc` 1, `kv`, `papi` 0, `proot` 1, `spread` 2 and 5 and `www` 2; hivemind-soaki-2 `front`, `proot` 0, `spread` 0 and 4 and `www` 1; hivemind-soaki-3 `api` 1, `cache`, `grpc` 0, `papi` 1, `spread` 1 and 3 and `www` 0; hivemind-soaki-4, powered off and on before, none.
+
+| HTTP, through the routers | |
+|---|---|
+| Requests, all 16 streams | 588984 |
+| Succeeded | 588984 (100 %) |
+| Misrouted | 0 |
+| Requests of 1.5 s or more | 0 |
+| Longest gap between two successful requests on a stream | 0.12 s |
+| Total time per request (TCP connect, TLS handshake, request and reply), p50 / p90 / p99 / p99.9 / max | 2.6 / 3.1 / 5.1 / 7.8 / 20.0 ms |
+| TLS handshake, p50 / p99 / max | 1.6 / 3.0 / 11.5 ms |
+| TLS done to first byte of the reply, p50 / p99 / max | 0.6 / 1.6 / 16.7 ms |
+| Certificates issued in the window | 22 (8 for `api`, 8 for `paths`, 6 for `www`) |
+| Certificate checks (a fresh handshake with every router for each host every 30 s) | 1476, none failed |
+
+| Host and path | Requests | Succeeded | Misrouted | p50 / p99 / p99.9 / max (ms) |
+|---|---|---|---|---|
+| `api.soak.test/` | 147283 | 147283 | 0 | 2.5 / 5.1 / 7.7 / 20.0 |
+| `www.soak.test/` | 147229 | 147229 | 0 | 2.6 / 5.1 / 7.9 / 14.5 |
+| `paths.soak.test/` (proot) | 147229 | 147229 | 0 | 2.6 / 5.0 / 7.8 / 18.1 |
+| `paths.soak.test/api/x` (papi) | 147243 | 147243 | 0 | 2.6 / 5.1 / 7.8 / 18.8 |
+
+| gRPC, through the routers | |
+|---|---|
+| Unary calls, all four routers | 73491 |
+| Succeeded | 73491 (100 %), all from version 2 |
+| Time per call (a new process, TCP connect, TLS handshake and call), p50 / p90 / p99 / p99.9 / max | 5.8 / 8.2 / 11.3 / 15.1 / 24.1 ms |
+| Longest gap between two successful calls through a router | 0.22 s |
+| Server streams that ended in the window | 14, each complete: 1000 messages and `grpc-status` 0 |
+| Messages | 14828 |
+| Longest gap between two messages of a router's streams, the next stream's start included | 1.02 s |
+
+| Probe | Result |
+|---|---|
+| Status answered, converged, all 20 replicas running, no replica on two machines | 371 of 371 |
+| `kv` value read back, and the same as written | 371 of 371 |
+| `GET /v1/status`, `/v1/nodes`, `/v1/apps` on the server, 310 each | all 200; p50 2.3, 1.8 and 1.1 ms; p99 7.7, 8.8 and 7.9 ms; max 14.4, 13.0 and 12.0 ms |
+| Dangling Docker volumes, every node, every 60 s | 0 |
+| Container log files | at most 2 files for one container, the largest 10000119 bytes |
+| Events: lost nodes, restarts, failed probes | none |
+
+The hivemind process on each node, 62 samples a minute apart:
+
+| Node | RSS first / last / max (MiB) | Threads first / last | Open fds first / last / max | CPU, % of one CPU | Restarts |
+|---|---|---|---|---|---|
+| hivemind-soaki-1 (server) | 27.8 / 27.7 / 28.0 | 9 / 9 | 43 / 42 / 45 | 5.21 | 0 |
+| hivemind-soaki-2 | 24.2 / 24.1 / 24.4 | 9 / 9 | 26 / 26 / 28 | 3.87 | 0 |
+| hivemind-soaki-3 | 23.7 / 24.1 / 24.2 | 8 / 9 | 26 / 26 / 27 | 3.83 | 0 |
+| hivemind-soaki-4 | 22.0 / 22.3 / 22.4 | 8 / 9 | 27 / 26 / 29 | 3.72 | 0 |
+
+Each process used 3.7 to 5.2 % of one CPU, against 2.9 to 4.1 % in the fifth soak, with the gRPC clients' 20 calls a second and four streams through the routers on top of the same HTTP load, and 8 replicas on the server's machine against 5. RSS stayed within 0.4 MiB over the hour. The store grew from 252 to 256 KiB (`hivemind.db`), with a 4032 KiB WAL at the end. The routers' counters in the server's `/metrics`, read at the window's two ends, against the clients' `200`s through each router, the gRPC calls and streams counted for `paths.soak.test`:
+
+| Router | `api.soak.test` | `paths.soak.test` | `www.soak.test` |
+|---|---|---|---|
+| hivemind-soaki-1 (the server, read directly) | +24 | +22 | +17 |
+| hivemind-soaki-2 | -42 | -104 | -41 |
+| hivemind-soaki-3 | -42 | -105 | -42 |
+| hivemind-soaki-4 | -42 | -105 | -43 |
+
+The server's router counted 24, 22 and 17 more `200`s than its streams had, against Pebble's three HTTP-01 validations for each of the 8, 8 and 6 issuances, 24, 24 and 18. Each worker's counters were 4.2 s further behind the clients at the second read than at the first: 42 requests of a host with 10 a second, 105 of `paths.soak.test` with its two HTTP streams and the unary calls, 25 a second; a worker posts them every 15 s.
+
+## What did not work, and what was not measured
+
+- When the server's machine restarted while its workers could not reach it, its routed replicas came back on other host ports, and the workers' routers, serving their last table, sent requests to the old ones: gRPC calls to an HTTP/1.1 server, which got `502`, and `papi`'s requests to `proot`, which answered them with a `200`. In the hold this lasted from 26 s after the server's API answered until each worker reconnected, 3 minutes and more; in the second restart, healed inside the grace, 48 s.
+- The hold's `api` streams did not check which app answered, so how many `api` requests `proot` answered then was not counted; the second restart counted it for `papi` and `api`.
+- The gRPC clients make one call at a time per router, so the power-off cost one call per router; with more calls in flight, more would have failed in the 5 s before the router gave up the connection.
+- During the hold the workers' routers tried to renew certificates while the server, which holds their storage, was unreachable, and logged `certificate resources not found in storage for any configured issuer (issuer may have changed); obtaining a new certificate instead of renewing`, then at error `job failed ... failed storage check ... storage is probably misconfigured`. Nothing was issued, and after the heal the next attempt found the stored certificate.
+- The routers renewed every certificate about every 10 minutes, 22 issuances in the steady hour (17 in the fifth soak's), each with the warning `certificate is in emergency renewal window`: Pebble's renewal information gives the whole lifetime of its 1-hour certificates as the renewal window. A property of the test CA's settings.
+- A rotation with a worker cut off by `finish --force`, and the server's new warning for such a worker, were not run; nor a compose file's `x-hivemind` health check, nor a failing health check's reason in `hivemind status`.
+- The power-off goes through two ssh hops; the harness's fault line is about 5 s before the machine went down, which the clients' first stalled requests (05:01:43) date.
+- The harness's held-stream client first ran with a curl `-w` format that began with `@`, which curl reads as a file to load: for two minutes before the first scenario every stream failed at once. It was fixed, those lines dropped, and the clients started again before the first scenario.
+- One hour of steady state is too short for leak figures.
+
+## Running it, with gRPC
+
+As [with CA rotations](#running-it-with-ca-rotations), with `SOAK_GRPC=1` and a linux build of `test/h2ctest` in the run directory:
+
+```sh
+export SOAK_DIR=$PWD/.scratch/run SOAK_ROUTES=1 SOAK_PATHS=1 SOAK_GRPC=1 SERVER_NAME=hivemind-server.soak.test
+CGO_ENABLED=0 GOOS=linux go build -trimpath -o "$SOAK_DIR/h2ctest" ./test/h2ctest
+scripts/soak/outside.sh setup                 # pushes soak/h2ctest:1 and :2, and the client binary
+BIN=path/to/hivemind scripts/soak/setup.sh     # grpc, and a checked call of each kind through every router
+scripts/soak/outside.sh client-start           # 16 HTTP streams, and a unary and a held stream per router
+scripts/soak/scenario.sh probe-start
+scripts/soak/scenario.sh watch-start
+
+HEAL_LAGS="node-2:0 node-3:5 node-4:20" scripts/soak/scenario.sh start-hold &   # stop the server's machine, then start it, when the log says so
+scripts/soak/scenario.sh ca-rotate
+scripts/soak/scenario.sh ca-abort
+scripts/soak/scenario.sh rollout 2 grpc
+scripts/soak/scenario.sh rollout 2 proot papi
+scripts/soak/scenario.sh begin poweroff-worker node-4
+scripts/soak/scenario.sh measure poweroff-worker node-4 loss 300 &    # ...power node-4 off; once it is lost, power it on, then:
+scripts/soak/scenario.sh measure poweroff-worker node-4 return 600
+scripts/soak/scenario.sh end poweroff-worker
+scripts/soak/scenario.sh mark steady begin && scripts/soak/scenario.sh metrics-snap steady-begin
+#    ...an hour later:
+scripts/soak/scenario.sh metrics-snap steady-end && scripts/soak/scenario.sh mark steady end
+
+# the server's machine restarted while its workers cannot reach it, healed inside the grace
+for ip in 10.0.0.5 10.0.0.6 10.0.0.7 10.0.0.8; do STREAMS="api.soak.test/index.html=api" scripts/soak/outside.sh client-add $ip; done
+HOLD_NAME=restart-cutoff HOLD_AFTER=-50 HEAL_LAGS="node-2:0 node-3:0 node-4:0" scripts/soak/scenario.sh start-hold &
+
+scripts/soak/outside.sh fetch
+SOAK_DURATIONS=scripts/soak/durations-soak6.txt scripts/soak/report.sh "$SOAK_DIR/soak.log"
+scripts/soak/client-report.sh "$SOAK_DIR/soak.log" "$SOAK_DIR/client"
+scripts/soak/metrics-report.sh "$SOAK_DIR/metrics-steady-begin.txt" "$SOAK_DIR/metrics-steady-end.txt" "$SOAK_DIR/client"
+```
