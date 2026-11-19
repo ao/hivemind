@@ -102,3 +102,31 @@ func TestPrintCAStatusTurnedRound(t *testing.T) {
 		t.Errorf("hivemind status's direction towards the new CA: %q", got)
 	}
 }
+
+// The end of a rotation says which backups to delete by how it ended. In
+// the fourth acceptance run an abort, and a finish after an abort, said to
+// delete every older backup, the good ones from before start with the
+// rest.
+func TestEndedMessageSaysWhichBackups(t *testing.T) {
+	kept := strings.Repeat("a", 64)
+	back := endedMessage(&carotate.Ended{Back: true, Kept: kept, Dropped: strings.Repeat("b", 64)})
+	for _, want := range []string{"back on the CA the cluster had before it started (ca.crt aaaaaaaa)",
+		"Backups taken during the rotation hold the new CA's key", "delete them", "Backups from before the rotation started are still good."} {
+		if !strings.Contains(back, want) {
+			t.Errorf("back: no %q in %q", want, back)
+		}
+	}
+	if strings.Contains(back, "delete the old ones") {
+		t.Errorf("back: says to delete the old backups: %q", back)
+	}
+	fwd := endedMessage(&carotate.Ended{Kept: kept, Dropped: strings.Repeat("b", 64)})
+	for _, want := range []string{"ended on the new CA (ca.crt aaaaaaaa)", "Backups taken before now hold the old CA's key",
+		"take a new backup, and delete the old ones."} {
+		if !strings.Contains(fwd, want) {
+			t.Errorf("forward: no %q in %q", want, fwd)
+		}
+	}
+	if strings.Contains(fwd, "still good") {
+		t.Errorf("forward: says older backups are good: %q", fwd)
+	}
+}

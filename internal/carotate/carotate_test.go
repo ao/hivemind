@@ -310,8 +310,8 @@ func TestRestartInEachPhase(t *testing.T) {
 	if err := fx.trust("node-a", old, old, next); !errors.Is(err, ErrSuperseded) {
 		t.Fatalf("after a restart, node-a's old certificate: %v, want ErrSuperseded", err)
 	}
-	if _, err := fx.m.Finish(ctx, false); err != nil {
-		t.Fatal(err)
+	if st, err := fx.m.Finish(ctx, false); err != nil || st.Ended == nil || st.Ended.Back || st.Ended.Kept != pki.FingerprintHex(next) || st.Ended.Dropped != pki.FingerprintHex(old) {
+		t.Fatalf("finish: %+v, %v; want it ended on the new CA", st.Ended, err)
 	}
 	fx.restart()
 	if st := fx.status(); st.Rotation != nil || st.Current.Fingerprint != pki.FingerprintHex(next) {
@@ -393,7 +393,8 @@ func TestAbortInTrust(t *testing.T) {
 		t.Fatal(err)
 	}
 	st, err := fx.m.Abort(ctx)
-	if err != nil || st.Rotation != nil || st.Next != nil {
+	if err != nil || st.Rotation != nil || st.Next != nil || st.Ended == nil || !st.Ended.Back ||
+		st.Ended.Kept != pki.FingerprintHex(old) || st.Ended.Dropped != pki.FingerprintHex(next) {
 		t.Fatalf("abort in phase trust: %+v %v", st, err)
 	}
 	if c, _ := fx.cas(); c != old || fx.m.Accepts(next) || exists(t, filepath.Join(fx.dir, pki.NextCAKeyFile)) {
@@ -498,8 +499,8 @@ func TestAbortInRenew(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	if _, err := fx.m.Finish(ctx, false); err != nil {
-		t.Fatal(err)
+	if st, err := fx.m.Finish(ctx, false); err != nil || st.Ended == nil || !st.Ended.Back || st.Ended.Kept != pki.FingerprintHex(old) {
+		t.Fatalf("finish of the turned rotation: %+v, %v; want it ended back on the old CA", st.Ended, err)
 	}
 	if c, n := fx.cas(); c != old || n != ([32]byte{}) || exists(t, filepath.Join(fx.dir, pki.NextCAKeyFile)) {
 		t.Fatal("the turned rotation did not end with the old CA")

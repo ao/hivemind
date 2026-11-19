@@ -91,13 +91,18 @@ every worker trust the new CA alone, ca-next.key and ca-next.crt replace
 ca.key and ca.crt, and the old CA's key is deleted. finish refuses while a
 node has not renewed, and names each one, with why; --force cuts those nodes
 off, and each must join again with an empty data directory and a new join
-token. Backups taken before finish hold the old CA's key: take a new one.`, true),
+token. Backups taken before finish hold the old CA's key: take a new one.
+After an abort turned the rotation round, finish goes back to the old CA:
+the backups taken during the rotation hold the new CA's key, and those from
+before start are still good.`, true),
 		caStepCmd("abort", "Undo a rotation that has not finished",
 			`Undo a rotation that has not finished. In phase trust, the new CA is deleted at
 once, and the workers stop trusting it at their next request. In phase renew,
 some nodes may hold certificates from the new CA, so the rotation turns round
 instead: the nodes renew back under the old CA, and hivemind ca rotate finish
-ends it and deletes the new CA.`, false),
+ends it and deletes the new CA. Either way the cluster ends on the CA it had:
+backups taken during the rotation hold the new CA's key, and those from
+before start are still good.`, false),
 	)
 	return cmd
 }
@@ -130,7 +135,7 @@ func caStepCmd(step, short, long string, forceable bool) *cobra.Command {
 		case step == "start":
 			fmt.Fprintln(out, "Started a rotation of the cluster CA. Take a backup now: one from before this has no key of the new CA.")
 		case step == "finish" || (step == "abort" && st.Rotation == nil):
-			fmt.Fprintln(out, "The rotation has ended. Backups taken before now hold a CA key the cluster no longer uses: take a new backup, and delete the old ones.")
+			fmt.Fprintln(out, endedMessage(st.Ended))
 		case step == "abort":
 			fmt.Fprintln(out, "The rotation turned round: the nodes renew back under the old CA. Run hivemind ca rotate finish once the list below is empty.")
 		}
@@ -207,6 +212,26 @@ func printCAStatus(out io.Writer, st carotate.Status) {
 	}
 	fmt.Fprintf(out, "Next: hivemind ca rotate %s, which waits for:\n", r.NextStep)
 	printWaiting(out, r.Waiting)
+}
+
+// endedMessage says what the end of a rotation means for the backups. An
+// abort, and a finish after an abort turned the rotation round, leave the
+// cluster on the CA it had before: the backups taken during the rotation
+// hold the new CA's key, and those from before it are good. In the fourth
+// acceptance run both said to delete every older backup, the good ones
+// with the rest.
+func endedMessage(e *carotate.Ended) string {
+	switch {
+	case e == nil:
+		return "The rotation has ended. Take a new backup: hivemind ca status shows which CA the cluster has now."
+	case e.Back:
+		return "The rotation has ended, back on the CA the cluster had before it started (" + caFile(pki.CACertFile, e.Kept) + "). " +
+			"Backups taken during the rotation hold the new CA's key, which the cluster no longer uses: delete them. " +
+			"Backups from before the rotation started are still good."
+	default:
+		return "The rotation has ended on the new CA (" + caFile(pki.CACertFile, e.Kept) + "). " +
+			"Backups taken before now hold the old CA's key, which the cluster no longer uses: take a new backup, and delete the old ones."
+	}
 }
 
 // caFile names a CA by its file and the first 8 digits of its fingerprint,

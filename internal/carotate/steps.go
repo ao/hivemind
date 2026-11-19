@@ -24,6 +24,24 @@ type Status struct {
 	Rotation *RotationInfo `json:"rotation,omitempty"`
 	// Nodes is every node but the server's own, while a rotation runs.
 	Nodes []NodeStatus `json:"nodes,omitempty"`
+	// Ended is set in the reply of the step that ended a rotation, and
+	// says how it ended.
+	Ended *Ended `json:"ended,omitempty"`
+}
+
+// Ended is how a rotation ended, in the reply of the step that ended it.
+type Ended struct {
+	// Back is true when the cluster is back on the CA it had before the
+	// rotation started: an abort in phase trust, or a finish after an
+	// abort turned the rotation round. Then the backups taken during the
+	// rotation hold the dropped CA's key, and those from before it are
+	// good; otherwise every backup from before the end holds the dropped
+	// key.
+	Back bool `json:"back"`
+	// Kept is the fingerprint of the CA the cluster has now, in ca.crt,
+	// and Dropped that of the CA whose key was deleted.
+	Kept    string `json:"kept"`
+	Dropped string `json:"dropped"`
 }
 
 // CAInfo describes one CA.
@@ -306,12 +324,31 @@ func (m *Manager) Finish(ctx context.Context, force bool) (Status, error) {
 		}
 		s = m.cur.Load()
 	}
+	ended := &Ended{Back: s.rot.Toward == store.CACurrent, Kept: pki.FingerprintHex(s.to.Fingerprint()),
+		Dropped: pki.FingerprintHex(s.from.Fingerprint())}
 	if err := m.endLocked(ctx, s); err != nil {
 		return Status{}, err
 	}
-	m.log.Info("CA rotation finished: the cluster trusts one CA, and the other's key is deleted. Backups taken before now hold "+
-		"the old CA's key; take a new backup", "ca", short(m.Current().Fingerprint()))
-	return m.Status(ctx)
+	if ended.Back {
+		m.log.Info("CA rotation finished, back on the CA the cluster had before it: the cluster trusts that CA alone, and the new CA's key "+
+			"is deleted. Backups taken during the rotation hold that key, which the cluster no longer uses: delete them. "+
+			"Backups from before the rotation started are still good", "ca", short(s.to.Fingerprint()), "dropped", short(s.from.Fingerprint()))
+	} else {
+		m.log.Info("CA rotation finished: the cluster trusts the new CA alone, and the old CA's key is deleted. Backups taken before now "+
+			"hold the old CA's key, which the cluster no longer uses: take a new backup, and delete the old ones",
+			"ca", short(s.to.Fingerprint()), "dropped", short(s.from.Fingerprint()))
+	}
+	return m.statusEnded(ctx, ended)
+}
+
+// statusEnded is Status, with how the rotation ended.
+func (m *Manager) statusEnded(ctx context.Context, e *Ended) (Status, error) {
+	st, err := m.Status(ctx)
+	if err != nil {
+		return Status{}, err
+	}
+	st.Ended = e
+	return st, nil
 }
 
 // endLocked records that the rotation is ending, so the node listener
@@ -372,8 +409,10 @@ func (m *Manager) Abort(ctx context.Context) (Status, error) {
 		if err := m.endLocked(ctx, &state{current: s.current, next: s.next, rot: &rot}); err != nil {
 			return Status{}, err
 		}
-		m.log.Info("CA rotation aborted: no node had a certificate from the new CA, which is deleted; the nodes stop trusting it at their next request")
-		return m.Status(ctx)
+		m.log.Info("CA rotation aborted: no node had a certificate from the new CA, which is deleted; the nodes stop trusting it at their next request. "+
+			"Backups taken during the rotation hold its key, which the cluster no longer uses: delete them. Backups from before the rotation "+
+			"started are still good", "ca", short(s.current.Fingerprint()), "dropped", short(s.next.Fingerprint()))
+		return m.statusEnded(ctx, &Ended{Back: true, Kept: pki.FingerprintHex(s.current.Fingerprint()), Dropped: pki.FingerprintHex(s.next.Fingerprint())})
 	}
 	rot := *s.rot
 	rot.Toward, rot.Phase = store.CACurrent, store.CAPhaseRenew

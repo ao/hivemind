@@ -125,7 +125,9 @@ Undo a rotation that has not finished. In phase trust, the new CA is deleted at
 once, and the workers stop trusting it at their next request. In phase renew,
 some nodes may hold certificates from the new CA, so the rotation turns round
 instead: the nodes renew back under the old CA, and hivemind ca rotate finish
-ends it and deletes the new CA.
+ends it and deletes the new CA. Either way the cluster ends on the CA it had:
+backups taken during the rotation hold the new CA's key, and those from
+before start are still good.
 
 ```
 hivemind ca rotate abort [flags]
@@ -147,6 +149,9 @@ ca.key and ca.crt, and the old CA's key is deleted. finish refuses while a
 node has not renewed, and names each one, with why; --force cuts those nodes
 off, and each must join again with an empty data directory and a new join
 token. Backups taken before finish hold the old CA's key: take a new one.
+After an abort turned the rotation round, finish goes back to the old CA:
+the backups taken during the rotation hold the new CA's key, and those from
+before start are still good.
 
 ```
 hivemind ca rotate finish [flags]
