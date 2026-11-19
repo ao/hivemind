@@ -22,7 +22,8 @@ import (
 
 // TestCLICompose runs compose deploy with the real binary on a two-service
 // file against a real serve and Docker daemon, checks each container's
-// environment, published port and volume, and then runs compose delete.
+// environment, published port and volume, and the health check from
+// x-hivemind, and then runs compose delete.
 func TestCLICompose(t *testing.T) {
 	host := os.Getenv("DOCKER_HOST")
 	if host == "" {
@@ -70,6 +71,8 @@ func TestCLICompose(t *testing.T) {
       - "${WEB_PORT}:80"
     environment:
       GREETING: ${GREETING}
+    x-hivemind:
+      health: {tcp: {port: 80}, interval: 1s, timeout: 500ms}
   store:
     image: busybox:1.36
     command: sh -c 'echo ready > /data/ready; exec sleep 3600'
@@ -95,6 +98,12 @@ volumes:
 	c.waitRunning(rt, "it-web", 1)
 	c.waitRunning(rt, "it-store", 1)
 	web, store := containers(t, rt, "it-web")[0], containers(t, rt, "it-store")[0]
+
+	// web's TCP check, from x-hivemind, passes: Compose has none.
+	waitFor(t, 30*time.Second, func() bool {
+		a, ok := find(c.status(), "it-web")
+		return ok && len(a.Replicas) == 1 && a.Replicas[0].Health == "healthy" && a.Replicas[0].Ready
+	}, "it-web healthy by its tcp check", srvOut)
 
 	// The environment, the published port, and the volume, as the engine
 	// has them.

@@ -158,6 +158,8 @@ func (c *converter) service(name string, n *node) (App, bool) {
 		return App{}, false
 	}
 	a := spec.App{Name: appName}
+	var xHealth *spec.Health
+	xHealthGiven := false
 	for _, k := range n.keys {
 		v, p := n.vals[k], path+"."+k
 		switch k {
@@ -178,11 +180,20 @@ func (c *converter) service(name string, n *node) (App, bool) {
 		case "restart":
 			c.restart(p, v)
 		case extensionKey:
-			c.hivemindExtension(p, v, &a)
+			xHealth, xHealthGiven = c.hivemindExtension(p, v, &a)
 		default:
 			if !isExtension(k) {
 				c.refuse(p, reason(serviceReasons, k, "the app spec has no equivalent"))
 			}
+		}
+	}
+	// x-hivemind's health is used in place of healthcheck, and only one
+	// of them may be given, so that the file says which check runs.
+	if xHealthGiven {
+		if present(n, "healthcheck") {
+			c.add(path+"."+extensionKey+".health", "an app has one health check: give healthcheck or x-hivemind.health, not both")
+		} else {
+			a.Health = xHealth
 		}
 	}
 	if _, ok := n.vals["image"]; !ok {
