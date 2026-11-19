@@ -3,6 +3,7 @@
 package runtime
 
 import (
+	"cmp"
 	"context"
 	"errors"
 	"fmt"
@@ -10,6 +11,7 @@ import (
 	"regexp"
 	"slices"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/ao/hivemind/internal/spec"
@@ -28,6 +30,15 @@ const (
 	// container's, and a label the container sets wins: an image with
 	// LABEL hivemind.routed=true would otherwise give its app the drain.
 	LabelRouted = "hivemind.routed"
+	// LabelRoutePorts is on the container of a routed app: each route port
+	// and the host port it is published on, as "80:30000,8080:30001",
+	// sorted by route port. The agent picks those host ports when it
+	// creates the container and publishes them as fixed bindings, which the
+	// engine binds again at every start, so the label holds for the
+	// container's whole life; the agent reads it to know which host ports
+	// its stopped containers will take again. A routed container without
+	// it was made by an earlier build, with ephemeral host ports.
+	LabelRoutePorts = "hivemind.route-ports"
 )
 
 // Sentinel errors. Errors returned by a Runtime match these with errors.Is.
@@ -112,10 +123,12 @@ type PortBinding struct {
 	ContainerPort int
 	// Protocol is "tcp" or "udp". Empty means tcp.
 	Protocol string
-	// Ephemeral asks the engine for a free host port. HostPort must then be
-	// 0; Container.Ports reports the port the engine chose. Routed apps
-	// publish their route ports this way.
-	Ephemeral bool
+	// Route marks a route port of a routed app. It is published like any
+	// other binding, on HostPort, and recorded in LabelRoutePorts. It is
+	// checked on its own rather than as one of the spec's ports, so route
+	// ports do not count against the spec's limit; no two bindings of a
+	// container may have one host port and protocol.
+	Route bool
 }
 
 // VolumeMount mounts one of the app's volumes into the container. Name is
@@ -171,14 +184,54 @@ type ContainerConfig struct {
 }
 
 // Labels returns the hivemind labels for the replica. Each one is set,
-// so that none comes from the image.
+// so that none comes from the image, and LabelRoutePorts too when the
+// container has route bindings.
 func (c ContainerConfig) Labels() map[string]string {
-	return map[string]string{
+	l := map[string]string{
 		LabelApp:        c.App,
 		LabelReplica:    fmt.Sprint(c.Replica),
 		LabelGeneration: fmt.Sprint(c.Generation),
 		LabelRouted:     strconv.FormatBool(c.Routed),
 	}
+	var pairs [][2]int
+	for _, p := range c.Ports {
+		if p.Route {
+			pairs = append(pairs, [2]int{p.ContainerPort, p.HostPort})
+		}
+	}
+	if len(pairs) > 0 {
+		slices.SortFunc(pairs, func(x, y [2]int) int { return cmp.Or(cmp.Compare(x[0], y[0]), cmp.Compare(x[1], y[1])) })
+		parts := make([]string, len(pairs))
+		for i, p := range pairs {
+			parts[i] = strconv.Itoa(p[0]) + ":" + strconv.Itoa(p[1])
+		}
+		l[LabelRoutePorts] = strings.Join(parts, ",")
+	}
+	return l
+}
+
+// RouteHostPorts reads LabelRoutePorts: the host port of each route port.
+// ok is false when the label is missing or malformed, as on a routed
+// container made by a build before route host ports were fixed.
+func RouteHostPorts(labels map[string]string) (ports map[int]int, ok bool) {
+	v, found := labels[LabelRoutePorts]
+	if !found || v == "" {
+		return nil, false
+	}
+	ports = map[int]int{}
+	for _, pair := range strings.Split(v, ",") {
+		cs, hs, cut := strings.Cut(pair, ":")
+		c, err1 := strconv.Atoi(cs)
+		h, err2 := strconv.Atoi(hs)
+		if !cut || err1 != nil || err2 != nil || c < 1 || c > 65535 || h < 1 || h > 65535 {
+			return nil, false
+		}
+		if _, dup := ports[c]; dup {
+			return nil, false
+		}
+		ports[c] = h
+	}
+	return ports, true
 }
 
 // Container is the engine's view of one container. List fills only the
@@ -200,9 +253,8 @@ type Container struct {
 	// or has not stopped. Inspect fills them; List does not.
 	StartedAt  time.Time
 	FinishedAt time.Time
-	// Ports are the host ports the engine has published for the container,
-	// with the port it chose for an ephemeral binding. A container that is
-	// not running has none. List and Inspect fill them.
+	// Ports are the host ports the engine has published for the container.
+	// A container that is not running has none. List and Inspect fill them.
 	Ports []PortBinding
 }
 
@@ -294,16 +346,14 @@ func Prepare(cfg ContainerConfig) (ContainerConfig, error) {
 
 	a := spec.App{Name: cfg.App, Image: cfg.Image, Replicas: 1, Command: cfg.Command, Env: cfg.Env,
 		Resources: spec.Resources{CPU: cfg.CPU, Memory: spec.ByteSize(cfg.Memory)}}
-	// Fixed host ports follow the spec's rules. An ephemeral binding has no
-	// host port, so its address and protocol are checked on their own: a
-	// spec port with host port 1 stands in for it.
-	var fixed, ephemeral []int // indexes into cfg.Ports
+	// The spec's ports follow the spec's rules. A route binding is checked
+	// on its own, as a spec with that one port, so that route ports do not
+	// count against the spec's limit on ports; then its host port and
+	// protocol must be no other binding's, as the spec requires of its own.
+	var fixed, route []int // indexes into cfg.Ports
 	for i, p := range cfg.Ports {
-		if p.Ephemeral {
-			if p.HostPort != 0 {
-				return cfg, fmt.Errorf("%w: ports[%d]: an ephemeral binding has no host port, got %d", ErrInvalid, i, p.HostPort)
-			}
-			ephemeral = append(ephemeral, i)
+		if p.Route {
+			route = append(route, i)
 			continue
 		}
 		fixed = append(fixed, i)
@@ -316,15 +366,24 @@ func Prepare(cfg ContainerConfig) (ContainerConfig, error) {
 	if err := a.Validate(); err != nil {
 		return cfg, fmt.Errorf("%w: %v", ErrInvalid, err)
 	}
-	eph := make([]spec.Port, 0, len(ephemeral))
-	for _, i := range ephemeral {
+	seen := map[string]bool{}
+	for _, p := range a.Ports {
+		seen[p.Key()] = true
+	}
+	rp := make([]spec.Port, 0, len(route))
+	for _, i := range route {
 		p := cfg.Ports[i]
-		one := spec.App{Name: "x", Image: "x", Ports: []spec.Port{{Bind: p.HostIP, Host: 1, Container: p.ContainerPort, Protocol: p.Protocol}}}
+		one := spec.App{Name: "x", Image: "x", Ports: []spec.Port{{Bind: p.HostIP, Host: p.HostPort, Container: p.ContainerPort, Protocol: p.Protocol}}}
 		one.Normalize()
 		if err := one.Validate(); err != nil {
 			return cfg, fmt.Errorf("%w: ports[%d]: %v", ErrInvalid, i, err)
 		}
-		eph = append(eph, one.Ports[0])
+		k := one.Ports[0].Key()
+		if seen[k] {
+			return cfg, fmt.Errorf("%w: ports[%d]: host port %s listed twice", ErrInvalid, i, k)
+		}
+		seen[k] = true
+		rp = append(rp, one.Ports[0])
 	}
 
 	// Copy the slices before writing defaults back, so the caller's are untouched.
@@ -333,9 +392,9 @@ func Prepare(cfg ContainerConfig) (ContainerConfig, error) {
 		cfg.Ports[i].HostIP = a.Ports[j].Bind
 		cfg.Ports[i].Protocol = a.Ports[j].Protocol
 	}
-	for j, i := range ephemeral {
-		cfg.Ports[i].HostIP = eph[j].Bind
-		cfg.Ports[i].Protocol = eph[j].Protocol
+	for j, i := range route {
+		cfg.Ports[i].HostIP = rp[j].Bind
+		cfg.Ports[i].Protocol = rp[j].Protocol
 	}
 	cfg.Volumes = slices.Clone(cfg.Volumes)
 	cfg.Command = slices.Clone(cfg.Command)

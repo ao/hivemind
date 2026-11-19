@@ -157,11 +157,11 @@ The archive holds the CA private key, so the server sends it only over TLS, or t
 
 ```json
 {"routes": [{"host": "www.example.com", "path": "/", "app": "web", "port": 80, "protocol": "http",
-  "endpoints": ["10.0.0.5:32768", "10.0.0.6:32771"]},
+  "endpoints": ["10.0.0.5:30000", "10.0.0.6:30003"]},
  {"host": "www.example.com", "path": "/api", "app": "api", "port": 8080, "protocol": "http",
-  "endpoints": ["10.0.0.6:32775"]},
+  "endpoints": ["10.0.0.6:30001"]},
  {"host": "www.example.com", "path": "/shop.Cart", "app": "cart", "port": 50051, "protocol": "h2c",
-  "endpoints": ["10.0.0.7:32780"]}]}
+  "endpoints": ["10.0.0.7:30002"]}]}
 ```
 
 `path` is the route's path prefix, or `/` for a route of the whole host (which the app spec writes with no `path`). `port` is the container port the route names. `protocol` is what the routers speak to the replicas: `http` (HTTP/1.1) or `h2c` (HTTP/2 without TLS, as gRPC servers speak; see [protocols](routing.md#protocols)). A server of a build before protocols sends none, and its routes are all `http`. `endpoints` are the `address:port` of each replica that takes the route's traffic now: its container is Ready, it is the copy the replica (or its rollout surge) is assigned, and its node's lease is current. A route whose app has no such replica has `"endpoints": []`, and a router answers it with `503`. See [routing](routing.md); `hivemind routes` prints this table.

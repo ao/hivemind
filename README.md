@@ -110,7 +110,7 @@ In the unreleased 2.2.0, an app can name `routes: [{host: www.example.com, port:
 - The API listens on `127.0.0.1:4483`. Every route except `GET /healthz` needs the admin token that `init` prints. A non-loopback `--api-addr` needs TLS as well. With a certificate from a private CA, give the CLI that CA with `--ca-cert` or `HIVEMIND_CA_CERT`.
 - `serve --advertise` opens two more ports, on that address only. Port 4484 is the node API. It accepts only a machine that holds a certificate from the cluster CA. Port 4485 takes join requests, and each one needs a join token.
 - `--route-addr` (unreleased 2.2.0) opens the router, on ports 80 and 443. It is the one listener that may bind `0.0.0.0`, and it has no authentication: it serves the routed apps' public traffic.
-- Nothing else listens. Container ports are published on `127.0.0.1` unless the spec names another address. A routed app's ports are published on ephemeral ports of the node's private address, for the other nodes' routers; keep that network to the nodes, or firewall those ports.
+- Nothing else listens. Container ports are published on `127.0.0.1` unless the spec names another address. A routed app's ports are published on ports 30000 to 32767 of the node's private address, for the other nodes' routers; keep that network to the nodes, or firewall those ports.
 
 [docs/security.md](docs/security.md) lists every listener and file, and what a compromised worker can and cannot do.
 

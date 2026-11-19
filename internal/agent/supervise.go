@@ -132,6 +132,9 @@ func (a *Agent) supervise(ctx context.Context, as store.Assignment, c runtime.Co
 			st.Error = ls.message()
 			return nil
 		}
+		if len(as.Spec.Routes) > 0 && !fixedRoutePorts(as, c) {
+			return a.replaceForPorts(ctx, as, c, st, log)
+		}
 		if discarded, err := a.startOrDiscard(ctx, c.ID); err != nil {
 			if discarded {
 				st.ContainerID, st.State = "", "pending"
@@ -181,6 +184,16 @@ func (a *Agent) supervise(ctx context.Context, as store.Assignment, c runtime.Co
 			st.Error = ls.message()
 			return nil
 		}
+		if len(as.Spec.Routes) > 0 && !fixedRoutePorts(as, c) {
+			if err := a.replaceForPorts(ctx, as, c, st, log); err != nil {
+				return err
+			}
+			rs.restarts++
+			a.clearSchedule(rs, st)
+			log.Warn("restarted exited container", "restarts", rs.restarts, "exit_code", ci.ExitCode, "oom_killed", ci.OOMKilled,
+				"new_container", shortID(st.ContainerID))
+			return nil
+		}
 		if discarded, err := a.startOrDiscard(ctx, c.ID); err != nil {
 			if discarded {
 				st.ContainerID, st.State = "", "pending"
@@ -221,7 +234,11 @@ func (a *Agent) supervise(ctx context.Context, as store.Assignment, c runtime.Co
 					st.Error = failed
 					return nil
 				}
-				if err := a.restartInPlace(ctx, c); err != nil {
+				if len(as.Spec.Routes) > 0 && !fixedRoutePorts(as, c) {
+					if err := a.replaceForPorts(ctx, as, c, st, log); err != nil {
+						return err
+					}
+				} else if err := a.restartInPlace(ctx, c); err != nil {
 					return a.fail(st, c.Name, err)
 				}
 				rs.restarts++

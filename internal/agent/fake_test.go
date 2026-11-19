@@ -19,7 +19,7 @@ import (
 type fakeRuntime struct {
 	mu         sync.Mutex
 	next       int
-	nextPort   int                       // ephemeral host ports are 32768, 32769, ...
+	nextPort   int                       // ephemeral host ports (addEphemeral) are 32768, 32769, ...
 	containers map[string]*fakeContainer // by ID
 	images     map[string]bool
 	calls      map[string]int
@@ -48,11 +48,17 @@ type fakeRuntime struct {
 	ports bool
 	// startDelay is how long each Start takes, as on a busy engine.
 	startDelay time.Duration
+	// held is host ports that something outside hivemind holds: Start
+	// refuses a container that publishes one, as the engine does.
+	held map[int]bool
 }
 
 type fakeContainer struct {
 	runtime.Container
 	cfg runtime.ContainerConfig
+	// ephemeral are bindings published on a new host port at each start,
+	// as a routed container of an earlier build has.
+	ephemeral []runtime.PortBinding
 }
 
 func newFakeRuntime() *fakeRuntime {
@@ -150,6 +156,32 @@ func (f *fakeRuntime) add(name, state string, labels map[string]string) string {
 	return id
 }
 
+// addEphemeral puts in place a stopped container of the routed replica
+// app/replica/generation as an earlier build made it: the hivemind labels
+// but no route ports label, and each route port in ports published on
+// routeAddr on a new ephemeral host port at each start.
+func (f *fakeRuntime) addEphemeral(app string, replica, generation int, state string, ports ...int) string {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.next++
+	id := fmt.Sprintf("%064x", f.next)
+	cfg := runtime.ContainerConfig{Name: ContainerName(app, replica, generation), App: app, Replica: replica,
+		Generation: generation, Routed: true, Image: "docker.io/library/nginx:alpine"}
+	c := &fakeContainer{Container: runtime.Container{ID: id, Name: cfg.Name, Image: cfg.Image, State: "created", Labels: cfg.Labels()}, cfg: cfg}
+	for _, p := range ports {
+		c.ephemeral = append(c.ephemeral, runtime.PortBinding{HostIP: routeAddr, ContainerPort: p})
+	}
+	f.containers[id] = c
+	if state == "running" {
+		f.mu.Unlock()
+		_ = f.Start(context.Background(), id)
+		f.mu.Lock()
+	} else {
+		c.State = state
+	}
+	return id
+}
+
 func (f *fakeRuntime) Create(_ context.Context, cfg runtime.ContainerConfig) (string, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
@@ -209,11 +241,17 @@ func (f *fakeRuntime) Start(_ context.Context, id string) error {
 	if c == nil {
 		return rtErr("start", runtime.ErrNotFound)
 	}
+	for _, p := range c.cfg.Ports {
+		if f.held[p.HostPort] {
+			return &runtime.Error{Op: "start", Err: runtime.ErrConflict,
+				Message: fmt.Sprintf("listen tcp4 %s:%d: bind: address already in use", p.HostIP, p.HostPort)}
+		}
+	}
 	if f.ports {
 		for _, p := range c.cfg.Ports {
 			for _, o := range f.containers {
 				for _, q := range o.Ports {
-					if o != c && o.State == "running" && !p.Ephemeral && p.HostPort == q.HostPort && p.Protocol == q.Protocol {
+					if o != c && o.State == "running" && p.HostPort == q.HostPort && p.Protocol == q.Protocol {
 						return &runtime.Error{Op: "start", Err: runtime.ErrConflict, Message: "port is already allocated"}
 					}
 				}
@@ -224,16 +262,16 @@ func (f *fakeRuntime) Start(_ context.Context, id string) error {
 	c.StartedAt = f.now()
 	c.FinishedAt = time.Time{}
 	c.IPAddress = "127.0.0.1"
-	// Like Docker, each start publishes the ports again, and an ephemeral
-	// binding gets a new port.
+	// Like Docker, each start publishes the ports again: each binding on its
+	// host port, and an ephemeral one, as a container of an earlier build
+	// has (addEphemeral), on a new port.
 	c.Ports = nil
 	for _, p := range c.cfg.Ports {
-		hp := p.HostPort
-		if p.Ephemeral {
-			f.nextPort++
-			hp = 32767 + f.nextPort
-		}
-		c.Ports = append(c.Ports, runtime.PortBinding{HostIP: p.HostIP, HostPort: hp, ContainerPort: p.ContainerPort, Protocol: p.Protocol})
+		c.Ports = append(c.Ports, runtime.PortBinding{HostIP: p.HostIP, HostPort: p.HostPort, ContainerPort: p.ContainerPort, Protocol: p.Protocol})
+	}
+	for _, p := range c.ephemeral {
+		f.nextPort++
+		c.Ports = append(c.Ports, runtime.PortBinding{HostIP: p.HostIP, HostPort: 32767 + f.nextPort, ContainerPort: p.ContainerPort, Protocol: "tcp"})
 	}
 	return nil
 }
@@ -395,4 +433,17 @@ func (f *fakeRuntime) setFail(fn func(op, arg string) error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.fail = fn
+}
+
+// hold makes ports held by something outside hivemind: Start refuses a
+// container that publishes one of them.
+func (f *fakeRuntime) hold(ports ...int) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.held == nil {
+		f.held = map[int]bool{}
+	}
+	for _, p := range ports {
+		f.held[p] = true
+	}
 }

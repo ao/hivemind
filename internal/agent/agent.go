@@ -102,8 +102,9 @@ type Config struct {
 	// LeaseRenewer. Zero means DefaultHeartbeat.
 	Heartbeat time.Duration
 	// RouteBind is the node's private address. A routed app's containers
-	// publish each route port on an ephemeral host port there. Empty means
-	// the node runs no routed replica: one assigned to it fails to start.
+	// publish each route port there, on a host port the agent picks from
+	// RoutePortFirst to RoutePortLast (routeports.go). Empty means the node
+	// runs no routed replica: one assigned to it fails to start.
 	RouteBind string
 	// RouteDrain is how long a routed container that is no longer assigned
 	// keeps running before it is stopped. Zero means DefaultRouteDrain; a
@@ -139,6 +140,7 @@ type Agent struct {
 	launches map[string]*launchState  // by container name: failed creates and starts, for their backoff
 	removals map[string]*removal      // by container ID: removals in flight, and ended ones not yet reported
 	slots    chan struct{}            // removeSlots tokens, one per removal running
+	ports    routePortState           // the host ports of routed containers (routeports.go)
 }
 
 // New returns an agent. It does nothing until Run or Reconcile is called.
@@ -425,6 +427,7 @@ func (a *Agent) Reconcile(ctx context.Context) error {
 		return errors.Join(err, a.report(ctx, st))
 	}
 	slices.SortFunc(containers, func(x, y runtime.Container) int { return cmp.Compare(x.Name, y.Name) })
+	a.notePorts(containers, want)
 
 	// Match containers to replicas. A container matches when its labels name
 	// a wanted replica at the wanted generation; anything else is extra, and
@@ -566,31 +569,17 @@ func (a *Agent) Reconcile(ctx context.Context) error {
 			// The last create failed less than its backoff ago.
 			st.State, st.Error = "pending", ls.message()
 		} else {
-			id, state, err := a.create(ctx, as)
-			st.ContainerID, st.State = id, state
-			if state == "running" {
-				afterStart(as, &st)
-				delete(a.launches, st.Name)
-				a.startProbe(ctx, as, id, st.Name)
+			err := a.launch(ctx, as, &st)
+			if st.State == "running" {
+				a.startProbe(ctx, as, st.ContainerID, st.Name)
 				created[st.Name] = true
 			}
 			if err != nil {
-				// A pull waiting out its backoff failed in an earlier
-				// pass; the status keeps saying so, and the pass is fine.
-				// A pull has its own backoff; any other failure to create
-				// or start the container waits launchBackoff.
-				var pe *pullError
-				if !errors.As(err, &pe) || !pe.waiting {
-					errs = append(errs, err)
-				}
-				st.Error = err.Error()
-				if pe == nil && ctx.Err() == nil {
-					st.Error = a.launchFailed(st.Name, err).message()
-				}
+				errs = append(errs, err)
 			}
 		}
 		if len(as.Spec.Routes) > 0 && st.State == "running" && st.ContainerID != "" {
-			if err := a.routePorts(ctx, as, listed, ok && listed.Running(), &st); err != nil {
+			if err := a.routePorts(ctx, as, listed, ok && listed.Running() && listed.ID == st.ContainerID, &st); err != nil {
 				errs = append(errs, err)
 			}
 		}
@@ -649,17 +638,55 @@ func (a *Agent) report(ctx context.Context, st []store.Status) error {
 	return nil
 }
 
+// launch creates and starts the container of a replica that has none, and
+// fills in st. It returns the error for the pass, which is nil for a pull
+// that waits out its backoff: that pull failed in an earlier pass, and the
+// status keeps saying so. A pull has its own backoff; any other failure to
+// create or start the container waits launchBackoff.
+func (a *Agent) launch(ctx context.Context, as store.Assignment, st *store.Status) error {
+	id, state, err := a.create(ctx, as)
+	st.ContainerID, st.State = id, state
+	if state == "running" {
+		afterStart(as, st)
+		delete(a.launches, st.Name)
+	}
+	if err == nil {
+		return nil
+	}
+	st.Error = err.Error()
+	var pe *pullError
+	if !errors.As(err, &pe) {
+		if ctx.Err() == nil {
+			st.Error = a.launchFailed(st.Name, err).message()
+		}
+		return err
+	}
+	if pe.waiting {
+		return nil
+	}
+	return err
+}
+
 // create makes and starts the container for one replica. The image is pulled
 // only when it is missing, so a replacement does not wait for the registry,
 // with the assignment's registry credential if it has one, and a failed pull
-// backs off (pull.go). It returns the container ID, the state the container
-// is left in, and any error.
+// backs off (pull.go). A routed replica's route ports get host ports of
+// their own (routeports.go). It returns the container ID, the state the
+// container is left in, and any error.
 func (a *Agent) create(ctx context.Context, as store.Assignment) (string, string, error) {
-	cfg := containerConfig(as, a.cfg.RouteBind)
+	name := ContainerName(as.App, as.Index, as.Generation)
 	log := a.log.With("app", as.App, "replica", as.Index, "generation", as.Generation)
-	if cfg.Routed && a.cfg.RouteBind == "" {
-		return "", "pending", fmt.Errorf("%s: %w", cfg.Name, errNoRouteBind)
+	var hostPorts []int
+	if rp := as.Spec.RoutePorts(); len(rp) > 0 {
+		if a.cfg.RouteBind == "" {
+			return "", "pending", fmt.Errorf("%s: %w", name, errNoRouteBind)
+		}
+		var err error
+		if hostPorts, err = a.pickRoutePorts(len(rp)); err != nil {
+			return "", "pending", fmt.Errorf("%s: %w", name, err)
+		}
 	}
+	cfg := containerConfig(as, a.cfg.RouteBind, hostPorts)
 
 	id, err := a.cfg.Runtime.Create(ctx, cfg)
 	if errors.Is(err, runtime.ErrNotFound) {
@@ -680,7 +707,11 @@ func (a *Agent) create(ctx context.Context, as store.Assignment) (string, string
 	if err != nil {
 		return "", "pending", fmt.Errorf("%s: %w", cfg.Name, err)
 	}
-	log.Info("created container", "container", shortID(id))
+	if len(hostPorts) > 0 {
+		log.Info("created container", "container", shortID(id), "route_ports", cfg.Labels()[runtime.LabelRoutePorts])
+	} else {
+		log.Info("created container", "container", shortID(id))
+	}
 	if discarded, err := a.startOrDiscard(ctx, id); err != nil {
 		if discarded {
 			return "", "pending", fmt.Errorf("%s: %w", cfg.Name, err)
@@ -736,9 +767,9 @@ func (a *Agent) remove(ctx context.Context, c runtime.Container) error {
 var errNoRouteBind = errors.New("this node has no private address, so it cannot run a routed replica")
 
 // containerConfig is the container for one assignment. A routed app's route
-// ports are published on ephemeral host ports on routeBind, beside any
-// fixed host ports of the spec.
-func containerConfig(as store.Assignment, routeBind string) runtime.ContainerConfig {
+// ports, as.Spec.RoutePorts(), are published on routeBind, each on the host
+// port at the same index of hostPorts, beside the spec's own host ports.
+func containerConfig(as store.Assignment, routeBind string, hostPorts []int) runtime.ContainerConfig {
 	cfg := runtime.ContainerConfig{
 		Name:       ContainerName(as.App, as.Index, as.Generation),
 		Image:      as.Spec.Image,
@@ -754,8 +785,12 @@ func containerConfig(as store.Assignment, routeBind string) runtime.ContainerCon
 	for _, p := range as.Spec.Ports {
 		cfg.Ports = append(cfg.Ports, runtime.PortBinding{HostIP: p.Bind, HostPort: p.Host, ContainerPort: p.Container, Protocol: p.Protocol})
 	}
-	for _, p := range as.Spec.RoutePorts() {
-		cfg.Ports = append(cfg.Ports, runtime.PortBinding{HostIP: routeBind, ContainerPort: p, Protocol: "tcp", Ephemeral: true})
+	for i, p := range as.Spec.RoutePorts() {
+		hp := 0
+		if i < len(hostPorts) {
+			hp = hostPorts[i]
+		}
+		cfg.Ports = append(cfg.Ports, runtime.PortBinding{HostIP: routeBind, HostPort: hp, ContainerPort: p, Protocol: "tcp", Route: true})
 	}
 	for _, v := range as.Spec.Volumes {
 		cfg.Volumes = append(cfg.Volumes, runtime.VolumeMount{Name: v.Name, Path: v.Path})
@@ -764,9 +799,10 @@ func containerConfig(as store.Assignment, routeBind string) runtime.ContainerCon
 }
 
 // routePorts fills in the host port of each route port of a running routed
-// container. The ports come from the list when the container was running
-// there already, and from an inspect when this pass started it, because the
-// engine picks a new ephemeral port at each start.
+// container, as the engine published it. The ports come from the list when
+// the container was running there already, and from an inspect when this
+// pass started it: a routed container of an earlier build has ephemeral
+// ports, which the engine picked at its start.
 func (a *Agent) routePorts(ctx context.Context, as store.Assignment, listed runtime.Container, useListed bool, st *store.Status) error {
 	c := listed
 	if !useListed {

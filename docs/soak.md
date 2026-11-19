@@ -1546,7 +1546,7 @@ The server's router counted 24, 22 and 17 more `200`s than its streams had, agai
 
 ## What did not work, and what was not measured
 
-- When the server's machine restarted while its workers could not reach it, its routed replicas came back on other host ports, and the workers' routers, serving their last table, sent requests to the old ones: gRPC calls to an HTTP/1.1 server, which got `502`, and `papi`'s requests to `proot`, which answered them with a `200`. In the hold this lasted from 26 s after the server's API answered until each worker reconnected, 3 minutes and more; in the second restart, healed inside the grace, 48 s.
+- When the server's machine restarted while its workers could not reach it, its routed replicas came back on other host ports, and the workers' routers, serving their last table, sent requests to the old ones: gRPC calls to an HTTP/1.1 server, which got `502`, and `papi`'s requests to `proot`, which answered them with a `200`. In the hold this lasted from 26 s after the server's API answered until each worker reconnected, 3 minutes and more; in the second restart, healed inside the grace, 48 s. Fixed after the soak: a routed container now keeps its host ports for its life ([route host ports](routing.md#route-host-ports)).
 - The hold's `api` streams did not check which app answered, so how many `api` requests `proot` answered then was not counted; the second restart counted it for `papi` and `api`.
 - The gRPC clients make one call at a time per router, so the power-off cost one call per router; with more calls in flight, more would have failed in the 5 s before the router gave up the connection.
 - During the hold the workers' routers tried to renew certificates while the server, which holds their storage, was unreachable, and logged `certificate resources not found in storage for any configured issuer (issuer may have changed); obtaining a new certificate instead of renewing`, then at error `job failed ... failed storage check ... storage is probably misconfigured`. Nothing was issued, and after the heal the next attempt found the stored certificate.
@@ -1557,6 +1557,8 @@ The server's router counted 24, 22 and 17 more `200`s than its streams had, agai
 - One hour of steady state is too short for leak figures.
 
 ## Running it, with gRPC
+
+A build after the sixth soak publishes the routed containers on host ports 30000 to 32767, so the soak security group must allow TCP 30000 to 32767 between the machines; the groups of the second to sixth soaks allowed 32768 to 60999, the range before.
 
 As [with CA rotations](#running-it-with-ca-rotations), with `SOAK_GRPC=1` and a linux build of `test/h2ctest` in the run directory:
 

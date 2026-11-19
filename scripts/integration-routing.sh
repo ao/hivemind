@@ -20,7 +20,8 @@
 #     0600 and no token, and a plain serve --role worker runs the router
 #     again; hivemind nodes shows yes under ROUTER for all three nodes
 #   - an app with a route and two replicas runs them on two nodes, each
-#     publishing port 80 on an ephemeral port of its node's address
+#     publishing port 80 on its node's address, on a host port from 30000
+#     to 32767
 #   - the certificate: one is issued, once, though all three routers asked
 #     for it at the same time (the storage lock), and every router serves it
 #   - through each node's router, with SNI, replies come from both replicas;
@@ -45,6 +46,13 @@
 #     each with grpc-status 0 in its trailers; hivemind routes shows h2c.
 #     A rolling update of it with those calls through all three routers
 #     the whole time: none fails, and both generations answer
+#   - the server's node restarts while the workers' routers serve their
+#     last table: with a replica of each app on every node, the workers
+#     are cut off from the server's port 4484 and the server's container is
+#     stopped and started. Its routed containers come back on the host
+#     ports they had, and 45 s of requests and gRPC calls through the
+#     workers' routers, with the table from before, all pass, reach the
+#     server's replicas too, and none reaches another app
 #   - a node that runs a replica is killed: requests through the other two
 #     routers keep getting 200s while the replica is placed again
 #
@@ -71,6 +79,11 @@ HTTP_PORT=5002 # Pebble's httpPort: where it checks HTTP-01 answers
 HTTPS_PORT=8443
 EMAIL=ops@routing.test
 ACME_CA=https://pebble:14000/dir
+# A routed container's host ports are from 30000 to 32767 (internal/agent/routeports.go).
+ROUTE_PORT_RE='(3[01][0-9]{3}|32[0-6][0-9]{2}|327[0-5][0-9]|3276[0-7])'
+# A subnet of the network's own, so the server's node can start again at
+# its address (docker network connect --ip).
+CL_NET_SUBNET=auto
 
 cl_init routing
 cl_add_node
@@ -257,10 +270,10 @@ for i in 0 1 2; do
 	c=${CL_NAMES[$i]}
 	ports=$(docker exec "$c" docker ps --filter label=hivemind.app=who --format '{{.Ports}}')
 	[ -z "$ports" ] && continue
-	grep -qE "^${IPS[$i]//./\\.}:[0-9]+->80/tcp$" <<<"$ports" ||
-		cl_fail "a who replica on $c does not publish port 80 on ${IPS[$i]} alone: $ports"
+	grep -qE "^${IPS[$i]//./\\.}:$ROUTE_PORT_RE->80/tcp$" <<<"$ports" ||
+		cl_fail "a who replica on $c does not publish port 80 on ${IPS[$i]} alone, on a port from 30000 to 32767: $ports"
 done
-cl_note "each replica publishes port 80 on an ephemeral port of its node's address only"
+cl_note "each replica publishes port 80 on its node's address only, on a host port from 30000 to 32767"
 
 # code IP [PATH]: the status code of an https request through IP's router.
 code() {
@@ -475,7 +488,8 @@ cl_note "path routes: through each of the three routers, /v1 goes to api and the
 docker exec -i "$CLIENT" sh -c 'cat >/tmp/paths.sh' <<'EOF'
 #!/bin/sh
 # paths.sh FILE HOST PORT IP...: until FILE.stop exists, requests / and
-# /v1/x through each router in turn, and appends "PATH CODE NAME" for each.
+# /v1/x through each router in turn, and appends "PATH CODE NAME HOST" for
+# each: the replica's -name and its host name, which is its container's ID.
 f=$1 host=$2 port=$3
 shift 3
 while [ ! -e "$f.stop" ]; do
@@ -484,7 +498,8 @@ while [ ! -e "$f.stop" ]; do
 			out=$(curl -s --max-time 15 --cacert /tmp/root.pem --resolve "$host:$port:$ip" -w '\ncode=%{http_code}\n' "https://$host:$port$p" | tr -d '\r')
 			code=$(printf '%s\n' "$out" | sed -n 's/^code=//p')
 			name=$(printf '%s\n' "$out" | sed -n 's/^Name: //p')
-			echo "$p ${code:-none} ${name:--}" >>"$f"
+			hn=$(printf '%s\n' "$out" | sed -n 's/^Hostname: //p')
+			echo "$p ${code:-none} ${name:--} ${hn:--}" >>"$f"
 		done
 	done
 done
@@ -593,6 +608,136 @@ read -r total bad gens <<<"$(docker exec "$CLIENT" awk '{ n++ } $2 != "ok" { bad
 case ",$gens" in *,grpc/1,*grpc/2,* | *,grpc/2,*grpc/1,*) ;; *) cl_fail "the calls during the rollout reached $gens, want both generations" ;; esac
 counts=$(docker exec "$CLIENT" awk '{ c[$1]++ } END { for (k in c) printf "%s %d, ", k, c[k] }' /tmp/grpc)
 cl_note "rolling update of grpc: $total calls through the three routers ($counts), $bad failed"
+
+# The server's node restarts while the workers' routers serve their last
+# table. Each app gets a replica on every node, the workers are cut off from
+# the server's cluster port, so their routers keep the table they have, and
+# the server's node container is stopped and started, as a machine is
+# rebooted: its agent starts its routed containers again. They keep their
+# host ports, so the workers' routers reach the same replicas at the
+# addresses they have. With ephemeral host ports, in the sixth soak, the
+# replicas came back on each other's ports, and those routers sent one
+# app's requests to another (a 200 from the wrong app) and gRPC calls to an
+# HTTP/1.1 server (502).
+for app in who api grpc; do
+	docker exec "$S" hivemind scale "$app" 3 >/dev/null || cl_fail "scale $app 3"
+done
+one_each() { # one_each APP: three replicas running, one on each node
+	local rows
+	rows=$(app_rows "$1")
+	[ "$(awk '$4 == "running"' <<<"$rows" | wc -l)" -eq 3 ] &&
+		[ "$(awk '$4 == "running" { print $2 }' <<<"$rows" | sort -u | wc -l)" -eq 3 ]
+}
+three_endpoints() { # every route has three endpoints in the table
+	routes_out=$(docker exec "$S" hivemind routes 2>&1)
+	[ "$(grep -cE "^$HOST +[^ ]+ +[^ ]+ +[0-9]+ +(http|h2c) +[0-9.:]+,[0-9.:]+,[0-9.:]+$" <<<"$routes_out")" -eq 3 ]
+}
+for app in who api grpc; do
+	wait_for 120 one_each "$app" || cl_fail "$app does not run a replica on each node: $(app_rows "$app" | tr '\n' ';')"
+done
+wait_for 60 three_endpoints || cl_fail "the routing table does not have three endpoints for each route: $(tr '\n' ';' <<<"$routes_out")"
+sleep 2 # every router reads the table
+server_ports() { docker exec "$S" docker ps --filter label=hivemind.routed=true --format '{{.Names}} {{.Ports}}' | sort; }
+BEFORE=$(server_ports)
+[ "$(wc -l <<<"$BEFORE")" -eq 3 ] || cl_fail "the server's node does not run three routed containers: $BEFORE"
+if grep -vqE "^hivemind-[a-z]+-[0-9]+-g[0-9]+ ${S_IP//./\\.}:$ROUTE_PORT_RE->[0-9]+/tcp$" <<<"$BEFORE"; then
+	cl_fail "a routed container on the server publishes elsewhere than on $S_IP, on a port from 30000 to 32767: $BEFORE"
+fi
+S_WHO=$(docker exec "$S" docker ps -q --filter label=hivemind.app=who)
+S_API=$(docker exec "$S" docker ps -q --filter label=hivemind.app=api)
+S_GRPC=$(docker exec "$S" docker ps -q --filter label=hivemind.app=grpc)
+cl_note "the server's routed containers: $(tr '\n' ';' <<<"$BEFORE")"
+
+# Requests through the workers' routers from now until the server's
+# containers run again: none may reach the wrong app; a gRPC call may fail
+# while the server is down.
+docker exec -d "$CLIENT" sh /tmp/paths.sh /tmp/rs1 "$HOST" "$HTTPS_PORT" "$W1_IP" "$W2_IP"
+docker exec -d "$CLIENT" /tmp/h2ctest loop -url "https://$HOST:$HTTPS_PORT" -ca /tmp/root.pem -out /tmp/rs1grpc \
+	"$W1_IP:$HTTPS_PORT" "$W2_IP:$HTTPS_PORT"
+log_count() { docker exec "$1" sh -c "grep -c '$2' /var/log/hivemind.log || true"; }
+LOST0=$(log_count "$S" 'node lost')
+STALE=() AGAIN=()
+for i in 1 2; do
+	c=${CL_NAMES[$i]}
+	STALE[$i]=$(log_count "$c" 'serving the last one')
+	AGAIN[$i]=$(log_count "$c" 'reading the routing table again')
+	docker exec "$c" iptables -I OUTPUT -p tcp -d "$S_IP" --dport 4484 -j DROP || cl_fail "iptables in $c"
+done
+stale_logged() { [ "$(log_count "$1" 'serving the last one')" -gt "$2" ]; }
+for i in 1 2; do
+	wait_for 30 stale_logged "${CL_NAMES[$i]}" "${STALE[$i]}" || cl_fail "${CL_NAMES[$i]}'s router did not log that it serves its last table"
+done
+cl_note "the workers are cut off from the server's port 4484; their routers serve their last table"
+
+STOP_AT=$(date +%s)
+docker stop -t 30 "$S" >/dev/null
+STOPPED_AT=$(date +%s) # the node container has stopped
+docker start "$S" >/dev/null
+# docker start may give the node another address; it gets its own back.
+docker network disconnect "$CL_NET" "$S" || cl_fail "could not disconnect $S from $CL_NET"
+docker network connect --ip "$S_IP" "$CL_NET" "$S" || cl_fail "could not connect $S to $CL_NET at $S_IP"
+[ "$(cl_ip_of "$S")" = "$S_IP" ] || cl_fail "$S has address $(cl_ip_of "$S") after its restart, not $S_IP"
+wait_for 90 docker exec "$S" docker info || cl_fail "the Docker daemon in $S did not start again"
+docker exec -d -e SSL_CERT_FILE=/etc/pebble-minica.pem "$S" sh -c \
+	"exec hivemind serve --advertise $S_IP --min-ready 0s --start-grace 5m $(route_flags 0.0.0.0) >>/var/log/hivemind.log 2>&1"
+wait_for 30 docker exec "$S" hivemind status || cl_fail "the API did not answer after the restart"
+server_back() { [ "$(docker exec "$S" docker ps -q --filter label=hivemind.routed=true | wc -l)" -eq 3 ]; }
+wait_for 60 server_back || cl_fail "the server's routed containers did not run again: $(docker exec "$S" docker ps -a | tr '\n' ';')"
+BACK_AT=$(date +%s)
+AFTER=$(server_ports)
+[ "$AFTER" = "$BEFORE" ] ||
+	cl_fail "the server's routed containers have other host ports after the restart: before $(tr '\n' ';' <<<"$BEFORE") after $(tr '\n' ';' <<<"$AFTER")"
+cl_note "the server's node restarted; its routed containers run again $((BACK_AT - STOP_AT)) s after the stop began, $((STOPPED_AT - STOP_AT)) s of it the stop, on the same host ports"
+
+# Then 45 s of requests through the workers' routers, which still serve
+# the table from before the restart: every one is a 200 from the app that
+# owns the path, and every gRPC call passes. A router skips the server's
+# endpoints for up to 30 s after the dials that failed while it was down,
+# then sends them requests again; some must reach the server's replicas.
+docker exec "$CLIENT" touch /tmp/rs1.stop /tmp/rs1grpc.stop
+docker exec -d "$CLIENT" sh /tmp/paths.sh /tmp/rs2 "$HOST" "$HTTPS_PORT" "$W1_IP" "$W2_IP"
+docker exec -d "$CLIENT" /tmp/h2ctest loop -url "https://$HOST:$HTTPS_PORT" -ca /tmp/root.pem -out /tmp/rs2grpc \
+	"$W1_IP:$HTTPS_PORT" "$W2_IP:$HTTPS_PORT"
+sleep 45
+docker exec "$CLIENT" touch /tmp/rs2.stop /tmp/rs2grpc.stop
+sleep 16
+for i in 1 2; do
+	[ "$(log_count "${CL_NAMES[$i]}" 'reading the routing table again')" = "${AGAIN[$i]}" ] ||
+		cl_fail "${CL_NAMES[$i]}'s router read the table while it was cut off, so this did not test its last table"
+done
+bad=$(docker exec "$CLIENT" awk '$2 == "200" && !(($1 == "/" && $3 == "who") || ($1 == "/v1/x" && $3 == "api"))' /tmp/rs1)
+[ -z "$bad" ] || cl_fail "requests reached another app while the server restarted: $(sort <<<"$bad" | uniq -c | tr '\n' ';')"
+total1=$(docker exec "$CLIENT" sh -c 'wc -l </tmp/rs1')
+calls1=$(docker exec "$CLIENT" sh -c 'wc -l </tmp/rs1grpc')
+cbad1=$(docker exec "$CLIENT" sh -c "grep -vc ' ok ' /tmp/rs1grpc || true")
+read -r total bad onserver <<<"$(docker exec "$CLIENT" awk -v w="$S_WHO" -v a="$S_API" '{ n++ }
+	!(($1 == "/" && $2 == "200" && $3 == "who") || ($1 == "/v1/x" && $2 == "200" && $3 == "api")) { bad++ }
+	$4 == w || $4 == a { s++ } END { print n+0, bad+0, s+0 }' /tmp/rs2)"
+[ "$total" -ge 40 ] || cl_fail "only $total requests after the restart"
+[ "$bad" -eq 0 ] || cl_fail "$bad of $total requests after the restart failed or reached the wrong app: $(docker exec "$CLIENT" sort /tmp/rs2 | uniq -c | sort -rn | head -n 20 | tr '\n' ';')"
+[ "$onserver" -gt 0 ] || cl_fail "no request after the restart reached the server's who ($S_WHO) or api ($S_API) replica"
+read -r calls cbad conserver <<<"$(docker exec "$CLIENT" awk -v g="$S_GRPC" '{ n++ } $2 != "ok" { bad++ }
+	$2 == "ok" && index($3, "@" g) > 0 { s++ } END { print n+0, bad+0, s+0 }' /tmp/rs2grpc)"
+[ "$calls" -ge 20 ] || cl_fail "only $calls gRPC calls after the restart"
+[ "$cbad" -eq 0 ] || cl_fail "$cbad of $calls gRPC calls after the restart failed: $(docker exec "$CLIENT" grep -v ' ok ' /tmp/rs2grpc | sort | uniq -c | head -n 20 | tr '\n' ';')"
+[ "$conserver" -gt 0 ] || cl_fail "no gRPC call after the restart reached the server's grpc replica ($S_GRPC)"
+cl_note "server restart, through the workers' routers: during it $total1 requests, none to another app, and $calls1 gRPC calls, $cbad1 failed; after it, with the table from before, $total requests ($onserver to the server's replicas) and $calls gRPC calls ($conserver to the server's), none failed or reached another app"
+
+# The workers reach the server again, and the apps go back to two replicas
+# each for the node loss below.
+for i in 1 2; do
+	docker exec "${CL_NAMES[$i]}" iptables -D OUTPUT -p tcp -d "$S_IP" --dport 4484 -j DROP || cl_fail "heal in ${CL_NAMES[$i]}"
+done
+all_ready() { [ "$(docker exec "$S" hivemind nodes | grep -c ' ready ')" -eq 3 ]; }
+wait_for 90 all_ready || cl_fail "the workers are not ready after the heal: $(docker exec "$S" hivemind nodes | tr '\n' ';')"
+[ "$(log_count "$S" 'node lost')" = "$LOST0" ] ||
+	cl_fail "a node was lost: $(docker exec "$S" grep 'node lost' /var/log/hivemind.log | tr '\n' ';')"
+for app in who api grpc; do
+	docker exec "$S" hivemind scale "$app" 2 >/dev/null || cl_fail "scale $app 2"
+done
+wait_for 120 on_two_nodes 3 || cl_fail "who did not go back to two replicas: $(who_rows | tr '\n' ';')"
+wait_for 60 rolled api 2 || cl_fail "api did not go back to two replicas: $(app_rows api | tr '\n' ';')"
+wait_for 60 rolled grpc 2 || cl_fail "grpc did not go back to two replicas: $(app_rows grpc | tr '\n' ';')"
 
 # Kill a worker that runs a replica. The other two routers keep answering.
 victim=""

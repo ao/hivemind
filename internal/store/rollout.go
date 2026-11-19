@@ -374,8 +374,9 @@ func (s *Store) startMove(ctx context.Context, tx *sql.Tx, r rolloutRow, a spec.
 // volume.
 //
 // With sameNode, a routed app's surge may also go on rep's own node. Its
-// ports are ephemeral, so the new copy runs beside the old one there, and a
-// rollout on one node keeps the replica serving. Placement still prefers
+// route ports go on host ports its node's agent picks for each container, so
+// the new copy runs beside the old one there, and a rollout on one node
+// keeps the replica serving. Placement still prefers
 // another node, which has fewer of the app's replicas. A drain passes false:
 // its surge must leave the node. When no node can take the surge, it returns
 // "" and the reason.

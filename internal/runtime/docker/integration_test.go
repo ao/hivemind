@@ -266,6 +266,62 @@ func TestIntegrationPublishedPortReachesNginx(t *testing.T) {
 	}
 }
 
+// A route port keeps its host port across a stop and a start, as after its
+// machine restarts, and a stopped container's label still names it. Route
+// ports were ephemeral before: in the sixth soak a restarted machine's
+// replicas came back on each other's ports, and routers with the old table
+// sent one app's requests to another.
+func TestIntegrationRoutePortSurvivesRestart(t *testing.T) {
+	c := itClient(t)
+	const port = 30080
+	app := itName("routed")
+	id := itCreate(t, c, runtime.ContainerConfig{
+		Name: app + "-0-1", Image: nginxImage, App: app, Generation: 1, Routed: true,
+		Ports: []runtime.PortBinding{{HostIP: "127.0.0.1", HostPort: port, ContainerPort: 80, Route: true}},
+	})
+	get := func() {
+		t.Helper()
+		url := fmt.Sprintf("http://127.0.0.1:%d/", port)
+		deadline := time.Now().Add(60 * time.Second)
+		for {
+			resp, err := http.Get(url)
+			if err == nil {
+				body, _ := io.ReadAll(resp.Body)
+				resp.Body.Close()
+				if resp.StatusCode == http.StatusOK && bytes.Contains(body, []byte("Welcome to nginx")) {
+					return
+				}
+				err = fmt.Errorf("HTTP %d", resp.StatusCode)
+			}
+			if time.Now().After(deadline) {
+				t.Fatalf("GET %s: %v", url, err)
+			}
+			time.Sleep(500 * time.Millisecond)
+		}
+	}
+	for i := range 3 {
+		if err := c.Start(itCtx(t), id); err != nil {
+			t.Fatalf("start %d: %v", i, err)
+		}
+		got := itWaitState(t, c, id, "running", 30*time.Second)
+		if hp := got.PublishedPort("127.0.0.1", 80, "tcp"); hp != port {
+			t.Fatalf("start %d: port 80 published on %d, want %d: %+v", i, hp, port, got.Ports)
+		}
+		get()
+		if err := c.Stop(itCtx(t), id, 10*time.Second); err != nil {
+			t.Fatalf("stop %d: %v", i, err)
+		}
+		list, err := c.List(itCtx(t), map[string]string{runtime.LabelApp: app})
+		if err != nil || len(list) != 1 {
+			t.Fatalf("list: %v, %+v", err, list)
+		}
+		hp, ok := runtime.RouteHostPorts(list[0].Labels)
+		if !ok || hp[80] != port || len(list[0].Ports) != 0 {
+			t.Fatalf("stopped container: labels %v, ports %+v", list[0].Labels, list[0].Ports)
+		}
+	}
+}
+
 // itListeners returns the listening addresses for a local TCP port, read from
 // /proc/net/tcp and /proc/net/tcp6 in this network namespace. Each key is the
 // hex address part of the entry, such as "0100007F" for 127.0.0.1.

@@ -18,9 +18,9 @@ import (
 
 // Routing.
 //
-// An app with routes publishes each route's container port on an ephemeral
-// host port on its node's private address, and the agent reports the port it
-// got. The routing table maps each route host to the address and port of
+// An app with routes publishes each route's container port on a host port
+// of its node's private address, which the agent picks and reports. The
+// routing table maps each route host to the address and port of
 // every replica that can take traffic now: its container is Ready (running,
 // and passing its health check, the signal a rollout waits for), it is the
 // container the replica or its surge is assigned (so a copy a rollout has

@@ -312,16 +312,14 @@ func (c *Client) Create(ctx context.Context, cfg runtime.ContainerConfig) (strin
 	for _, p := range cfg.Ports {
 		key := strconv.Itoa(p.ContainerPort) + "/" + p.Protocol
 		exposed[key] = struct{}{}
-		// An empty HostPort asks the engine for a free port ("If HostPort
-		// is an empty string, the system assigns a port", the PortBinding
-		// definition in the Engine API).
-		hostPort := strconv.Itoa(p.HostPort)
-		if p.Ephemeral {
-			hostPort = ""
-		}
+		// Every binding names its host port, a route port's too: the engine
+		// binds that port again at each start of the container, where an
+		// empty HostPort would have it pick a new one each time ("If
+		// HostPort is an empty string, the system assigns a port", the
+		// PortBinding definition in the Engine API).
 		bindings[key] = append(bindings[key], portBinding{
 			HostIP:   p.HostIP,
-			HostPort: hostPort,
+			HostPort: strconv.Itoa(p.HostPort),
 		})
 	}
 	// A mount of type "volume" makes the engine create a missing volume with

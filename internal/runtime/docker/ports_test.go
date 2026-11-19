@@ -9,19 +9,23 @@ import (
 	"github.com/ao/hivemind/internal/runtime"
 )
 
-// An ephemeral binding is sent with an empty HostPort, which asks the engine
-// for a free port, beside a fixed binding of the same container port.
-func TestCreateEphemeralPort(t *testing.T) {
+// A route binding is sent with its host port, beside a fixed binding of the
+// same container port, so the engine binds that port at every start, and
+// its port is in the container's hivemind.route-ports label. An empty
+// HostPort, as route ports were sent before, has the engine pick a new port
+// at each start.
+func TestCreateRoutePort(t *testing.T) {
 	c, fd := newFake(t, withInfo("json-file", func(w http.ResponseWriter, ex exchange) {
 		writeJSON(w, http.StatusCreated, map[string]any{"Id": "c0ffee"})
 	}))
-	_, err := c.Create(context.Background(), runtime.ContainerConfig{Name: "web-0-1", Image: "nginx", App: "web",
+	_, err := c.Create(context.Background(), runtime.ContainerConfig{Name: "web-0-1", Image: "nginx", App: "web", Routed: true,
 		Ports: []runtime.PortBinding{
 			{HostPort: 8080, ContainerPort: 80},
-			{HostIP: "10.0.0.5", ContainerPort: 80, Ephemeral: true},
+			{HostIP: "10.0.0.5", HostPort: 30000, ContainerPort: 80, Route: true},
 		}})
 	requireNoErr(t, err)
 	var body struct {
+		Labels       map[string]string
 		ExposedPorts map[string]struct{}
 		HostConfig   struct {
 			PortBindings map[string][]struct{ HostIp, HostPort string }
@@ -32,8 +36,11 @@ func TestCreateEphemeralPort(t *testing.T) {
 	}
 	bs := body.HostConfig.PortBindings["80/tcp"]
 	if len(body.ExposedPorts) != 1 || len(bs) != 2 || bs[0].HostPort != "8080" || bs[0].HostIp != "127.0.0.1" ||
-		bs[1].HostPort != "" || bs[1].HostIp != "10.0.0.5" {
+		bs[1].HostPort != "30000" || bs[1].HostIp != "10.0.0.5" {
 		t.Fatalf("bindings = %+v, exposed = %v", bs, body.ExposedPorts)
+	}
+	if got := body.Labels[runtime.LabelRoutePorts]; got != "80:30000" {
+		t.Fatalf("label %s = %q, want 80:30000", runtime.LabelRoutePorts, got)
 	}
 }
 
