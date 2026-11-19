@@ -23,6 +23,8 @@
 # ACME API on its private address, port 14000; the registry on its private
 # address, port 443; Pebble's management API and challtestsrv's on
 # 127.0.0.1 only. Nothing else is published.
+# With OUTSIDE_REGISTRY=0 there is no registry (and nothing on 443), so the
+# outside machine can be a node that runs a router, as in the scale run.
 #
 # Pebble runs with its validation sleeps off, no nonce rejection, no
 # authorization reuse (every order is validated again, over HTTP-01 on port
@@ -33,7 +35,7 @@
 # Pebble makes at its start: Pebble must not restart during the run.
 #
 # Clients: one stream per router and entry of STREAMS (HOST/PATH). Each is
-# one curl process making a request every 100 ms (--rate 10/s) to
+# one curl process making $STREAM_RATE requests a second (default 10/s) to
 # https://HOST/PATH through that router,
 # over HTTP/1.1 with a new TCP connection and a full TLS handshake each time
 # (--http1.1, Connection: close,
@@ -65,6 +67,8 @@ fi
 # "HOST/PATH=NAME"; with NAME, each reply must be whoami's from the app NAME.
 STREAMS=${STREAMS:-$(printf '%s/ ' $HOSTS)}
 CERT_LIFETIME=${CERT_LIFETIME:-3600}
+# Requests a second on each stream (curl --rate).
+STREAM_RATE=${STREAM_RATE:-10/s}
 PEBBLE_IMAGE=${PEBBLE_IMAGE:-ghcr.io/letsencrypt/pebble:latest}
 CHALL_IMAGE=${CHALL_IMAGE:-ghcr.io/letsencrypt/pebble-challtestsrv:latest}
 REG_IMAGE=${REG_IMAGE:-registry:2}
@@ -81,9 +85,10 @@ setup() {
 	mkdir -p "$OUT_FILES"
 	[ -s "$PW_FILE" ] || (umask 077 && openssl rand -hex 16 >"$PW_FILE")
 	ev outside "setup begin $OUT_NAME $OUT_IP cert_lifetime=${CERT_LIFETIME}s hosts=$HOSTS"
-	SSH_TIMEOUT=600 out "set -e; for i in $PEBBLE_IMAGE $CHALL_IMAGE $REG_IMAGE $HTPASSWD_IMAGE; do sudo docker pull -q \$i; done" >/dev/null
+	local reg=$OUTSIDE_REGISTRY
+	SSH_TIMEOUT=600 out "set -e; for i in $PEBBLE_IMAGE $CHALL_IMAGE $([ "$reg" = 0 ] || echo "$REG_IMAGE $HTPASSWD_IMAGE"); do sudo docker pull -q \$i; done" >/dev/null
 	# The registry's own CA and certificate, made here for the run.
-	SSH_TIMEOUT=60 out "sudo bash -s" <<EOF
+	[ "$reg" = 0 ] || SSH_TIMEOUT=60 out "sudo bash -s" <<EOF
 set -e
 install -d -m 0755 /opt/soak && install -d -m 0700 /opt/soak/certs /opt/soak/auth
 cd /opt/soak/certs
@@ -96,9 +101,9 @@ cd /opt/soak/certs
 }
 EOF
 	# htpasswd, from the password on stdin.
-	out "sudo docker run --rm -i --entrypoint htpasswd $HTPASSWD_IMAGE -Bin $REG_USER | sudo tee /opt/soak/auth/htpasswd >/dev/null" <"$PW_FILE"
+	[ "$reg" = 0 ] || out "sudo docker run --rm -i --entrypoint htpasswd $HTPASSWD_IMAGE -Bin $REG_USER | sudo tee /opt/soak/auth/htpasswd >/dev/null" <"$PW_FILE"
 	# Pebble's config: HTTP-01 on port 80, and a short default lifetime.
-	out "sudo tee /opt/soak/pebble-config.json >/dev/null" <<EOF
+	out "sudo install -d -m 0755 /opt/soak && sudo tee /opt/soak/pebble-config.json >/dev/null" <<EOF
 {"pebble": {"listenAddress": "0.0.0.0:14000", "managementListenAddress": "0.0.0.0:15000",
  "certificate": "test/certs/localhost/cert.pem", "privateKey": "test/certs/localhost/key.pem",
  "httpPort": 80, "tlsPort": 443, "ocspResponderURL": "", "externalAccountBindingRequired": false,
@@ -115,18 +120,22 @@ EOF
 			-e PEBBLE_VA_NOSLEEP=1 -e PEBBLE_WFE_NONCEREJECT=0 -e PEBBLE_AUTHZREUSE=0 \
 			-v /opt/soak/pebble-config.json:/soak/pebble-config.json:ro $PEBBLE_IMAGE \
 			-config /soak/pebble-config.json -dnsserver \$cip:8053 >/dev/null
-		sudo docker run -d --name soak-registry --restart unless-stopped -p $OUT_IP:443:5000 \
+		[ \"$reg\" = 0 ] || sudo docker run -d --name soak-registry --restart unless-stopped -p $OUT_IP:443:5000 \
 			-v /opt/soak/certs:/certs:ro -v /opt/soak/auth:/auth:ro -v soak-registry:/var/lib/registry \
 			-e REGISTRY_AUTH=htpasswd -e REGISTRY_AUTH_HTPASSWD_REALM=soak -e REGISTRY_AUTH_HTPASSWD_PATH=/auth/htpasswd \
 			-e REGISTRY_HTTP_TLS_CERTIFICATE=/certs/reg.crt -e REGISTRY_HTTP_TLS_KEY=/certs/reg.key $REG_IMAGE >/dev/null"
 	# The outside machine pushes to its own registry by name, as a node pulls.
-	out "sudo sed -i '/ # soak-outside\$/d' /etc/hosts && echo '$OUT_IP pebble $REGISTRY # soak-outside' | sudo tee -a /etc/hosts >/dev/null &&
-		sudo install -d /etc/docker/certs.d/$REGISTRY && sudo cp /opt/soak/certs/ca.crt /etc/docker/certs.d/$REGISTRY/ca.crt"
-	SSH_TIMEOUT=60 out "for i in \$(seq 1 30); do curl -s -o /dev/null --cacert /etc/docker/certs.d/$REGISTRY/ca.crt https://$REGISTRY/v2/ && exit 0; sleep 1; done; exit 1" ||
-		die "the registry does not answer"
+	out "sudo sed -i '/ # soak-outside\$/d' /etc/hosts && echo '$OUT_IP pebble $REGISTRY # soak-outside' | sudo tee -a /etc/hosts >/dev/null"
+	if [ "$reg" != 0 ]; then
+		out "sudo install -d /etc/docker/certs.d/$REGISTRY && sudo cp /opt/soak/certs/ca.crt /etc/docker/certs.d/$REGISTRY/ca.crt"
+		SSH_TIMEOUT=60 out "for i in \$(seq 1 30); do curl -s -o /dev/null --cacert /etc/docker/certs.d/$REGISTRY/ca.crt https://$REGISTRY/v2/ && exit 0; sleep 1; done; exit 1" ||
+			die "the registry does not answer"
+	fi
 	SSH_TIMEOUT=60 out "sudo docker cp soak-pebble:/test/certs/pebble.minica.pem /opt/soak/pebble-minica.pem && sudo cat /opt/soak/pebble-minica.pem" >"$OUT_FILES/pebble-minica.pem"
-	out "sudo cat /opt/soak/certs/ca.crt" >"$OUT_FILES/registry-ca.crt"
-	push_images
+	if [ "$reg" != 0 ]; then
+		out "sudo cat /opt/soak/certs/ca.crt" >"$OUT_FILES/registry-ca.crt"
+		push_images
+	fi
 	local h addrs
 	addrs=$(printf '"%s",' "${IPS[@]}")
 	for h in $HOSTS; do
@@ -134,7 +143,7 @@ EOF
 	done
 	out "for i in \$(seq 1 30); do curl -fsS -o /dev/null --cacert /opt/soak/pebble-minica.pem https://127.0.0.1:15000/roots/0 && exit 0; sleep 1; done; exit 1" ||
 		die "Pebble's management API does not answer"
-	ev outside "pebble image=$(out "sudo docker inspect -f '{{.Image}} {{index .Config.Labels \"org.opencontainers.image.revision\"}}' soak-pebble") chall=$(out "sudo docker inspect -f '{{.Image}}' soak-chall") registry=$(out "sudo docker inspect -f '{{.Image}}' soak-registry")"
+	ev outside "pebble image=$(out "sudo docker inspect -f '{{.Image}} {{index .Config.Labels \"org.opencontainers.image.revision\"}}' soak-pebble") chall=$(out "sudo docker inspect -f '{{.Image}}' soak-chall") registry=$([ "$reg" = 0 ] && echo none || out "sudo docker inspect -f '{{.Image}}' soak-registry")"
 	ev outside "listeners $(out "sudo ss -ltnH" | awk '{ printf "%s;", $4 }')"
 	ev outside "setup end"
 }
@@ -197,13 +206,13 @@ f=$d/$host${tag:++$tag}@$ip.log
 w='%time{%s.%f} %{http_code} %{exitcode} %{time_connect} %{time_appconnect} %{time_starttransfer} %{time_total} %{num_connects}'
 while :; do
 	if [ -z "$name" ]; then
-		curl -s --http1.1 --rate 10/s --no-sessionid -H 'Connection: close' --connect-timeout 3 -m 10 \
+		curl -s --http1.1 --rate "${RATE:-10/s}" --no-sessionid -H 'Connection: close' --connect-timeout 3 -m 10 \
 			--cacert $d/root.pem --resolve "$host:443:$ip" -o /dev/null -w "$w %{errormsg}\n" \
 			"https://$host$path?n=[1-36000]" >>"$f" 2>/dev/null
 	else
 		# The body goes to awk, which keeps the "Name:" line and writes one line
 		# per request when curl's marker line comes.
-		curl -s --http1.1 --rate 10/s --no-sessionid -H 'Connection: close' --connect-timeout 3 -m 10 \
+		curl -s --http1.1 --rate "${RATE:-10/s}" --no-sessionid -H 'Connection: close' --connect-timeout 3 -m 10 \
 			--cacert $d/root.pem --resolve "$host:443:$ip" -w "\n@@soak@@ $w @@ %{errormsg}\n" \
 			"https://$host$path?n=[1-36000]" 2>/dev/null |
 			awk -v want="$name" '
@@ -241,7 +250,7 @@ streams_to() {
 		hp=${s%%=*} name=""
 		[ "$hp" = "$s" ] || name=${s#*=}
 		host=${hp%%/*} path=/${hp#*/}
-		out "sudo setsid nohup $CDIR/stream.sh $ip $host '$path' $name >/dev/null 2>&1 </dev/null &"
+		out "sudo env RATE=$STREAM_RATE setsid nohup $CDIR/stream.sh $ip $host '$path' $name >/dev/null 2>&1 </dev/null &"
 	done
 }
 

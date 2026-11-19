@@ -57,6 +57,21 @@ ACME_EMAIL=${ACME_EMAIL:-ops@soak.test}
 REGISTRY=${REGISTRY:-registry.soak.test}
 # The files prepare_node installs on each node, fetched by outside.sh.
 OUT_FILES=$SOAK_DIR/outside-files
+# OUTSIDE_REGISTRY=0: no private registry on the outside machine (the scale
+# run, whose images are public; its outside machine is one of the nodes, whose
+# router has port 443).
+OUTSIDE_REGISTRY=${OUTSIDE_REGISTRY:-1}
+
+# The h2c test server (test/h2ctest), built by the operator into
+# $SOAK_DIR/h2ctest; import_h2c NAME imports it on NAME as the image
+# $H2C_IMAGE, which no registry has. It does nothing without the file, or
+# when NAME has the image.
+H2C_IMAGE=${H2C_IMAGE:-hivemind-h2ctest:scale}
+import_h2c() {
+	[ -s "$SOAK_DIR/h2ctest" ] || return 0
+	on "$1" "sudo docker image inspect $H2C_IMAGE >/dev/null 2>&1" && return 0
+	SSH_TIMEOUT=120 on "$1" "d=\$(mktemp -d) && cat >\$d/h2ctest && chmod 755 \$d/h2ctest && tar -C \$d -cf - h2ctest | sudo docker import --change 'ENTRYPOINT [\"/h2ctest\"]' - $H2C_IMAGE >/dev/null; rc=\$?; rm -rf \$d; exit \$rc" <"$SOAK_DIR/h2ctest"
+}
 
 # The server's DNS name (the third soak). With SERVER_NAME set, the server
 # runs serve --advertise $SERVER_NAME --cluster-addr <its private address>,
@@ -296,6 +311,7 @@ After=network-online.target docker.service
 [Service]
 ExecStart=/usr/local/bin/hivemind serve $(advertise_flags "$1")$(route_flags "$1")
 Restart=on-failure
+RestartPreventExitStatus=3
 RestartSec=5
 
 [Install]
@@ -331,6 +347,7 @@ After=network-online.target docker.service
 [Service]
 ExecStart=/usr/local/bin/hivemind serve --role worker$(route_flags "${1:-}")
 Restart=on-failure
+RestartPreventExitStatus=3
 RestartSec=5
 
 [Install]
@@ -379,7 +396,8 @@ running() { awk -F'\t' '$1 == "R" && $9 == "running" { n++; if ($5 == "running")
 prepare_node() {
 	local n=$1
 	[ -n "$OUT_IP" ] || die "prepare_node: no outside machine in $OUTSIDE_FILE"
-	[ -s "$OUT_FILES/pebble-minica.pem" ] && [ -s "$OUT_FILES/registry-ca.crt" ] || die "prepare_node: run outside.sh setup first"
+	[ -s "$OUT_FILES/pebble-minica.pem" ] || die "prepare_node: run outside.sh setup first"
+	[ "$OUTSIDE_REGISTRY" = 0 ] || [ -s "$OUT_FILES/registry-ca.crt" ] || die "prepare_node: run outside.sh setup first"
 	on "$n" "sudo sed -i '/ # soak-outside\$/d' /etc/hosts && echo '$OUT_IP pebble $REGISTRY # soak-outside' | sudo tee -a /etc/hosts >/dev/null" || return 1
 	# The server's name resolves to what the record says now, which on a new
 	# server machine is still the old address.
@@ -388,7 +406,10 @@ prepare_node() {
 		dns_line "$n" "$(dns_ip)" || return 1
 	fi
 	on "$n" "sudo tee /etc/pki/ca-trust/source/anchors/pebble-minica.pem >/dev/null && sudo update-ca-trust" <"$OUT_FILES/pebble-minica.pem" || return 1
-	on "$n" "sudo install -d /etc/docker/certs.d/$REGISTRY && sudo tee /etc/docker/certs.d/$REGISTRY/ca.crt >/dev/null" <"$OUT_FILES/registry-ca.crt" || return 1
+	if [ "$OUTSIDE_REGISTRY" != 0 ]; then
+		on "$n" "sudo install -d /etc/docker/certs.d/$REGISTRY && sudo tee /etc/docker/certs.d/$REGISTRY/ca.crt >/dev/null" <"$OUT_FILES/registry-ca.crt" || return 1
+	fi
+	import_h2c "$n" || return 1
 	on "$n" "curl -fsS -m 5 -o /dev/null https://pebble:14000/dir" || die "$n: Pebble's ACME directory does not answer, or is not trusted"
 	ev prepare "$n hosts+trust+certs.d done"
 }

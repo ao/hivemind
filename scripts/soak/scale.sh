@@ -24,6 +24,12 @@
 #   scale.sh restart-server     systemctl restart on the server; sample until converged
 #   scale.sh lat N              N requests each of GET /v1/status, /v1/nodes, /v1/apps, /v1/routes
 #   scale.sh routes             the routed apps' endpoints in GET /v1/routes
+#   scale.sh served             through every router: each host, each path route, each h2c route
+#   scale.sh h2c-start|h2c-stop|h2c-status
+#                               unary calls to an h2c route through each router in turn
+#   scale.sh metrics [N]        N timed reads of the server's /metrics, with the router series
+#   scale.sh perf-start SECS [NAME] | perf-fetch [NAME] | perf-report DIR
+#                               perf record of hivemind on NAME (the server), copied here, read
 #   scale.sh listeners          every node's TCP listeners; fail on an app port on a wildcard
 #   scale.sh on NAME CMD        run CMD on NAME over the harness's ssh connection
 #
@@ -45,6 +51,7 @@ NG=${NGINX_IMAGE:-nginx:alpine}
 BB=${BUSYBOX_IMAGE:-busybox:stable}
 RD=${REDIS_IMAGE:-redis:7-alpine}
 RDIR=/var/tmp/hivemind-scale
+SCALE_MIX=${SCALE_MIX:-1}
 # The apps with a volume, for lib.sh and scenario.sh.
 export VOLUME_APPS="kv vol-1 vol-2 vol-3 vol-4 vol-5 vol-6 vol-7 vol-8 vol-9"
 
@@ -63,6 +70,15 @@ export VOLUME_APPS="kv vol-1 vol-2 vol-3 vol-4 vol-5 vol-6 vol-7 vol-8 vol-9"
 # So 20 apps publish a host port, 10 have a volume, 30 a health check, 10 are
 # routed and 5 come from compose files; the 71 without a host port or a volume
 # are the portless ones that "scale" changes.
+#
+# With SCALE_MIX=2 (the second scale run), ng-06 to ng-10 are replaced by
+# five routed apps of 9 replicas each, so the totals stay 100 and 500:
+#   pr-01..03  nginx on the path /api of rt-01.scale.test to rt-03.scale.test,
+#              with a page at /api/ that says the app's name
+#   gr-01..02  test/h2ctest, a gRPC-style server that speaks only h2c, routed
+#              as h2c-01.scale.test and h2c-02.scale.test with protocol h2c,
+#              a TCP health check; the image is $H2C_IMAGE, imported on each
+#              node from $SOAK_DIR/h2ctest (import_h2c in lib.sh)
 specs() {
 	local i n
 	rm -rf "$SPECS"
@@ -91,9 +107,22 @@ specs() {
 		[ "$i" = 16 ] && n=8
 		app "bb-$i" plain "$n" 1 "{\"name\":\"bb-$i\",\"image\":\"$BB\",\"replicas\":$n,\"command\":[\"sleep\",\"86400\"]}"
 	done
-	for i in $(seq -w 1 10); do
-		app "ng-$i" plain 9 1 "{\"name\":\"ng-$i\",\"image\":\"$NG\",\"replicas\":9}"
-	done
+	if [ "$SCALE_MIX" = 2 ]; then
+		for i in $(seq -f %02g 1 5); do
+			app "ng-$i" plain 9 1 "{\"name\":\"ng-$i\",\"image\":\"$NG\",\"replicas\":9}"
+		done
+		# /api/ of rt-01 to rt-03: nginx with a page there that names the app
+		for i in 1 2 3; do
+			app "pr-0$i" routed 9 1 "{\"name\":\"pr-0$i\",\"image\":\"$NG\",\"replicas\":9,\"command\":[\"sh\",\"-c\",\"mkdir -p /usr/share/nginx/html/api && echo pr-0$i >/usr/share/nginx/html/api/index.html && exec nginx -g 'daemon off;'\"],\"routes\":[{\"host\":\"rt-0$i.scale.test\",\"path\":\"/api\",\"port\":80}]}"
+		done
+		for i in 1 2; do
+			app "gr-0$i" routed 9 1 "{\"name\":\"gr-0$i\",\"image\":\"$H2C_IMAGE\",\"replicas\":9,\"command\":[\"serve\",\"-addr\",\":50051\",\"-name\",\"gr-0$i\"],\"routes\":[{\"host\":\"h2c-0$i.scale.test\",\"port\":50051,\"protocol\":\"h2c\"}],\"health\":{\"tcp\":{\"port\":50051}}}"
+		done
+	else
+		for i in $(seq -w 1 10); do
+			app "ng-$i" plain 9 1 "{\"name\":\"ng-$i\",\"image\":\"$NG\",\"replicas\":9}"
+		done
+	fi
 	for i in 1 2 3 4 5; do
 		if [ "$i" -le 3 ]; then
 			printf 'name: cmp%s\nservices:\n  cmp%s:\n    image: %s\n    command: ["sleep", "86400"]\n    deploy:\n      replicas: 4\n' "$i" "$i" "$BB"
@@ -256,6 +285,7 @@ pull() {
 	for n in "${NAMES[@]}"; do
 		(t0=$(now_ms)
 			SSH_TIMEOUT=300 on "$n" "for i in $NG $BB $RD; do sudo docker pull -q \$i >/dev/null || exit 1; done" && r=ok || r=fail
+			if [ "$SCALE_MIX" = 2 ]; then import_h2c "$n" || r=fail; fi
 			ev event "pull $n $r ms=$(($(now_ms) - t0))") &
 		pids+=($!)
 	done
@@ -440,10 +470,11 @@ return_nodes() {
 	ev mark "$phase end"
 }
 
-ROLL_APPS="hc-01 hc-02 hc-03 hc-04 hc-05 hc-06 hc-07 hc-08 hc-09 hc-10 hc-11 hc-12 hc-13 hc-14 hc-15
+# ROLL_APPS in the environment replaces the list.
+ROLL_APPS=${ROLL_APPS:-"hc-01 hc-02 hc-03 hc-04 hc-05 hc-06 hc-07 hc-08 hc-09 hc-10 hc-11 hc-12 hc-13 hc-14 hc-15
 hc-16 hc-17 hc-18 hc-19 hc-20 hc-21 hc-22 hc-23 hc-24 hc-25 hc-26 hc-27 hc-28 hc-29 hc-30
 bb-01 bb-02 bb-03 bb-04 bb-05 bb-06 bb-07 bb-08 bb-09 bb-10 bb-11 bb-12 bb-13 bb-14 bb-15 bb-16
-ng-01 ng-02 ng-03 ng-04"
+ng-01 ng-02 ng-03 ng-04"}
 
 rollout() {
 	local n=${1:-50} phase=${2:-rollout} list val apps a end t prev=- cur rpid npaused
@@ -615,7 +646,123 @@ routes() {
 	local out
 	token
 	out=$(on "$SERVER" "read -r h; printf '%s\n' \"\$h\" | curl -sS -K - http://127.0.0.1:4483/v1/routes" <<<"header = \"Authorization: Bearer $TOKEN\"") || die "GET /v1/routes"
-	jq -r '.routes[] | "\(.host) app=\(.app) port=\(.port) endpoints=\(.endpoints | length) \(.endpoints | join(","))"' <<<"$out" | while read -r l; do ev routes "$l"; echo "$l"; done
+	jq -r '.routes[] | "\(.host)\(if (.path // "/") == "/" then "" else .path end) app=\(.app) port=\(.port) protocol=\(.protocol // "http") endpoints=\(.endpoints | length) \(.endpoints | join(","))"' <<<"$out" | while read -r l; do ev routes "$l"; echo "$l"; done
+}
+
+# ---------------------------------------------------------------- routers (SCALE_MIX=2, SOAK_ROUTES=1)
+#
+# The clients run on the outside machine ($OUTSIDE_FILE), which trusts
+# Pebble's root (outside.sh root). The h2c client is test/h2ctest, copied there
+# from $SOAK_DIR/h2ctest.
+
+# routed_hosts: the hosts of the routed apps, one per line.
+routed_hosts() { jq -r '.routes[]?.host' "$SPECS"/json/*.json | sort -u; }
+
+# served: through every router, a GET of / on every routed host but the h2c
+# ones (200), of /api/ on the hosts with a path route (200, the page names
+# pr-0N), and a unary call to each h2c host (from gr-0N). One "served" line per
+# router and a summary; fails when one is wrong.
+served() {
+	local cmd="" ip h i out bad
+	out_h2c_bin
+	for ip in "${IPS[@]}"; do
+		for h in $(routed_hosts | grep -v '^h2c-'); do
+			cmd+="printf '%s %s ' $ip $h/; curl -s -o /dev/null -m 5 --cacert /var/lib/soak-client/root.pem --resolve $h:443:$ip -w '%{http_code}\n' https://$h/; "
+		done
+		for i in 1 2 3; do
+			h=rt-0$i.scale.test
+			cmd+="printf '%s %s ' $ip $h/api/; curl -s -m 5 --cacert /var/lib/soak-client/root.pem --resolve $h:443:$ip -w ' %{http_code}\n' https://$h/api/ | tr '\n' ' '; echo; "
+		done
+		for i in 1 2; do
+			h=h2c-0$i.scale.test
+			cmd+="printf '%s %s ' $ip $h; timeout 10 /var/lib/soak-client/h2ctest call -url https://$h:443 -connect $ip:443 -ca /var/lib/soak-client/root.pem unary 2>&1 | tr '\n' ' '; echo \" rc=\${PIPESTATUS[0]}\"; "
+		done
+	done
+	out=$(SSH_TIMEOUT=300 on "$OUT_NAME" "$cmd") || die "served: the checks did not run on $OUT_NAME"
+	bad=$(awk '($2 ~ /\/$/ && $2 !~ /\/api\/$/ && $3 != 200) || ($2 ~ /\/api\/$/ && !($3 ~ /^pr-0/ && $4 == 200)) || ($2 ~ /^h2c-/ && $NF != "rc=0") { n++ } END { print n + 0 }' <<<"$out")
+	while read -r l; do ev served "$l"; done <<<"$out"
+	ev served "summary checks=$(wc -l <<<"$out") bad=$bad"
+	echo "checks=$(wc -l <<<"$out") bad=$bad"
+	[ "$bad" = 0 ]
+}
+
+# out_h2c_bin: test/h2ctest on the outside machine.
+out_h2c_bin() {
+	on "$OUT_NAME" "test -x /var/lib/soak-client/h2ctest" 2>/dev/null && return 0
+	[ -s "$SOAK_DIR/h2ctest" ] || die "no $SOAK_DIR/h2ctest"
+	SSH_TIMEOUT=60 on "$OUT_NAME" "sudo install -d -m 0755 /var/lib/soak-client && sudo tee /var/lib/soak-client/h2ctest >/dev/null && sudo chmod 755 /var/lib/soak-client/h2ctest" <"$SOAK_DIR/h2ctest" || die "h2ctest to $OUT_NAME"
+}
+
+# On the outside machine: a unary call to h2c-01.scale.test through each
+# router in turn, then a 1 s pause, until h2c.stop exists. One line per call:
+# "<Unix s.ms> <router> <rc> <seconds> <reply or error>".
+read -r -d '' H2C_LOOP <<'EOF' || true
+#!/bin/bash
+d=/var/lib/soak-client
+while [ ! -e $d/h2c.stop ]; do
+	for ip in $(cat $d/routers); do
+		t0=$(date +%s%N)
+		r=$(timeout 10 $d/h2ctest call -url https://h2c-01.scale.test:443 -connect $ip:443 -ca $d/root.pem unary 2>&1)
+		rc=$?
+		r=$(printf '%s' "$r" | tr '\n' ' ')
+		t1=$(date +%s%N)
+		echo "$((t0 / 1000000)) $ip $rc $(((t1 - t0) / 1000000)) $r"
+	done >>$d/h2c.log
+	sleep 1
+done
+EOF
+
+h2c_start() {
+	out_h2c_bin
+	on "$OUT_NAME" "sudo tee /var/lib/soak-client/h2c-loop.sh >/dev/null && sudo chmod 755 /var/lib/soak-client/h2c-loop.sh" <<<"$H2C_LOOP"
+	on "$OUT_NAME" "sudo rm -f /var/lib/soak-client/h2c.stop; sudo setsid nohup /var/lib/soak-client/h2c-loop.sh >/dev/null 2>&1 </dev/null &"
+	ev client "h2c loop start"
+}
+h2c_stop() {
+	on "$OUT_NAME" "sudo touch /var/lib/soak-client/h2c.stop"
+	ev client "h2c loop stop"
+}
+# h2c_status: calls and failures so far, per router.
+h2c_status() {
+	on "$OUT_NAME" "awk '{ n[\$2]++; if (\$3 != 0) f[\$2]++ } END { for (k in n) printf \"%s calls=%d failed=%d\n\", k, n[k], f[k] }' /var/lib/soak-client/h2c.log | sort"
+}
+
+# metrics [N]: N reads of the server's /metrics, timed: bytes, lines,
+# go_goroutines, the router series and the nodes they name. Prints a summary.
+metrics() {
+	local n=${1:-5} out
+	token
+	out=$(on "$SERVER" "read -r h; for i in \$(seq 1 $n); do printf '%s\n' \"\$h\" | curl -sS -K - -m 20 -o \$HOME/hm-metrics.txt -w '%{http_code} %{time_total} %{size_download} ' http://127.0.0.1:4483/metrics; awk '\$1 == \"go_goroutines\" { g = \$2 } /^hivemind_router_/ { r++; if (match(\$0, /node=\"[^\"]+\"/)) nd[substr(\$0, RSTART, RLENGTH)] = 1 } /^[a-z]/ { l++ } END { c = 0; for (k in nd) c++; printf \"lines=%d goroutines=%s router_series=%d router_nodes=%d\n\", l, g, r, c }' \$HOME/hm-metrics.txt; done" <<<"header = \"Authorization: Bearer $TOKEN\"") || die "GET /metrics"
+	while read -r c s b rest; do ev metrics "code=$c s=$s bytes=$b $rest"; done <<<"$out"
+	on "$SERVER" "cat \$HOME/hm-metrics.txt" >"$SOAK_DIR/metrics-$(date -u +%H%M%S).txt" 2>/dev/null || true
+	awk '{ print $1, $2 * 1000 "ms", $3 "B", $4, $5, $6, $7 }' <<<"$out"
+}
+
+# perf-start SECS [NAME]: perf record of the hivemind process on NAME (the
+# server) for SECS, in the background on that machine, at 99 Hz with call
+# graphs. perf-fetch [NAME] copies the data and the binary here; perf-report
+# FILE reads it in a throwaway container on this machine.
+perf_start() {
+	local secs=${1:?seconds} n=${2:-$SERVER}
+	on "$n" "command -v perf >/dev/null || sudo dnf install -y -q perf >/dev/null 2>&1" || die "no perf on $n"
+	on "$n" "pid=\$(systemctl show -p MainPID --value hivemind.service); sudo rm -f /var/tmp/hm-perf.data; sudo setsid nohup perf record -F 99 -g -p \$pid -o /var/tmp/hm-perf.data -- sleep $secs >/var/tmp/hm-perf.log 2>&1 </dev/null &" || die "perf record on $n"
+	ev perf "start node=$n secs=$secs"
+}
+perf_fetch() {
+	local n=${1:-$SERVER} dst
+	dst=$SOAK_DIR/perf-$(date -u +%H%M%S)
+	mkdir -p "$dst/symfs/usr/local/bin"
+	SSH_TIMEOUT=300 on "$n" "sudo cat /var/tmp/hm-perf.data" >"$dst/perf.data" || die "copying perf.data"
+	cp "$BIN" "$dst/symfs/usr/local/bin/hivemind"
+	ev perf "fetched node=$n dir=$dst bytes=$(stat -c %s "$dst/perf.data") log=$(on "$n" "tail -n 2 /var/tmp/hm-perf.log" | tr '\n' ';')"
+	echo "$dst"
+}
+perf_report() {
+	local dir=${1:?dir}
+	docker run --rm -v "$dir:/p" -w /p amazonlinux:2023 bash -c 'dnf install -y -q perf >/dev/null 2>&1 &&
+		perf report -f -i perf.data --symfs /p/symfs --stdio --children --sort symbol -g none --percent-limit 0.3 >report-children.txt 2>report.err;
+		perf report -f -i perf.data --symfs /p/symfs --stdio --no-children --sort symbol -g none --percent-limit 0.3 >report-self.txt 2>>report.err;
+		perf script -f -i perf.data --symfs /p/symfs -F time,ip,sym --no-inline >script.txt 2>>report.err; ls -l'
 }
 
 listeners() {
@@ -652,10 +799,18 @@ scale) scale_apps "$@" ;;
 restart-server) restart_server ;;
 lat) lat "$@" ;;
 routes) routes ;;
+served) served ;;
+h2c-start) h2c_start ;;
+h2c-stop) h2c_stop ;;
+h2c-status) h2c_status ;;
+metrics) metrics "$@" ;;
+perf-start) perf_start "$@" ;;
+perf-fetch) perf_fetch "$@" ;;
+perf-report) perf_report "$@" ;;
 listeners) listeners ;;
 on) on "$@" ;;
 *)
-	sed -n '2,33p' "$0"
+	sed -n '2,39p' "$0"
 	exit 2
 	;;
 esac
