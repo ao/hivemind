@@ -893,22 +893,104 @@ func TestChallengeForAHostNotReadYet(t *testing.T) {
 		t.Fatalf("challenge for a host the router had not read: %d %q, want 200 and the key authorization", resp.StatusCode, body)
 	}
 
-	// Within the next second, challenges for made-up hosts cause no read.
+	// Within the next second, challenges for made-up hosts wait for one
+	// read, a second after the last, and get 404.
 	before := reads()
+	var wg sync.WaitGroup
 	for i := range 5 {
-		req, _ := http.NewRequest(http.MethodGet, fmt.Sprintf("http://made-up-%d.example.com/.well-known/acme-challenge/x", i), nil)
-		if resp, _, _ := get(t, c, req); resp.StatusCode != http.StatusNotFound {
-			t.Fatalf("challenge for a made-up host: %d, want 404", resp.StatusCode)
-		}
+		wg.Go(func() {
+			req, _ := http.NewRequest(http.MethodGet, fmt.Sprintf("http://made-up-%d.example.com/.well-known/acme-challenge/x", i), nil)
+			if code, _, err := getAsync(c, req); err != nil || code != http.StatusNotFound {
+				t.Errorf("challenge for a made-up host: %d %v, want 404", code, err)
+			}
+		})
 	}
-	if n := reads() - before; n > 1 {
-		t.Fatalf("%d table reads for 5 challenges for made-up hosts in a second, want at most 1", n)
+	wg.Wait()
+	if n := reads() - before; n != 1 {
+		t.Fatalf("%d table reads for 5 challenges for made-up hosts in a second, want 1", n)
 	}
 	// Other paths for an unknown host read nothing.
 	before = reads()
 	req, _ = http.NewRequest(http.MethodGet, "http://made-up.example.com/", nil)
 	if resp, _, _ := get(t, c, req); resp.StatusCode != http.StatusNotFound || reads() != before {
 		t.Fatalf("a plain request for an unknown host: %d, %d reads", resp.StatusCode, reads()-before)
+	}
+}
+
+// Two hosts deployed 100 ms apart, as compose deploys them, each challenged
+// 100 ms after it was added: the second challenge comes within the second
+// after the read the first one caused, waits for the next read, a second
+// after that one, and is answered. Before, it read nothing and got 404, as 8
+// of 12 hosts did in the second scale run, and the CA retried a minute
+// later.
+func TestChallengesForHostsAddedApartAreAnswered(t *testing.T) {
+	tr := newTestRouterPoll(t, Table{}, time.Hour)
+	waitFor(t, func() bool { return tr.readCount() >= 2 }) // the start's read and the poll's first one
+	store := func(host, token string) {
+		t.Helper()
+		chal := fmt.Sprintf(`{"type":"http-01","url":"https://acme.invalid/chal/%s","status":"pending","token":%q,`+
+			`"keyAuthorization":"%s.thumbprint","identifier":{"type":"dns","value":%q}}`, token, token, token, host)
+		if err := tr.st.TLSStore(context.Background(), "acme/acme.invalid-dir/challenge_tokens/"+host+".json", []byte(chal)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	store("a.example.com", "tok_a")
+	store("b.example.com", "tok_b")
+	before := tr.readCount()
+	type answer struct {
+		code int
+		body string
+		took time.Duration
+	}
+	answers := make(chan answer, 2)
+	challenge := func(host, token string) {
+		began := time.Now()
+		req, _ := http.NewRequest(http.MethodGet, "http://"+host+"/.well-known/acme-challenge/"+token, nil)
+		code, body, err := getAsync(tr.plain(), req)
+		if err != nil {
+			body = err.Error()
+		}
+		answers <- answer{code, body, time.Since(began)}
+	}
+	tr.setRoutes(Table{"a.example.com": whole()}, nil)
+	time.Sleep(100 * time.Millisecond)
+	go challenge("a.example.com", "tok_a")
+	time.Sleep(100 * time.Millisecond)
+	tr.setRoutes(Table{"a.example.com": whole(), "b.example.com": whole()}, nil)
+	time.Sleep(100 * time.Millisecond)
+	go challenge("b.example.com", "tok_b")
+	for range 2 {
+		a := <-answers
+		if a.code != http.StatusOK || !strings.HasSuffix(a.body, ".thumbprint") {
+			t.Fatalf("a challenge: %d %q after %v, want 200 and the key authorization", a.code, a.body, a.took)
+		}
+		t.Logf("answered %q after %v", a.body, a.took)
+	}
+	if n := tr.readCount() - before; n != 2 {
+		t.Fatalf("%d table reads for the two challenges, want 2", n)
+	}
+}
+
+// A challenge waits for the next read only as long as its request lasts.
+func TestChallengeWaitEndsWithItsRequest(t *testing.T) {
+	tr := newTestRouterPoll(t, Table{}, time.Hour)
+	waitFor(t, func() bool { return tr.readCount() >= 2 })
+	c := tr.plain()
+	req, _ := http.NewRequest(http.MethodGet, "http://made-up.example.com/.well-known/acme-challenge/x", nil)
+	if resp, _, _ := get(t, c, req); resp.StatusCode != http.StatusNotFound {
+		t.Fatalf("a challenge for a made-up host: %d, want 404", resp.StatusCode)
+	}
+	// The next read is a second away; the client gives up after 100 ms.
+	quick := tr.plain()
+	quick.Timeout = 100 * time.Millisecond
+	began := time.Now()
+	req, _ = http.NewRequest(http.MethodGet, "http://made-up.example.com/.well-known/acme-challenge/x", nil)
+	if resp, err := quick.Do(req); err == nil {
+		resp.Body.Close()
+		t.Fatalf("a challenge answered %d within 100 ms of a read, want it to wait for the next", resp.StatusCode)
+	}
+	if took := time.Since(began); took > 600*time.Millisecond {
+		t.Fatalf("the request that gave up after 100 ms took %v", took)
 	}
 }
 
@@ -1196,4 +1278,16 @@ func TestRetryWhenAConnectionFailsBeforeTheReply(t *testing.T) {
 	if bad == 0 {
 		t.Fatal("a POST was retried on another replica after the first one's connection failed")
 	}
+}
+
+// getAsync is get for a goroutine other than the test's: it returns the
+// error rather than end the test.
+func getAsync(c *http.Client, req *http.Request) (int, string, error) {
+	resp, err := c.Do(req)
+	if err != nil {
+		return 0, "", err
+	}
+	defer resp.Body.Close()
+	b, err := io.ReadAll(resp.Body)
+	return resp.StatusCode, string(b), err
 }

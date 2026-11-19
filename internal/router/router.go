@@ -125,8 +125,10 @@ type Router struct {
 	bg sync.WaitGroup
 
 	// refreshMu, lastRefresh and refreshing limit the table reads that
-	// challenges for unknown hosts cause (see refresh). refreshing is closed
-	// when the read in flight ends; it is nil when none runs.
+	// challenges for unknown hosts cause (see refresh). lastRefresh is when
+	// the last of those reads started, or is to start. refreshing is closed
+	// when the read that has not started yet ends; it is nil when none
+	// waits to start.
 	refreshMu   sync.Mutex
 	lastRefresh time.Time
 	refreshing  chan struct{}
@@ -427,25 +429,30 @@ const (
 	refreshTimeout = 5 * time.Second
 )
 
-// refresh reads the table now, unless a read started less than refreshEvery
-// ago. The read runs under the router's context, not the caller's, so a
-// client that goes away does not cancel it: if it did, the router would go
-// without the new table until the next read refreshEvery later, and a CA's
-// validation in between would fail. Callers that arrive while a read runs
-// wait for it and then use its table; each stops waiting when its own ctx
-// ends.
+// refresh reads the table, at most one read starting every refreshEvery,
+// and returns once a read that started after the call has ended. A call
+// that comes less than refreshEvery after the last read started waits for
+// the next one, at refreshEvery after it, and every call until that read
+// starts waits for the same one. Before, such a call read nothing, and the
+// router answered 404 for a host it had not read: in the second scale run,
+// 8 of 12 hosts deployed tens of milliseconds apart failed their first
+// HTTP-01 validation, and got their certificates a minute late. The read
+// runs under the router's context, not the caller's, so a client that goes
+// away does not cancel it: if it did, the router would go without the new
+// table until the next read, and a CA's validation in between would fail.
+// Each caller stops waiting when its own ctx ends.
 func (rt *Router) refresh(ctx context.Context) {
 	rt.refreshMu.Lock()
 	done := rt.refreshing
 	if done == nil {
-		if time.Since(rt.lastRefresh) < refreshEvery {
-			rt.refreshMu.Unlock()
-			return
+		at := time.Now()
+		if next := rt.lastRefresh.Add(refreshEvery); next.After(at) {
+			at = next
 		}
-		rt.lastRefresh = time.Now()
+		rt.lastRefresh = at
 		done = make(chan struct{})
 		rt.refreshing = done
-		go rt.readTable(done)
+		go rt.readTable(at, done)
 	}
 	rt.refreshMu.Unlock()
 	select {
@@ -454,14 +461,25 @@ func (rt *Router) refresh(ctx context.Context) {
 	}
 }
 
-// readTable is refresh's read. It closes done when it ends.
-func (rt *Router) readTable(done chan struct{}) {
-	defer func() {
-		rt.refreshMu.Lock()
-		rt.refreshing = nil
-		rt.refreshMu.Unlock()
-		close(done)
-	}()
+// readTable is refresh's read, which starts at at. Callers that come once
+// it has started wait for the next one. It closes done when it ends.
+func (rt *Router) readTable(at time.Time, done chan struct{}) {
+	defer close(done)
+	if d := time.Until(at); d > 0 {
+		t := time.NewTimer(d)
+		select {
+		case <-t.C:
+		case <-rt.ctx.Done():
+			t.Stop()
+			rt.refreshMu.Lock()
+			rt.refreshing = nil
+			rt.refreshMu.Unlock()
+			return
+		}
+	}
+	rt.refreshMu.Lock()
+	rt.refreshing = nil
+	rt.refreshMu.Unlock()
 	ctx, cancel := context.WithTimeout(rt.ctx, refreshTimeout)
 	defer cancel()
 	if tab, err := rt.cfg.Routes(ctx); err == nil {
