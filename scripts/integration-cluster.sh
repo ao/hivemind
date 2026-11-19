@@ -590,7 +590,7 @@ cl_note "the removed worker exited, and a restart is refused with status 3: $(ta
 # Its containers are left running, as documented; remove them by hand, then
 # no replica is duplicated and spread is at its replica count.
 [ -n "$(docker exec "$W1" docker ps -q --filter label=hivemind.app)" ] || cl_fail "the removed worker stopped its containers"
-docker exec "$W1" sh -c 'docker rm -f $(docker ps -aq --filter label=hivemind.app)' >/dev/null
+docker exec "$W1" sh -c 'docker rm -fv $(docker ps -aq --filter label=hivemind.app)' >/dev/null
 wait_for 60 no_duplicates || cl_fail "a replica is duplicated after the removal: $( (containers_of web; containers_of spread) | sort | tr '\n' ';')"
 [ "$(count_running spread)" -eq 3 ] || cl_fail "spread is not at three running replicas after the removal"
 cl_note "after the removal: spread at three running replicas, no duplicates"

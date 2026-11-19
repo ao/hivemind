@@ -305,7 +305,7 @@ scratch_start() {
 }
 
 scratch_stop() {
-	out "sudo pkill -TERM -f '^$HM serve --data-dir $SCRATCH'; sleep 2; ids=\$(sudo docker ps -aq --filter label=hivemind.app); [ -z \"\$ids\" ] || sudo docker rm -f \$ids >/dev/null; sudo rm -rf $SCRATCH"
+	out "sudo pkill -TERM -f '^$HM serve --data-dir $SCRATCH'; sleep 2; ids=\$(sudo docker ps -aq --filter label=hivemind.app); [ -z \"\$ids\" ] || sudo docker rm -fv \$ids >/dev/null; sudo rm -rf $SCRATCH"
 	ev outside "scratch cluster stopped and removed"
 }
 

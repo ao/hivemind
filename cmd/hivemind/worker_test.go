@@ -546,3 +546,17 @@ func TestJoinTakesTheWorkersFlags(t *testing.T) {
 		t.Errorf("join --advertise: %v", err)
 	}
 }
+
+// A removed node's containers are removed by hand with docker rm -fv, which
+// takes their anonymous volumes with them: in the fifth soak, docker rm -f
+// at a rejoin left redis's /data volume dangling for the rest of the run.
+// The worker's message and the help of hivemind node remove both say so.
+func TestRemovedNodeCleanupTakesAnonymousVolumes(t *testing.T) {
+	const want = "docker rm -fv $(docker ps -aq --filter label=hivemind.app)"
+	if msg := removedError("node-1").Error(); !strings.Contains(msg, want) || !strings.Contains(msg, "anonymous volumes") {
+		t.Errorf("the removed worker's message: %s", msg)
+	}
+	if long := nodeRemoveCmd().Long; !strings.Contains(long, want) || !strings.Contains(long, "named volumes stay") {
+		t.Errorf("hivemind node remove's help does not give %q", want)
+	}
+}

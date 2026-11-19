@@ -563,8 +563,14 @@ example, a new volume name) or the app is deleted.
 The node's ID goes on the server's list of removed nodes. The server refuses
 its certificate on the node API from then on, and never issues the ID again.
 A removed worker that is still running stops with an error; its containers
-keep running until they are removed by hand. To bring the machine back, join
-it again with an empty data directory and a new join token.`,
+keep running until they are removed by hand, on that machine, with
+
+  docker rm -fv $(docker ps -aq --filter label=hivemind.app)
+
+-v removes their anonymous volumes too, those of images with VOLUME, such as
+redis's /data, which -f alone leaves dangling; the app's named volumes stay.
+To bring the machine back, join it again with an empty data directory and a
+new join token.`,
 		Args: cobra.ExactArgs(1),
 	}
 	cf := addClientFlags(cmd)

@@ -333,7 +333,7 @@ cl_note "finish --force cut $W2 off; started again, it says the CA was rotated w
 wait_for 60 docker exec "$S" grep -q "these have not reached the server in the 30 s since.*nodes=$OFF_ID" /var/log/hivemind.log ||
 	cl_fail "30 s after finish --force the server did not log that $OFF_ID has not reached it: $(docker exec "$S" grep 'forced finish went ahead' /var/log/hivemind.log)"
 docker exec "$S" hivemind node remove "$OFF_ID" >/dev/null || cl_fail "node remove $OFF_ID"
-docker exec "$W2" sh -c "docker rm -f \$(docker ps -aq --filter label=hivemind.app) >/dev/null 2>&1; rm -rf $DATA; true"
+docker exec "$W2" sh -c "docker rm -fv \$(docker ps -aq --filter label=hivemind.app) >/dev/null 2>&1; rm -rf $DATA; true"
 join_worker 2
 [ "${CL_IDS[2]}" != "$OFF_ID" ] || cl_fail "$W2 joined again with its old ID"
 wait_for 60 ready_nodes "${CL_IDS[2]}" || cl_fail "the rejoined $W2 is not ready"

@@ -823,7 +823,7 @@ const exitRemoved = 3
 // say they run.
 func removedError(id string) error {
 	return &exitError{code: exitRemoved, err: fmt.Errorf("node %s was removed from the cluster, and the server refuses its certificate; "+
-		"its containers may still be on this machine (remove them with: docker rm -f $(docker ps -aq --filter label=hivemind.app)); "+
+		"its containers may still be on this machine (remove them, with their anonymous volumes, with: docker rm -fv $(docker ps -aq --filter label=hivemind.app); the app volumes stay); "+
 		"to join again, use an empty --data-dir and a new join token", id)}
 }
 
