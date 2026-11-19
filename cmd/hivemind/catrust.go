@@ -193,9 +193,11 @@ func (k *trustKeeper) apply(ctx context.Context) error {
 			"this worker keeps trusting that CA", "ca", shortFP(pki.Fingerprint(own)))
 	}
 	if !next.Same(cur) {
-		if err := k.write(next); err != nil {
+		written, err := k.write(next)
+		if err != nil {
 			return err
 		}
+		next = written
 		tlsCfg, err := pki.ClientTLSConfigTrust(next, k.holder, k.host)
 		if err != nil {
 			return err
@@ -277,41 +279,61 @@ func inSet(ps []nodeapi.ParsedCA, fp [32]byte) bool {
 	return false
 }
 
+// ownFirst returns t with the CA of the node's certificate first, the order
+// of ca.crt, and the rest in t's order. t itself when it is so already, or
+// when no CA of t issued the certificate.
+func (k *trustKeeper) ownFirst(t *pki.Trust) *pki.Trust {
+	cas := t.CAs()
+	own := t.Issuer(k.holder.Leaf())
+	if own == nil || pki.Fingerprint(cas[0]) == pki.Fingerprint(own) {
+		return t
+	}
+	ordered := []*x509.Certificate{own}
+	for _, c := range cas {
+		if pki.Fingerprint(c) != pki.Fingerprint(own) {
+			ordered = append(ordered, c)
+		}
+	}
+	return pki.MustTrust(ordered...)
+}
+
 // write replaces ca.crt with the set, the CA of the node's certificate
 // first: written to ca.crt.next, synced, then renamed, so ca.crt is never
-// seen half written.
-func (k *trustKeeper) write(t *pki.Trust) error {
-	cas := t.CAs()
-	if own := t.Issuer(k.holder.Leaf()); own != nil {
-		ordered := []*x509.Certificate{own}
-		for _, c := range cas {
-			if pki.Fingerprint(c) != pki.Fingerprint(own) {
-				ordered = append(ordered, c)
-			}
-		}
-		t = pki.MustTrust(ordered...)
-	}
+// seen half written. It returns the set as written, which the caller keeps
+// as the worker's: renewed reads the order from it. In the fifth soak the
+// worker kept the set in the order it had read it, and after an abort in
+// the renew phase, a renewal back under the CA that set had first found
+// nothing to reorder, and left the dropped CA first in ca.crt until finish.
+func (k *trustKeeper) write(t *pki.Trust) (*pki.Trust, error) {
+	t = k.ownFirst(t)
 	next := filepath.Join(k.dir, workerTrustNext)
 	_ = os.Remove(next)
 	if err := writeSynced(next, t.PEM()); err != nil {
-		return fmt.Errorf("saving the cluster CAs: %w", err)
+		return nil, fmt.Errorf("saving the cluster CAs: %w", err)
 	}
 	if err := os.Rename(next, filepath.Join(k.dir, pki.CACertFile)); err != nil {
-		return fmt.Errorf("saving the cluster CAs: %w", err)
+		return nil, fmt.Errorf("saving the cluster CAs: %w", err)
 	}
-	return syncDir(k.dir)
+	return t, syncDir(k.dir)
 }
 
 // renewed puts the CA of the node's new certificate first in ca.crt, so
-// that the file reads as it would after a join to that CA.
+// that the file reads as it would after a join to that CA. The worker calls
+// it after each renewal, and at its start, for a renewal whose reorder a
+// crash cut short.
 func (k *trustKeeper) renewed() {
+	k.mu.Lock()
+	defer k.mu.Unlock()
 	t := k.trust.Load()
-	if own := t.Issuer(k.holder.Leaf()); own == nil || pki.Fingerprint(t.CAs()[0]) == pki.Fingerprint(own) {
+	if k.ownFirst(t) == t {
 		return
 	}
-	if err := k.write(t); err != nil {
+	written, err := k.write(t)
+	if err != nil {
 		k.log.Warn("reordering the cluster CAs after a renewal", "err", err)
+		return
 	}
+	k.trust.Store(written)
 }
 
 // removeStaleTrust removes a ca.crt.next a crash left.

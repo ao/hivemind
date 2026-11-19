@@ -287,6 +287,13 @@ func TestWorkerFollowsAnAbortInRenew(t *testing.T) {
 	if !certFrom(tw, next) {
 		t.Fatal("the worker did not renew under the new CA")
 	}
+	firstIs := func(when string, want *pki.CA) {
+		t.Helper()
+		if tr := diskTrust(t, dir); len(tr.CAs()) != 2 || pki.Fingerprint(tr.CAs()[0]) != want.Fingerprint() {
+			t.Fatalf("%s: ca.crt %x, want both CAs, %x first", when, tr.Fingerprints(), want.Fingerprint())
+		}
+	}
+	firstIs("after the renewal under the new CA", next)
 	if _, err := s.m.Abort(ctx); err != nil {
 		t.Fatal(err)
 	}
@@ -294,6 +301,20 @@ func TestWorkerFollowsAnAbortInRenew(t *testing.T) {
 	if !certFrom(tw, old) || len(tw.keeper.Trust().CAs()) != 2 {
 		t.Fatal("after the abort the worker did not renew back under the old CA, keeping both")
 	}
+	// The CA of its certificate is first again. In the fifth soak the
+	// dropped CA stayed first until finish.
+	firstIs("after the renewal back under the old CA", old)
+	if pki.Fingerprint(tw.keeper.Trust().CAs()[0]) != old.Fingerprint() {
+		t.Fatal("the set in memory does not have the old CA first")
+	}
+	// A worker that starts with ca.crt in the wrong order, as after a crash
+	// between a renewal and its reorder, puts it right.
+	if err := os.WriteFile(filepath.Join(dir, pki.CACertFile), pki.MustTrust(next.Cert, old.Cert).PEM(), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	tw = startTestWorker(t, dir)
+	tw.keeper.renewed()
+	firstIs("at a start with the new CA first", old)
 	if err := tw.register(); err != nil {
 		t.Fatal(err)
 	}

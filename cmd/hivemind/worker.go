@@ -555,6 +555,7 @@ func runWorker(ctx context.Context, cfg *config.Config, log *slog.Logger, rt run
 	// applied.
 	host, _, _ := net.SplitHostPort(w.state.Server)
 	keeper := newTrustKeeper(cfg.DataDir, w.state.NodeID, host, w.trust, w.holder, log.With("component", "ca"))
+	keeper.renewed() // ca.crt in its order, after a crash between a renewal and its reorder
 	client, err := nodeapi.NewClient("https://"+w.state.Server, w.tlsCfg, nodeapi.WithVersion(version),
 		nodeapi.WithEpochGuard(workerEpochGuard(cfg.DataDir, log)), nodeapi.WithCATrust(keeper.header))
 	if err != nil {
