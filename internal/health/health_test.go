@@ -287,3 +287,41 @@ func waitState(t *testing.T, m *Monitor, want State) {
 		time.Sleep(5 * time.Millisecond)
 	}
 }
+
+// A monitor's first check is one interval after its container started, not
+// after the monitor did: one made 800 ms after the start of a container with
+// a 1 s interval checks 200 ms later, and one made after a whole interval
+// checks at once. Each check that changes the state calls the function
+// given to Notify, and no other does.
+func TestMonitorChecksFromTheContainersStartAndNotifies(t *testing.T) {
+	host, port := httpServer(t, map[string]http.HandlerFunc{"/": func(http.ResponseWriter, *http.Request) {}})
+	h := spec.Health{HTTP: &spec.HTTPCheck{Path: "/", Port: port}, Interval: spec.Duration(time.Second),
+		Timeout: spec.Duration(time.Second), Retries: 2}
+	for _, c := range []struct {
+		since       time.Duration // the container started this long before the monitor
+		least, most time.Duration
+	}{
+		{800 * time.Millisecond, 100 * time.Millisecond, 600 * time.Millisecond},
+		{3 * time.Second, 0, 400 * time.Millisecond},
+	} {
+		m := NewMonitor(h, Target{IP: host}, nil, time.Now().Add(-c.since), nil)
+		var notes atomic.Int32
+		m.Notify(func() { notes.Add(1) })
+		ctx, cancel := context.WithCancel(context.Background())
+		done := make(chan struct{})
+		began := time.Now()
+		go func() { m.Run(ctx); close(done) }()
+		waitState(t, m, Healthy)
+		took := time.Since(began)
+		if took < c.least || took > c.most {
+			t.Errorf("started %v before the monitor: first check after %v, want %v to %v", c.since, took, c.least, c.most)
+		}
+		// Two more checks that pass change nothing.
+		time.Sleep(2200 * time.Millisecond)
+		if n := notes.Load(); n != 1 {
+			t.Errorf("started %v before the monitor: %d notifications, want 1, for starting to healthy", c.since, n)
+		}
+		cancel()
+		<-done
+	}
+}

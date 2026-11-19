@@ -46,6 +46,8 @@ type fakeRuntime struct {
 	// ports, when set, makes Start refuse a container whose fixed host port
 	// a running container has published, as the engine does.
 	ports bool
+	// startDelay is how long each Start takes, as on a busy engine.
+	startDelay time.Duration
 }
 
 type fakeContainer struct {
@@ -193,6 +195,11 @@ func (f *fakeRuntime) find(ref string) *fakeContainer {
 }
 
 func (f *fakeRuntime) Start(_ context.Context, id string) error {
+	f.mu.Lock()
+	delay := f.startDelay
+	f.mu.Unlock()
+	// A slow engine, without the lock, so checks run meanwhile.
+	time.Sleep(delay)
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	if err := f.begin("start", id); err != nil {

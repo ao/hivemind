@@ -146,6 +146,7 @@ func (a *Agent) supervise(ctx context.Context, as store.Assignment, c runtime.Co
 		log.Info("started container", "was", c.State)
 		st.State = "running"
 		afterStart(as, st)
+		a.startProbe(ctx, as, c.ID, c.Name)
 
 	case "exited":
 		a.stopProbe(c.Name)
@@ -196,6 +197,7 @@ func (a *Agent) supervise(ctx context.Context, as store.Assignment, c runtime.Co
 		log.Warn("restarted exited container", "restarts", rs.restarts, "exit_code", ci.ExitCode, "oom_killed", ci.OOMKilled)
 		st.State = "running"
 		afterStart(as, st)
+		a.startProbe(ctx, as, c.ID, c.Name)
 
 	case "running":
 		if as.Spec.Health == nil {
@@ -336,6 +338,8 @@ func (a *Agent) probeFor(ctx context.Context, c runtime.Container, h spec.Health
 		mon.AssumeHealthy()
 	}
 	delete(a.healthy, c.ID)
+	// A change of state is reported at once, not at the next pass.
+	mon.Notify(a.Trigger)
 	p := &probe{mon: mon, cancel: cancel}
 	a.probes[c.Name] = p
 	go mon.Run(pctx)
@@ -406,4 +410,21 @@ func (a *Agent) Close() {
 	}
 	a.cancelPulls()
 	a.cancelRemovals()
+}
+
+// startProbe starts the health monitor of a container that this pass has
+// just started, if its replica has a health check. Its first check is then
+// one interval after the container's start, and it is ready once that
+// passes, whatever else the pass still has to do; a monitor started by the
+// next pass, after a pass that started many containers, began its checks
+// late: in the second scale run a node that started 93 containers in one
+// 21 s pass had its health-checked ones ready 9 s late. A failure leaves the
+// monitor to the next pass.
+func (a *Agent) startProbe(ctx context.Context, as store.Assignment, id, name string) {
+	if as.Spec.Health == nil {
+		return
+	}
+	if _, err := a.probeFor(ctx, runtime.Container{ID: id, Name: name}, *as.Spec.Health); err != nil {
+		a.log.Debug("starting the health monitor of a container just started; the next pass starts it", "container", shortID(id), "err", err)
+	}
 }

@@ -533,6 +533,7 @@ func (a *Agent) Reconcile(ctx context.Context) error {
 		}
 	}
 	waited := false
+	created := map[string]bool{} // containers this pass created and started
 	for _, k := range order {
 		as := want[k]
 		st := store.Status{Name: ContainerName(as.App, as.Index, as.Generation), App: as.App, Replica: as.Index, Generation: as.Generation}
@@ -570,6 +571,8 @@ func (a *Agent) Reconcile(ctx context.Context) error {
 			if state == "running" {
 				afterStart(as, &st)
 				delete(a.launches, st.Name)
+				a.startProbe(ctx, as, id, st.Name)
+				created[st.Name] = true
 			}
 			if err != nil {
 				// A pull waiting out its backoff failed in an earlier
@@ -618,9 +621,13 @@ func (a *Agent) Reconcile(ctx context.Context) error {
 	}
 	a.forgetRemovals()
 
-	kept := make(map[string]bool, len(keep))
+	kept := make(map[string]bool, len(keep)+len(created))
 	for _, c := range keep {
 		kept[c.Name] = true
+	}
+	// The containers this pass started keep the monitors it started.
+	for name := range created {
+		kept[name] = true
 	}
 	for name := range a.unrouted {
 		if !draining[name] {

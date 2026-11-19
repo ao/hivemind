@@ -264,7 +264,7 @@ An app may have one health check: HTTP, TCP or exec.
 
 The defaults are an interval of 10 seconds, a timeout of 2 seconds, and 3 retries. A `start_period` makes failures ignored for that long after the container starts. A replica becomes unhealthy after the retries fail in a row.
 
-An app without a health check counts as ready as soon as its container runs. A new container is `starting` until its first check passes. When the agent itself restarts, as in an upgrade of hivemind, a container that kept running and that its last report called healthy stays healthy and ready, and its next check decides as it would have; so its routed replicas stay in the routing table.
+An app without a health check counts as ready as soon as its container runs. A new container is `starting` until its first check passes, one interval after the container started; a check that changes a replica's state is reported at once. When the agent itself restarts, as in an upgrade of hivemind, a container that kept running and that its last report called healthy stays healthy and ready, and its next check decides as it would have; so its routed replicas stay in the routing table.
 
 The agent restarts a container that exits, whatever its exit code, and a container that becomes unhealthy. The wait before each restart doubles from 1 second and stops at 5 minutes. A container that has been running and healthy for 10 minutes starts over at 1 second. The restart count is kept per container, and the agent reads it back from the last status report when it starts.
 

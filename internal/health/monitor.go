@@ -100,10 +100,16 @@ type Monitor struct {
 	target  Target
 	rt      Execer
 	now     func() time.Time
+	started time.Time
+	notify  func()
 	mu      sync.Mutex // guards tr and checked
 	tr      *Tracker
 	checked time.Time
 }
+
+// Notify makes Run call f, outside the monitor's lock, after each check that
+// changed the state. Call it before Run.
+func (m *Monitor) Notify(f func()) { m.notify = f }
 
 // NewMonitor returns a monitor for a container started at started. now is the
 // clock the start period is measured with; nil means time.Now.
@@ -111,32 +117,50 @@ func NewMonitor(h spec.Health, target Target, rt Execer, started time.Time, now 
 	if now == nil {
 		now = time.Now
 	}
-	return &Monitor{h: h, target: target, rt: rt, now: now, tr: NewTracker(h, started)}
+	return &Monitor{h: h, target: target, rt: rt, now: now, started: started, tr: NewTracker(h, started)}
 }
 
-// Run probes until ctx is cancelled. A probe that is cut short by the
-// cancellation is not recorded.
+// Run probes until ctx is cancelled, every interval from one interval after
+// the container started: a monitor started after that, as by an agent that
+// restarted, or one that started many containers in one long pass, checks
+// at once. Before, the first check was one interval after the monitor
+// started, and in the second scale run a node that started 93 containers in
+// one 21 s pass had its health-checked ones ready 9 s late. A probe that is
+// cut short by the cancellation is not recorded.
 func (m *Monitor) Run(ctx context.Context) {
 	interval := m.h.Interval.D()
 	if interval <= 0 {
 		interval = 10 * time.Second
 	}
+	// A start time ahead of this machine's clock waits one interval at most.
+	first := min(max(m.started.Add(interval).Sub(m.now()), 0), interval)
+	wait := time.NewTimer(first)
+	select {
+	case <-ctx.Done():
+		wait.Stop()
+		return
+	case <-wait.C:
+	}
 	t := time.NewTicker(interval)
 	defer t.Stop()
 	for {
-		select {
-		case <-ctx.Done():
-			return
-		case <-t.C:
-		}
 		err := Check(ctx, m.h, m.target, m.rt)
 		if ctx.Err() != nil {
 			return
 		}
 		m.mu.Lock()
-		m.tr.Observe(m.now(), err)
+		before := m.tr.state
+		after := m.tr.Observe(m.now(), err)
 		m.checked = m.now()
 		m.mu.Unlock()
+		if after != before && m.notify != nil {
+			m.notify()
+		}
+		select {
+		case <-ctx.Done():
+			return
+		case <-t.C:
+		}
 	}
 }
 
