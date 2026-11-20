@@ -23,7 +23,26 @@ const (
 
 	// NodeCertLifetime is the longest a node certificate may run.
 	NodeCertLifetime = 365 * 24 * time.Hour
+
+	// ServerRoleURI is the URI SAN that marks a server's own certificate:
+	// the server port of a cluster of several servers takes no other
+	// (docs/ha.md). The cluster never puts it in a worker's certificate.
+	ServerRoleURI = NodeURIScheme + "://role/server"
 )
+
+// HasServerRole reports whether the certificate carries the server role.
+func HasServerRole(cert *x509.Certificate) bool {
+	for _, u := range cert.URIs {
+		if u.String() == ServerRoleURI {
+			return true
+		}
+	}
+	return false
+}
+
+// ErrNotServer is a peer certificate without the server role where only a
+// server's is taken.
+var ErrNotServer = errors.New("pki: the certificate is not a server's")
 
 var (
 	ErrInvalidNodeID    = errors.New("pki: invalid node ID")
@@ -117,6 +136,9 @@ type NodeCertOptions struct {
 	// certificate names it too, so a worker that dials the address itself
 	// can check the name. Empty adds nothing.
 	Bind string
+	// Server marks the certificate as a server's own (ServerRoleURI). Only
+	// a server sets it, for its listener certificate.
+	Server bool
 	// Lifetime is the certificate's validity. Zero means NodeCertLifetime.
 	// Values above NodeCertLifetime are refused.
 	Lifetime time.Duration
@@ -186,6 +208,13 @@ func (ca *CA) IssueNodeCert(csrDER []byte, o NodeCertOptions) ([]byte, error) {
 		KeyUsage:     x509.KeyUsageDigitalSignature,
 		ExtKeyUsage:  []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth, x509.ExtKeyUsageClientAuth},
 		URIs:         []*url.URL{nodeURL},
+	}
+	if o.Server {
+		role, err := url.Parse(ServerRoleURI)
+		if err != nil {
+			return nil, err
+		}
+		tmpl.URIs = append(tmpl.URIs, role)
 	}
 	if o.Advertise != "" {
 		if ip := net.ParseIP(o.Advertise); ip != nil {

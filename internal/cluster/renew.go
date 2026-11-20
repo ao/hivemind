@@ -163,7 +163,7 @@ func (s *serverCertSource) issue() (tls.Certificate, error) {
 	}
 	// The chain carries the listener CA, which a joining node pins.
 	ca := s.cfg.Rotation.Listener()
-	der, err := ca.IssueNodeCert(csr, pki.NodeCertOptions{NodeID: s.cfg.LocalNodeID, Advertise: s.cfg.Advertise, Bind: s.cfg.Bind,
+	der, err := ca.IssueNodeCert(csr, pki.NodeCertOptions{NodeID: s.cfg.LocalNodeID, Advertise: s.cfg.Advertise, Bind: s.cfg.Bind, Server: true,
 		Lifetime: s.cfg.NodeCertLifetime, Now: s.now()})
 	if err != nil {
 		return tls.Certificate{}, err

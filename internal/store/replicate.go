@@ -62,13 +62,23 @@ func (s *Store) SetReplicator(r Replicator) {
 // Replicated reports whether writes go through a log.
 func (s *Store) Replicated() bool { return s.repl.Load() != nil }
 
-// Hold runs fn while no transaction runs, as SetReplicator waits for one.
-// Turning replication on uses it, so that the store it hands Raft as the
-// log's first snapshot is the store every later write starts from.
-func (s *Store) Hold(fn func() error) error {
+// EnableReplication runs handover while no transaction runs, and then,
+// if it succeeds, makes every later write go through the replicator it
+// returns, as SetReplicator does. Turning replication on in a running
+// cluster of one uses it: the store handover gives Raft as the log's first
+// snapshot is then the store every later write starts from.
+func (s *Store) EnableReplication(handover func() (Replicator, error)) error {
 	s.writeMu.Lock()
 	defer s.writeMu.Unlock()
-	return fn()
+	if s.repl.Load() != nil {
+		return errors.New("store: replication is on already")
+	}
+	r, err := handover()
+	if err != nil {
+		return err
+	}
+	s.repl.Store(&replicator{r})
+	return nil
 }
 
 // replicatedTx is tx for a replicated store. The caller holds writeMu. A
@@ -216,6 +226,21 @@ func (s *Store) ResetAppliedIndex(ctx context.Context) error {
 	return s.tx(ctx, func(tx *sql.Tx) error {
 		keepsRoutes(tx)
 		_, err := tx.ExecContext(ctx, `UPDATE raft_applied SET idx = 0 WHERE id = 1`)
+		return err
+	})
+}
+
+// RaiseAppliedIndex raises the applied index to at least idx, for a store
+// that has just loaded the Raft snapshot at idx before Raft starts. It
+// writes the store directly, so it is for a store that does not replicate
+// yet.
+func (s *Store) RaiseAppliedIndex(ctx context.Context, idx uint64) error {
+	if s.Replicated() {
+		return errors.New("store: the applied index of a replicated store is the log's")
+	}
+	return s.tx(ctx, func(tx *sql.Tx) error {
+		keepsRoutes(tx)
+		_, err := tx.ExecContext(ctx, `UPDATE raft_applied SET idx = max(idx, ?) WHERE id = 1`, int64(idx))
 		return err
 	})
 }
