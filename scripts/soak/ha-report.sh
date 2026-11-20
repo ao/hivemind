@@ -39,10 +39,10 @@ $3 == "event" && ($4 in cur) && !(cur[$4] in e) && f[cur[$4]] == 0 && / fault / 
 $3 == "scenario" && $5 == "end" && ($4 in cur) && !(cur[$4] in e) { e[cur[$4]] = $2 / 1000 }
 END { for (i = 1; i <= n; i++) { w = order[i]; if (w in e) printf "%s %s %.3f %.3f %.3f\n", base[w], w, s[w], e[w], f[w] } }' "$LOG" |
 	while read -r name label ws we wf; do
-		case "$name" in leader-kill | leader-partition | quorum-loss | service-restart | service-restart-follower | rollout-leader) ;; *) continue ;; esac
+		case "$name" in leader-kill | leader-partition | quorum-loss | service-restart | service-restart-follower | rollout-leader | router-noleader) ;; *) continue ;; esac
 		echo "### $label"
 		echo
-		echo "From $(date -u -d @"${ws%.*}" +%T) to $(date -u -d @"${we%.*}" +%T) UTC; fault at $(date -u -d @"${wf%.*}" +%T.%3N)."
+		echo "From $(date -u -d @"${ws%.*}" +%T) to $(date -u -d @"${we%.*}" +%T) UTC; fault at $(date -u -d @"$wf" +%T.%3N)."
 		echo
 		echo "Events, seconds after the fault:"
 		echo

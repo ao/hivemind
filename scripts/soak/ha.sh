@@ -17,6 +17,10 @@
 #                                    server, the server's)
 #   scenario.sh rollout-leader       a rolling update of every app, the
 #                                    leader's hivemind restarted during it
+#   scenario.sh router-noleader [GAP]  the leader's hivemind restarted while
+#                                    no server leads (the two others paused
+#                                    with SIGSTOP); GAP s (1) after its start
+#                                    one of them resumed, then the other
 #   scenario.sh steady [SECS]        the steady state (3600 s), with the
 #                                    write-load deleting as it goes
 #   scenario.sh servers [LABEL]      each server's view, one log line
@@ -249,7 +253,8 @@ ha_begin() {
 }
 
 # ha_end NAME: the write-load stopped, checked and cleaned; the servers'
-# journals since the scenario began; the end line.
+# journals since the scenario began (journal-TAG-SERVER.txt, the run's tag, so
+# that a scenario run twice keeps both); the end line.
 ha_end() {
 	local name=$1 s f wl=none
 	if [ "$WLOAD" = 1 ]; then
@@ -258,7 +263,7 @@ ha_end() {
 		if [ "$WL_CLEAN" = 1 ]; then "$HERE/wload.sh" clean "$WL_TAG" || wl="$wl,clean-FAIL"; fi
 	fi
 	for s in "${SRV_NAMES[@]}"; do
-		f=$SOAK_DIR/journal-$name-$s.txt
+		f=$SOAK_DIR/journal-${WL_TAG:-$name}-$s.txt
 		SSH_TIMEOUT=60 on "$s" "sudo journalctl -u hivemind --since @$HA_T0 -o short-iso-precise --no-pager" >"$f" 2>/dev/null || true
 		ev event "$name journal $s lines=$(wc -l <"$f") errors=$(grep -c 'level=ERROR' "$f" || true) warns=$(grep -c 'level=WARN' "$f" || true) lost=$(grep -c 'node lost' "$f" || true) leader_lines=$(grep -ci 'leader' "$f" || true)"
 	done
@@ -562,6 +567,83 @@ service_restart() {
 	ha_end "$name"
 }
 
+# hm_signal NAME SIG: SIG to the main process of NAME's hivemind unit.
+hm_signal() {
+	SSH_TIMEOUT=20 on "$1" "p=\$(systemctl show -p MainPID --value hivemind.service); [ \"\${p:-0}\" != 0 ] && sudo kill -$2 \$p"
+}
+
+# router_noleader [GAP]: a server's router that starts while no server leads
+# (the eighth soak's third finding). The two followers' hivemind paused
+# (SIGSTOP: their sockets stay open, nothing answers), so the leader steps
+# down; 2 s later its hivemind stopped and started (systemctl), so its
+# router starts with no leader; GAP s (1) after the start one of the others
+# resumed (SIGCONT), so the two elect a leader; RN_REST s (15) later the
+# last one. The clients through the restarted server's router (outside.sh)
+# count what failed once its listener was open; its journal says when it
+# listened and read the table. Ends once every server is a voter in the
+# view of the leader a majority names and the cluster has converged, plus
+# 10 s.
+router_noleader() {
+	local name=router-noleader gap=${1:-1} T s P=() tf t now end fpid newl="" done_at=0 ok gone=0
+	need_servers "$name"
+	ha_begin "$name"
+	T=$(leader) || die "$name: no leader"
+	for s in "${SRV_NAMES[@]}"; do [ "$s" = "$T" ] || P+=("$s"); done
+	ev event "$name target $T paused=${P[*]} gap=$gap"
+	tf=$(now_ms)
+	(
+		for s in "${P[@]}"; do
+			ev event "$name $s fault pause"
+			hm_signal "$s" STOP || ev event "$name $s pause-failed"
+		done
+		sleep 2
+		ev event "$name $T fault stop"
+		SSH_TIMEOUT=60 on "$T" "sudo systemctl stop hivemind.service" || ev event "$name $T stop-failed"
+		ev event "$name $T stopped"
+		SSH_TIMEOUT=60 on "$T" "sudo systemctl start hivemind.service" || ev event "$name $T start-failed"
+		ev event "$name $T started"
+		sleep "$gap"
+		ev event "$name ${P[0]} fault resume"
+		hm_signal "${P[0]}" CONT || ev event "$name ${P[0]} resume-failed"
+		sleep "${RN_REST:-15}"
+		ev event "$name ${P[1]} fault resume"
+		hm_signal "${P[1]}" CONT || ev event "$name ${P[1]} resume-failed"
+		ev event "$name resumed-all"
+	) &
+	fpid=$!
+	end=$(($(date +%s) + 600))
+	while [ "$(date +%s)" -lt "$end" ]; do
+		t=$(now_ms)
+		now=$(date +%s)
+		ha_observe "$name"
+		[ "$HLEAD" != none ] || gone=1
+		if [ -z "$newl" ] && [ "$gone" = 1 ] && [ "$HLEAD" != none ] && [ -n "$HLEAD" ]; then
+			newl=$HLEAD
+			ev event "$name leader-again $newl ms_after_fault=$(($(now_ms) - tf))"
+		fi
+		if [ -n "$newl" ] && ! kill -0 "$fpid" 2>/dev/null && [ "$HCONV" = yes ]; then
+			ok=1
+			for s in "${SRV_NAMES[@]}"; do
+				[ "$s" = "$HLEAD" ] || rejoined "$name" "$s" || ok=0
+			done
+			if [ "$ok" = 1 ]; then
+				[ "$done_at" != 0 ] || {
+					done_at=$now
+					ev event "$name all-back leader=$HLEAD"
+				}
+				[ "$now" -lt $((done_at + 10)) ] || break
+			fi
+		fi
+		ha_tick "$t"
+	done
+	[ "$(date +%s)" -lt "$end" ] || ev event "$name measure-timeout leader=${newl:-none} converged=$HCONV"
+	wait "$fpid" 2>/dev/null || true
+	# never leave a server paused
+	for s in "${P[@]}"; do hm_signal "$s" CONT >/dev/null 2>&1 || true; done
+	ev event "$name $T router $(on "$T" "sudo journalctl -u hivemind --since @$((tf / 1000)) -o short-iso-precise --no-pager | grep -E 'router listening|routing table|managing certificates|this server leads|shutting down|handed the leadership|stopped' | cut -c1-260" 2>/dev/null | tr -s ' \n' ' ' | cut -c1-2000)"
+	ha_end "$name"
+}
+
 # The status sampler of rollout-leader, on the client machine through the
 # client that knows every server (wload.sh's CLI and env): hivemind status
 # --json every 0.5 s; one line per sample, "T sample N" and each app below
@@ -689,6 +771,32 @@ steady_journals() {
 	done
 }
 
+# raft_sample: on each server, the Raft log's last index and, after the
+# first sample, the entries appended since the one before: how many, the
+# bytes of their data, and how many carry a statement that writes a pending
+# replica's reason (the bytes "pending_reason"; the eighth soak's fourth
+# finding). One "steady raft" line per server. steady takes one every
+# STEADY_RAFT_EVERY s (300), so no entry is compacted away between two.
+declare -A RAFT_IDX
+raft_sample() {
+	local s r q i n b p
+	for s in "${SRV_NAMES[@]}"; do
+		if [ -z "${RAFT_IDX[$s]:-}" ]; then
+			q="SELECT (SELECT max(idx) FROM logs), 0, 0, 0"
+		else
+			q="SELECT (SELECT max(idx) FROM logs), count(*), coalesce(sum(length(data)), 0), coalesce(sum(instr(data, X'70656e64696e675f726561736f6e') > 0), 0) FROM logs WHERE idx > ${RAFT_IDX[$s]}"
+		fi
+		r=$(SSH_TIMEOUT=30 on "$s" "sudo sqlite3 -separator ' ' $DATA/raft/raft.db \"$q\"" 2>/dev/null) || r=""
+		read -r i n b p <<<"$r" || true
+		if [[ "$i" =~ ^[0-9]+$ ]] && [[ "$p" =~ ^[0-9]+$ ]]; then
+			ev event "steady raft $s idx=$i entries=$n bytes=$b reasons=$p"
+			RAFT_IDX[$s]=$i
+		else
+			ev event "steady raft $s fail=$(tr -s ' \n' '__' <<<"$r" | cut -c1-200)"
+		fi
+	done
+}
+
 # steady [SECS]: the steady state, as before (mark steady begin/end, the
 # routers' metrics at both ends), for SECS (3600); with the write-load, which
 # deletes the app it deployed $STEADY_KEEP (100) cycles before, so the store
@@ -703,7 +811,15 @@ steady() {
 	t0=$(date +%s)
 	ev event "steady servers $(servers_line)"
 	metrics_snap steady-begin
-	sleep "$secs"
+	raft_sample
+	local rest=$secs step=${STEADY_RAFT_EVERY:-300} d
+	while [ "$rest" -gt 0 ]; do
+		d=$step
+		[ "$d" -le "$rest" ] || d=$rest
+		sleep "$d"
+		rest=$((rest - d))
+		raft_sample
+	done
 	metrics_snap steady-end
 	ev mark "steady end"
 	ev event "steady servers $(servers_line)"

@@ -55,6 +55,7 @@
 #   scenario.sh end NAME
 #   scenario.sh leader-kill | leader-partition [SECS] | quorum-loss |
 #               service-restart [leader|follower] | rollout-leader |
+#               router-noleader [GAP] |
 #               steady [SECS] | servers [LABEL] | ha-selftest
 #                                             the scenarios of several servers,
 #                                             with the write-load: see ha.sh
@@ -1977,6 +1978,7 @@ leader-partition) leader_partition "$@" ;;
 quorum-loss) quorum_loss ;;
 service-restart) service_restart "$@" ;;
 rollout-leader) rollout_leader ;;
+router-noleader) router_noleader "$@" ;;
 steady) steady "$@" ;;
 servers) ev servers "${1:-now} $(servers_line)" ;;
 ha-selftest) ha_selftest ;;
