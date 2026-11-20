@@ -275,6 +275,10 @@ type Store struct {
 	placeMu      sync.Mutex
 	placeKey     [sha256.Size]byte
 	placeSet     bool
+	// placeRuns counts the placements of pending replicas that ran, for
+	// the tests of the skip: a reason that did not change is not written
+	// again, so the rows do not show a run.
+	placeRuns atomic.Int64
 
 	// credSizes is the size of each stored registry credential in an
 	// assignment, by host, or nil until it is read (assignbytes.go).
@@ -753,6 +757,7 @@ func (s *Store) placePendingRows(ctx context.Context, tx *sql.Tx) ([]Assignment,
 			return nil, nil
 		}
 	}
+	s.placeRuns.Add(1)
 	// Every replica that still has a container on a node holds its host
 	// ports and capacity, marked for removal or not, and so does every surge.
 	placed, err := placedFrom(ctx, tx, fp)
@@ -783,8 +788,13 @@ func (s *Store) placePendingRows(ctx context.Context, tx *sql.Tx) ([]Assignment,
 		}
 		if perr != nil {
 			reasons[k] = perr.Error()
-			if _, err := tx.ExecContext(ctx, `UPDATE replicas SET pending_reason = ?, updated_at = ? WHERE app = ? AND idx = ?`,
-				reasons[k], now, p.App, p.Index); err != nil {
+			// Only a reason that changed is written, so updated_at is when
+			// it was set: every pass wrote every pending replica's reason
+			// again, and with many pending replicas each write and report
+			// carried them all through the Raft log (eighth soak: 63 % of
+			// its bytes, for 200 replicas that could not be placed).
+			if _, err := tx.ExecContext(ctx, `UPDATE replicas SET pending_reason = ?, updated_at = ? WHERE app = ? AND idx = ? AND pending_reason != ?`,
+				reasons[k], now, p.App, p.Index, reasons[k]); err != nil {
 				return nil, err
 			}
 			continue

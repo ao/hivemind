@@ -184,8 +184,8 @@ func (s *Store) releaseNode(ctx context.Context, tx *sql.Tx, id string) error {
 	for _, r := range reps {
 		if len(r.Spec.Volumes) > 0 {
 			reason := fmt.Sprintf("volume is on node %s, which is unavailable; the app stays down until the node returns", id)
-			if _, err := tx.ExecContext(ctx, `UPDATE replicas SET pending_reason = ?, updated_at = ? WHERE app = ? AND idx = ?`,
-				reason, now, r.App, r.Index); err != nil {
+			if _, err := tx.ExecContext(ctx, `UPDATE replicas SET pending_reason = ?, updated_at = ? WHERE app = ? AND idx = ? AND pending_reason != ?`,
+				reason, now, r.App, r.Index, reason); err != nil {
 				return err
 			}
 			continue

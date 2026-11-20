@@ -9,6 +9,7 @@ import (
 	"regexp"
 	"strings"
 	"time"
+	"unicode"
 )
 
 // The write connection's driver. It is the sqlite driver with one thing
@@ -215,9 +216,21 @@ func firstSQLLine(q string) string {
 	return q
 }
 
-// recorder collects the write statements of one transaction.
+// recorder collects the write statements of one transaction that changed
+// a row. A single INSERT, UPDATE, DELETE or REPLACE that changed none is
+// left out: it changed nothing of the state the leader ran it on, and
+// every server applies the batch to that same state, statement by
+// statement, so it would change nothing there either (docs/ha.md). In the
+// eighth soak, such statements, the cleanup DELETEs of every report, were
+// 18 % of the Raft log's bytes. SQLite counts a row an UPDATE matched even
+// when it sets the values the row has, so an UPDATE that may set the same
+// values says so in its WHERE.
 type recorder struct {
 	stmts []Statement
+	// wrote is true once a write statement has run, recorded or not: a
+	// transaction that ran one needs the leadership, as before, even when
+	// it changed nothing.
+	wrote bool
 	// changed is true once a statement has changed a row.
 	changed bool
 	// err is the first statement that cannot be recorded, as one with a
@@ -248,10 +261,35 @@ func (r *recorder) add(query string, args []driver.NamedValue, res driver.Result
 			}
 		}
 	}
+	r.wrote = true
+	n, err := res.RowsAffected()
+	if err == nil && n == 0 && singleDML(query) {
+		return
+	}
 	r.stmts = append(r.stmts, Statement{SQL: query, Args: vals})
-	if n, err := res.RowsAffected(); err == nil && n > 0 {
+	if err == nil && n > 0 {
 		r.changed = true
 	}
+}
+
+// singleDML reports whether query is one INSERT, UPDATE, DELETE or
+// REPLACE statement, whose result's rows affected are its own: the driver
+// gives the last statement's for several, and a statement of another kind
+// leaves the count of the one before.
+func singleDML(query string) bool {
+	q := strings.TrimSuffix(strings.TrimSpace(query), ";")
+	if strings.Contains(q, ";") {
+		return false
+	}
+	i := strings.IndexFunc(q, unicode.IsSpace)
+	if i < 0 {
+		return false
+	}
+	switch strings.ToUpper(q[:i]) {
+	case "INSERT", "UPDATE", "DELETE", "REPLACE":
+		return true
+	}
+	return false
 }
 
 // setRecorder sets rec on the write connection conn holds, nil to stop.

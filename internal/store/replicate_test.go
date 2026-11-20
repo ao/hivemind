@@ -9,6 +9,7 @@ import (
 	"math"
 	"path/filepath"
 	"reflect"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -573,4 +574,84 @@ func TestRecorderRefusesAWriteAsAQuery(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+}
+
+// TestUnchangedRowsAreNotReplicated: a placement pass writes the reason of
+// a replica that cannot be placed only when it changes, and a statement
+// that changes no row is left out of the batch, so a transaction of only
+// such statements appends nothing. In the eighth soak every pass wrote
+// every pending replica's reason again, 63 % of the Raft log's bytes, and
+// every report's cleanup DELETEs that deleted nothing another 18 %. A
+// follower still refuses such a write, and the two stores still agree.
+func TestUnchangedRowsAreNotReplicated(t *testing.T) {
+	clock := &fakeClock{t: time.Unix(1_700_000_000, 0)}
+	leader, follower, l := replicatedPair(t, clock)
+	ctx := ctxT(t)
+	if err := leader.UpsertNode(ctx, Node{ID: node1, Name: "one", CPU: 4, Memory: 8 << 30}); err != nil {
+		t.Fatal(err)
+	}
+	big := spec.App{Name: "big", Image: "nginx", Replicas: 1, Resources: spec.Resources{CPU: 64}}
+	if _, err := leader.PutApp(ctx, big); err != nil {
+		t.Fatal(err)
+	}
+	if r := replicasOf(t, follower, "big"); len(r) != 1 || r[0].PendingReason == "" {
+		t.Fatalf("the follower's replica of big: %+v, want one with a pending reason", r)
+	}
+	reasonWrites := func(from int) (n int) {
+		t.Helper()
+		l.mu.Lock()
+		defer l.mu.Unlock()
+		for _, e := range l.entries[from:] {
+			b, err := DecodeBatch(e)
+			if err != nil {
+				t.Fatal(err)
+			}
+			for _, st := range b.Stmts {
+				if strings.Contains(st.SQL, "pending_reason = ?") && slices.Contains(st.Args, any("big")) {
+					n++
+				}
+			}
+		}
+		return n
+	}
+	entries := func() int {
+		l.mu.Lock()
+		defer l.mu.Unlock()
+		return len(l.entries)
+	}
+
+	// Another app is placed, so the pass runs again over big, which it
+	// still cannot place, for the same reason.
+	from := entries()
+	clock.Advance(2 * time.Second)
+	if _, err := leader.PutApp(ctx, spec.App{Name: "small", Image: "nginx", Replicas: 1}); err != nil {
+		t.Fatal(err)
+	}
+	if n := reasonWrites(from); n != 0 {
+		t.Fatalf("the pass wrote big's unchanged reason %d times", n)
+	}
+	// A reason that changes is written.
+	from = entries()
+	if _, err := leader.SetNodeEligibility(ctx, node1, false); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := leader.ReconcileNodes(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if n := reasonWrites(from); n != 1 {
+		t.Fatalf("big's reason, changed, was written %d times", n)
+	}
+
+	// A write that changes no row appends nothing, and a follower refuses it.
+	from = entries()
+	if err := leader.TLSDelete(ctx, "certificates/acme/none.example.com"); err != nil {
+		t.Fatal(err)
+	}
+	if n := entries() - from; n != 0 {
+		t.Fatalf("a delete of a key that is not there appended %d entries", n)
+	}
+	if err := follower.TLSDelete(ctx, "certificates/acme/none.example.com"); !errors.Is(err, ErrNotLeader) {
+		t.Fatalf("a follower's delete that changes nothing: %v, want ErrNotLeader", err)
+	}
+	compareDumps(t, "follower", dumpTables(t, leader), dumpTables(t, follower))
 }

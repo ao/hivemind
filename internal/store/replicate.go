@@ -91,10 +91,12 @@ func (s *Store) replicatedTx(ctx context.Context, r *replicator, fn func(*sql.Tx
 	if err != nil {
 		return err
 	}
+	if rec.wrote && werr != nil {
+		return werr
+	}
+	// A transaction whose writes changed no row appends nothing, and costs
+	// no Raft round (recorder).
 	if len(rec.stmts) > 0 {
-		if werr != nil {
-			return werr
-		}
 		seq := s.seq.Add(1)
 		data, err := EncodeBatch(Batch{Schema: SchemaVersion, Origin: s.origin, Seq: seq, Stmts: rec.stmts})
 		if err != nil {

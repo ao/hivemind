@@ -11,16 +11,16 @@ import (
 	"github.com/ao/hivemind/internal/spec"
 )
 
-// attemptAt returns when placement last wrote replica idx of app: each run
-// that leaves it pending writes its reason and the time.
-func (e *schedEnv) attemptAt(app string, idx int) (time.Time, string) {
+// attemptAt returns how many placements of pending replicas have run, and
+// the reason of replica idx of app. A run that leaves the reason as it was
+// does not write it again, so the row does not show the run.
+func (e *schedEnv) attemptAt(app string, idx int) (int64, string) {
 	e.t.Helper()
-	var at int64
 	var reason string
-	if err := e.s.db.QueryRow(`SELECT updated_at, pending_reason FROM replicas WHERE app = ? AND idx = ?`, app, idx).Scan(&at, &reason); err != nil {
+	if err := e.s.db.QueryRow(`SELECT pending_reason FROM replicas WHERE app = ? AND idx = ?`, app, idx).Scan(&reason); err != nil {
 		e.t.Fatal(err)
 	}
-	return time.Unix(0, at), reason
+	return e.s.placeRuns.Load(), reason
 }
 
 // The scale run: one replica that no node could take made every sweep and
@@ -65,21 +65,21 @@ func TestPlacementSkippedWhenNothingChanged(t *testing.T) {
 	if err := e.s.ReportStatus(ctx, node1, []Status{{Name: "hivemind-blk-0-g1", ContainerID: "b", App: "blk", Generation: 1, State: "running", Ready: true}}); err != nil {
 		t.Fatal(err)
 	}
-	if at, _ := e.attemptAt("web", 0); !at.Equal(first) {
-		t.Fatalf("placement ran at %v with nothing changed since %v", at, first)
+	if at, _ := e.attemptAt("web", 0); at != first {
+		t.Fatalf("placement ran %d times with nothing changed", at-first)
 	}
 
 	// A new node: placement runs, and the node is not ready for 30 s.
 	e.clock.Advance(time.Second)
 	e.renew(nodeB)
 	second, reason := e.attemptAt("web", 0)
-	if !second.After(first) {
-		t.Fatalf("placement did not run for a new node: last at %v", second)
+	if second <= first {
+		t.Fatalf("placement did not run for a new node: %d runs, %d before", second, first)
 	}
 	tick(20*time.Second, node1, nodeB)
 	e.sweep()
-	if at, r := e.attemptAt("web", 0); !at.Equal(second) || r != reason {
-		t.Fatalf("placement ran at %v (%q), with nothing changed since %v (%q)", at, r, second, reason)
+	if at, r := e.attemptAt("web", 0); at != second || r != reason {
+		t.Fatalf("placement ran %d times (%q), with nothing changed (%q)", at-second, r, reason)
 	}
 	// 30 s after it registered, the node takes the replica.
 	tick(10*time.Second, node1, nodeB)
