@@ -36,7 +36,7 @@ Two things share the port, told apart by ALPN: `hivemind-raft/1` is Raft's own t
 
 The Raft address of a server is its advertise address with this port, such as `10.0.0.6:4486` or `hm-2.example.internal:4486`, and the dialing side checks that the certificate names that host, as a worker checks the server it dials.
 
-Timing: raft's defaults for a LAN, a heartbeat timeout and an election timeout of 1 s and a leader lease of 500 ms. A follower that hears nothing for 1 to 2 s starts an election, so a new leader is expected within a few seconds of the old one's loss; the integration test measured 1.0 s after a kill and 1.9 s after a partition ([measurements](#measurements)). A leader that cannot reach a majority for 500 ms steps down. A connection on the server port is dialled with a 3 s timeout, and fails when the other machine has not acknowledged its data for 5 s (`TCP_USER_TIMEOUT`, on Linux), so a request passed to a leader whose machine is gone fails in seconds rather than at its client's timeout.
+Timing: raft's defaults for a LAN, a heartbeat timeout and an election timeout of 1 s and a leader lease of 500 ms. A follower that hears nothing for 1 to 2 s starts an election, so a new leader is expected within a few seconds of the old one's loss; the integration test measured 0.7 to 1.8 s after a kill and 1.4 to 1.9 s after a partition ([measurements](#measurements)). A leader that cannot reach a majority for 500 ms steps down. A connection on the server port is dialled with a 3 s timeout, and fails when the other machine has not acknowledged its data for 5 s (`TCP_USER_TIMEOUT`, on Linux), so a request passed to a leader whose machine is gone fails in seconds rather than at its client's timeout.
 
 ## Replicating the store
 
@@ -204,4 +204,16 @@ Unit tests: the store's replication (a workload over every table applied on a le
 
 ## Measurements
 
-To be filled in from the CI run.
+On one c8g.4xlarge (16 arm64 vCPUs, Amazon Linux 2023), with the three servers and two workers of `scripts/integration-ha.sh` as Docker-in-Docker containers on one bridge network, so with no real network between them:
+
+| What | Run 1 | Run 2 |
+|---|---|---|
+| A new leader after the leader's container was killed, as the survivors' own Raft state shows it | 1,764 ms | 746 ms |
+| A write through a follower's API taken after the kill | 1,796 ms | 780 ms |
+| A new leader after the leader was cut off the network | 1,905 ms | 1,355 ms |
+| Writes acknowledged before the kill / after it / refused or timed out; every acknowledged one in every server's store | 26 / 51 / 3 | 25 / 53 / 2 |
+| Requests through the workers' routers during the failover, all 200 | 40 | 40 |
+
+In run 1, the old leader's replicas ran on other nodes 34 s after the kill, with a 30 s start grace. Three `PUT /v1/apps` on a three-server cluster in an earlier run of the same script took 8.9, 8.9 and 9.1 ms on the leader, as its request log has them; a cluster of one was not timed in the same way, so the cost of the log over one server is not measured here. In the unit tests, three servers on loopback with timeouts cut to 300 ms elected a new leader 608 ms after the leader stopped.
+
+The binary for linux/amd64, built with `-trimpath -ldflags "-s -w"`, is 21,549,216 bytes, 1,642,496 bytes (8.3%) more than at the commit this branch was cut from (19,906,720).
