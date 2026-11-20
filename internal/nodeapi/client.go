@@ -128,6 +128,22 @@ type swapTransport struct {
 	// swap serialises the changes of cur, so that a reset and a new TLS
 	// config cannot undo each other.
 	swap sync.Mutex
+
+	// A cluster of several servers (docs/ha.md). servers is the list the
+	// client knows, host:port of each node listener, and current the one
+	// it uses; nil and "" for one server. onServers is called with a new
+	// list a reply named (ServersHeader). others holds a transport for
+	// each server but the one cur's TLS config names, a clone of cur that
+	// names that server instead.
+	servers   atomic.Pointer[[]string]
+	current   atomic.Pointer[string]
+	onServers atomic.Pointer[func([]string)]
+	others    sync.Map // host:port -> *otherTransport
+}
+
+type otherTransport struct {
+	base *http.Transport
+	t    *http.Transport
 }
 
 func (s *swapTransport) RoundTrip(r *http.Request) (*http.Response, error) {
@@ -161,7 +177,7 @@ func (s *swapTransport) RoundTrip(r *http.Request) (*http.Response, error) {
 		r = r.WithContext(httptrace.WithClientTrace(r.Context(), &httptrace.ClientTrace{GotConn: conn.got}))
 	}
 	sent := time.Now()
-	resp, err := s.cur.Load().RoundTrip(r)
+	resp, host, err := s.send(r)
 	if err != nil {
 		return nil, clockHint(err)
 	}
@@ -173,11 +189,12 @@ func (s *swapTransport) RoundTrip(r *http.Request) (*http.Response, error) {
 		if c != nil {
 			addr = c.RemoteAddr().String()
 		}
-		if err := s.epoch.check(r.URL.Host, addr, resp.Header.Get(EpochHeader)); err != nil {
+		if err := s.epoch.check(host, addr, resp.Header.Get(EpochHeader)); err != nil {
 			s.dropStale(resp, c)
 			return nil, err
 		}
 	}
+	s.learnServers(resp.Header.Get(ServersHeader))
 	s.server.see(resp.Header.Get(VersionHeader))
 	s.clock.observe(sent, time.Now(), resp)
 	if f := s.caSeen.Load(); f != nil {
@@ -235,6 +252,185 @@ func (s *swapTransport) reset() {
 	defer s.swap.Unlock()
 	old := s.cur.Swap(s.cur.Load().Clone())
 	old.CloseIdleConnections()
+	s.dropOthers()
+}
+
+// dropOthers forgets the transports to the other servers, after cur
+// changed, and closes their idle connections.
+func (s *swapTransport) dropOthers() {
+	s.others.Range(func(k, v any) bool {
+		v.(*otherTransport).t.CloseIdleConnections()
+		s.others.Delete(k)
+		return true
+	})
+}
+
+// transportFor is the transport for a request to host: cur for the server
+// its TLS config names, and for any other a clone of cur that names host.
+func (s *swapTransport) transportFor(host string) *http.Transport {
+	cur := s.cur.Load()
+	name, _, err := net.SplitHostPort(host)
+	if err != nil || cur.TLSClientConfig == nil || cur.TLSClientConfig.ServerName == "" || cur.TLSClientConfig.ServerName == name {
+		return cur
+	}
+	if v, ok := s.others.Load(host); ok && v.(*otherTransport).base == cur {
+		return v.(*otherTransport).t
+	}
+	t := cur.Clone()
+	t.TLSClientConfig = cur.TLSClientConfig.Clone()
+	t.TLSClientConfig.ServerName = name
+	s.others.Store(host, &otherTransport{base: cur, t: t})
+	return t
+}
+
+// serverList is the servers the client knows, or nil for one.
+func (s *swapTransport) serverList() []string {
+	if p := s.servers.Load(); p != nil {
+		return *p
+	}
+	return nil
+}
+
+// noLeader reports a reply that says no server leads: the client tries
+// another server.
+func noLeader(resp *http.Response) bool {
+	return resp.StatusCode == http.StatusServiceUnavailable && resp.Header.Get(NoLeaderHeader) != ""
+}
+
+// send makes the request, to the server in use, and with several servers
+// moves to the next one when a server does not answer or answers that no
+// server leads, as long as the request's body can be sent again. It
+// returns the server that answered.
+func (s *swapTransport) send(r *http.Request) (*http.Response, string, error) {
+	list := s.serverList()
+	if len(list) < 2 {
+		resp, err := s.transportFor(r.URL.Host).RoundTrip(r)
+		return resp, r.URL.Host, err
+	}
+	start := 0
+	if p := s.current.Load(); p != nil {
+		for i, h := range list {
+			if h == *p {
+				start = i
+			}
+		}
+	}
+	var lastResp *http.Response
+	var lastErr error
+	lastHost := r.URL.Host
+	for i := 0; i < len(list); i++ {
+		host := list[(start+i)%len(list)]
+		req := r
+		if i > 0 && r.Body != nil && r.Body != http.NoBody && r.GetBody == nil {
+			break // a stream cannot be sent again
+		}
+		if host != r.URL.Host || i > 0 {
+			req = r.Clone(r.Context())
+			u := *r.URL
+			u.Host = host
+			req.URL, req.Host = &u, ""
+			if i > 0 && r.GetBody != nil {
+				b, err := r.GetBody()
+				if err != nil {
+					break
+				}
+				req.Body = b
+			}
+		}
+		resp, err := s.transportFor(host).RoundTrip(req)
+		if err == nil && !noLeader(resp) {
+			if lastResp != nil {
+				lastResp.Body.Close()
+			}
+			if p := s.current.Load(); p == nil || *p != host {
+				s.current.Store(&host)
+			}
+			return resp, host, nil
+		}
+		// A server's answer that none leads says more than another's
+		// silence, so it is the one kept.
+		if err == nil {
+			if lastResp != nil {
+				lastResp.Body.Close()
+			}
+			lastResp, lastHost = resp, host
+		} else if lastResp == nil {
+			lastErr, lastHost = err, host
+		}
+		if r.Context().Err() != nil {
+			break
+		}
+	}
+	if lastResp != nil {
+		return lastResp, lastHost, nil
+	}
+	return nil, lastHost, lastErr
+}
+
+// learnServers takes the server list a reply named, when it is new.
+func (s *swapTransport) learnServers(v string) {
+	list := ParseServers(v)
+	if len(list) == 0 {
+		return
+	}
+	if old := s.serverList(); slicesEqual(old, list) {
+		return
+	}
+	s.servers.Store(&list)
+	if f := s.onServers.Load(); f != nil {
+		(*f)(append([]string(nil), list...))
+	}
+}
+
+func slicesEqual(a, b []string) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := range a {
+		if a[i] != b[i] {
+			return false
+		}
+	}
+	return true
+}
+
+// WithServers gives the client the servers of a cluster of several, from
+// node.json: it uses the first that answers, and the list a reply names
+// replaces it. With one server, or none, it changes nothing.
+func WithServers(list []string) ClientOption {
+	return func(c *Client) {
+		var ok []string
+		for _, h := range list {
+			if ValidateServerAddress(h) == nil {
+				ok = append(ok, h)
+			}
+		}
+		if len(ok) > 1 {
+			c.tr.servers.Store(&ok)
+		}
+	}
+}
+
+// OnServers makes the client call f with each new list of servers a reply
+// names, so that a worker can keep it in node.json. f must not block. Nil
+// removes it.
+func (c *Client) OnServers(f func([]string)) {
+	if f == nil {
+		c.tr.onServers.Store(nil)
+		return
+	}
+	c.tr.onServers.Store(&f)
+}
+
+// Servers is the list of servers the client knows, nil for one.
+func (c *Client) Servers() []string { return append([]string(nil), c.tr.serverList()...) }
+
+// Server is the server the client uses now, host:port.
+func (c *Client) Server() string {
+	if p := c.tr.current.Load(); p != nil {
+		return *p
+	}
+	return strings.TrimPrefix(c.base, "https://")
 }
 
 // WithCATrust makes the client send f's value, the CAs the node trusts
@@ -263,6 +459,7 @@ func (c *Client) SetTLSConfig(cfg *tls.Config) {
 	next.TLSClientConfig = cfg
 	old := c.tr.cur.Swap(next)
 	old.CloseIdleConnections()
+	c.tr.dropOthers()
 }
 
 // OnAnswer makes the client call f after each reply from the server, of any
@@ -279,7 +476,13 @@ func (c *Client) OnAnswer(f func()) {
 }
 
 // CloseIdleConnections is what http.Client.CloseIdleConnections calls.
-func (s *swapTransport) CloseIdleConnections() { s.cur.Load().CloseIdleConnections() }
+func (s *swapTransport) CloseIdleConnections() {
+	s.cur.Load().CloseIdleConnections()
+	s.others.Range(func(_, v any) bool {
+		v.(*otherTransport).t.CloseIdleConnections()
+		return true
+	})
+}
 
 // CloseIdleConnections closes the client's idle connections to the server.
 func (c *Client) CloseIdleConnections() { c.http.CloseIdleConnections() }
@@ -420,6 +623,11 @@ func statusError(resp *http.Response) error {
 		case resp.Header.Get(VersionHeader) == "":
 			return fmt.Errorf("%w: %s", ErrNotRegistered, msg)
 		}
+	}
+	if noLeader(resp) {
+		// No server of the cluster leads, as while a majority is down: the
+		// worker waits as it does for a server that does not answer.
+		return &UnreachableError{Err: fmt.Errorf("no server leads the cluster: %s", msg)}
 	}
 	if resp.StatusCode == http.StatusForbidden && e.Error == RemovedMessage {
 		return ErrNodeRemoved

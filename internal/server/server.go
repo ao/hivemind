@@ -98,6 +98,15 @@ type Config struct {
 	// /v1/ca and POST /v1/ca/rotation/{step}. Nil means this server has no
 	// cluster CA, and those routes answer 503.
 	CA *carotate.Manager
+	// Servers lists the servers of the cluster for GET /v1/servers, and
+	// RemoveServer removes one for DELETE /v1/servers/{id}, returning what
+	// to do with its node (docs/ha.md#membership). Nil answers 503.
+	Servers      func(ctx context.Context) (ServersReply, error)
+	RemoveServer func(ctx context.Context, id string, force bool) (string, error)
+	// IssueServerJoinToken makes a server join token, with a warning to
+	// pass on, such as that the cluster would have two servers. Nil means
+	// this server cannot add servers, and the request answers 503.
+	IssueServerJoinToken func(ttl time.Duration) (token string, expires time.Time, warning string, err error)
 }
 
 // Defaults for Config.LoginLimiter: an address may fail LoginFailLimit
@@ -232,6 +241,8 @@ func (s *Server) routes() {
 	r.HandleFunc("POST /v1/backup", s.postBackup)
 	r.HandleFunc("GET /v1/ca", s.getCA)
 	r.HandleFunc("POST /v1/ca/rotation/{step}", s.postCARotation)
+	r.HandleFunc("GET /v1/servers", s.listServers)
+	r.HandleFunc("DELETE /v1/servers/{id}", s.removeServer)
 	r.HandleFunc("GET /metrics", s.metricsHandler)
 }
 

@@ -42,6 +42,9 @@ var (
 	// ErrFixed is a step on a Manager made with Fixed, which has no data
 	// directory.
 	ErrFixed = errors.New("this server cannot rotate its CA")
+	// ErrSeveralServers is a rotation started in a cluster of several
+	// servers, which 2.3.0 does not do (docs/ha.md#compatibility).
+	ErrSeveralServers = errors.New("the cluster has more than one server, and a CA rotation needs a cluster of one: remove the other servers (hivemind server remove), rotate, and join them again")
 )
 
 // RefusedError is a step refused while nodes are not where it needs them.
@@ -291,6 +294,9 @@ func (m *Manager) Current() *pki.CA { return m.cur.Load().current }
 // Listener is the CA that signs the server's own certificate, which both
 // cluster listeners present. Join tokens name it.
 func (m *Manager) Listener() *pki.CA { return m.cur.Load().listener }
+
+// Rotating reports whether a CA rotation is in progress.
+func (m *Manager) Rotating() bool { return m.cur.Load().rot != nil }
 
 // ListenerChanged receives a value when the listener CA has changed, so
 // the server's certificate is issued again.

@@ -8,7 +8,8 @@
 //     node.
 //   - the join listener, on the cluster port plus one. It presents the same
 //     server certificate but asks for no client certificate, because a
-//     joining node has none yet. It serves POST /join and nothing else.
+//     joining node has none yet. It serves POST /join, and POST /join-server
+//     for a server of a cluster of several (docs/ha.md), and nothing else.
 //
 // The two listeners are separate so that a mistake in routing can't expose a
 // node route without a certificate: the join listener's mux has no node
@@ -28,9 +29,11 @@ import (
 	"net/http"
 	"net/netip"
 	"strconv"
+	"sync/atomic"
 	"time"
 
 	"github.com/ao/hivemind/internal/carotate"
+	"github.com/ao/hivemind/internal/ha"
 	"github.com/ao/hivemind/internal/logrelay"
 	"github.com/ao/hivemind/internal/nodeapi"
 	"github.com/ao/hivemind/internal/pki"
@@ -111,6 +114,15 @@ type Config struct {
 	// Version is the server's hivemind version, sent in
 	// nodeapi.VersionHeader on every node API reply. Empty sends none.
 	Version string
+	// HA holds the Leadership of a cluster of several servers; nil, or an
+	// empty holder, for a cluster of one (ha.go).
+	HA *HAHolder
+	// JoinServer admits a server with a server join token, and
+	// ServerTokens redeems those tokens. Nil refuses server joins.
+	JoinServer   ServerJoiner
+	ServerTokens *pki.Tokens
+	// epoch holds Epoch for the routes, as Listen makes it (SetEpoch).
+	epoch *atomic.Int64
 	// Epoch is the epoch of the server's store (store.Cluster.Epoch), sent
 	// in nodeapi.EpochHeader on every node API reply. A request from a
 	// node that has seen a higher epoch is refused, and logged once: this
@@ -134,6 +146,10 @@ type Cluster struct {
 	mln   net.Listener
 	jln   net.Listener
 	certs *serverCertSource
+	// nodeHandler and joinHandler are the listeners' routes, without the
+	// pass to the leader.
+	nodeHandler, joinHandler http.Handler
+	epoch                    *atomic.Int64
 	// refused logs the node listener's failed handshakes (handshake.go).
 	refused *refusedLog
 	stop    context.CancelFunc
@@ -206,15 +222,21 @@ func Listen(cfg Config) (*Cluster, error) {
 		return nil, fmt.Errorf("join listener on %s: %w", bind, err)
 	}
 
+	cfg.epoch = &atomic.Int64{}
+	cfg.epoch.Store(cfg.Epoch)
 	if cfg.Logs == nil {
 		cfg.Logs = logrelay.New(logrelay.Options{})
 	}
-	c := &Cluster{log: log, logs: cfg.Logs, mln: mln, jln: jln, certs: certs,
+	c := &Cluster{log: log, logs: cfg.Logs, mln: mln, jln: jln, certs: certs, epoch: cfg.epoch,
 		refused: &refusedLog{log: log, now: cfg.now(), trusted: func() [][32]byte { return cfg.Rotation.Accept().Load().Fingerprints() },
 			nodeAt: storeNodeAt(cfg.Store)}}
 	c.ctx, c.stop = context.WithCancel(context.Background())
-	c.mtls = newHTTPServer(nodeRoutes(cfg, log))
-	c.join = newHTTPServer(joinRoutes(cfg, limiter, log))
+	// A follower passes both listeners' requests to the leader, which
+	// serves them with the same handlers (NodeHandler, JoinHandler).
+	c.nodeHandler = withServers(&serverList{st: cfg.Store}, nodeRoutes(cfg, log))
+	c.joinHandler = joinRoutes(cfg, limiter, log)
+	c.mtls = newHTTPServer(forwardOr(ha.KindNode, cfg.HA, c.nodeHandler))
+	c.join = newHTTPServer(forwardOr(ha.KindJoin, cfg.HA, c.joinHandler))
 	// Both listeners read the server certificate from the holder at each
 	// handshake, so a renewal takes effect without a restart.
 	// The node listener reads the client CAs it accepts from the rotation
@@ -227,6 +249,15 @@ func Listen(cfg Config) (*Cluster, error) {
 
 // ServerCert returns the server certificate new handshakes use.
 func (c *Cluster) ServerCert() *tls.Certificate { return c.certs.holder.Load() }
+
+// CertHolder holds the server certificate, which the server port of a
+// cluster of several presents too.
+func (c *Cluster) CertHolder() *pki.CertHolder { return c.certs.holder }
+
+// NodeHandler and JoinHandler serve the node and join routes as the
+// listeners do, for requests a follower passed to this server.
+func (c *Cluster) NodeHandler() http.Handler { return c.nodeHandler }
+func (c *Cluster) JoinHandler() http.Handler { return c.joinHandler }
 
 // listenAdvertise binds host:port, the bind or advertise address. Port 0
 // picks a free port. A listener that ends up on a wildcard address is

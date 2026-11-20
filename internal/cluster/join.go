@@ -18,9 +18,12 @@ import (
 const errJoinRefused = "the join token is invalid, used or expired"
 
 // joinRoutes returns the handler of the join listener. It serves POST /join
-// and nothing else.
+// and POST /join-server, and nothing else.
 func joinRoutes(cfg Config, limiter *ratelimit.FailLimiter, log *slog.Logger) http.Handler {
 	mux := http.NewServeMux()
+	mux.HandleFunc("POST "+nodeapi.JoinServerPath, func(w http.ResponseWriter, r *http.Request) {
+		joinServer(cfg, limiter, log, w, r)
+	})
 	mux.HandleFunc("POST "+nodeapi.JoinPath, func(w http.ResponseWriter, r *http.Request) {
 		join(cfg, limiter, log, w, r)
 	})

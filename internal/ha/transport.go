@@ -4,7 +4,6 @@ import (
 	"context"
 	"crypto/tls"
 	"crypto/x509"
-	"errors"
 	"fmt"
 	"log/slog"
 	"net"
@@ -282,8 +281,6 @@ func (t *observedTransport) lastSeen(id raft.ServerID) time.Time {
 	defer t.mu.Unlock()
 	return t.seen[id]
 }
-
-var errClosed = errors.New("ha: closed")
 
 // stateConn is a server port connection of the forward protocol, with the
 // TLS state of its handshake.

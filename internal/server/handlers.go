@@ -660,6 +660,14 @@ func pathName(w http.ResponseWriter, r *http.Request) (string, bool) {
 // logged and the client gets a generic message.
 func (s *Server) fail(w http.ResponseWriter, r *http.Request, err error) {
 	switch {
+	case errors.Is(err, store.ErrNotLeader):
+		// The leader changed, or none leads (docs/ha.md#the-api): nothing
+		// was written, and a client may try again, here or elsewhere.
+		w.Header().Set(noLeaderHeader, "1")
+		w.Header().Set("Retry-After", "1")
+		writeError(w, http.StatusServiceUnavailable, err.Error())
+	case errors.Is(err, store.ErrOutcomeUnknown):
+		writeError(w, http.StatusServiceUnavailable, err.Error()+": check, and try again if it is not")
 	case errors.Is(err, store.ErrNotFound):
 		writeError(w, http.StatusNotFound, err.Error())
 	case errors.Is(err, store.ErrInvalid):

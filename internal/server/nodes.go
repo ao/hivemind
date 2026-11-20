@@ -216,6 +216,13 @@ func (s *Server) listNodes(w http.ResponseWriter, r *http.Request) {
 	// The workers' routers read the routing table through the cluster
 	// listener every second; the server's own runs in this process.
 	routing := s.cfg.RouteReaders.Reading(now)
+	// In a cluster of several, every server's node is a server's.
+	servers := map[string]store.Server{}
+	if list, err := s.cfg.Store.ListServers(r.Context()); err == nil {
+		for _, sv := range list {
+			servers[sv.ID] = sv
+		}
+	}
 	out := make([]NodeView, 0, len(nodes))
 	for _, n := range nodes {
 		age := max(now.Sub(n.LastLease), 0)
@@ -233,7 +240,7 @@ func (s *Server) listNodes(w http.ResponseWriter, r *http.Request) {
 			state = "lost"
 		}
 		v := NodeView{ID: n.ID, Name: n.Name, CPU: n.CPU, Memory: n.Memory, LastLease: n.LastLease.UTC(),
-			LeaseAgeSeconds: age.Seconds(), State: state, Server: n.ID == s.cfg.NodeID, Replicas: count[n.ID],
+			LeaseAgeSeconds: age.Seconds(), State: state, Server: n.ID == s.cfg.NodeID || servers[n.ID].ID != "", Replicas: count[n.ID],
 			Eligible: n.Eligible, Address: n.Address, Version: n.Version, Dials: n.Dials, Router: routing[n.ID]}
 		if n.ID == s.cfg.NodeID {
 			v.Router = s.cfg.RouterReport != nil
@@ -250,6 +257,9 @@ func (s *Server) listNodes(w http.ResponseWriter, r *http.Request) {
 		}
 		if v.Server {
 			v.Advertise = s.cfg.Advertise
+			if sv, ok := servers[n.ID]; ok {
+				v.Advertise = sv.Advertise
+			}
 		}
 		if !n.CertNotAfter.IsZero() {
 			t := n.CertNotAfter.UTC()

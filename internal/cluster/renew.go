@@ -172,7 +172,7 @@ func (s *serverCertSource) issue() (tls.Certificate, error) {
 	if err != nil {
 		return tls.Certificate{}, err
 	}
-	if err := s.cfg.Store.RecordNodeCertValidity(context.Background(), s.cfg.LocalNodeID, pki.IssuedAt(cert.Leaf), cert.Leaf.NotAfter); err != nil {
+	if err := s.cfg.Store.RecordNodeCertValidity(context.Background(), s.cfg.LocalNodeID, pki.IssuedAt(cert.Leaf), cert.Leaf.NotAfter); err != nil && !errors.Is(err, store.ErrNotLeader) {
 		s.log.Warn("recording the server certificate's expiry", "err", err)
 	}
 	return cert, nil

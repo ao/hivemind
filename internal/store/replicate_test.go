@@ -480,7 +480,7 @@ func TestBatchEncoding(t *testing.T) {
 	when := time.Date(2026, 11, 20, 1, 2, 3, 456789, time.FixedZone("x", 3600))
 	in := Batch{Schema: 18, Origin: "abc", Seq: 7, Stmts: []Statement{
 		{SQL: "INSERT INTO t VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)", Args: []any{
-			nil, int64(math.MinInt64), int64(math.MaxInt64), math.Float64frombits(0x7ff8000000000001), -0.0,
+			nil, int64(math.MinInt64), int64(math.MaxInt64), math.Float64frombits(0x7ff8000000000001), math.Copysign(0, -1),
 			true, []byte{}, []byte{0, 0xff}, "not \xff utf-8", when}},
 		{SQL: "DELETE FROM t"},
 	}}

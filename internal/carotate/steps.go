@@ -271,6 +271,13 @@ func (m *Manager) Start(ctx context.Context) (Status, error) {
 	if s.rot != nil {
 		return Status{}, ErrInProgress
 	}
+	// Each server keeps the CA files in its own data directory, and a
+	// rotation changes them on this machine only.
+	if servers, err := m.st.ListServers(ctx); err != nil {
+		return Status{}, err
+	} else if len(servers) > 1 {
+		return Status{}, ErrSeveralServers
+	}
 	if err := m.removeOrphan(); err != nil {
 		return Status{}, err
 	}
@@ -513,5 +520,6 @@ func nodeIDs(w []Waiting) string {
 // rotation or its nodes, which the API answers with 409.
 func IsRefusal(err error) bool {
 	var r *RefusedError
-	return errors.As(err, &r) || errors.Is(err, ErrInProgress) || errors.Is(err, ErrNoRotation) || errors.Is(err, ErrWrongPhase)
+	return errors.As(err, &r) || errors.Is(err, ErrInProgress) || errors.Is(err, ErrNoRotation) || errors.Is(err, ErrWrongPhase) ||
+		errors.Is(err, ErrSeveralServers)
 }

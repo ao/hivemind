@@ -63,7 +63,7 @@ func nodeRoutes(cfg Config, log *slog.Logger) http.Handler {
 	mux.HandleFunc("POST "+nodeapi.Prefix+"/nodes/{id}/tls/{op}", a.tls)
 	mux.HandleFunc("GET "+nodeapi.Prefix+"/nodes/{id}/ca", a.caSet)
 	return withVersion(nodeapi.CleanVersion(cfg.Version), withCADigest(a.rot,
-		withEpoch(cfg.Epoch, log, a.denyRemoved(a.requireCurrentCert(a.checkCA(mux))))))
+		withEpoch(cfg.epochRef(), log, a.denyRemoved(a.requireCurrentCert(a.checkCA(mux))))))
 }
 
 // withVersion sets the server's version on every reply. A worker learns from
@@ -90,11 +90,11 @@ const staleMessage = "this server is from before a restore of the cluster: this 
 // from before that restore, and a newer copy of the cluster runs elsewhere.
 // That is logged once, at error, with what to do. A node older than epochs
 // sends none, and is served as before.
-func withEpoch(epoch int64, log *slog.Logger, next http.Handler) http.Handler {
-	v := nodeapi.FormatEpoch(epoch)
+func withEpoch(epochOf *atomic.Int64, log *slog.Logger, next http.Handler) http.Handler {
 	var logged atomic.Bool
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set(nodeapi.EpochHeader, v)
+		epoch := epochOf.Load()
+		w.Header().Set(nodeapi.EpochHeader, nodeapi.FormatEpoch(epoch))
 		seen, ok := nodeapi.ParseEpoch(r.Header.Get(nodeapi.EpochHeader))
 		if !ok || seen <= epoch {
 			next.ServeHTTP(w, r)
