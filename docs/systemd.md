@@ -76,13 +76,24 @@ On the server, `sudo hivemind nodes` lists the worker as `ready`, with `yes` und
 
 `join` writes the worker flags it was given, such as `--route-addr`, `--acme-email` and `--acme-ca`, to `/var/lib/hivemind/hivemind.yaml` (mode 0600), so this unit runs the [router](routing.md) the worker was joined with. A flag in `ExecStart` overrides the file. A worker joined by a build before 2.2 has no such file: give it the flags in `ExecStart`, as in `hivemind serve --role worker --route-addr 0.0.0.0 --acme-email ops@example.com`, or write `route-addr:` and `acme-email:` to that file; without them the unit runs the agent and no router. The server's unit takes the same flags after `--advertise`.
 
+## Another server
+
+A server that joins a cluster of several ([several servers](ha.md#membership)) is set up like a worker: join once by hand, stop it, and let the unit run it. `join --role server` runs the server in the foreground, and writes the flags it was given, such as `--advertise`, to `/var/lib/hivemind/hivemind.yaml`.
+
+```sh
+sudo hivemind join 10.0.0.5 --role server --token <token from join-token --role server> --advertise 10.0.0.6
+# When it logs "this server is a voter of the cluster now", stop it with Ctrl-C.
+```
+
+Then write the server unit above, with this machine's own address in `--advertise` (`10.0.0.6` here, not the first server's), and enable it the same way. `sudo hivemind servers` on any server lists it as a `follower`. A joined server has no `admin.token`, and `join` writes no client config, so its CLI needs the cluster's admin token: `sudo HIVEMIND_TOKEN=hm_... hivemind status`.
+
 ## What the settings do
 
 - The units run hivemind as root, which is what the default data directory (`/var/lib/hivemind`) and the Docker socket expect. To run as another user, add `User=` and a `--data-dir` that user owns, and give the user access to the Docker socket.
 - `After=docker.service` starts hivemind once Docker has started. Containers that hivemind starts have the restart policy `no`, so after a reboot Docker leaves them stopped, and the agent starts them, or removes them if their replica moved, on its first pass.
 - `After=network-online.target` waits for the network. If the `--advertise` address is not configured yet, `serve` cannot bind it and exits; `Restart=on-failure` tries again 5 s later.
 - `systemctl stop hivemind` sends SIGTERM. hivemind stops, and its containers keep running, as with Ctrl-C.
-- A worker that was removed from the cluster with `hivemind node remove` exits with status 3, at once and at every start after, and says its containers may still be on the machine. `RestartPreventExitStatus=3` keeps systemd from starting it again; without it, `Restart=on-failure` restarts it every 5 s, and the server logs a refused request each time. Every other error exits with status 1. Status 3 is new in 2.2.0: a removed 2.0.0 worker exits with 1, and the unit restarts it until it is disabled. Run `systemctl disable --now hivemind` on a machine you remove. The server never exits with 3; the line is in its unit too so that both units are the same.
+- A worker that was removed from the cluster with `hivemind node remove` exits with status 3, at once and at every start after, and says its containers may still be on the machine. `RestartPreventExitStatus=3` keeps systemd from starting it again; without it, `Restart=on-failure` restarts it every 5 s, and the server logs a refused request each time. Every other error exits with status 1. Status 3 is new in 2.2.0: a removed 2.0.0 worker exits with 1, and the unit restarts it until it is disabled. Run `systemctl disable --now hivemind` on a machine you remove. A server exits with 3 only when it is removed from a cluster of several servers with `hivemind server remove` ([several servers](ha.md#membership)), and then the line keeps its unit from starting it again too; its containers keep running.
 - Logs go to the journal: `journalctl -u hivemind`. The server logs one line at `info` for each API request.
 
 ## Measured with these units
