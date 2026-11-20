@@ -140,7 +140,7 @@ func addClientFlags(cmd *cobra.Command) *clientFlags {
 func addConnFlags(cmd *cobra.Command) *clientFlags {
 	f := &clientFlags{cmd: cmd}
 	fl := cmd.Flags()
-	fl.StringVar(&f.server, "server", "", "server URL (env "+envServer+"; default from the client config, then "+defaultServer+")")
+	fl.StringVar(&f.server, "server", "", "server URL, or the URLs of several servers, comma separated, tried in order (env "+envServer+"; default from the client config, then "+defaultServer+")")
 	fl.StringVar(&f.token, "token", "", "API token (env "+envToken+"; default from the client config's token file)")
 	fl.StringVar(&f.clientConfig, "client-config", "", "client config file (env "+envClientConfig+"; default "+defaultClientConfigHint+")")
 	fl.StringVar(&f.caCert, "ca-cert", "", "PEM file of the CA certificates to trust for an https server, instead of the system's (env "+envCACert+"; default from the client config)")

@@ -79,7 +79,7 @@ hivemind backup <file> [flags]
 | `--client-config` | string | - | `HIVEMIND_CLIENT_CONFIG` | client config file (env HIVEMIND_CLIENT_CONFIG; default $XDG_CONFIG_HOME/hivemind/config.yaml or ~/.config/hivemind/config.yaml) |
 | `--data-dir` | string | see description | `HIVEMIND_DATA_DIR` | the server's data directory (env HIVEMIND_DATA_DIR; default /var/lib/hivemind for root, else ~/.local/state/hivemind). The default is /var/lib/hivemind for root, and $XDG_STATE_HOME/hivemind or ~/.local/state/hivemind for other users. |
 | `--json` | bool | - | - | print JSON instead of a table |
-| `--server` | string | - | `HIVEMIND_SERVER` | server URL (env HIVEMIND_SERVER; default from the client config, then http://127.0.0.1:4483) |
+| `--server` | string | - | `HIVEMIND_SERVER` | server URL, or the URLs of several servers, comma separated, tried in order (env HIVEMIND_SERVER; default from the client config, then http://127.0.0.1:4483) |
 | `--token` | string | - | `HIVEMIND_TOKEN` | API token (env HIVEMIND_TOKEN; default from the client config's token file) |
 
 ### hivemind ca
@@ -140,7 +140,7 @@ hivemind ca rotate abort [flags]
 | `--ca-cert` | string | - | - | PEM file of the CA certificates to trust for an https server, instead of the system's (env HIVEMIND_CA_CERT; default from the client config) |
 | `--client-config` | string | - | `HIVEMIND_CLIENT_CONFIG` | client config file (env HIVEMIND_CLIENT_CONFIG; default $XDG_CONFIG_HOME/hivemind/config.yaml or ~/.config/hivemind/config.yaml) |
 | `--json` | bool | - | - | print JSON instead of a table |
-| `--server` | string | - | `HIVEMIND_SERVER` | server URL (env HIVEMIND_SERVER; default from the client config, then http://127.0.0.1:4483) |
+| `--server` | string | - | `HIVEMIND_SERVER` | server URL, or the URLs of several servers, comma separated, tried in order (env HIVEMIND_SERVER; default from the client config, then http://127.0.0.1:4483) |
 | `--token` | string | - | `HIVEMIND_TOKEN` | API token (env HIVEMIND_TOKEN; default from the client config's token file) |
 
 ##### hivemind ca rotate finish
@@ -165,7 +165,7 @@ hivemind ca rotate finish [flags]
 | `--client-config` | string | - | `HIVEMIND_CLIENT_CONFIG` | client config file (env HIVEMIND_CLIENT_CONFIG; default $XDG_CONFIG_HOME/hivemind/config.yaml or ~/.config/hivemind/config.yaml) |
 | `--force` | bool | - | - | cut off the nodes that have not renewed |
 | `--json` | bool | - | - | print JSON instead of a table |
-| `--server` | string | - | `HIVEMIND_SERVER` | server URL (env HIVEMIND_SERVER; default from the client config, then http://127.0.0.1:4483) |
+| `--server` | string | - | `HIVEMIND_SERVER` | server URL, or the URLs of several servers, comma separated, tried in order (env HIVEMIND_SERVER; default from the client config, then http://127.0.0.1:4483) |
 | `--token` | string | - | `HIVEMIND_TOKEN` | API token (env HIVEMIND_TOKEN; default from the client config's token file) |
 
 ##### hivemind ca rotate renew
@@ -185,7 +185,7 @@ hivemind ca rotate renew [flags]
 | `--client-config` | string | - | `HIVEMIND_CLIENT_CONFIG` | client config file (env HIVEMIND_CLIENT_CONFIG; default $XDG_CONFIG_HOME/hivemind/config.yaml or ~/.config/hivemind/config.yaml) |
 | `--force` | bool | - | - | go ahead while live nodes do not trust the new CA |
 | `--json` | bool | - | - | print JSON instead of a table |
-| `--server` | string | - | `HIVEMIND_SERVER` | server URL (env HIVEMIND_SERVER; default from the client config, then http://127.0.0.1:4483) |
+| `--server` | string | - | `HIVEMIND_SERVER` | server URL, or the URLs of several servers, comma separated, tried in order (env HIVEMIND_SERVER; default from the client config, then http://127.0.0.1:4483) |
 | `--token` | string | - | `HIVEMIND_TOKEN` | API token (env HIVEMIND_TOKEN; default from the client config's token file) |
 
 ##### hivemind ca rotate start
@@ -205,7 +205,7 @@ hivemind ca rotate start [flags]
 | `--ca-cert` | string | - | - | PEM file of the CA certificates to trust for an https server, instead of the system's (env HIVEMIND_CA_CERT; default from the client config) |
 | `--client-config` | string | - | `HIVEMIND_CLIENT_CONFIG` | client config file (env HIVEMIND_CLIENT_CONFIG; default $XDG_CONFIG_HOME/hivemind/config.yaml or ~/.config/hivemind/config.yaml) |
 | `--json` | bool | - | - | print JSON instead of a table |
-| `--server` | string | - | `HIVEMIND_SERVER` | server URL (env HIVEMIND_SERVER; default from the client config, then http://127.0.0.1:4483) |
+| `--server` | string | - | `HIVEMIND_SERVER` | server URL, or the URLs of several servers, comma separated, tried in order (env HIVEMIND_SERVER; default from the client config, then http://127.0.0.1:4483) |
 | `--token` | string | - | `HIVEMIND_TOKEN` | API token (env HIVEMIND_TOKEN; default from the client config's token file) |
 
 #### hivemind ca status
@@ -228,7 +228,7 @@ hivemind ca status [flags]
 | `--ca-cert` | string | - | - | PEM file of the CA certificates to trust for an https server, instead of the system's (env HIVEMIND_CA_CERT; default from the client config) |
 | `--client-config` | string | - | `HIVEMIND_CLIENT_CONFIG` | client config file (env HIVEMIND_CLIENT_CONFIG; default $XDG_CONFIG_HOME/hivemind/config.yaml or ~/.config/hivemind/config.yaml) |
 | `--json` | bool | - | - | print JSON instead of a table |
-| `--server` | string | - | `HIVEMIND_SERVER` | server URL (env HIVEMIND_SERVER; default from the client config, then http://127.0.0.1:4483) |
+| `--server` | string | - | `HIVEMIND_SERVER` | server URL, or the URLs of several servers, comma separated, tried in order (env HIVEMIND_SERVER; default from the client config, then http://127.0.0.1:4483) |
 | `--token` | string | - | `HIVEMIND_TOKEN` | API token (env HIVEMIND_TOKEN; default from the client config's token file) |
 
 ### hivemind compose
@@ -307,7 +307,7 @@ hivemind compose delete <file> [flags]
 | `--force` | bool | - | - | delete an app of the same name that another project, hivemind deploy or the API deployed |
 | `--json` | bool | - | - | print JSON instead of a table |
 | `--prefix` | string | - | - | name each app PREFIX-<service> instead of <service> |
-| `--server` | string | - | `HIVEMIND_SERVER` | server URL (env HIVEMIND_SERVER; default from the client config, then http://127.0.0.1:4483) |
+| `--server` | string | - | `HIVEMIND_SERVER` | server URL, or the URLs of several servers, comma separated, tried in order (env HIVEMIND_SERVER; default from the client config, then http://127.0.0.1:4483) |
 | `--token` | string | - | `HIVEMIND_TOKEN` | API token (env HIVEMIND_TOKEN; default from the client config's token file) |
 
 #### hivemind compose deploy
@@ -343,7 +343,7 @@ hivemind compose deploy <file> [flags]
 | `--json` | bool | - | - | print JSON instead of a table |
 | `--prefix` | string | - | - | name each app PREFIX-<service> instead of <service> |
 | `--replace` | bool | - | - | update an app of the same name that another project, hivemind deploy or the API deployed |
-| `--server` | string | - | `HIVEMIND_SERVER` | server URL (env HIVEMIND_SERVER; default from the client config, then http://127.0.0.1:4483) |
+| `--server` | string | - | `HIVEMIND_SERVER` | server URL, or the URLs of several servers, comma separated, tried in order (env HIVEMIND_SERVER; default from the client config, then http://127.0.0.1:4483) |
 | `--token` | string | - | `HIVEMIND_TOKEN` | API token (env HIVEMIND_TOKEN; default from the client config's token file) |
 
 ### hivemind delete
@@ -359,7 +359,7 @@ hivemind delete <app> [flags]
 | `--ca-cert` | string | - | - | PEM file of the CA certificates to trust for an https server, instead of the system's (env HIVEMIND_CA_CERT; default from the client config) |
 | `--client-config` | string | - | `HIVEMIND_CLIENT_CONFIG` | client config file (env HIVEMIND_CLIENT_CONFIG; default $XDG_CONFIG_HOME/hivemind/config.yaml or ~/.config/hivemind/config.yaml) |
 | `--json` | bool | - | - | print JSON instead of a table |
-| `--server` | string | - | `HIVEMIND_SERVER` | server URL (env HIVEMIND_SERVER; default from the client config, then http://127.0.0.1:4483) |
+| `--server` | string | - | `HIVEMIND_SERVER` | server URL, or the URLs of several servers, comma separated, tried in order (env HIVEMIND_SERVER; default from the client config, then http://127.0.0.1:4483) |
 | `--token` | string | - | `HIVEMIND_TOKEN` | API token (env HIVEMIND_TOKEN; default from the client config's token file) |
 
 ### hivemind deploy
@@ -413,7 +413,7 @@ hivemind deploy [-- command [arg...]] [flags]
 | `--name` | string | - | - | app name |
 | `--port` | string, repeatable | - | - | published port, [bind:]host:container[/udp] (repeatable) |
 | `--replicas` | int | - | - | number of replicas (default 1) |
-| `--server` | string | - | `HIVEMIND_SERVER` | server URL (env HIVEMIND_SERVER; default from the client config, then http://127.0.0.1:4483) |
+| `--server` | string | - | `HIVEMIND_SERVER` | server URL, or the URLs of several servers, comma separated, tried in order (env HIVEMIND_SERVER; default from the client config, then http://127.0.0.1:4483) |
 | `--timeout` | duration | `5m0s` | - | with --wait, how long to wait |
 | `--token` | string | - | `HIVEMIND_TOKEN` | API token (env HIVEMIND_TOKEN; default from the client config's token file) |
 | `--volume` | string, repeatable | - | - | named volume, name:/path in the container (repeatable) |
@@ -564,7 +564,7 @@ hivemind join-token [flags]
 | `--client-config` | string | - | `HIVEMIND_CLIENT_CONFIG` | client config file (env HIVEMIND_CLIENT_CONFIG; default $XDG_CONFIG_HOME/hivemind/config.yaml or ~/.config/hivemind/config.yaml) |
 | `--json` | bool | - | - | print JSON instead of a table |
 | `--role` | string | `worker` | - | worker, or server for a token that joins another server of the cluster |
-| `--server` | string | - | `HIVEMIND_SERVER` | server URL (env HIVEMIND_SERVER; default from the client config, then http://127.0.0.1:4483) |
+| `--server` | string | - | `HIVEMIND_SERVER` | server URL, or the URLs of several servers, comma separated, tried in order (env HIVEMIND_SERVER; default from the client config, then http://127.0.0.1:4483) |
 | `--token` | string | - | `HIVEMIND_TOKEN` | API token (env HIVEMIND_TOKEN; default from the client config's token file) |
 | `--ttl` | string | - | - | how long the token lasts, such as 1h (default 24h0m0s, 1h0m0s with --role server) |
 
@@ -590,7 +590,7 @@ hivemind logs <app> [replica] [flags]
 | `--ca-cert` | string | - | - | PEM file of the CA certificates to trust for an https server, instead of the system's (env HIVEMIND_CA_CERT; default from the client config) |
 | `--client-config` | string | - | `HIVEMIND_CLIENT_CONFIG` | client config file (env HIVEMIND_CLIENT_CONFIG; default $XDG_CONFIG_HOME/hivemind/config.yaml or ~/.config/hivemind/config.yaml) |
 | `-f`, `--follow` | bool | - | - | keep printing new lines |
-| `--server` | string | - | `HIVEMIND_SERVER` | server URL (env HIVEMIND_SERVER; default from the client config, then http://127.0.0.1:4483) |
+| `--server` | string | - | `HIVEMIND_SERVER` | server URL, or the URLs of several servers, comma separated, tried in order (env HIVEMIND_SERVER; default from the client config, then http://127.0.0.1:4483) |
 | `--tail` | int | - | - | print only the last N lines (0 for all) |
 | `--token` | string | - | `HIVEMIND_TOKEN` | API token (env HIVEMIND_TOKEN; default from the client config's token file) |
 
@@ -660,7 +660,7 @@ hivemind node drain <id> [flags]
 | `--deadline` | duration | `10m0s` | - | how long replicas may take to move; at the deadline the rest are stopped and placed again |
 | `--json` | bool | - | - | print JSON instead of a table |
 | `--no-wait` | bool | - | - | start the drain and return without waiting for it |
-| `--server` | string | - | `HIVEMIND_SERVER` | server URL (env HIVEMIND_SERVER; default from the client config, then http://127.0.0.1:4483) |
+| `--server` | string | - | `HIVEMIND_SERVER` | server URL, or the URLs of several servers, comma separated, tried in order (env HIVEMIND_SERVER; default from the client config, then http://127.0.0.1:4483) |
 | `--token` | string | - | `HIVEMIND_TOKEN` | API token (env HIVEMIND_TOKEN; default from the client config's token file) |
 
 #### hivemind node eligibility
@@ -696,7 +696,7 @@ hivemind node eligibility <id> --enable|--disable [flags]
 | `--disable` | bool | - | - | stop the node from taking new replicas |
 | `--enable` | bool | - | - | let the node take new replicas |
 | `--json` | bool | - | - | print JSON instead of a table |
-| `--server` | string | - | `HIVEMIND_SERVER` | server URL (env HIVEMIND_SERVER; default from the client config, then http://127.0.0.1:4483) |
+| `--server` | string | - | `HIVEMIND_SERVER` | server URL, or the URLs of several servers, comma separated, tried in order (env HIVEMIND_SERVER; default from the client config, then http://127.0.0.1:4483) |
 | `--token` | string | - | `HIVEMIND_TOKEN` | API token (env HIVEMIND_TOKEN; default from the client config's token file) |
 
 #### hivemind node remove
@@ -735,7 +735,7 @@ hivemind node remove <id> [flags]
 | `--client-config` | string | - | `HIVEMIND_CLIENT_CONFIG` | client config file (env HIVEMIND_CLIENT_CONFIG; default $XDG_CONFIG_HOME/hivemind/config.yaml or ~/.config/hivemind/config.yaml) |
 | `--force` | bool | - | - | remove the node even though it still renews its lease |
 | `--json` | bool | - | - | print JSON instead of a table |
-| `--server` | string | - | `HIVEMIND_SERVER` | server URL (env HIVEMIND_SERVER; default from the client config, then http://127.0.0.1:4483) |
+| `--server` | string | - | `HIVEMIND_SERVER` | server URL, or the URLs of several servers, comma separated, tried in order (env HIVEMIND_SERVER; default from the client config, then http://127.0.0.1:4483) |
 | `--token` | string | - | `HIVEMIND_TOKEN` | API token (env HIVEMIND_TOKEN; default from the client config's token file) |
 
 #### hivemind node set-server
@@ -844,7 +844,7 @@ hivemind nodes [flags]
 | `--ca-cert` | string | - | - | PEM file of the CA certificates to trust for an https server, instead of the system's (env HIVEMIND_CA_CERT; default from the client config) |
 | `--client-config` | string | - | `HIVEMIND_CLIENT_CONFIG` | client config file (env HIVEMIND_CLIENT_CONFIG; default $XDG_CONFIG_HOME/hivemind/config.yaml or ~/.config/hivemind/config.yaml) |
 | `--json` | bool | - | - | print JSON instead of a table |
-| `--server` | string | - | `HIVEMIND_SERVER` | server URL (env HIVEMIND_SERVER; default from the client config, then http://127.0.0.1:4483) |
+| `--server` | string | - | `HIVEMIND_SERVER` | server URL, or the URLs of several servers, comma separated, tried in order (env HIVEMIND_SERVER; default from the client config, then http://127.0.0.1:4483) |
 | `--token` | string | - | `HIVEMIND_TOKEN` | API token (env HIVEMIND_TOKEN; default from the client config's token file) |
 
 ### hivemind registry
@@ -877,7 +877,7 @@ hivemind registry list [flags]
 | `--ca-cert` | string | - | - | PEM file of the CA certificates to trust for an https server, instead of the system's (env HIVEMIND_CA_CERT; default from the client config) |
 | `--client-config` | string | - | `HIVEMIND_CLIENT_CONFIG` | client config file (env HIVEMIND_CLIENT_CONFIG; default $XDG_CONFIG_HOME/hivemind/config.yaml or ~/.config/hivemind/config.yaml) |
 | `--json` | bool | - | - | print JSON instead of a table |
-| `--server` | string | - | `HIVEMIND_SERVER` | server URL (env HIVEMIND_SERVER; default from the client config, then http://127.0.0.1:4483) |
+| `--server` | string | - | `HIVEMIND_SERVER` | server URL, or the URLs of several servers, comma separated, tried in order (env HIVEMIND_SERVER; default from the client config, then http://127.0.0.1:4483) |
 | `--token` | string | - | `HIVEMIND_TOKEN` | API token (env HIVEMIND_TOKEN; default from the client config's token file) |
 
 #### hivemind registry login
@@ -915,7 +915,7 @@ hivemind registry login <host> --username <name> (--password-stdin | --password-
 | `--json` | bool | - | - | print JSON instead of a table |
 | `--password-file` | string | - | - | read the password or token from this file |
 | `--password-stdin` | bool | - | - | read the password or token from standard input |
-| `--server` | string | - | `HIVEMIND_SERVER` | server URL (env HIVEMIND_SERVER; default from the client config, then http://127.0.0.1:4483) |
+| `--server` | string | - | `HIVEMIND_SERVER` | server URL, or the URLs of several servers, comma separated, tried in order (env HIVEMIND_SERVER; default from the client config, then http://127.0.0.1:4483) |
 | `--token` | string | - | `HIVEMIND_TOKEN` | API token (env HIVEMIND_TOKEN; default from the client config's token file) |
 | `--username` | string | - | - | the username, or AWS for ECR |
 
@@ -933,7 +933,7 @@ hivemind registry logout <host> [flags]
 |---|---|---|---|---|
 | `--ca-cert` | string | - | - | PEM file of the CA certificates to trust for an https server, instead of the system's (env HIVEMIND_CA_CERT; default from the client config) |
 | `--client-config` | string | - | `HIVEMIND_CLIENT_CONFIG` | client config file (env HIVEMIND_CLIENT_CONFIG; default $XDG_CONFIG_HOME/hivemind/config.yaml or ~/.config/hivemind/config.yaml) |
-| `--server` | string | - | `HIVEMIND_SERVER` | server URL (env HIVEMIND_SERVER; default from the client config, then http://127.0.0.1:4483) |
+| `--server` | string | - | `HIVEMIND_SERVER` | server URL, or the URLs of several servers, comma separated, tried in order (env HIVEMIND_SERVER; default from the client config, then http://127.0.0.1:4483) |
 | `--token` | string | - | `HIVEMIND_TOKEN` | API token (env HIVEMIND_TOKEN; default from the client config's token file) |
 
 ### hivemind restore
@@ -1009,7 +1009,7 @@ hivemind routes [flags]
 | `--ca-cert` | string | - | - | PEM file of the CA certificates to trust for an https server, instead of the system's (env HIVEMIND_CA_CERT; default from the client config) |
 | `--client-config` | string | - | `HIVEMIND_CLIENT_CONFIG` | client config file (env HIVEMIND_CLIENT_CONFIG; default $XDG_CONFIG_HOME/hivemind/config.yaml or ~/.config/hivemind/config.yaml) |
 | `--json` | bool | - | - | print JSON instead of a table |
-| `--server` | string | - | `HIVEMIND_SERVER` | server URL (env HIVEMIND_SERVER; default from the client config, then http://127.0.0.1:4483) |
+| `--server` | string | - | `HIVEMIND_SERVER` | server URL, or the URLs of several servers, comma separated, tried in order (env HIVEMIND_SERVER; default from the client config, then http://127.0.0.1:4483) |
 | `--token` | string | - | `HIVEMIND_TOKEN` | API token (env HIVEMIND_TOKEN; default from the client config's token file) |
 
 ### hivemind scale
@@ -1033,7 +1033,7 @@ hivemind scale <app> <replicas> [flags]
 | `--ca-cert` | string | - | - | PEM file of the CA certificates to trust for an https server, instead of the system's (env HIVEMIND_CA_CERT; default from the client config) |
 | `--client-config` | string | - | `HIVEMIND_CLIENT_CONFIG` | client config file (env HIVEMIND_CLIENT_CONFIG; default $XDG_CONFIG_HOME/hivemind/config.yaml or ~/.config/hivemind/config.yaml) |
 | `--json` | bool | - | - | print JSON instead of a table |
-| `--server` | string | - | `HIVEMIND_SERVER` | server URL (env HIVEMIND_SERVER; default from the client config, then http://127.0.0.1:4483) |
+| `--server` | string | - | `HIVEMIND_SERVER` | server URL, or the URLs of several servers, comma separated, tried in order (env HIVEMIND_SERVER; default from the client config, then http://127.0.0.1:4483) |
 | `--timeout` | duration | `5m0s` | - | with --wait, how long to wait |
 | `--token` | string | - | `HIVEMIND_TOKEN` | API token (env HIVEMIND_TOKEN; default from the client config's token file) |
 | `--wait` | bool | - | - | wait until every replica that should run is running and ready |
@@ -1140,7 +1140,7 @@ hivemind server remove <id> [flags]
 | `--client-config` | string | - | `HIVEMIND_CLIENT_CONFIG` | client config file (env HIVEMIND_CLIENT_CONFIG; default $XDG_CONFIG_HOME/hivemind/config.yaml or ~/.config/hivemind/config.yaml) |
 | `--force` | bool | - | - | remove the server even if the servers that stay cannot reach a majority |
 | `--json` | bool | - | - | print JSON instead of a table |
-| `--server` | string | - | `HIVEMIND_SERVER` | server URL (env HIVEMIND_SERVER; default from the client config, then http://127.0.0.1:4483) |
+| `--server` | string | - | `HIVEMIND_SERVER` | server URL, or the URLs of several servers, comma separated, tried in order (env HIVEMIND_SERVER; default from the client config, then http://127.0.0.1:4483) |
 | `--token` | string | - | `HIVEMIND_TOKEN` | API token (env HIVEMIND_TOKEN; default from the client config's token file) |
 
 ### hivemind servers
@@ -1168,7 +1168,7 @@ hivemind servers [flags]
 | `--ca-cert` | string | - | - | PEM file of the CA certificates to trust for an https server, instead of the system's (env HIVEMIND_CA_CERT; default from the client config) |
 | `--client-config` | string | - | `HIVEMIND_CLIENT_CONFIG` | client config file (env HIVEMIND_CLIENT_CONFIG; default $XDG_CONFIG_HOME/hivemind/config.yaml or ~/.config/hivemind/config.yaml) |
 | `--json` | bool | - | - | print JSON instead of a table |
-| `--server` | string | - | `HIVEMIND_SERVER` | server URL (env HIVEMIND_SERVER; default from the client config, then http://127.0.0.1:4483) |
+| `--server` | string | - | `HIVEMIND_SERVER` | server URL, or the URLs of several servers, comma separated, tried in order (env HIVEMIND_SERVER; default from the client config, then http://127.0.0.1:4483) |
 | `--token` | string | - | `HIVEMIND_TOKEN` | API token (env HIVEMIND_TOKEN; default from the client config's token file) |
 
 ### hivemind status
@@ -1207,7 +1207,7 @@ hivemind status [app] [flags]
 | `--ca-cert` | string | - | - | PEM file of the CA certificates to trust for an https server, instead of the system's (env HIVEMIND_CA_CERT; default from the client config) |
 | `--client-config` | string | - | `HIVEMIND_CLIENT_CONFIG` | client config file (env HIVEMIND_CLIENT_CONFIG; default $XDG_CONFIG_HOME/hivemind/config.yaml or ~/.config/hivemind/config.yaml) |
 | `--json` | bool | - | - | print JSON instead of a table |
-| `--server` | string | - | `HIVEMIND_SERVER` | server URL (env HIVEMIND_SERVER; default from the client config, then http://127.0.0.1:4483) |
+| `--server` | string | - | `HIVEMIND_SERVER` | server URL, or the URLs of several servers, comma separated, tried in order (env HIVEMIND_SERVER; default from the client config, then http://127.0.0.1:4483) |
 | `--token` | string | - | `HIVEMIND_TOKEN` | API token (env HIVEMIND_TOKEN; default from the client config's token file) |
 
 ### hivemind version
@@ -1225,6 +1225,6 @@ hivemind version [flags]
 |---|---|---|---|---|
 | `--ca-cert` | string | - | - | PEM file of the CA certificates to trust for an https server, instead of the system's (env HIVEMIND_CA_CERT; default from the client config) |
 | `--client-config` | string | - | `HIVEMIND_CLIENT_CONFIG` | client config file (env HIVEMIND_CLIENT_CONFIG; default $XDG_CONFIG_HOME/hivemind/config.yaml or ~/.config/hivemind/config.yaml) |
-| `--server` | string | - | `HIVEMIND_SERVER` | server URL (env HIVEMIND_SERVER; default from the client config, then http://127.0.0.1:4483) |
+| `--server` | string | - | `HIVEMIND_SERVER` | server URL, or the URLs of several servers, comma separated, tried in order (env HIVEMIND_SERVER; default from the client config, then http://127.0.0.1:4483) |
 | `--token` | string | - | `HIVEMIND_TOKEN` | API token (env HIVEMIND_TOKEN; default from the client config's token file) |
 
