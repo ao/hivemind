@@ -53,6 +53,13 @@
 #                                             to back, a status sampler every 0.5 s
 #   scenario.sh ports LABEL                   each node's routed containers and host ports
 #   scenario.sh end NAME
+#   scenario.sh leader-kill | leader-partition [SECS] | quorum-loss |
+#               service-restart | steady [SECS] | servers [LABEL] | ha-selftest
+#                                             the scenarios of several servers,
+#                                             with the write-load: see ha.sh
+#
+# The scenarios above but the ha.sh ones assume one server (SOAK_SERVERS=1)
+# with its API on loopback (SOAK_API_TLS=0).
 #
 # A fault that needs the machine's owner (power off, power on, a new machine)
 # is done outside this script; "measure" observes it. MODE is:
@@ -67,6 +74,8 @@
 set -uo pipefail
 . "$(dirname "$0")/lib.sh"
 HERE=$(cd "$(dirname "$0")" && pwd)
+# The scenarios of several servers (leader-kill, leader-partition, quorum-loss, ...).
+. "$HERE/ha.sh"
 
 # place_spread: delete spread and deploy it again, so that every node holds a
 # replica. Placed replicas never move, so a node that came back holds nothing.
@@ -906,8 +915,12 @@ setserver_checks() {
 # $SOAK_DIR/metrics-LABEL.txt with the time; one log line with the number of
 # series per node.
 read -r -d '' REMOTE_METRICS <<'EOF' || true
-tok=$(cat /var/lib/hivemind/admin.token) || exit 1
-printf 'header = "Authorization: Bearer %s"\n' "$tok" | curl -sS -K - -m 5 http://127.0.0.1:4483/metrics | grep '^hivemind_router_'
+# args: the API URL, the token file and the CA (api_args in lib.sh)
+u=${1:-http://127.0.0.1:4483} tf=${2:-/var/lib/hivemind/admin.token} ca=${3:--}
+co=()
+[ "$ca" = - ] || co=(--cacert "$ca")
+tok=$(cat "$tf") || exit 1
+printf 'header = "Authorization: Bearer %s"\n' "$tok" | curl -sS -K - "${co[@]}" -m 5 "$u/metrics" | grep '^hivemind_router_'
 EOF
 metrics_nodes() { # metrics_nodes FILE: "name=series ..." for the request counters
 	awk -F'node="' '/^hivemind_router_requests_total\{/ { split($2, a, "\""); n[a[1]]++ } END { for (k in n) print k, n[k] }' "$1" |
@@ -917,9 +930,9 @@ metrics_nodes() { # metrics_nodes FILE: "name=series ..." for the request counte
 		done
 }
 metrics_snap() {
-	local f=$SOAK_DIR/metrics-$1.txt t
+	local f=$SOAK_DIR/metrics-$1.txt t s
 	t=$(now_ms)
-	on "$SERVER" "sudo bash -s" <<<"$REMOTE_METRICS" >"$f.tmp" || die "metrics on $SERVER"
+	s=$(api_server) && on "$s" "sudo bash -s $(api_args "$s")" <<<"$REMOTE_METRICS" >"$f.tmp" || die "metrics on ${s:-no server}"
 	{
 		echo "# t_ms=$t"
 		cat "$f.tmp"
@@ -931,10 +944,10 @@ metrics_snap() {
 # metrics_watch SECS: every 5 s for SECS, the nodes that have router series
 # in the server's /metrics; a line at each change.
 metrics_watch() {
-	local end last="" f=$SOAK_DIR/metrics-watch.txt v
+	local end last="" f=$SOAK_DIR/metrics-watch.txt v s
 	end=$(($(date +%s) + ${1:-300}))
 	while [ "$(date +%s)" -lt "$end" ]; do
-		if on "$SERVER" "sudo bash -s" <<<"$REMOTE_METRICS" >"$f" 2>/dev/null; then
+		if s=$(api_server) && on "$s" "sudo bash -s $(api_args "$s")" <<<"$REMOTE_METRICS" >"$f" 2>/dev/null; then
 			v=$(metrics_nodes "$f" | tr ' ' '\n' | sed 's/=.*//' | sort | tr '\n' ' ')
 		else
 			v=fail
@@ -1958,6 +1971,13 @@ metrics-watch) metrics_watch "$@" ;;
 kv-check) kv_check "$@" ;;
 upgrade) upgrade ;;
 end) end_scenario "$@" ;;
+leader-kill) leader_kill ;;
+leader-partition) leader_partition "$@" ;;
+quorum-loss) quorum_loss ;;
+service-restart) service_restart ;;
+steady) steady "$@" ;;
+servers) ev servers "${1:-now} $(servers_line)" ;;
+ha-selftest) ha_selftest ;;
 *)
 	sed -n '2,48p' "$0"
 	exit 2

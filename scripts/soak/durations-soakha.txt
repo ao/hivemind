@@ -1,0 +1,17 @@
+leader-kill: power-off to port 22 closed|scenario leader-kill begin|event leader-kill .* fault poweroff|event leader-kill .* port22-down
+leader-kill: power-off to a new leader, as a majority of the servers names it|scenario leader-kill begin|event leader-kill .* fault poweroff|event leader-kill new-leader
+leader-kill: power-off to the first node lost|scenario leader-kill begin|event leader-kill .* fault poweroff|event leader-kill node [^ ]+ lost
+leader-kill: power-off to converged, allowing a volume replica held|scenario leader-kill begin|event leader-kill .* fault poweroff|event leader-kill converged-held-yes
+leader-kill: start asked to port 22 open|scenario leader-kill begin|event leader-kill .* return-asked|event leader-kill .* port22-up
+leader-kill: port 22 open to back as a follower|scenario leader-kill begin|event leader-kill .* port22-up|event leader-kill .* rejoined-follower
+leader-kill: port 22 open to converged|scenario leader-kill begin|event leader-kill .* port22-up|event leader-kill converged-yes
+leader-partition: partition to the old leader stepping down|scenario leader-partition begin|event leader-partition .* fault partition|event leader-partition .* stepped-down
+leader-partition: partition to a new leader|scenario leader-partition begin|event leader-partition .* fault partition|event leader-partition new-leader
+leader-partition: partition to a 503 from the old leader's API|scenario leader-partition begin|event leader-partition .* fault partition|event leader-partition api [^ ]+ code=503
+leader-partition: heal to back as a follower|scenario leader-partition begin|event leader-partition [^ ]+ heal$|event leader-partition .* rejoined-follower
+quorum-loss: power-off to no leader|scenario quorum-loss begin|event quorum-loss .* fault poweroff|event quorum-loss no-leader
+quorum-loss: power-off to a 503 from a survivor's API|scenario quorum-loss begin|event quorum-loss .* fault poweroff|event quorum-loss api [^ ]+ code=503
+quorum-loss: first start asked to port 22 open|scenario quorum-loss begin|event quorum-loss .* return-asked|event quorum-loss .* port22-up
+quorum-loss: port 22 open to a leader again|scenario quorum-loss begin|event quorum-loss .* port22-up|event quorum-loss leader-again
+quorum-loss: a leader again to every server back|scenario quorum-loss begin|event quorum-loss leader-again|event quorum-loss all-back
+service-restart: restart to the API back|scenario service-restart begin|event service-restart .* fault restart|event service-restart api-back

@@ -46,6 +46,8 @@ st=""
 for f in hivemind.db hivemind.db-wal hivemind.db-shm; do
 	[ -f /var/lib/hivemind/$f ] && st="$st ${f#hivemind.}_bytes=$(stat -c %s /var/lib/hivemind/$f)"
 done
+# with several servers: the Raft log, stable store and snapshots (docs/ha.md)
+[ -d /var/lib/hivemind/raft ] && st="$st raft_bytes=$(du -sb /var/lib/hivemind/raft | cut -f1)"
 cs=$(docker ps -q --filter label=hivemind.app | wc -l)
 # Volumes no container uses (anonymous volumes left behind), and the json-file
 # logs of hivemind's containers: the most files one container has, and the
@@ -56,14 +58,18 @@ echo "pid=$pid rss_kb=$rss threads=$thr utime=${12} stime=${13} starttime=${20} 
 EOF
 
 read -r -d '' REMOTE_LAT <<'EOF' || true
-tok=$(cat /var/lib/hivemind/admin.token) || exit 1
+# args: the API URL, the token file and the CA (api_args in lib.sh)
+u=${1:-http://127.0.0.1:4483} tf=${2:-/var/lib/hivemind/admin.token} ca=${3:--}
+co=()
+[ "$ca" = - ] || co=(--cacert "$ca")
+tok=$(cat "$tf") || exit 1
 cfg() { printf 'header = "Authorization: Bearer %s"\n' "$tok"; }
 for r in status nodes apps; do
 	for i in 1 2 3 4 5; do
-		cfg | curl -sS -o /dev/null -K - -m 5 -w "%{http_code} %{time_total} $r %{size_download}\n" http://127.0.0.1:4483/v1/$r 2>/dev/null || echo "fail 0 $r 0"
+		cfg | curl -sS -o /dev/null -K - "${co[@]}" -m 5 -w "%{http_code} %{time_total} $r %{size_download}\n" "$u/v1/$r" 2>/dev/null || echo "fail 0 $r 0"
 	done
 done
-if m=$(cfg | curl -sS -K - -m 5 http://127.0.0.1:4483/metrics 2>/dev/null); then
+if m=$(cfg | curl -sS -K - "${co[@]}" -m 5 "$u/metrics" 2>/dev/null); then
 	g=$(printf '%s\n' "$m" | awk '$1 == "go_goroutines" { print $2 }')
 	# the nodes whose routers have series, by the node label
 	rn=$(printf '%s\n' "$m" | awk -F'node="' '/^hivemind_router_requests_total\{/ { split($2, a, "\""); if (!(a[1] in n)) { n[a[1]] = 1; c++ } } END { printf "%d", c }')
@@ -142,12 +148,16 @@ resources_once() {
 			fi
 		) &
 	done
-	if out=$(on "$SERVER" "sudo bash -s" <<<"$REMOTE_LAT" 2>/dev/null); then
+	# with several servers, through the one that answered last (a follower passes
+	# the request to the leader); "via" names it
+	local s=$SERVER
+	[ "$SOAK_SERVERS" = 1 ] || s=$(api_server) || s=$SERVER
+	if out=$(on "$s" "sudo bash -s $(api_args "$s")" <<<"$REMOTE_LAT" 2>/dev/null); then
 		while read -r a b c d; do
 			case "$a" in
 			metrics) ev metrics "$b $c $d" ;;
 			fail) ev lat "fail route=/v1/$c" ;;
-			*) ev lat "code=$a s=$b route=/v1/$c bytes=$d" ;;
+			*) ev lat "code=$a s=$b route=/v1/$c bytes=$d${s:+ via=$s}" ;;
 			esac
 		done <<<"$out"
 	else

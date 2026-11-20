@@ -8,6 +8,22 @@
 #                                                     of $PATH_HOST, per router
 #
 # The first machine in $NODES_FILE becomes the server, the others workers.
+#
+# With SOAK_SERVERS=N (the soak of several servers, docs/ha.md, ha.sh), the
+# first N machines are servers: the first one init makes, as below; each of
+# the others joins it with a server token (hivemind join-token --role server)
+# and hivemind join <first> --role server --advertise <its address> in the
+# foreground until hivemind servers lists it as a voter, then runs the same
+# unit as the first, serve --advertise <its address> with the router's
+# flags (join_server in lib.sh); the workers join the first server's
+# address, and keep the list of servers in node.json. Before hivemind runs,
+# ports_check (lib.sh) checks that the security group lets the servers reach
+# each other's port 4486 and the client the API's 4483. With SOAK_API_TLS=1
+# (the default with N > 1) every server serves the API on its private
+# address with a certificate from a CA made for the run (api_certs), and the
+# outside machine gets the CLI as a client that knows every server
+# (wload.sh client-setup). sqlite3 is installed on the servers for the
+# write-load's check.
 # Each machine needs Docker Engine running, jq, curl, iptables, and an ssh
 # login with passwordless sudo. Each step is the one the docs give
 # (docs/quick-start.md, the README's "Add a machine", docs/systemd.md):
@@ -78,23 +94,48 @@ machine_facts() {
 install_server() {
 	note "server $SERVER ($SERVER_IP): init, unit with serve --advertise $SERVER_IP"
 	# init prints the admin token once; keep it out of the log. It is in
-	# $DATA/admin.token, mode 0600, for the CLI as root.
-	hm "$SERVER" init >/dev/null
+	# $DATA/admin.token, mode 0600, for the CLI as root (and, with
+	# SOAK_API_TLS=1, copied to $SOAK_ETC for the soak's client config).
+	on "$SERVER" "sudo $HM init" >/dev/null
+	token_to "$SERVER"
 	install_unit "$SERVER" "$(server_unit "$SERVER_IP")"
 	wait_for 60 hm "$SERVER" status || die "the API on $SERVER did not answer"
+	ev setup "$SERVER unit ExecStart=$(on "$SERVER" "systemctl show -p ExecStart --value hivemind.service | sed -n 's/.*argv\[\]=\([^;]*\);.*/\1/p'")"
+	if [ "$SOAK_SERVERS" -gt 1 ] && [ "$SOAK_ROUTES" = 1 ]; then
+		wait_for 90 router_up_id "$SERVER" || die "$SERVER: no router: $(hma nodes 2>&1 | tr -s ' \n' ' ')"
+	fi
 }
 
+# servers_facts: with several servers, how they see the cluster: hivemind
+# servers on each, and each worker's list of servers in its node.json.
+servers_facts() {
+	local n
+	[ "$SOAK_SERVERS" -gt 1 ] || return 0
+	ev setup "servers $(servers_line)"
+	while read -r line; do ev servers "$line"; done < <(hma servers 2>&1)
+	for n in "${NAMES[@]:SOAK_SERVERS}"; do
+		ev setup "$n node.json server=$(on "$n" "sudo jq -c '[.server, .servers]' $DATA/node.json" 2>&1 | tr -d ' ')"
+	done
+}
 
 # write_ids: the "id name" map, from each worker's node.json and the server's node list.
 write_ids() {
 	local i n id
 	: >"$IDS_FILE.tmp"
-	id=$(hm "$SERVER" nodes --json | jq -r '.[] | select(.server) | .id')
+	if [ "$SOAK_SERVERS" = 1 ]; then
+		id=$(hm "$SERVER" nodes --json | jq -r '.[] | select(.server) | .id')
+	else
+		id=$(node_id_on "$SERVER") || id=""
+	fi
 	[ -n "$id" ] || die "no server node in hivemind nodes"
 	echo "$id $SERVER" >>"$IDS_FILE.tmp"
 	for ((i = 1; i < ${#NAMES[@]}; i++)); do
 		n=${NAMES[$i]}
-		id=$(on "$n" "sudo jq -r .node_id $DATA/node.json")
+		if is_server "$n"; then
+			id=$(node_id_on "$n") || id=""
+		else
+			id=$(on "$n" "sudo jq -r .node_id $DATA/node.json")
+		fi
 		[ -n "$id" ] || die "$n has no node ID"
 		echo "$id $n" >>"$IDS_FILE.tmp"
 	done
@@ -104,11 +145,11 @@ write_ids() {
 
 all_ready() {
 	local want=${#NAMES[@]}
-	[ "$(hm "$SERVER" nodes --json | jq '[.[] | select(.state == "ready")] | length')" = "$want" ]
+	[ "$(hma nodes --json | jq '[.[] | select(.state == "ready")] | length')" = "$want" ]
 }
 
 deploy() { # deploy JSON
-	hm "$SERVER" "deploy -f -" <<<"$1" >/dev/null
+	hma_in "deploy -f -" <<<"$1" >/dev/null
 }
 
 deploy_routed() {
@@ -116,7 +157,7 @@ deploy_routed() {
 	deploy "$(api_spec)"
 	deploy "$(spread_spec)"
 	deploy "$(kv_spec)"
-	hm "$SERVER" "compose deploy -" < <(shop_compose) >/dev/null || die "compose deploy shop"
+	hma_in "compose deploy -" < <(shop_compose) >/dev/null || die "compose deploy shop"
 	ev setup "deployed www api spread kv; compose project shop: front cache"
 	if [ "$SOAK_PATHS" = 1 ]; then
 		deploy "$(path_spec proot / 1)"
@@ -170,12 +211,12 @@ check_paths() {
 	done
 	out=$(on "$OUT_NAME" "$cmd") || die "check_paths on $OUT_NAME"
 	while read -r line; do ev paths "$line"; done <<<"$out"
-	ev paths "routes $(hm "$SERVER" routes 2>&1 | tr -s ' \n' ' ')"
+	ev paths "routes $(hma routes 2>&1 | tr -s ' \n' ' ')"
 }
 
 kv_node() { # the soak name of the node that runs kv replica 0
 	local st id
-	st=$(hm "$SERVER" status --json)
+	st=$(hma status --json)
 	id=$(jq -r '.[] | select(.name == "kv") | .replicas[0].node_id // ""' <<<"$st")
 	[ -n "$id" ] && name_of_id "$id"
 }
@@ -187,28 +228,42 @@ check_listeners() {
 		l=$(on "$n" "sudo ss -ltnpH" | awk '{ print $4, $6 }')
 		ev listeners "$n $(awk '{ printf "%s;", $1 }' <<<"$l")"
 		bad=$(awk '{ split($1, a, ":"); port = a[length(a)]; addr = substr($1, 1, length($1) - length(port) - 1) }
-			(port == 4483 || port == 4484 || port == 4485 || port == 8080 || port == 8081 || port == 6379 || port == 80 || port == 443) && (addr == "0.0.0.0" || addr == "*" || addr == "[::]") { print $1 }' <<<"$l")
+			(port == 4483 || port == 4484 || port == 4485 || port == 4486 || port == 8080 || port == 8081 || port == 6379 || port == 80 || port == 443) && (addr == "0.0.0.0" || addr == "*" || addr == "[::]") { print $1 }' <<<"$l")
 		[ -z "$bad" ] || die "$n: a hivemind or app port listens on a wildcard address: $bad"
 	done
 }
 
 main() {
 	local n val
-	ev setup "begin nodes=${#NAMES[@]} server=$SERVER binary_sha256=$(sha256sum "$BIN" | cut -d' ' -f1)"
+	ev setup "begin nodes=${#NAMES[@]} servers=${SRV_NAMES[*]} api_tls=$SOAK_API_TLS binary_sha256=$(sha256sum "$BIN" | cut -d' ' -f1)"
 	for n in "${NAMES[@]}"; do install_bin "$n" & done
 	wait
 	for n in "${NAMES[@]}"; do machine_facts "$n"; done
 	if [ "$SOAK_ROUTES" = 1 ]; then
 		for n in "${NAMES[@]}"; do prepare_node "$n"; done
 	fi
+	# the security group, for the server port and the API off loopback
+	ports_check
+	# sqlite3 on the servers, for the write-load's check of each one's store (wload.sh)
+	if [ "${WLOAD:-$SOAK_API_TLS}" = 1 ]; then
+		for n in "${SRV_NAMES[@]}"; do
+			SSH_TIMEOUT=300 on "$n" "command -v sqlite3 >/dev/null || sudo dnf install -y -q sqlite >/dev/null" || die "$n: no sqlite3"
+			ev machine "$n sqlite3=$(on "$n" "sqlite3 --version | cut -d' ' -f1")"
+		done
+	fi
+	api_certs
 	# the server's name, on the outside machine too
 	if [ -n "$SERVER_NAME" ] && [ -n "$OUT_NAME" ]; then dns_line "$OUT_NAME" "$(dns_ip)"; fi
 	install_server
-	for ((i = 1; i < ${#NAMES[@]}; i++)); do join_worker "${NAMES[$i]}"; done
+	for n in "${SRV_NAMES[@]:1}"; do join_server "$n"; done
+	for n in "${NAMES[@]:SOAK_SERVERS}"; do join_worker "$n"; done
 	write_ids
-	wait_for 60 all_ready || die "not every node is ready: $(hm "$SERVER" nodes)"
+	wait_for 60 all_ready || die "not every node is ready: $(hma nodes)"
 	# The table with its ROUTER column, as an operator reads it.
-	while read -r line; do ev nodes "$line"; done < <(hm "$SERVER" nodes 2>&1)
+	while read -r line; do ev nodes "$line"; done < <(hma nodes 2>&1)
+	servers_facts
+	# the client that knows every server, on the outside machine (wload.sh)
+	if [ "$SOAK_API_TLS" = 1 ] && [ -n "${WL_CLIENT:-$OUT_NAME}" ]; then "$HERE/wload.sh" client-setup; fi
 	note "all ${#NAMES[@]} nodes ready; waiting 40 s, the --min-ready wait, before the first deploy"
 	sleep 40
 	if [ "${SETUP_APPS:-1}" = 0 ]; then
