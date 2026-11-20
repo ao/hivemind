@@ -2,10 +2,13 @@ package main
 
 import (
 	"context"
+	"encoding/pem"
 	"io"
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -128,5 +131,48 @@ func TestCLITriesAgainWhileNoServerLeads(t *testing.T) {
 	err = testClient(t, outcome.URL, good.URL).call(ctx, http.MethodPost, "/v1/registries", map[string]string{"host": "x"}, nil)
 	if err == nil || unknown.Load() != 1 || hits.Load() != 0 {
 		t.Fatalf("a write whose outcome is unknown: %v, sent %d times and to the next server %d times", err, unknown.Load(), hits.Load())
+	}
+}
+
+// TestCLIPassesAStoppedServerAndSaysWhyNoServerLeads: with no leader, and
+// a server whose process is stopped, which takes the TCP connection in its
+// kernel and never answers the TLS handshake, a call gives that server 3 s,
+// not the 5 s of its handshake timeout, and prints the other server's
+// answer that no server leads, not the stopped one's timeout (the ninth
+// soak's fourth finding).
+func TestCLIPassesAStoppedServerAndSaysWhyNoServerLeads(t *testing.T) {
+	isolate(t)
+	wait := leaderWait
+	leaderWait = 500 * time.Millisecond
+	t.Cleanup(func() { leaderWait = wait })
+	const why = "no leader: this server reaches 1 of the 3 servers, and a write needs 2"
+	follower := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = io.Copy(io.Discard, r.Body)
+		w.Header().Set(nodeapi.NoLeaderHeader, "1")
+		w.WriteHeader(http.StatusServiceUnavailable)
+		_, _ = w.Write([]byte(`{"error":"` + why + `"}`))
+	}))
+	defer follower.Close()
+	// Nothing accepts from this listener: a connect completes in the
+	// backlog, and the handshake waits.
+	stopped, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer stopped.Close()
+	ca := filepath.Join(t.TempDir(), "ca.pem")
+	if err := os.WriteFile(ca, pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: follower.Certificate().Raw}), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	c, err := (&clientFlags{server: follower.URL + ",https://" + stopped.Addr().String(), token: "tok", caCert: ca}).client()
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, m := range []string{http.MethodGet, http.MethodPost} {
+		start := time.Now()
+		err := c.call(context.Background(), m, "/v1/registries", map[string]string{"host": "x"}, nil)
+		if d := time.Since(start); err == nil || err.Error() != why || d > 4500*time.Millisecond {
+			t.Fatalf("%s with no leader and a stopped server: %v after %s", m, err, d)
+		}
 	}
 }

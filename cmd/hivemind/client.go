@@ -44,15 +44,22 @@ const (
 	maxResponse     = 16 << 20
 
 	// With one server, the CLI waits 30 s for the TCP connect. With
-	// several, it waits 2 s, and 5 s for the TLS handshake, and then tries
-	// the next server: one on the network that has not answered in that
-	// time is taken as gone. In the eighth soak, with the first of three
-	// servers powered off, every call waited 30 s, then 3.1 s, the kernel's
-	// time to give up on the address, before it tried the second.
+	// several, it waits 2 s for it, and 3 s in all for a connection, the
+	// TLS handshake included, and then tries the next server: one on the
+	// network that has not answered in that time is taken as gone. In the
+	// eighth soak, with the first of three servers powered off, every call
+	// waited 30 s, then 3.1 s, the kernel's time to give up on the address,
+	// before it tried the second. In the ninth, with two servers' processes
+	// stopped, whose machines took the connections, each cost a call the
+	// 5 s the TLS handshake had then.
 	connectTimeout     = 30 * time.Second
 	listConnectTimeout = 2 * time.Second
-	listTLSTimeout     = 5 * time.Second
+	listConnTimeout    = 3 * time.Second
 )
+
+// errNoConn ends a request to one of several servers that has had no
+// connection for listConnTimeout.
+var errNoConn = errors.New("no connection")
 
 // clientKeepAlive probes an idle connection to the server after 15 s, then
 // every 5 s, and drops it after 3 probes go unanswered.
@@ -276,7 +283,7 @@ func (f *clientFlags) client() (*apiClient, error) {
 	var last string
 	if len(bases) > 1 {
 		dial.Timeout = listConnectTimeout
-		tr.TLSHandshakeTimeout = listTLSTimeout
+		tr.TLSHandshakeTimeout = listConnTimeout
 		// The server that answered the last command of this list is tried
 		// first.
 		if last = lastServer(bases); last != "" {
@@ -379,7 +386,11 @@ var (
 // leader). It also passes a server whose connection broke after the
 // request was sent, but only for a GET or a HEAD: a write sent again
 // could be applied twice. When some server answered that none leads, it
-// tries them all again for a few seconds (leaderWait).
+// tries them all again for a few seconds (leaderWait), and if no server
+// takes the request by then, returns the last such answer, which says why,
+// rather than the error of a server that did not answer. In the ninth
+// soak, with no leader and two servers' processes stopped, the CLI
+// printed the last server's TLS handshake timeout.
 func (c *apiClient) send(ctx context.Context, method, path string, body any) (*http.Response, error) {
 	var b []byte
 	if body != nil {
@@ -389,8 +400,15 @@ func (c *apiClient) send(ctx context.Context, method, path string, body any) (*h
 		}
 	}
 	safe := method == http.MethodGet || method == http.MethodHead
-	var err error
+	var err, noLeaderErr error
 	var firstNoLeader time.Time
+	// why is what send returns when no server took the request.
+	why := func() error {
+		if noLeaderErr != nil {
+			return noLeaderErr
+		}
+		return err
+	}
 	for {
 		noLeader := false
 		start := 0
@@ -418,28 +436,25 @@ func (c *apiClient) send(ctx context.Context, method, path string, body any) (*h
 			var ae *apiError
 			switch {
 			case ctx.Err() != nil:
-				return nil, err
+				return nil, why()
 			case errors.As(err, &ae) && ae.noLeader:
-				noLeader = true
+				noLeader, noLeaderErr = true, err
+				if firstNoLeader.IsZero() {
+					firstNoLeader = time.Now()
+				}
 			case errors.As(err, &re) && (!re.sent || safe):
 			default:
 				return nil, err
 			}
 		}
-		if !noLeader {
-			return nil, err
-		}
-		if firstNoLeader.IsZero() {
-			firstNoLeader = time.Now()
-		}
-		if time.Since(firstNoLeader) >= leaderWait {
-			return nil, err
+		if !noLeader || time.Since(firstNoLeader) >= leaderWait {
+			return nil, why()
 		}
 		t := time.NewTimer(leaderRetry)
 		select {
 		case <-ctx.Done():
 			t.Stop()
-			return nil, err
+			return nil, why()
 		case <-t.C:
 		}
 	}
@@ -456,7 +471,25 @@ type reachError struct {
 
 func (e *reachError) Error() string { return e.msg }
 
-// sendTo is send to one server.
+// closeThen is a reply's body that calls then once it is closed: the reply
+// is read under the request's context, which then ends.
+type closeThen struct {
+	io.ReadCloser
+	then func()
+}
+
+func (c *closeThen) Close() error {
+	err := c.ReadCloser.Close()
+	c.then()
+	return err
+}
+
+// sendTo is send to one server. With several servers, the request ends if
+// it has no connection to this one after listConnTimeout, whatever it
+// waits for: the TCP connect, the TLS handshake, or a connection another
+// request is opening. A server whose process is stopped, as in the ninth
+// soak, takes the TCP connection in its kernel and never answers the
+// handshake.
 func (c *apiClient) sendTo(ctx context.Context, base, method, path string, b []byte, hasBody bool) (*http.Response, error) {
 	var rd io.Reader
 	if hasBody {
@@ -468,8 +501,20 @@ func (c *apiClient) sendTo(ctx context.Context, base, method, path string, b []b
 			sent.Store(true)
 		}
 	}}
-	req, err := http.NewRequestWithContext(httptrace.WithClientTrace(ctx, trace), method, base+path, rd)
+	rctx, done := ctx, func() {}
+	if len(c.bases) > 1 {
+		var cancel context.CancelCauseFunc
+		rctx, cancel = context.WithCancelCause(ctx)
+		slow := time.AfterFunc(listConnTimeout, func() { cancel(errNoConn) })
+		trace.GotConn = func(httptrace.GotConnInfo) { slow.Stop() }
+		done = func() {
+			slow.Stop()
+			cancel(nil)
+		}
+	}
+	req, err := http.NewRequestWithContext(httptrace.WithClientTrace(rctx, trace), method, base+path, rd)
 	if err != nil {
+		done()
 		return nil, err
 	}
 	req.Header.Set("Authorization", "Bearer "+c.token)
@@ -479,8 +524,12 @@ func (c *apiClient) sendTo(ctx context.Context, base, method, path string, b []b
 	}
 	resp, err := c.http.Do(req)
 	if err != nil {
+		done()
 		if ctx.Err() != nil {
 			return nil, ctx.Err()
+		}
+		if errors.Is(context.Cause(rctx), errNoConn) {
+			return nil, &reachError{msg: fmt.Sprintf("cannot reach hivemind at %s: no connection in %s", base, listConnTimeout)}
 		}
 		if msg := tlsReason(err, c.caPath); msg != "" {
 			return nil, &reachError{msg: fmt.Sprintf("cannot reach hivemind at %s: %s", base, msg)}
@@ -493,8 +542,10 @@ func (c *apiClient) sendTo(ctx context.Context, base, method, path string, b []b
 		return nil, re
 	}
 	if resp.StatusCode/100 == 2 {
+		resp.Body = &closeThen{ReadCloser: resp.Body, then: done}
 		return resp, nil
 	}
+	defer done()
 	defer resp.Body.Close()
 	if resp.StatusCode == http.StatusUnauthorized {
 		return nil, c.refused()
