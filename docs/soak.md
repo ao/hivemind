@@ -2070,3 +2070,200 @@ scripts/soak/metrics-report.sh "$SOAK_DIR/metrics-steady-begin.txt" "$SOAK_DIR/m
 ```
 
 The operator's start of a machine: `scripts/soak/scenario.sh fault NAME MACHINE start` puts the request's time in the log. `HA_FAULT=service` kills and starts `hivemind` instead of powering the machine off, for a run with no operator.
+
+# Ninth soak: three servers again, with the eighth soak's fixes
+
+Seven new machines, on 2026-11-20, on the 2.3.0 candidate at 28814cc: 2.2.0, [several servers](ha.md), and the fixes of what the eighth soak found. Three servers, three workers and the outside machine, as in the eighth soak, with the same clients through every router and the write-load through hivemind's CLI. Each of the eighth soak's seven findings was run again: the leader's machine powered off with it first in the client's list, the leader cut off from the other servers, the leader's `hivemind` restarted, a server's router started while no server leads (twice, a new scenario), the foreground `join --role server` of the set-up, and the Raft log of 50 minutes of steady state. Every write the API acknowledged was in every server's store afterwards, the three stores held the same rows after each scenario, and no copy of a replica ran on two nodes. Times are UTC; the machines' private addresses are shown renumbered, 10.0.0.N for hivemind-soakl-N.
+
+## The eighth soak's findings, again
+
+| | Eighth soak (23763ae) | Ninth soak (28814cc) |
+|---|---|---|
+| A client whose first server's machine is off | every CLI call 3.1 s, the first 30.0 s; 42 writes in the 154 s the machine was down | one write and one read took 2.0 s (the connect timeout of a list), then 20 to 25 ms each, from the server that answered last; 186 writes in the 3 min, none failed |
+| The leader's `hivemind` restarted | it kept the leadership for its 10 s stop and handed it to nobody; 1.7 s without a leader; 4 reads and 1 write refused | it handed the leadership on 17 ms after `shutting down`; another server led 29 ms after it; 111 writes and 241 reads, none failed, the slowest write 30 ms |
+| A server's router that starts while no server leads | no table, every TLS handshake failed for 1.9 s (21 requests per stream) | with another server leading, the restarted router had its table and 3 certificates 0.13 s after the old process exited, and no handshake failed. With no leader, it still did not serve its certificates until it read a table: a hung server held its one read for the whole 5 s it waits at start ([below](#a-servers-router-started-while-no-server-leads)) |
+| The Raft log of the steady state | 5.7 entries a second, 3.1 KB each on average; the reason of every pending replica written again by each placement pass, 63 % of the bytes; `raft.db` 66 MB after the hour | 5.2 entries a second, 416 bytes each on average, 88 % fewer bytes a second; the reasons 2.4 % of the bytes; `raft.db` 8.9 MB and a 4.1 MB WAL after 50 minutes. 89 % of the entries are now a node's lease, renewed by each report and each heartbeat ([below](#steady-state-7)) |
+| Stopping the foreground `join --role server` | 10.0 s, with `level=WARN msg="cluster shutdown" err="context deadline exceeded"` | 566 ms and 58 ms, without that warning |
+| Raft's lines for a server that is down | 71 lines at error on the new leader in 2.5 min | none at error; 5 warnings in the 2.6 min (the first, then one every 30 s with `repeated=21`, `11`, `11`, `11`), and `a server answers again failures=69` at info when it was back |
+| The CLI during an election | a read failed while the stopping leader still led; reads and writes refused with `503` in the 1.7 s without a leader | no read or write failed in the power-off, the cut-off or the restart; the slowest write, 3.0 s, waited out the cut-off's election |
+
+What is left of these, and what is new, is [below](#what-did-not-work-and-what-was-not-measured-8).
+
+## The scenarios
+
+| | Writes acknowledged, of those made | Acknowledged writes missing from a server's store | Reads through the client, failed | Longest without a successful read |
+|---|---|---|---|---|
+| The leader's machine powered off (hivemind-soakl-1, first in the client's list) | 186 of 186 | 0 | 0 of 182 | 2.5 s |
+| The leader cut off from the other servers for 65 s | 95 of 95 | 0 | 0 of 206 | 4.0 s |
+| The leader's `hivemind` restarted | 111 of 111 | 0 | 0 of 241 | 0.5 s |
+| A server's `hivemind` restarted while the two others are paused; one resumed 1 s after its start | 42 of 43; 1 failed with no leader | 0 | 1 of 89, with no leader | 17.4 s, the time without a quorum |
+| The same, the first one resumed 8 s after its start | 43 of 44; 1 failed with no leader | 0 | 1 of 89, with no leader | 27.3 s, the time without a quorum |
+| Steady state, 50 minutes | 1400 of 1400 | 0 | 0 of 5984 | none failed; the slowest read 119.9 ms |
+
+## The machines and the build
+
+| | |
+|---|---|
+| Machines | 7 EC2 c7g.large in one subnet: 2 vCPU (Graviton3), 3.7 GiB (MemTotal 3897240 kB), Amazon Linux 2023.12.20261119, kernel 6.18.62-127.179.amzn2023.aarch64, Docker 25.0.18 |
+| Roles | hivemind-soakl-1, 2 and 3 the servers (1 made by `init`, 2 and 3 joined with server tokens), 4 to 6 workers, 7 the outside machine |
+| hivemind | 28814cc: `CGO_ENABLED=0 go build -trimpath -ldflags "-s -w -X main.version=v2.2.0-26-g28814cc -X main.commit=28814cc2616d" ./cmd/hivemind`, Go 1.27.4 (golang:1.27), linux/arm64, sha256 274ab941...2018df |
+| The gRPC server and client | `test/h2ctest`, built the same way with `-ldflags "-s -w"`, sha256 8581bdf9...42b21b, the eighth soak's |
+| Service, API, client, outside machine | as in the eighth soak: each server's API on its private address, port 4483, with a certificate from a CA made for the run, and the CLI on the outside machine with `HIVEMIND_SERVER=https://10.0.0.1:4483,https://10.0.0.2:4483,https://10.0.0.3:4483` |
+| Network | the soak security group: TCP 4483, 4484, 4485, 4486, 30000 to 32767 and 32768 to 60999 within the group. Before set-up, a connection from each of the six other machines to a listener on 10.0.0.1 on 4486, 4483, 30000, 32767, 32768 and 60999: all open |
+
+## Set-up
+
+As in the eighth soak, in one try: 32 s from the start of set-up to all six routers listening, and 89 s to the apps deployed and converged, 20 replicas, 40 s of it the `--min-ready` wait. hivemind-soakl-2 logged that it had joined at 08:50:58.53 and installed the leader's snapshot 0.09 s later, and was a voter in the leader's list by 3.2 s after its join; hivemind-soakl-3 joined at 08:51:05.58 and was a voter by 2.3 s after. The foreground `join` of hivemind-soakl-2 stopped 566 ms after its SIGTERM, of hivemind-soakl-3 58 ms after, against 10.0 s for each in the eighth soak; the only line between `shutting down` and `stopped` was hivemind-soakl-2's `level=WARN msg="raft: failed to decode incoming command" ... error="transport shutdown"`. `hivemind servers` on each of the three named hivemind-soakl-1 the leader and the other two followers.
+
+## Method
+
+The eighth soak's harness and clients, with two additions:
+
+- `router-noleader [GAP]`: the two followers' `hivemind` paused with SIGSTOP, so that their sockets stay open and nothing answers on them, as with a hung process or a machine that is gone but not yet refused; the leader steps down; 2 s later its `hivemind` is stopped and started with `systemctl`, so that its router starts while no server leads; GAP s after the start one paused server is resumed with SIGCONT, so that two servers can elect a leader, and 15 s later the other. Run with GAP 1, within the 5 s a starting router waits for its table, and GAP 8, past it.
+- In the steady state, on each server every 5 minutes, the Raft log's last index and the entries appended since the last look, their bytes and how many carry a write of a pending replica's reason, from `raft.db` with sqlite3; and at the end, the entries of the window decoded by statement on the build host, from a copy of a follower's `raft.db`.
+
+The fault times are from the servers' journals. The machine was powered off from inside (`sysrq o`) and started with `aws ec2 start-instances` when the harness asked, 20 s after its note.
+
+## Results
+
+### The leader's machine powered off, first in the client's list
+
+| | UTC | After the power-off |
+|---|---|---|
+| Power-off command, hivemind-soakl-1 | 08:53:36.33 | |
+| Both followers' heartbeat timeouts | 08:53:37.65 | +1.32 |
+| hivemind-soakl-2 leads (term 4) | 08:53:37.68 | +1.35 |
+| The old leader's node `waiting` (the new leader's start grace) | | +16.9 |
+| Its node lost; converged without it | | +122.4, +126.7 |
+| Start request; port 22 open; its raft started | 08:56:03.66, 08:56:10.14, 08:56:11.01 | +147.3, +153.8, +154.7 |
+| A follower in the new leader's view; converged | 08:56:12.49 | +156.2 |
+
+hivemind-soakl-3 timed out first, 11 ms before hivemind-soakl-2, and hivemind-soakl-2 refused its pre-vote, having heard from the leader more recently; hivemind-soakl-2's own pre-vote and election then took 12 ms. The client's first server, and the one it had used last, was hivemind-soakl-1. The first write after the power-off, at +1.0 s, took 2.02 s, and the read at +0.5 s 2.01 s: the 2 s connect timeout a list gives each server, then hivemind-soakl-2, which led by then. Every call after that started at hivemind-soakl-2, the server that had answered last, kept in the client's cache directory (`/root/.cache/hivemind/server-<hash>`, mode 0600 in a 0700 directory): p50 25 ms, p99 51 ms for the 186 writes, none failed, and the longest between two acknowledged writes 3.0 s. Raft on the new leader logged the dead server at warn: `failed to make requestVote RPC` once, then `failed to heartbeat to ... repeated=21 in=30s`, and three more such lines each 30 s apart with `repeated=11`; three `failed to contact` warnings in its first 1.5 s, raft's own; and when the machine was back, `raft: a server answers again ... failures=69` at info. No line at error on any server.
+
+### The leader cut off from the other servers
+
+iptables on the leader, hivemind-soakl-2, dropped TCP 4484 and 4486 to and from the two other servers, both ways.
+
+| | UTC | Seconds |
+|---|---|---|
+| The rules in place | 08:56:54.60 | |
+| hivemind-soakl-2: `failed to contact quorum of nodes, stepping down` | 08:56:55.05 | +0.46 |
+| hivemind-soakl-3 leads (term 5) | 08:56:57.09 | +2.50 |
+| The rules removed | 08:57:59.1 | +64.5 |
+| hivemind-soakl-2 a follower, its own API `200` | 08:58:00.8 | +66.2 |
+
+All 95 writes were acknowledged and in the three stores. hivemind-soakl-2's own API answered the marked `503` (`no leader: this server reaches 1 of the 3 servers, and a write needs 2`) from +0.4 s to the heal; the slowest write, 3.03 s, was the one made during the election, the CLI trying the servers again every 500 ms until one led, and no write or read failed (206 reads, the slowest 22 ms). On its way down, hivemind-soakl-2 logged two `node request failed` lines at error: a lease renewal whose leadership was lost while it was in the log, and a report it refused with no leader. While cut off it logged raft's `Election timeout reached, restarting election` at warn 43 times in the 65 s.
+
+### The leader's hivemind restarted
+
+`systemctl restart hivemind` on the leader, hivemind-soakl-3.
+
+| | UTC | Seconds |
+|---|---|---|
+| `shutting down` | 08:58:41.541 | |
+| hivemind-soakl-1, the follower furthest along, a candidate | 08:58:41.545 | +0.004 |
+| hivemind-soakl-1 wins (term 6); hivemind-soakl-3 `no longer leads`, `handed the leadership on ... took=17ms` | 08:58:41.560, 08:58:41.561 | +0.02 |
+| hivemind-soakl-1 leads | 08:58:41.570 | +0.029 |
+| The router's 10 s wait for its held stream ends; the process exits | 08:58:51.836 | +10.3 |
+| The new process's router: `router ready hosts=3 certificates_loaded=3`, listening | 08:58:51.967 | +10.4 |
+
+The cluster had a leader the whole time but for the 9 ms between the old leader's step-down and the new one's first line. The 111 writes, through the client, took 30 ms at the most, and none of the 241 reads failed. The stopping server's API and router were closed for the 10.4 s, as before: its own API refused connections, and through its router at most one request per HTTP stream was refused, the one sent between the old router's close and the new one's listen; once the new one listened, nothing through it failed. Its node's log poll and hivemind-soakl-1's got `503 the server is shutting down` once, and retried. The handover logged raft's `peer has newer term, stopping replication` at error on the stopping server.
+
+### A server's router started while no server leads
+
+The new scenario, twice: the followers paused, the leader, hivemind-soakl-1, stepped down 0.58 s later, and its `hivemind` was restarted. The seconds are from the new process's start, its raft's first line.
+
+| | GAP 1 | GAP 8 |
+|---|---|---|
+| The two followers paused | 09:00:42.44 | 09:01:53.27 |
+| The leader steps down | 09:00:43.02 | 09:01:53.86 |
+| `shutting down`; the process exits (the router's 10 s wait) | 09:00:44.59; 09:00:56.98 | 09:01:55.42; 09:02:06.95 |
+| The new process: raft started | 09:00:57.14 | 09:02:07.14 |
+| One follower resumed | 09:00:58.06 | 09:02:15.05 |
+| hivemind-soakl-1 elected (terms 7 and 8), leads | 09:00:58.88, +1.7 s | 09:02:15.25, +8.1 s |
+| The router: `starting without a routing table ... reads=1`, listening | 09:01:02.14, +5.0 s | 09:02:12.14, +5.0 s |
+| The router has its table | 09:01:02.15 | 09:02:22.14, +15.0 s |
+| Through it, after the old process exited: HTTP per stream; unary gRPC calls | 1 timed out (curl's 3 s connect limit), the others waited up to 5.0 s; 1 call `tls: internal error` after 4.99 s | 1 timed out and 101 `tls: internal error` per stream, from +5.0 to +15.0 s; 51 calls failed |
+
+In both runs the router's start made one read of the table, which lasted the whole 5 s the router waits before it takes TLS connections (`reads=1`). The server was then a follower, so the read went through the node API and its list of servers. Its error was the server's own node listener's no-leader answer, and the time most likely went to the next server in the list, a paused one, whose port accepted the connection while nothing answered it: the node API's client gives a server 10 s for the TLS handshake. In the first run hivemind-soakl-1 itself led from +1.7 s, and the router got its table within 10 ms of its start without one; the TLS connections queued meanwhile waited up to 5 s, one per stream longer than curl's 3 s. In the second the router started with no table at +5.0 s, failed every handshake, and read the table again only at its next poll, 10 s later, though its own server had led for 6.9 s by then; that poll's read also hung on a paused server and failed, and the one right after it succeeded. With finding 3 of the eighth soak, its certificates are in the server's own copy of the store; what kept them from being served was the table, which a router needs before it serves a host. The write and read that failed in each run are the client's during the quorum loss: the CLI tried hivemind-soakl-1, which said no leader, then the two paused servers, 5 s each for the TLS handshake, and printed the last error, `TLS handshake timeout`, rather than the no-leader answer.
+
+## Steady state
+
+On 28814cc, 50 minutes, from 09:02:49.8 to 09:52:51.7, after the scenarios: the 24 HTTP streams (four through each router), the 12 gRPC clients, the API probe, and the write-load at one write every 2 s, each app deployed, scaled, and deleted 100 cycles later. hivemind-soakl-1 led the whole window, in term 8 from the second run of the router scenario, and no server logged an election, a heartbeat timeout or a change of leader, nor a line at error.
+
+| The write-load and the API | |
+|---|---|
+| Writes, through the client that knows every server | 1400: 500 deploys, 500 scales, 400 deletes; all acknowledged |
+| Time per write, p50 / p90 / p99 / p99.9 / max | 29.6 / 32.8 / 38.1 / 54.1 / 61.5 ms |
+| By kind, p50 / p99 / max | deploy 30.4 / 41.1 / 61.5 ms, scale 30.3 / 37.9 / 43.8 ms, delete 16.6 / 24.2 / 26.1 ms |
+| The check | Each server's own store held exactly the 101 apps kept, each with its `WL_SEQ` and 2 replicas, and none of the deleted ones; the three stores the same rows; the clean deleted 101, 0 left |
+| Reads through the client, `hivemind nodes --json` every 0.5 s | 5984, none failed; p50 9.6, p99 17.8, max 119.9 ms |
+| Each server's API, `GET /v1/nodes` directly every 0.5 s | 5984 `200` from each of the three |
+| `GET /v1/status`, `/v1/nodes`, `/v1/apps` through a server, 250 each | all `200`; p50 12.9, 5.0 and 4.0 ms; p99 29.1, 12.7 and 5.7 ms |
+
+| HTTP, through the six routers | |
+|---|---|
+| Requests, all 24 streams | 715440 |
+| Succeeded | 715440 (100 %) |
+| Misrouted | 0 |
+| Requests of 1.5 s or more | 0 |
+| Total time per request (TCP connect, TLS handshake, request and reply), p50 / p90 / p99 / p99.9 / max | 2.5 / 3.3 / 5.5 / 9.1 / 1065.3 ms |
+| TLS handshake, p50 / p99 / max | 1.5 / 3.3 / 37.5 ms |
+| Certificate checks (a fresh handshake with every router for each host every 30 s) | none failed in the window; the 22 of the whole run that failed were each on the machine that was down, paused or restarting at the time |
+
+| gRPC, through the six routers | |
+|---|---|
+| Unary calls | 89268, all succeeded; p50 / p90 / p99 / p99.9 / max 5.3 / 7.6 / 12.0 / 18.5 / 108.4 ms |
+| Server streams that ended in the window | 18, each complete: 1000 messages and `grpc-status` 0 |
+
+The hivemind process on each node, 50 samples a minute apart:
+
+| Node | RSS first / last / max (MiB) | Threads | Open fds first / last / max | CPU, % of one CPU | Restarts |
+|---|---|---|---|---|---|
+| hivemind-soakl-1 (the leader) | 38.8 / 42.0 / 42.1 | 9 | 78 / 59 / 78 | 8.84 | 0 |
+| hivemind-soakl-2 (follower) | 37.7 / 37.8 / 37.8 | 9 | 61 / 45 / 61 | 4.55 | 0 |
+| hivemind-soakl-3 (follower) | 36.5 / 37.8 / 37.8 | 9 | 48 / 45 / 48 | 4.30 | 0 |
+| hivemind-soakl-4 | 25.6 / 25.1 / 25.7 | 8 | 28 / 26 / 28 | 3.93 | 0 |
+| hivemind-soakl-5 | 25.1 / 25.7 / 25.7 | 8 to 9 | 26 / 25 / 27 | 3.94 | 0 |
+| hivemind-soakl-6 | 25.2 / 24.7 / 25.4 | 8 | 27 / 25 / 27 | 4.15 | 0 |
+
+The store grew from 296 to 348 KiB on each server, with a 4 MiB WAL. The leader's RSS rose 3.2 MiB in the window, its process having started at 09:02:07, 40 s before it; 50 minutes is too short for leak figures.
+
+The Raft log, on each server, from `raft.db` every 5 minutes and, at the end, a copy of hivemind-soakl-2's decoded on the build host:
+
+| | |
+|---|---|
+| Entries appended in the 3000 s | 15594, the same on the three servers to the byte at every look: 5.2 a second, 1460 to 1612 in each 5 minutes |
+| Their data | 6.49 MB: 2.2 KB a second, 416 bytes an entry on average |
+| Entries that write a pending replica's reason | 999, one for each deploy and scale |
+| Snapshots | at 09:17 (index 8405) and 09:44 (index 17254), 8849 entries apart |
+| `raft.db` and its WAL at the end | 8.9 MB and 4.1 MB, 13501 entries |
+
+In the eighth soak, with the same write-load and six nodes, the log took 5.7 entries a second of 3.1 KB on average, and `raft.db` was 66 MB after the hour: the bytes a second are 88 % fewer, the entries 9 % fewer. Of the last 3767 entries, decoded by statement, 3350 (89 %) were a node's lease, `UPDATE nodes SET last_lease = ?`: 1766 of them with `UPDATE container_status SET updated_at = ?`, a report that changed nothing but the time, and 1584 alone, the agent's renewal every 5 s or the report of a node with no containers. They made 66 % of the bytes. Each node reports every 2 s and renews its lease every 5 s besides, and each is a Raft entry, written and fsynced on the three servers: about 0.77 entries a second per node. The writes of a pending replica's reason were 191 statements, 2.4 % of the bytes, against 63 % in the eighth soak.
+
+The routers' counters in the leader's `/metrics`, read at the window's two ends, against the clients' `200`s through each router: the leader's own router counted 15 to 19 more than its clients for each host, Pebble's validations; each other router 16 to 42 fewer, less than one of its posts to the leader, which are every 15 s, at 10 requests a second per stream.
+
+## What did not work, and what was not measured
+
+- A server's router that starts while no server leads and another server is hung gives its one read of the table the whole 5 s it waits at start: the node API's client tries the next server in its list, and gives a server 10 s for the TLS handshake. The router's own server took the leadership 1.7 s into the wait in one run, and the router did not read again; in the other the router started with no table, failed every TLS handshake for 10 s, 101 requests per HTTP stream and 51 unary gRPC calls, and read the table again only at its next poll, 6.9 s after its own server led ([above](#a-servers-router-started-while-no-server-leads)). A powered-off server would cost the same through the client's 10 s dial timeout; that was not measured.
+- The node listener answers a report or a lease renewal that failed because the leadership changed, `leadership lost while committing log` or no leader, with `500 internal error`, and logs `node request failed` at error; the API answers the same with `503`. It happened once or twice at each step-down here, and a worker's agent logged `reconcile pass failed ... (500 Internal Server Error): internal error`.
+- A CLI call during a quorum loss with two servers hung took 10 s and more, 5 s for each hung server's TLS handshake, and then printed the last server's `TLS handshake timeout` rather than the first server's no-leader answer, which says what is wrong.
+- Raft's lease and report entries are 89 % of the log in a steady cluster ([above](#steady-state-7)).
+- Lines at error or warn that are not errors: `peer has newer term, stopping replication` at error at each planned handover; `node request failed` at error as above; raft's `Election timeout reached, restarting election` at warn, 43 times in the 65 s a server was cut off, which hivemind does not limit as it does the failed RPCs. The handover's `handed the leadership on` line has `to=""`, without the server it went to.
+- A stopping server's API and router are still closed for the 10 s its router waits for held streams; clients through that router and that API's address alone fail meanwhile, as before.
+- The once-a-second observer's view of the leader lags by its ssh timeouts, more so with paused servers: in the router scenario it named the old leader for 4 s after its step-down and no leader for 4 s after the new one led. The times above are from the servers' journals.
+- Not run: the eighth soak's list, but for the restart while no server leads: a server machine replaced by an empty one and joined again; `hivemind server remove`; five servers; a follower behind by more than the log keeps; a full disk; clock skew; the leader cut off from the workers only; SIGKILL of the leader's `hivemind`; quorum loss and the rolling update with a leader change, which this run did not repeat.
+
+## Running it, with the router scenario
+
+As [the eighth soak's](#running-it-with-three-servers), with:
+
+```sh
+scripts/soak/scenario.sh leader-kill          # start the machine when the log says "start ... machine now"
+scripts/soak/scenario.sh leader-partition 60
+scripts/soak/scenario.sh service-restart
+scripts/soak/scenario.sh router-noleader 1    # the followers paused; the leader restarted; one resumed 1 s after its start
+scripts/soak/scenario.sh router-noleader 8
+scripts/soak/scenario.sh watch-stop
+WL_EVERY_MS=2000 scripts/soak/scenario.sh steady 3000   # STEADY_RAFT_EVERY=300: the Raft log's growth on each server
+```
