@@ -6,6 +6,7 @@ import (
 	"log/slog"
 	"net/http"
 	"strconv"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -59,16 +60,38 @@ type ServerJoiner func(ctx context.Context, id string, req nodeapi.JoinServerReq
 // forwardOr passes a request to the leader when this server is a follower
 // of a cluster of several, and serves it with next otherwise. Every
 // request first loses its forwarding headers: only the leader's server
-// port takes them, from another server.
-func forwardOr(kind string, h *HAHolder, next http.Handler) http.Handler {
+// port takes them, from another server. A log poll or log stream that it
+// passes on ends when stop does, at the listener's Shutdown, as one this
+// server serves itself ends when its log relay closes. Before, a follower's
+// stop waited the whole shutdown timeout, 10 s, for the log poll its own
+// node held through it (eighth soak: every join --role server took 10 s
+// to stop, with a warning).
+func forwardOr(kind string, h *HAHolder, stop context.Context, next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		ha.StripForwardHeaders(r.Header)
 		if l := h.Get(); l != nil && !l.IsLeader() {
+			if kind == ha.KindNode && isLogPath(r.URL.Path) {
+				ctx, cancel := context.WithCancel(r.Context())
+				defer cancel()
+				defer context.AfterFunc(stop, cancel)()
+				r = r.WithContext(ctx)
+			}
 			l.Forward(kind, w, r)
 			return
 		}
 		next.ServeHTTP(w, r)
 	})
+}
+
+// isLogPath reports whether p is a node's log poll or a log stream, which
+// stay open for as long as they wait or stream.
+func isLogPath(p string) bool {
+	rest, ok := strings.CutPrefix(p, nodeapi.Prefix+"/nodes/")
+	if !ok {
+		return false
+	}
+	_, tail, ok := strings.Cut(rest, "/")
+	return ok && (tail == "logs/requests" || strings.HasPrefix(tail, "logs/streams/"))
 }
 
 // serversEvery is how long the server list for ServersHeader is kept

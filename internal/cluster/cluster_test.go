@@ -34,6 +34,7 @@ type fixture struct {
 	tokens   *pki.Tokens
 	nodeAddr string
 	joinAddr string
+	c        *Cluster
 }
 
 func newFixture(t *testing.T, limiter *ratelimit.FailLimiter, opts ...store.Option) *fixture {
@@ -69,7 +70,7 @@ func newFixtureWith(t *testing.T, mod func(*Config), opts ...store.Option) *fixt
 		_ = c.Shutdown()
 		st.Close()
 	})
-	return &fixture{t: t, st: st, ca: ca, tokens: tokens, nodeAddr: c.NodeAddr(), joinAddr: c.JoinAddr()}
+	return &fixture{t: t, st: st, ca: ca, tokens: tokens, nodeAddr: c.NodeAddr(), joinAddr: c.JoinAddr(), c: c}
 }
 
 // issue makes a token for this cluster.

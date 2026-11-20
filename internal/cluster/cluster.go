@@ -29,6 +29,7 @@ import (
 	"net/http"
 	"net/netip"
 	"strconv"
+	"sync"
 	"sync/atomic"
 	"time"
 
@@ -152,8 +153,39 @@ type Cluster struct {
 	epoch                    *atomic.Int64
 	// refused logs the node listener's failed handshakes (handshake.go).
 	refused *refusedLog
-	stop    context.CancelFunc
-	ctx     context.Context
+	// stop ends ctx, at Shutdown or Close: the certificate renewal, and the
+	// log polls and streams a follower passes to the leader.
+	stop context.CancelFunc
+	ctx  context.Context
+	// nodeConns and joinConns count each listener's connections with a
+	// request in flight, which Shutdown names when its wait runs out.
+	nodeConns, joinConns connCount
+}
+
+// connCount counts the connections of an http.Server that have a request
+// in flight (http.Server.ConnState).
+type connCount struct {
+	mu     sync.Mutex
+	active map[net.Conn]bool
+}
+
+func (c *connCount) note(conn net.Conn, s http.ConnState) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.active == nil {
+		c.active = map[net.Conn]bool{}
+	}
+	if s == http.StateActive {
+		c.active[conn] = true
+	} else {
+		delete(c.active, conn)
+	}
+}
+
+func (c *connCount) n() int {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return len(c.active)
 }
 
 // NewNodeID returns a new node ID: "node-" and 12 random hex digits. It is a
@@ -235,8 +267,10 @@ func Listen(cfg Config) (*Cluster, error) {
 	// serves them with the same handlers (NodeHandler, JoinHandler).
 	c.nodeHandler = withServers(&serverList{st: cfg.Store}, nodeRoutes(cfg, log))
 	c.joinHandler = joinRoutes(cfg, limiter, log)
-	c.mtls = newHTTPServer(forwardOr(ha.KindNode, cfg.HA, c.nodeHandler))
-	c.join = newHTTPServer(forwardOr(ha.KindJoin, cfg.HA, c.joinHandler))
+	c.mtls = newHTTPServer(forwardOr(ha.KindNode, cfg.HA, c.ctx, c.nodeHandler))
+	c.mtls.ConnState = c.nodeConns.note
+	c.join = newHTTPServer(forwardOr(ha.KindJoin, cfg.HA, c.ctx, c.joinHandler))
+	c.join.ConnState = c.joinConns.note
 	// Both listeners read the server certificate from the holder at each
 	// handshake, so a renewal takes effect without a restart.
 	// The node listener reads the client CAs it accepts from the rotation
@@ -326,12 +360,19 @@ func (c *Cluster) Close() error {
 }
 
 // Shutdown closes both listeners and waits for requests in flight, up to
-// shutdownTimeout. It closes the log relay first, so log polls and streams end
-// at once instead of holding the shutdown.
+// shutdownTimeout. It closes the log relay first, and ends the log polls and
+// streams a follower passes to the leader, so they end at once instead of
+// holding the shutdown. When the wait runs out, the error says how many
+// connections each listener still had a request in flight on.
 func (c *Cluster) Shutdown() error {
 	c.stop()
 	c.logs.Close()
 	ctx, cancel := context.WithTimeout(context.Background(), shutdownTimeout)
 	defer cancel()
-	return errors.Join(c.mtls.Shutdown(ctx), c.join.Shutdown(ctx))
+	err := errors.Join(c.mtls.Shutdown(ctx), c.join.Shutdown(ctx))
+	if err != nil && ctx.Err() != nil {
+		return fmt.Errorf("after %s, the node listener still had %d connections with a request in flight, and the join listener %d: %w",
+			shutdownTimeout, c.nodeConns.n(), c.joinConns.n(), err)
+	}
+	return err
 }

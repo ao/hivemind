@@ -189,3 +189,62 @@ func TestServersHeader(t *testing.T) {
 		t.Fatalf("servers header %q", v)
 	}
 }
+
+// holdingLeadership is a follower whose leader holds each request passed
+// to it until the request's context ends, as it holds a log poll.
+type holdingLeadership struct{ started chan string }
+
+func (h *holdingLeadership) IsLeader() bool { return false }
+func (h *holdingLeadership) Forward(kind string, w http.ResponseWriter, r *http.Request) {
+	h.started <- r.URL.Path
+	<-r.Context().Done()
+	w.WriteHeader(http.StatusServiceUnavailable)
+}
+
+// TestShutdownEndsForwardedLogPolls: a follower's listener that is
+// passing a node's log poll to the leader stops in well under its 10 s
+// wait for requests in flight, which every join --role server spent on its
+// own node's poll in the eighth soak, logging "cluster shutdown: context
+// deadline exceeded". Other requests passed on are left to finish.
+func TestShutdownEndsForwardedLogPolls(t *testing.T) {
+	holder := &HAHolder{}
+	fx := newFixtureWith(t, func(c *Config) { c.HA = holder })
+	id, cert := fx.enroll(fx.issue(time.Hour)) // a cluster of one yet
+	h := &holdingLeadership{started: make(chan string, 1)}
+	holder.Set(h)
+	a := fx.nodeClient(cert)
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		if resp, err := a.Get(fx.nodeURL(nodeapi.LogRequestsPath(id))); err == nil {
+			resp.Body.Close()
+		}
+	}()
+	select {
+	case p := <-h.started:
+		if p != nodeapi.LogRequestsPath(id) {
+			t.Fatalf("passed on %s", p)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("the log poll was not passed to the leader")
+	}
+	start := time.Now()
+	if err := fx.c.Shutdown(); err != nil {
+		t.Fatalf("shutdown: %v", err)
+	}
+	if d := time.Since(start); d > time.Second {
+		t.Fatalf("the listener took %s to stop with a log poll passed to the leader", d)
+	}
+	<-done
+
+	for _, p := range []string{nodeapi.LogRequestsPath(id), nodeapi.Prefix + "/nodes/" + id + "/logs/streams/r1"} {
+		if !isLogPath(p) {
+			t.Fatalf("%s is a log path", p)
+		}
+	}
+	for _, p := range []string{nodeapi.AssignmentsPath(id), nodeapi.Prefix + "/nodes/" + id + "/status", "/logs/requests"} {
+		if isLogPath(p) {
+			t.Fatalf("%s is not a log path", p)
+		}
+	}
+}
