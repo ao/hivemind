@@ -2,11 +2,14 @@ package ha
 
 import (
 	"context"
+	"errors"
+	"fmt"
 	"io"
 	"log"
 	"log/slog"
 
 	"github.com/hashicorp/go-hclog"
+	"github.com/hashicorp/raft"
 )
 
 // hcLogger writes raft's log lines to a slog.Logger, so they go through
@@ -43,6 +46,9 @@ func (h *hcLogger) Log(level hclog.Level, msg string, args ...any) {
 		return
 	}
 	lv := slogLevel(level)
+	if lv >= slog.LevelWarn && behindTheLog(msg, args) {
+		lv = slog.LevelInfo
+	}
 	var more []any
 	if lv >= slog.LevelWarn {
 		var ok bool
@@ -58,8 +64,8 @@ func (h *hcLogger) Log(level hclog.Level, msg string, args ...any) {
 	if h.name != "" {
 		all = append(all, "raft", h.name)
 	}
-	all = append(all, h.args...)
-	all = append(all, args...)
+	all = append(all, formatArgs(h.args)...)
+	all = append(all, formatArgs(args)...)
 	all = append(all, more...)
 	h.l.Log(ctx, lv, "raft: "+msg, all...)
 }
@@ -123,4 +129,56 @@ type hcWriter struct{ h *hcLogger }
 func (w hcWriter) Write(p []byte) (int, error) {
 	w.h.Info(string(p))
 	return len(p), nil
+}
+
+// formatArgs gives each hclog.Fmt value its formatted string: slog would
+// print the format and its arguments as they are, as in servers="[%+v
+// [...]]" (the fifth acceptance run's seventh finding). The rest are
+// left as they are. args itself is not changed.
+func formatArgs(args []any) []any {
+	var out []any
+	for i, a := range args {
+		f, ok := a.(hclog.Format)
+		if !ok {
+			continue
+		}
+		if out == nil {
+			out = append([]any(nil), args...)
+		}
+		out[i] = formatOf(f)
+	}
+	if out == nil {
+		return args
+	}
+	return out
+}
+
+func formatOf(f hclog.Format) string {
+	if len(f) == 0 {
+		return ""
+	}
+	s, ok := f[0].(string)
+	if !ok {
+		return fmt.Sprint([]any(f)...)
+	}
+	return fmt.Sprintf(s, f[1:]...)
+}
+
+// behindTheLog reports a line of raft's for a server that lacks an entry
+// another has: a leader's "failed to get log" with "log not found", after
+// which it sends the follower a snapshot, as at every server join once the
+// log has been compacted, and a follower's "failed to get previous log",
+// after which the leader sends earlier entries. Each is info, not an
+// error or a warning.
+func behindTheLog(msg string, args []any) bool {
+	if msg != "failed to get log" && msg != "failed to get previous log" {
+		return false
+	}
+	for i := 0; i+1 < len(args); i += 2 {
+		if k, _ := args[i].(string); k == "error" {
+			err, _ := args[i+1].(error)
+			return errors.Is(err, raft.ErrLogNotFound) || (err != nil && err.Error() == raft.ErrLogNotFound.Error())
+		}
+	}
+	return false
 }
