@@ -147,9 +147,12 @@ func addConnFlags(cmd *cobra.Command) *clientFlags {
 	return f
 }
 
-// apiClient talks to one hivemind server.
+// apiClient talks to one hivemind server, or to the first of a list that
+// answers.
 type apiClient struct {
-	base  string
+	base string
+	// bases is every server given, base among them; one for most.
+	bases []string
 	token string
 	// tokenFrom says where the token came from, for the error when the
 	// server refuses it: "--token", "HIVEMIND_TOKEN" or the token file.
@@ -179,11 +182,23 @@ func (f *clientFlags) client() (*apiClient, error) {
 		return nil, err
 	}
 
-	srv := firstNonEmpty(f.server, os.Getenv(envServer), cc.Server, defaultServer)
-	u, err := url.Parse(srv)
-	if err != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Host == "" {
-		return nil, fmt.Errorf("server %q must be an http or https URL, such as %s", srv, defaultServer)
+	// A cluster of several servers can be given as a list, comma
+	// separated: the CLI tries them in order until one answers
+	// (docs/ha.md#the-api).
+	var bases []string
+	var u *url.URL
+	for _, s := range strings.Split(firstNonEmpty(f.server, os.Getenv(envServer), cc.Server, defaultServer), ",") {
+		s = strings.TrimSpace(s)
+		pu, err := url.Parse(s)
+		if err != nil || (pu.Scheme != "http" && pu.Scheme != "https") || pu.Host == "" {
+			return nil, fmt.Errorf("server %q must be an http or https URL, such as %s", s, defaultServer)
+		}
+		if u == nil {
+			u = pu
+		}
+		bases = append(bases, strings.TrimRight(s, "/"))
 	}
+	srv := bases[0]
 
 	token, tokenFrom := f.token, "--token"
 	if token == "" {
@@ -227,6 +242,11 @@ func (f *clientFlags) client() (*apiClient, error) {
 	if err != nil {
 		return nil, err
 	}
+	if tlsCfg != nil && len(bases) > 1 {
+		// Each server's certificate names that server: the transport
+		// checks the host of each request's URL.
+		tlsCfg.ServerName = ""
+	}
 
 	tr := http.DefaultTransport.(*http.Transport).Clone()
 	tr.ResponseHeaderTimeout = requestTimeout
@@ -235,7 +255,7 @@ func (f *clientFlags) client() (*apiClient, error) {
 	// TCP keepalives find a server machine that went away, which closes
 	// nothing, in about 30 s, where the defaults take some minutes.
 	tr.DialContext = (&net.Dialer{Timeout: 30 * time.Second, KeepAliveConfig: clientKeepAlive}).DialContext
-	return &apiClient{base: strings.TrimRight(srv, "/"), token: token, tokenFrom: tokenFrom, caPath: caPath, http: &http.Client{Transport: tr}}, nil
+	return &apiClient{base: srv, bases: bases, token: token, tokenFrom: tokenFrom, caPath: caPath, http: &http.Client{Transport: tr}}, nil
 }
 
 func firstNonEmpty(vs ...string) string {
@@ -248,23 +268,62 @@ func firstNonEmpty(vs ...string) string {
 }
 
 // send makes one request and returns the response for a 2xx status. Any
-// other status becomes an error with the server's message.
+// other status becomes an error with the server's message. With a list of
+// servers, a server that cannot be reached, or that answers that no
+// server leads, is passed for the next, from the one that answered last.
 func (c *apiClient) send(ctx context.Context, method, path string, body any) (*http.Response, error) {
-	var rd io.Reader
+	var b []byte
 	if body != nil {
-		b, err := json.Marshal(body)
-		if err != nil {
+		var err error
+		if b, err = json.Marshal(body); err != nil {
 			return nil, err
 		}
+	}
+	start := 0
+	for i, s := range c.bases {
+		if s == c.base {
+			start = i
+		}
+	}
+	var err error
+	for i := 0; i < max(len(c.bases), 1); i++ {
+		base := c.base
+		if len(c.bases) > 0 {
+			base = c.bases[(start+i)%len(c.bases)]
+		}
+		var resp *http.Response
+		resp, err = c.sendTo(ctx, base, method, path, b, body != nil)
+		if err == nil {
+			c.base = base
+			return resp, nil
+		}
+		var re *reachError
+		var ae *apiError
+		if ctx.Err() != nil || !(errors.As(err, &re) || errors.As(err, &ae) && ae.noLeader) {
+			return nil, err
+		}
+	}
+	return nil, err
+}
+
+// reachError is a request that reached no server.
+type reachError struct{ msg string }
+
+func (e *reachError) Error() string { return e.msg }
+
+// sendTo is send to one server.
+func (c *apiClient) sendTo(ctx context.Context, base, method, path string, b []byte, hasBody bool) (*http.Response, error) {
+	var rd io.Reader
+	if hasBody {
 		rd = bytes.NewReader(b)
 	}
-	req, err := http.NewRequestWithContext(ctx, method, c.base+path, rd)
+	req, err := http.NewRequestWithContext(ctx, method, base+path, rd)
 	if err != nil {
 		return nil, err
 	}
 	req.Header.Set("Authorization", "Bearer "+c.token)
 	req.Header.Set("Accept", "application/json")
-	if body != nil {
+	if hasBody {
 		req.Header.Set("Content-Type", "application/json")
 	}
 	resp, err := c.http.Do(req)
@@ -273,9 +332,9 @@ func (c *apiClient) send(ctx context.Context, method, path string, body any) (*h
 			return nil, ctx.Err()
 		}
 		if msg := tlsReason(err, c.caPath); msg != "" {
-			return nil, fmt.Errorf("cannot reach hivemind at %s: %s", c.base, msg)
+			return nil, &reachError{fmt.Sprintf("cannot reach hivemind at %s: %s", base, msg)}
 		}
-		return nil, fmt.Errorf("cannot reach hivemind at %s: %s", c.base, reachReason(err))
+		return nil, &reachError{fmt.Sprintf("cannot reach hivemind at %s: %s", base, reachReason(err))}
 	}
 	if resp.StatusCode/100 == 2 {
 		return resp, nil
@@ -285,16 +344,17 @@ func (c *apiClient) send(ctx context.Context, method, path string, body any) (*h
 		return nil, c.refused()
 	}
 	var e server.ErrorBody
-	b, _ := io.ReadAll(io.LimitReader(resp.Body, 64<<10))
-	if resp.StatusCode == http.StatusBadRequest && bytes.Contains(b, []byte("Client sent an HTTP request to an HTTPS server")) {
+	rb, _ := io.ReadAll(io.LimitReader(resp.Body, 64<<10))
+	if resp.StatusCode == http.StatusBadRequest && bytes.Contains(rb, []byte("Client sent an HTTP request to an HTTPS server")) {
 		// Go's reply on a TLS port to a request in plain HTTP.
-		return nil, fmt.Errorf("the server at %s speaks https: use --server %s", c.base, "https://"+strings.TrimPrefix(c.base, "http://"))
+		return nil, fmt.Errorf("the server at %s speaks https: use --server %s", base, "https://"+strings.TrimPrefix(base, "http://"))
 	}
 	v := nodeapi.CleanVersion(resp.Header.Get(nodeapi.VersionHeader))
-	if json.Unmarshal(b, &e) == nil && e.Error != "" {
-		return nil, &apiError{status: resp.StatusCode, msg: termSafe(e.Error), version: v}
+	noLeader := resp.StatusCode == http.StatusServiceUnavailable && resp.Header.Get(nodeapi.NoLeaderHeader) != ""
+	if json.Unmarshal(rb, &e) == nil && e.Error != "" {
+		return nil, &apiError{status: resp.StatusCode, msg: termSafe(e.Error), version: v, noLeader: noLeader}
 	}
-	return nil, &apiError{status: resp.StatusCode, msg: "server returned " + resp.Status, version: v}
+	return nil, &apiError{status: resp.StatusCode, msg: "server returned " + resp.Status, version: v, noLeader: noLeader}
 }
 
 // refused is the error for a 401: the server refused the token. It says
@@ -318,6 +378,8 @@ type apiError struct {
 	status  int
 	msg     string
 	version string
+	// noLeader is a 503 that says no server leads (docs/ha.md).
+	noLeader bool
 }
 
 func (e *apiError) Error() string { return e.msg }

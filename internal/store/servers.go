@@ -114,3 +114,58 @@ const (
 // ErrIsServer is a node that runs a server of the cluster, which node
 // removal refuses.
 var ErrIsServer = errors.New("the node runs a server of the cluster")
+
+// HASchemaVersion is the first schema version with the server table.
+const HASchemaVersion = 18
+
+// MakeClusterOfOneFile makes the store file at path the store of a cluster
+// of one, as restore does to the store it has just written
+// (docs/ha.md#compatibility): it empties the server table and sets the
+// applied index to 0, for a Raft log that a later server join starts
+// afresh. Like BumpEpochFile it does not open the file as a Store, so the
+// file keeps its schema version; one from before HASchemaVersion has
+// neither, and is left as it is. It returns how many servers it took out.
+func MakeClusterOfOneFile(ctx context.Context, path string) (int64, error) {
+	db, err := openExisting(path)
+	if err != nil {
+		return 0, err
+	}
+	defer db.Close()
+	v, err := schemaVersion(ctx, db)
+	if err != nil {
+		return 0, err
+	}
+	if v < HASchemaVersion {
+		return 0, nil
+	}
+	tx, err := db.BeginTx(ctx, nil)
+	if err != nil {
+		return 0, err
+	}
+	defer tx.Rollback()
+	res, err := tx.ExecContext(ctx, `DELETE FROM servers`)
+	if err != nil {
+		return 0, err
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return 0, err
+	}
+	if _, err := tx.ExecContext(ctx, `UPDATE raft_applied SET idx = 0 WHERE id = 1`); err != nil {
+		return 0, err
+	}
+	if err := tx.Commit(); err != nil {
+		return 0, err
+	}
+	if err := db.Close(); err != nil {
+		return 0, err
+	}
+	return n, syncFile(path)
+}
+
+// CountServers is how many servers the server table lists.
+func (s *Store) CountServers(ctx context.Context) (int, error) {
+	var n int
+	err := s.rdb.QueryRowContext(ctx, `SELECT count(*) FROM servers`).Scan(&n)
+	return n, err
+}

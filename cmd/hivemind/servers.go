@@ -178,6 +178,8 @@ type haServe struct {
 	mu sync.Mutex
 	// handlers is what forwarded requests reach once this server leads.
 	handlers ha.Handlers
+	// localReads is the test knob envTestLocalReads.
+	localReads bool
 	// extras starts what a server of several runs beside the leader's
 	// work: its node's log requests and router counters through the node
 	// API. Set by serve.
@@ -546,7 +548,8 @@ func (h *haServe) apiHandler(local http.Handler) http.Handler {
 		ha.StripForwardHeaders(r.Header)
 		n := h.node.Load()
 		if n == nil || n.IsLeader() || r.URL.Path == "/healthz" ||
-			(r.Method == http.MethodGet && r.URL.Path == "/v1/servers" && !n.HasLeader()) {
+			(r.Method == http.MethodGet && r.URL.Path == "/v1/servers" && !n.HasLeader()) ||
+			(h.localReads && r.Method == http.MethodGet && r.Header.Get(testLocalReadHeader) == "1") {
 			local.ServeHTTP(w, r)
 			return
 		}

@@ -570,6 +570,11 @@ func Restore(ctx context.Context, r io.Reader, dir string) (res Restored, err er
 			return Restored{}, err
 		}
 	}
+	// A restore makes a cluster of one (docs/ha.md#compatibility): the
+	// other servers of a cluster of several join it again.
+	if _, err := store.MakeClusterOfOneFile(ctx, dbPath); err != nil {
+		return Restored{}, fmt.Errorf("making the restored store a cluster of one: %w", err)
+	}
 	if err := syncDir(dir); err != nil {
 		return Restored{}, err
 	}

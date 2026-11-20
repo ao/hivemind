@@ -30,7 +30,7 @@ const (
 // Handshake and dial limits on the server port.
 const (
 	handshakeTimeout = 10 * time.Second
-	dialTimeout      = 10 * time.Second
+	dialTimeout      = 3 * time.Second
 )
 
 // peerCheck decides whether a server port peer is taken: its certificate
@@ -105,7 +105,7 @@ func (m *tlsMaterial) dial(ctx context.Context, addr, proto string) (*tls.Conn, 
 	if err != nil {
 		return nil, err
 	}
-	d := &tls.Dialer{NetDialer: &net.Dialer{Timeout: dialTimeout, KeepAlive: 15 * time.Second}, Config: cfg}
+	d := &tls.Dialer{NetDialer: &net.Dialer{Timeout: dialTimeout, KeepAlive: 15 * time.Second, Control: setUserTimeout}, Config: cfg}
 	c, err := d.DialContext(ctx, "tcp", addr)
 	if err != nil {
 		return nil, err

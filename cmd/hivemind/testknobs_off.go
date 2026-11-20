@@ -16,3 +16,12 @@ func testCertLifetime() (time.Duration, error) {
 	}
 	return 0, nil
 }
+
+// testLocalReads is false in a normal build. A set HIVEMIND_TEST_LOCAL_READS
+// is refused rather than ignored.
+func testLocalReads() (bool, error) {
+	if v, ok := os.LookupEnv(envTestLocalReads); ok && v != "" {
+		return false, fmt.Errorf("%s is set, but it is a test setting and this build has none; unset it", envTestLocalReads)
+	}
+	return false, nil
+}

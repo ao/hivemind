@@ -546,6 +546,19 @@ func runServe(ctx context.Context, cfg *config.Config, log *slog.Logger, rt runt
 		return err
 	}
 	defer st.Close()
+	if !several {
+		// A store that lists the servers of a cluster of several, in a data
+		// directory without Raft state, is a server's whose Raft state is
+		// gone: serving it alone would make a second cluster beside the
+		// others. A restore makes a cluster of one, with no servers listed.
+		if n, err := st.CountServers(ctx); err != nil {
+			return err
+		} else if n > 0 {
+			return fmt.Errorf("the store in %s lists %d servers of a cluster of several, but %s has no Raft state, so this server would make a cluster of its own: "+
+				"restore a backup into an empty data directory (hivemind restore), which makes a cluster of one, or join this machine again as a server with an empty --data-dir",
+				cfg.DataDir, n, ha.Dir(cfg.DataDir))
+		}
+	}
 	if several {
 		// Nothing writes the store but the log from here on.
 		st.SetReplicator(startingReplicator{})
@@ -638,6 +651,9 @@ func runServe(ctx context.Context, cfg *config.Config, log *slog.Logger, rt runt
 	// while the cluster has one server.
 	hs := &haServe{cfg: cfg, log: log, st: st, rot: rot, holder: &cluster.HAHolder{}, selfID: selfID, hostname: hostname,
 		nodeAddr: nodeAddr, rt: rt, seeds: seedIDs(joined), fatal: make(chan error, 1)}
+	if hs.localReads, err = testLocalReads(); err != nil {
+		return err
+	}
 
 	// Every listener is bound before this start is recorded, so a start
 	// that fails to bind, as with a wrong address, records neither the

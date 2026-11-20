@@ -23,3 +23,16 @@ func testCertLifetime() (time.Duration, error) {
 	}
 	return d, nil
 }
+
+// testLocalReads reads HIVEMIND_TEST_LOCAL_READS: 1 answers a GET with
+// testLocalReadHeader from this server's own store.
+func testLocalReads() (bool, error) {
+	switch v := os.Getenv(envTestLocalReads); v {
+	case "":
+		return false, nil
+	case "1":
+		return true, nil
+	default:
+		return false, fmt.Errorf("%s=%q must be 1 or unset", envTestLocalReads, v)
+	}
+}

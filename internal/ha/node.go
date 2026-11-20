@@ -508,6 +508,7 @@ func (n *Node) reachable() int {
 	c := 0
 	now := time.Now()
 	_, leader := n.raft.LeaderWithID()
+	leads := n.raft.State() == raft.Leader
 	for _, s := range n.configuration() {
 		if s.Suffrage != raft.Voter {
 			continue
@@ -515,7 +516,9 @@ func (n *Node) reachable() int {
 		switch {
 		case string(s.ID) == n.cfg.ID:
 			c++
-		case now.Sub(n.trans.lastSeen(s.ID)) < recentContact:
+		// What a server heard from the followers while it led says
+		// nothing once it does not.
+		case leads && now.Sub(n.trans.lastSeen(s.ID)) < recentContact:
 			c++
 		case s.ID == leader && now.Sub(n.raft.LastContact()) < recentContact:
 			c++
