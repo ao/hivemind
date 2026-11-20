@@ -650,7 +650,7 @@ func runServe(ctx context.Context, cfg *config.Config, log *slog.Logger, rt runt
 	// What a cluster of several servers runs (servers.go). Its node is nil
 	// while the cluster has one server.
 	hs := &haServe{cfg: cfg, log: log, st: st, rot: rot, holder: &cluster.HAHolder{}, selfID: selfID, hostname: hostname,
-		nodeAddr: nodeAddr, rt: rt, seeds: seedIDs(joined), fatal: make(chan error, 1)}
+		nodeAddr: nodeAddr, rt: rt, seeds: seedIDs(joined), fatal: make(chan error, 1), hadState: ha.HasState(cfg.DataDir)}
 	if hs.localReads, err = testLocalReads(); err != nil {
 		return err
 	}

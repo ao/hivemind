@@ -39,6 +39,8 @@
 #     through the last one is refused with "no leader" and "a write needs 2",
 #     hivemind servers says there is no leader, and every container keeps
 #     running. The two come back, and writes work again
+#   - hivemind server remove of a follower: it leaves the configuration, its
+#     serve stops with the removal message, and the two left take writes
 #
 # On exit it removes the containers, the network and the volumes it
 # created, also after a failure or Ctrl-C. The Go build cache volume
@@ -494,5 +496,20 @@ serve_server 1
 wait_for 60 voters_are 2 3 || cl_fail "the cluster did not recover: $(roles 2 | tr '\n' ';')"
 echo pw | hmi 2 registry login quorum-back.ha.test --username u --password-stdin >/dev/null || cl_fail "no write after the servers came back"
 cl_note "the two servers came back; writes work again"
+
+# server remove, of a follower: it leaves the configuration, its serve
+# stops with the removal message, and the two left take writes.
+LEADER=$(leader_of 2)
+LI=$(index_of "$LEADER") || cl_fail "no leader before server remove"
+RI=""
+for i in 0 1 2; do [ "$i" -ne "$LI" ] && RI=$i; done
+out=$(hm "$LI" server remove "${SID[$RI]}" 2>&1) || cl_fail "server remove ${SID[$RI]}: $out"
+removed_stopped() {
+	! docker exec "${S[$RI]}" pgrep -x hivemind >/dev/null && docker exec "${S[$RI]}" grep -q "was removed from the cluster's servers" /var/log/hivemind.log
+}
+wait_for 30 removed_stopped || cl_fail "the removed server's serve did not stop: $(docker exec "${S[$RI]}" tail -n 5 /var/log/hivemind.log)"
+wait_for 20 voters_are "$LI" 2 || cl_fail "the cluster does not list two voters after the removal: $(roles "$LI" | tr '\n' ';')"
+echo pw | hmi "$LI" registry login after-remove.ha.test --username u --password-stdin >/dev/null || cl_fail "no write after the removal"
+cl_note "server remove: ${SID[$RI]} left the configuration and its serve stopped with the removal message; the two left take writes: $out"
 cl_note "ha: election ${ELECTION_MS} ms after the kill, API writes again at ${API_MS} ms; election ${PARTITION_MS} ms after the cut; writes acknowledged ${ACKED_BEFORE} before and ${ACKED_AFTER} after the kill, all kept on every server; ${FAILED} refused; ${ROUTER_TOTAL} router requests, all 200"
 cl_note "ha: all checks passed"

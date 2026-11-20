@@ -209,3 +209,34 @@ func TestServeRefusesAServerWithoutItsRaftState(t *testing.T) {
 		t.Fatalf("serve of a server's store without its Raft state: %v", err)
 	}
 }
+
+// TestRemovalWatch: a server is taken as removed once the server table
+// lacks it, after it has seen its row there, or from the start of a serve
+// that found Raft state; not while it applies the entries that add the
+// servers after it joined.
+func TestRemovalWatch(t *testing.T) {
+	a := store.Server{ID: "node-a"}
+	me := store.Server{ID: "node-me"}
+	var w removalWatch
+	for _, step := range []struct {
+		servers []store.Server
+		removed bool
+	}{
+		{nil, false},
+		{[]store.Server{a}, false},
+		{[]store.Server{a, me}, false},
+		{[]store.Server{a, me}, false},
+		{[]store.Server{a}, true},
+	} {
+		if got := w.removed(step.servers, me.ID); got != step.removed {
+			t.Fatalf("with %v: removed %v, want %v", step.servers, got, step.removed)
+		}
+	}
+	restarted := removalWatch{seen: true}
+	if !restarted.removed([]store.Server{a}, me.ID) {
+		t.Fatal("a server restarted with Raft state, missing from the table, is not taken as removed")
+	}
+	if restarted.removed(nil, me.ID) {
+		t.Fatal("an empty table is taken as a removal")
+	}
+}

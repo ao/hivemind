@@ -178,6 +178,9 @@ type haServe struct {
 	mu sync.Mutex
 	// handlers is what forwarded requests reach once this server leads.
 	handlers ha.Handlers
+	// hadState is true when the data directory had Raft state as serve
+	// started.
+	hadState bool
 	// localReads is the test knob envTestLocalReads.
 	localReads bool
 	// extras starts what a server of several runs beside the leader's
@@ -261,8 +264,10 @@ func (h *haServe) started(n *ha.Node) {
 func (h *haServe) watchRemoved(n *ha.Node) {
 	t := time.NewTicker(5 * time.Second)
 	defer t.Stop()
+	w := removalWatch{seen: h.hadState}
 	for range t.C {
-		if n.Removed() {
+		servers, err := h.st.ListServers(context.Background())
+		if n.Removed() || (err == nil && w.removed(servers, h.selfID)) {
 			select {
 			case h.fatal <- &exitError{code: exitRemoved, err: fmt.Errorf("server %s was removed from the cluster's servers (hivemind server remove); "+
 				"its containers keep running. To use this machine as a server again, give it an empty --data-dir and a new server join token", h.selfID)}:
@@ -271,6 +276,23 @@ func (h *haServe) watchRemoved(n *ha.Node) {
 			return
 		}
 	}
+}
+
+// removalWatch tells a removed server from its store: Raft stops sending a
+// follower anything once a change that removes it is in the leader's log,
+// so the follower never sees the change, but it has applied the deletion
+// of its row, which server remove makes first. A server that has never
+// seen its own row, as one that has just joined and is still applying the
+// entries that add the servers, is not taken as removed; one that had Raft
+// state when serve started has seen it before.
+type removalWatch struct{ seen bool }
+
+func (w *removalWatch) removed(servers []store.Server, self string) bool {
+	if hasServer(servers, self) {
+		w.seen = true
+		return false
+	}
+	return w.seen && len(servers) > 0
 }
 
 // ownClient is the node API client of this server's own node: its server
@@ -536,7 +558,7 @@ func (h *haServe) removeServer(ctx context.Context, id string, force bool) (stri
 		return "", err
 	}
 	h.log.Info("server removed from the cluster", "server", id, "forced", force)
-	return fmt.Sprintf("the node of server %s is a node like any other now: move its replicas with hivemind node drain %s, "+
+	return fmt.Sprintf("The node of server %s is a node like any other now: move its replicas with hivemind node drain %s, "+
 		"and remove it with hivemind node remove %s", id, id, id), nil
 }
 

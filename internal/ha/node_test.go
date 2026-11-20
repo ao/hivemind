@@ -442,3 +442,43 @@ func testLogger(id string) *slog.Logger {
 	}
 	return slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelDebug})).With("server", id)
 }
+
+// TestRemoveServer: a follower removed from the configuration is gone from
+// the leader's; the two left take writes; and the removed server's
+// certificate, still valid and of the server role, is refused on the
+// leader's server port.
+func TestRemoveServer(t *testing.T) {
+	c := newTestCluster(t, 3)
+	c.start()
+	l := c.leader()
+	var f *testServer
+	for _, s := range c.servers {
+		if s != l {
+			f = s
+			break
+		}
+	}
+	if err := l.node.RemoveServer(f.id); err != nil {
+		t.Fatal(err)
+	}
+	c.waitFor(10*time.Second, "two servers in the configuration", func() bool { return len(l.node.Members()) == 2 })
+	if l.node.IsVoterID(f.id) {
+		t.Fatalf("the removed server is still a voter: %+v", l.node.Members())
+	}
+	if _, err := l.st.PutApp(context.Background(), spec.App{Name: "after", Image: "nginx", Replicas: 1}); err != nil {
+		t.Fatalf("a write with two servers left: %v", err)
+	}
+	cfg := &tls.Config{Certificates: []tls.Certificate{*f.cert.Load()}, RootCAs: c.trust.Load().Pool(), ServerName: "127.0.0.1",
+		NextProtos: []string{ProtoForward}, MinVersion: tls.VersionTLS13}
+	conn, err := tls.Dial("tcp", l.node.BoundAddr(), cfg)
+	if err == nil {
+		_ = conn.SetDeadline(time.Now().Add(5 * time.Second))
+		if _, err = conn.Write([]byte("GET / HTTP/1.1\r\nHost: x\r\n\r\n")); err == nil {
+			_, err = conn.Read(make([]byte, 1))
+		}
+		conn.Close()
+	}
+	if err == nil {
+		t.Fatal("the removed server's certificate reached the leader's server port")
+	}
+}
