@@ -44,9 +44,13 @@ sudo hivemind status
 `hivemind join` joins the cluster and then keeps running as the worker's agent, in the foreground. Under systemd, join once by hand, stop it, and let the unit run `hivemind serve --role worker`. Do not start the unit while `join` still runs: two agents on one machine would both manage its containers.
 
 ```sh
-sudo hivemind join 10.0.0.5 --token hivemind-join-v1.<fingerprint>.<secret>
+sudo install -m 600 /dev/stdin /root/join-token    # paste the token from hivemind join-token, then Ctrl-D
+sudo hivemind join 10.0.0.5 --token-file /root/join-token
 # When it logs "worker running", or /var/lib/hivemind/node.json exists, stop it with Ctrl-C.
+sudo rm /root/join-token
 ```
+
+`--token-file` keeps the token out of the process list and out of the journal, where `--token <token>` would put it while `join` runs. `--token -` reads it from standard input instead.
 
 Then write `/etc/systemd/system/hivemind.service`:
 
@@ -81,9 +85,13 @@ On the server, `sudo hivemind nodes` lists the worker as `ready`, with `yes` und
 A server that joins a cluster of several ([several servers](ha.md#membership)) is set up like a worker: join once by hand, stop it, and let the unit run it. `join --role server` runs the server in the foreground, and writes the flags it was given, such as `--advertise`, to `/var/lib/hivemind/hivemind.yaml`.
 
 ```sh
-sudo hivemind join 10.0.0.5 --role server --token <token from join-token --role server> --advertise 10.0.0.6
+sudo install -m 600 /dev/stdin /root/join-token    # paste the token from join-token --role server, then Ctrl-D
+sudo hivemind join 10.0.0.5 --role server --token-file /root/join-token --advertise 10.0.0.6
 # When it logs "this server is a voter of the cluster now", stop it with Ctrl-C.
+sudo rm /root/join-token
 ```
+
+A server's token gets its holder the cluster CA's private key, so keep it out of the command line.
 
 Then write the server unit above, with this machine's own address in `--advertise` (`10.0.0.6` here, not the first server's), and enable it the same way. `sudo hivemind servers` on the first server lists it as a `follower`. A joined server has no `admin.token`, and `join` writes no client config, so its CLI needs the cluster's admin token: `sudo HIVEMIND_TOKEN=hm_... hivemind status`, with `--server https://10.0.0.6:4483 --ca-cert <CA file>` once its API listens there ([upgrading](upgrading.md#adding-servers)).
 

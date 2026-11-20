@@ -299,7 +299,7 @@ func TestCLIOneNode(t *testing.T) {
 	}
 	// join needs a server address and a token; it refuses before it connects.
 	c.fails("accepts 1 arg", "join")
-	c.fails("--token is required", "join", "127.0.0.1")
+	c.fails("a join token is required: give --token-file", "join", "127.0.0.1")
 
 	// init prints the token once and refuses a second run.
 	out := c.ok("init")

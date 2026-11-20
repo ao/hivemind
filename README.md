@@ -87,8 +87,9 @@ hivemind serve --advertise 10.0.0.5
 # On the server, in another terminal. The token goes to stdout, and its expiry to stderr.
 hivemind join-token
 
-# On the worker. Use the same address as --advertise, and the token from join-token.
-hivemind join 10.0.0.5 --token hivemind-join-v1.<fingerprint>.<secret>
+# On the worker. Use the same address as --advertise. Save the token from join-token
+# in a file only you can read: --token-file keeps it out of the process list.
+hivemind join 10.0.0.5 --token-file join-token
 ```
 
 `join` stays in the foreground and runs the worker's agent. Stop it with Ctrl-C. Its containers keep running. To start it again later, run `hivemind serve --role worker` with the same data directory. `join` writes the worker flags it was given, such as `--route-addr` and `--acme-email`, to `<data-dir>/hivemind.yaml`, so the restart keeps them, the router included. To run the server and the workers as services that come back after a reboot, see [systemd](docs/systemd.md).
@@ -99,7 +100,7 @@ A token works once, and it expires after 24 hours. `hivemind join-token --ttl 1h
 
 `hivemind nodes` lists the nodes. To take a machine out of the cluster, run `hivemind node drain <id>` on the server, which moves its replicas to other nodes, each new copy starting before the old one stops, then `hivemind node remove <id>`. The server refuses the node's certificate from then on. In 2.0.0, which has no `node drain`, stop hivemind on the machine before `node remove`. See [concepts](docs/concepts.md#draining-a-node).
 
-To add a server rather than a worker, for a cluster of three or five, run `hivemind join-token --role server` on the server, and `hivemind join 10.0.0.5 --role server --token <token> --advertise <the new machine's address>` on the new machine. The servers also need TCP port 4486 open between them. See [several servers](docs/ha.md#membership). To remove a server, drain its node with `hivemind node drain <id>` while it serves, then run `hivemind server remove <id>`, which refuses a server whose node still has replicas to move, and `hivemind node remove <id>`.
+To add a server rather than a worker, for a cluster of three or five, run `hivemind join-token --role server` on the server, and `hivemind join 10.0.0.5 --role server --token-file <file with the token> --advertise <the new machine's address>` on the new machine. The servers also need TCP port 4486 open between them. See [several servers](docs/ha.md#membership). To remove a server, drain its node with `hivemind node drain <id>` while it serves, then run `hivemind server remove <id>`, which refuses a server whose node still has replicas to move, and `hivemind node remove <id>`.
 
 ## Compose files
 

@@ -129,7 +129,7 @@ func TestJoinServerNeedsItsAddress(t *testing.T) {
 		t.Fatalf("join --role server without --advertise: %v", err)
 	}
 	if _, _, err := run(t, "", "join", "10.255.255.1", "--role", "server", "--advertise", "10.255.255.2", "--data-dir", dir); err == nil ||
-		!strings.Contains(err.Error(), "--token is required") {
+		!strings.Contains(err.Error(), "a join token is required: give --token-file") {
 		t.Fatalf("join --role server without --token: %v", err)
 	}
 	if _, _, err := run(t, "", "join", "10.255.255.1", "--role", "boss", "--token", "x", "--data-dir", dir); err == nil ||

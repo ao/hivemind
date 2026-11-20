@@ -933,9 +933,9 @@ func serverHereError(dir, doing string) error {
 // directory, and runs the server.
 func runJoinServer(cmd *cobra.Command, cfg *config.Config, arg string) error {
 	ctx := cmd.Context()
-	token, _ := cmd.Flags().GetString("token")
-	if token == "" {
-		return errors.New("--token is required: run hivemind join-token --role server on a server of the cluster to get one")
+	token, err := joinToken(cmd, "hivemind join-token --role server on a server of the cluster")
+	if err != nil {
+		return err
 	}
 	if cfg.Advertise == "" {
 		return errors.New("--advertise is required with --role server: the address of this machine that the other servers and the workers reach")

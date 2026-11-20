@@ -17,6 +17,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/spf13/cobra"
+
 	"github.com/ao/hivemind/internal/cluster"
 	"github.com/ao/hivemind/internal/config"
 	"github.com/ao/hivemind/internal/nodeapi"
@@ -558,5 +560,57 @@ func TestRemovedNodeCleanupTakesAnonymousVolumes(t *testing.T) {
 	}
 	if long := nodeRemoveCmd().Long; !strings.Contains(long, want) || !strings.Contains(long, "named volumes stay") {
 		t.Errorf("hivemind node remove's help does not give %q", want)
+	}
+}
+
+// TestJoinTokenSources: join takes its token from --token-file, from
+// standard input with --token -, or from --token; one source only, and a
+// file or input that holds no token, or more than one line, is refused
+// without the token in the message.
+func TestJoinTokenSources(t *testing.T) {
+	const tok = "hivemind-join-v1.abc.def"
+	dir := t.TempDir()
+	write := func(name, s string) string {
+		p := filepath.Join(dir, name)
+		if err := os.WriteFile(p, []byte(s), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		return p
+	}
+	good := write("good", tok+"\n")
+	empty := write("empty", "\n")
+	two := write("two", tok+"\nsecond\n")
+	for _, c := range []struct {
+		args  []string
+		stdin string
+		want  string
+		err   string
+	}{
+		{args: []string{"--token-file", good}, want: tok},
+		{args: []string{"--token", "-"}, stdin: "  " + tok + "\r\n", want: tok},
+		{args: []string{"--token", tok}, want: tok},
+		{args: nil, err: "a join token is required: give --token-file"},
+		{args: []string{"--token", tok, "--token-file", good}, err: "not both"},
+		{args: []string{"--token-file", empty}, err: "is empty"},
+		{args: []string{"--token-file", two}, err: "more than one line"},
+		{args: []string{"--token-file", filepath.Join(dir, "missing")}, err: "--token-file"},
+		{args: []string{"--token", "-"}, stdin: "", err: "from standard input is empty"},
+	} {
+		cmd := &cobra.Command{Use: "join"}
+		cmd.Flags().String("token", "", "")
+		cmd.Flags().String("token-file", "", "")
+		if err := cmd.Flags().Parse(c.args); err != nil {
+			t.Fatal(err)
+		}
+		cmd.SetIn(strings.NewReader(c.stdin))
+		got, err := joinToken(cmd, "hivemind join-token")
+		switch {
+		case c.err == "" && (err != nil || got != c.want):
+			t.Errorf("%v: %q, %v; want %q", c.args, got, err, c.want)
+		case c.err != "" && (err == nil || !strings.Contains(err.Error(), c.err)):
+			t.Errorf("%v: %q, %v; want an error with %q", c.args, got, err, c.err)
+		case err != nil && c.args != nil && c.args[0] == "--token-file" && strings.Contains(err.Error(), tok):
+			t.Errorf("%v: the error has the token: %v", c.args, err)
+		}
 	}
 }

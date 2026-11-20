@@ -468,7 +468,7 @@ hivemind init [flags]
 
 Join a cluster as a worker node and run its agent in the foreground.
 
-  hivemind join 10.0.0.5 --token <token>
+  hivemind join 10.0.0.5 --token-file <file>
 
 <server> is the server's address, host or host:port, where the port is its
 cluster port (4484 by default), without a scheme or a path: a URL such as
@@ -481,8 +481,11 @@ then stores its key (mode 0600), its certificate, the cluster CA and its node
 ID in the data directory, and starts the agent.
 
 The token is single use and expires; get one with hivemind join-token on the
-server. --token is read from the flag only, not from HIVEMIND_TOKEN, which is
-the admin token.
+server. Give it with --token-file <file>, a file that holds it, or with
+--token -, which reads it from standard input. --token <token> works too,
+but puts the token in the process list, and in the journal of a service
+manager that runs join; a server's token gets its holder the cluster CA's
+key. The token is never read from HIVEMIND_TOKEN, which is the admin token.
 
 A joined machine keeps its state. After a restart, run
 "hivemind serve --role worker" with the same data directory. join writes the
@@ -533,7 +536,8 @@ hivemind join <server> [flags]
 | `--route-http-port` | string | `80` | `HIVEMIND_ROUTE_HTTP_PORT` | port of the router's HTTP listener, for ACME HTTP-01 challenges and redirects to https |
 | `--route-https-port` | string | `443` | `HIVEMIND_ROUTE_HTTPS_PORT` | port of the router's HTTPS listener |
 | `--route-max-conns-per-ip` | string | `256` | `HIVEMIND_ROUTE_MAX_CONNS_PER_IP` | most connections the router keeps open from one client IP address (an IPv6 /64), over both its ports; 0 means no limit, for a router behind a proxy that does not pass client addresses |
-| `--token` | string | - | - | join token from hivemind join-token on the server |
+| `--token` | string | - | - | join token from hivemind join-token on the server, or - to read it from standard input; on the command line it shows in the process list |
+| `--token-file` | string | - | - | read the join token from this file |
 
 ### hivemind join-token
 

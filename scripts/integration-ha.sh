@@ -202,8 +202,9 @@ for i in 1 2; do
 		grep -q "the cluster has two" "$CL_WORK/token.err" || cl_fail "join-token --role server did not warn of a cluster of two: $(cat "$CL_WORK/token.err")"
 	fi
 	docker exec -d -e "HM_TOKEN=$tok" -e HIVEMIND_TEST_LOCAL_READS=1 -e HIVEMIND_MIN_READY=0s -e HIVEMIND_START_GRACE=30s "${S[$i]}" \
-		sh -c "exec hivemind join ${SIP[0]}:4484 --role server --token \"\$HM_TOKEN\" --advertise ${SIP[$i]} >>/var/log/hivemind.log 2>&1"
+		sh -c "umask 077; printf %s \"\$HM_TOKEN\" >/root/join-token; exec hivemind join ${SIP[0]}:4484 --role server --token-file /root/join-token --advertise ${SIP[$i]} >>/var/log/hivemind.log 2>&1"
 	wait_for 60 docker exec "${S[$i]}" test -s /var/lib/hivemind/server.json || cl_fail "${S[$i]} did not join"
+	if grep -qF "$tok" <<<"$(docker exec "${S[$i]}" ps -o args)"; then cl_fail "the join token is in ${S[$i]}'s process list, though join read it from --token-file"; fi
 	SID[$i]=$(docker exec "${S[$i]}" sed -n 's/.*"node_id": *"\(node-[0-9a-f]*\)".*/\1/p' /var/lib/hivemind/server.json | head -n 1)
 	wait_for 90 voters_are 0 $((i + 1)) || cl_fail "s0 does not list $((i + 1)) voting servers: $(roles 0 | tr '\n' ';')"
 	cl_note "${S[$i]} (${SID[$i]}) joined, and is a voter: $(roles 0 | tr '\n' ';')"
@@ -228,7 +229,7 @@ for c in "$W1" "$W2"; do
 	ip=$(cl_ip_of "$c")
 	tok=$(hm 1 join-token --ttl 1h 2>/dev/null) || cl_fail "join-token through s1 failed"
 	docker exec -d -e "HM_TOKEN=$tok" -e SSL_CERT_FILE=/etc/pebble-minica.pem "$c" sh -c \
-		"exec hivemind join ${SIP[1]}:4484 --token \"\$HM_TOKEN\" $(route_flags "$ip") >>/var/log/hivemind.log 2>&1"
+		"printf %s \"\$HM_TOKEN\" | hivemind join ${SIP[1]}:4484 --token - $(route_flags "$ip") >>/var/log/hivemind.log 2>&1"
 	wait_for 60 docker exec "$c" test -s /var/lib/hivemind/node.json || cl_fail "$c did not join through s1"
 	WID[$n]=$(cl_node_id_of "$c")
 	n=$((n + 1))

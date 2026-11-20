@@ -184,7 +184,7 @@ func TestJoinRejectsBadInputBeforeTheNetwork(t *testing.T) {
 		args []string
 		want string
 	}{
-		{[]string{"join", "10.0.0.1"}, "--token is required"},
+		{[]string{"join", "10.0.0.1"}, "a join token is required: give --token-file"},
 		{[]string{"join", "--token", "x", "10.0.0.1"}, "malformed"},
 		{[]string{"join", "--token", "x", "--advertise", "10.0.0.2", "10.0.0.1"}, "does not apply"},
 		{[]string{"join", "--token", "x", "--cluster-addr", "10.0.0.2", "10.0.0.1"}, "--cluster-addr does not apply to join"},

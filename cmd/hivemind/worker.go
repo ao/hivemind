@@ -9,6 +9,7 @@ import (
 	"encoding/pem"
 	"errors"
 	"fmt"
+	"io"
 	"io/fs"
 	"log/slog"
 	"net"
@@ -77,7 +78,7 @@ func joinCmd() *cobra.Command {
 		Short: "Join a cluster as a worker, then run its agent",
 		Long: `Join a cluster as a worker node and run its agent in the foreground.
 
-  hivemind join 10.0.0.5 --token <token>
+  hivemind join 10.0.0.5 --token-file <file>
 
 <server> is the server's address, host or host:port, where the port is its
 cluster port (4484 by default), without a scheme or a path: a URL such as
@@ -90,8 +91,11 @@ then stores its key (mode 0600), its certificate, the cluster CA and its node
 ID in the data directory, and starts the agent.
 
 The token is single use and expires; get one with hivemind join-token on the
-server. --token is read from the flag only, not from HIVEMIND_TOKEN, which is
-the admin token.
+server. Give it with --token-file <file>, a file that holds it, or with
+--token -, which reads it from standard input. --token <token> works too,
+but puts the token in the process list, and in the journal of a service
+manager that runs join; a server's token gets its holder the cluster CA's
+key. The token is never read from HIVEMIND_TOKEN, which is the admin token.
 
 A joined machine keeps its state. After a restart, run
 "hivemind serve --role worker" with the same data directory. join writes the
@@ -142,9 +146,9 @@ certificates through the server.`,
 			if cmd.Flags().Changed("cluster-port") {
 				return errors.New("--cluster-port does not apply to join: a worker runs no cluster listener; give the server's cluster port in <server>")
 			}
-			token, _ := cmd.Flags().GetString("token")
-			if token == "" {
-				return errors.New("--token is required: run hivemind join-token on the server to get one")
+			token, err := joinToken(cmd, "hivemind join-token on the server")
+			if err != nil {
+				return err
 			}
 			host, port, err := splitServer(args[0])
 			if err != nil {
@@ -190,7 +194,9 @@ certificates through the server.`,
 		},
 	}
 	config.BindWorker(cmd.Flags(), config.Options{})
-	cmd.Flags().String("token", "", "join token from hivemind join-token on the server")
+	cmd.Flags().String("token", "", "join token from hivemind join-token on the server, or - to read it from standard input; on the command line it shows in the process list")
+	cmd.Flags().String("token-file", "", "read the join token from this file")
+	_ = cmd.Flags().SetAnnotation("token-file", noEnvAnnotation, []string{"true"})
 	_ = cmd.Flags().SetAnnotation("token", noEnvAnnotation, []string{"true"})
 	cmd.Flags().String("role", "worker", "worker, or server for another server of the cluster, with a token from join-token --role server")
 	return cmd
@@ -952,4 +958,58 @@ func (s *serversSaver) save(list []string) {
 		s.state = next
 		s.log.Info("the cluster has several servers; this worker uses the first that answers", "servers", strings.Join(list, ","))
 	}()
+}
+
+// maxJoinTokenLen bounds a join token read from a file or standard input;
+// a token is about 100 bytes.
+const maxJoinTokenLen = 4096
+
+// joinToken is join's token: from --token-file, from standard input with
+// --token -, or from --token itself, which puts it in the process list and
+// in a service manager's journal while the join runs (the fifth acceptance
+// run's fifth finding). get is the command that issues one, for the error
+// without any.
+func joinToken(cmd *cobra.Command, get string) (string, error) {
+	tok, _ := cmd.Flags().GetString("token")
+	file, _ := cmd.Flags().GetString("token-file")
+	switch {
+	case tok != "" && file != "":
+		return "", errors.New("give --token or --token-file, not both")
+	case file != "":
+		f, err := os.Open(file)
+		if err != nil {
+			return "", fmt.Errorf("--token-file: %w", err)
+		}
+		defer f.Close()
+		return readJoinToken(f, file)
+	case tok == "-":
+		if f, ok := cmd.InOrStdin().(*os.File); ok {
+			if fi, err := f.Stat(); err == nil && fi.Mode()&os.ModeCharDevice != 0 {
+				return "", errors.New("--token - reads the token from a pipe or a file, not a terminal; use --token-file <file>, or pipe it in")
+			}
+		}
+		return readJoinToken(cmd.InOrStdin(), "standard input")
+	case tok == "":
+		return "", fmt.Errorf("a join token is required: give --token-file <file>, or --token - to read it from standard input; run %s to get one", get)
+	}
+	return tok, nil
+}
+
+// readJoinToken reads a join token from r, without the space around it.
+// Errors never contain the token.
+func readJoinToken(r io.Reader, from string) (string, error) {
+	b, err := io.ReadAll(io.LimitReader(r, maxJoinTokenLen+1))
+	if err != nil {
+		return "", fmt.Errorf("reading the join token from %s: %w", from, err)
+	}
+	s := strings.TrimSpace(string(b))
+	switch {
+	case s == "":
+		return "", fmt.Errorf("the join token from %s is empty", from)
+	case len(b) > maxJoinTokenLen:
+		return "", fmt.Errorf("%s holds more than %d bytes, and a join token is about 100", from, maxJoinTokenLen)
+	case strings.ContainsAny(s, " \t\r\n"):
+		return "", fmt.Errorf("%s holds more than one line or word, and a join token is one", from)
+	}
+	return s, nil
 }

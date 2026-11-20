@@ -144,7 +144,7 @@ hivemind join-token --role server
 
 # On the new machine, which needs Docker Engine and the hivemind binary, and an empty
 # data directory. TCP 4484 to 4486 must be open between it and the other servers.
-hivemind join 10.0.0.5 --role server --token <token> --advertise 10.0.0.6
+hivemind join 10.0.0.5 --role server --token-file join-token --advertise 10.0.0.6   # join-token: a file that holds the token
 ```
 
 `join --role server` joins the cluster, and runs the new server in the foreground, as `join` runs a worker; `hivemind serve --advertise 10.0.0.6` runs it again after a stop, and so does a plain `hivemind serve`, since `join` writes the flags it was given, `--advertise` included, to `<data-dir>/hivemind.yaml`. To run it as a service, see [systemd](systemd.md#another-server). `join` has no API flags, so the new server's API listens on `127.0.0.1:4483` until its unit or its `hivemind.yaml` gives it `--api-addr`, `--api-tls-cert` and `--api-tls-key`. A server token and a worker token are not interchangeable: each is refused where the other is expected, with the same message as an unknown token. (The flag is `--role server`, as on `join`, not `--server`: every command that calls the API already has `--server`, the API's URL.)
