@@ -330,6 +330,31 @@ CREATE TABLE ca_rotation_nodes (
 	seen_at   INTEGER NOT NULL
 ) STRICT;
 `,
+	// 18: several servers (docs/ha.md). raft_applied is the index of the
+	// last Raft log entry this store applied, written in the entry's own
+	// transaction, so a restart applies none twice; 0 for a store that has
+	// not been in a Raft cluster. servers lists the servers of a cluster
+	// with more than one: each one's node ID, the address it advertises
+	// and its node listener's port, which workers dial, and its Raft
+	// address; it is empty for a cluster of one. join_tokens.role tells a
+	// server's join token from a worker's.
+	`
+CREATE TABLE raft_applied (
+	id  INTEGER PRIMARY KEY CHECK (id = 1),
+	idx INTEGER NOT NULL CHECK (idx >= 0)
+) STRICT;
+INSERT INTO raft_applied (id, idx) VALUES (1, 0);
+
+CREATE TABLE servers (
+	id        TEXT PRIMARY KEY CHECK (id != ''),
+	advertise TEXT NOT NULL CHECK (advertise != ''),
+	node_port INTEGER NOT NULL CHECK (node_port BETWEEN 1 AND 65533),
+	raft_addr TEXT NOT NULL CHECK (raft_addr != ''),
+	added_at  INTEGER NOT NULL
+) STRICT;
+
+ALTER TABLE join_tokens ADD COLUMN role TEXT NOT NULL DEFAULT 'worker' CHECK (role IN ('worker', 'server'));
+`,
 }
 
 // migrationNotes says in a few words what each migration adds, for the log:
@@ -352,6 +377,7 @@ var migrationNotes = []string{
 	"path routes",
 	"the cluster epoch and the server address each node dials",
 	"cluster CA rotation",
+	"several servers",
 }
 
 // SchemaVersion is the schema version this build writes.

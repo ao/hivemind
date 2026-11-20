@@ -306,6 +306,27 @@ type Store struct {
 	// bytesChecked, if set, gets the bytes a put's check made for after
 	// the put, when the check ran (putBytes). Tests set it.
 	bytesChecked func(after map[string]int64)
+
+	// writeMu makes one transaction of Store.tx at a time. With one
+	// connection that is so anyway; a replicated store holds it from the
+	// transaction's start until its entry is applied (replicate.go).
+	writeMu sync.Mutex
+	// repl, when set, is the log every write goes through (replicate.go).
+	repl atomic.Pointer[replicator]
+	// origin names this process in the batches it records, and seq
+	// numbers them. awaiting is the Seq of the batch a transaction waits
+	// for, 0 for none.
+	origin   string
+	seq      atomic.Uint64
+	awaiting atomic.Uint64
+	// cacheGen goes up each time the caches are dropped (dropCaches).
+	// reportGen is the cacheGen that reported and rewrote are of; reportMu
+	// guards it.
+	cacheGen  atomic.Uint64
+	reportGen uint64
+	// localNode is the node of the server this process runs, when it is
+	// not the cluster record's (SetLocalNode).
+	localNode atomic.Pointer[string]
 }
 
 // readConns is the size of the read-only pool.
@@ -324,14 +345,14 @@ func Open(ctx context.Context, path string, opts ...Option) (*Store, error) {
 	}
 	dsn := path + "?_pragma=busy_timeout(10000)&_pragma=foreign_keys(1)" +
 		"&_pragma=journal_mode(WAL)&_pragma=synchronous(FULL)&_txlock=immediate"
-	db, err := sql.Open("sqlite", dsn)
+	db, err := sql.Open(writeDriverName, dsn)
 	if err != nil {
 		return nil, fmt.Errorf("opening %s: %w", path, err)
 	}
 	// One connection for writes: they are serialised in the process. Other
 	// processes are kept out by SQLite's locks and wait up to busy_timeout.
 	db.SetMaxOpenConns(1)
-	s := &Store{db: db, now: time.Now, reported: map[string][sha256.Size]byte{}, rewrote: map[string]int64{}}
+	s := &Store{db: db, now: time.Now, reported: map[string][sha256.Size]byte{}, rewrote: map[string]int64{}, origin: newOrigin()}
 	for _, o := range opts {
 		o(s)
 	}
@@ -416,6 +437,11 @@ func (s *Store) Close() error { return errors.Join(s.changes.Close(), s.rdb.Clos
 // routing table, unless it said that it leaves the table as it is
 // (routecache.go), and then its onCommit functions run.
 func (s *Store) tx(ctx context.Context, fn func(*sql.Tx) error) error {
+	s.writeMu.Lock()
+	defer s.writeMu.Unlock()
+	if r := s.repl.Load(); r != nil {
+		return s.replicatedTx(ctx, r, fn)
+	}
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
 		return err
@@ -1204,6 +1230,7 @@ func (s *Store) ReportStatus(ctx context.Context, nodeID string, st []Status) er
 	sum := reportDigest(st, rps)
 	s.reportMu.Lock()
 	defer s.reportMu.Unlock()
+	s.checkReportGen()
 	last, ok := s.reported[nodeID]
 	same := ok && last == sum
 	// Until this transaction commits, the stored rows are not known.

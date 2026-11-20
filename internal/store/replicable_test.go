@@ -62,6 +62,9 @@ func TestWritesAreInTransactions(t *testing.T) {
 func TestNoValuesMadeInSQL(t *testing.T) {
 	re := regexp.MustCompile(`(?i)\b(random|randomblob|datetime|julianday|strftime|unixepoch|date|time|current_timestamp|current_date|current_time|last_insert_rowid|changes)\s*\(|\bcurrent_(timestamp|date|time)\b|\breturning\b|\bautoincrement\b|\bcreate\s+(temp|temporary)\b|\bcreate\s+trigger\b`)
 	for name, src := range storeSources(t) {
+		if name == "recdriver.go" {
+			continue // its literals are the patterns it refuses, not SQL
+		}
 		for _, lit := range sqlLiterals(src) {
 			if m := re.FindString(lit.text); m != "" {
 				// total_changes() is read on the leader only, to see whether

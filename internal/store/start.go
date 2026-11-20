@@ -111,15 +111,21 @@ func (st *startState) waitEnds() int64 {
 // past it (see Waiting).
 func (s *Store) SetStarted(ctx context.Context, t time.Time, grace time.Duration) error {
 	grace = max(grace, scheduler.DefaultLeaseTimeout)
+	// The server's own node is this process's: on a cluster of several
+	// servers, the node of the one that has just become the leader.
+	local, err := s.localNodeID(ctx, s.db)
+	if err != nil {
+		return err
+	}
 	var last int64
 	if err := s.db.QueryRowContext(ctx, `SELECT COALESCE(max(last_lease), 0) FROM nodes
-		WHERE last_lease < ? AND id IS NOT (SELECT node_id FROM cluster WHERE id = 1)`, t.UnixNano()).Scan(&last); err != nil {
+		WHERE last_lease < ? AND id IS NOT ?`, t.UnixNano(), local).Scan(&last); err != nil {
 		return err
 	}
 	st := &startState{at: t.UnixNano(), until: t.Add(grace).UnixNano(), grace: int64(grace), last: last}
 	if last != 0 {
 		rows, err := s.db.QueryContext(ctx, `SELECT id FROM nodes WHERE last_lease >= ? AND last_lease < ?
-			AND id IS NOT (SELECT node_id FROM cluster WHERE id = 1)`, last-int64(scheduler.DefaultLeaseTimeout), st.at)
+			AND id IS NOT ?`, last-int64(scheduler.DefaultLeaseTimeout), st.at, local)
 		if err != nil {
 			return err
 		}

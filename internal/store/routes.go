@@ -215,15 +215,19 @@ func (s *Store) readRouteTable(ctx context.Context, tx *sql.Tx, now time.Time) (
 	cutoff := now.UnixNano() - int64(scheduler.DefaultLeaseTimeout)
 	waitFrom, waitBefore := s.waitWindow(now)
 	started := s.startedAt()
+	local, err := s.localNodeID(ctx, tx)
+	if err != nil {
+		return nil, err
+	}
 	rows, err = tx.QueryContext(ctx, `SELECT c.app, c.route_ports, n.address FROM container_status c JOIN nodes n ON n.id = c.node_id
 		WHERE c.ready = 1 AND c.route_ports != '' AND n.address != ''
 		AND (n.last_lease >= ? OR (n.last_lease >= ? AND n.last_lease < ?))
-		AND NOT (c.node_id = (SELECT node_id FROM cluster WHERE id = 1) AND c.updated_at < ?)
+		AND NOT (c.node_id = ? AND c.updated_at < ?)
 		AND (EXISTS (SELECT 1 FROM replicas r WHERE r.app = c.app AND r.idx = c.idx AND r.node_id = c.node_id
 				AND r.generation = c.generation AND r.desired = 'running')
 			OR EXISTS (SELECT 1 FROM surges g WHERE g.app = c.app AND g.idx = c.idx AND g.node_id = c.node_id
 				AND g.generation = c.generation AND g.desired = 'running'))
-		ORDER BY c.app, c.node_id, c.name`, cutoff, waitFrom, waitBefore, started)
+		ORDER BY c.app, c.node_id, c.name`, cutoff, waitFrom, waitBefore, local, started)
 	if err != nil {
 		return nil, err
 	}

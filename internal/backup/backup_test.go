@@ -434,10 +434,11 @@ func TestRestoreRefusesNewerSchema(t *testing.T) {
 func TestRestoreMigratesOlderSchema(t *testing.T) {
 	s := newServer(t)
 	var b bytes.Buffer
-	// Undo migrations 17 to 7. Migration 11 changed only drains, which
+	// Undo migrations 18 to 7. Migration 11 changed only drains, which
 	// migration 8 made, and migration 15 replaced app_hosts, which
 	// migration 9 made, with app_routes.
-	snap := editSnapshot(s.st, `DROP TABLE ca_rotation_nodes`, `DROP TABLE ca_rotation`,
+	snap := editSnapshot(s.st, `DROP TABLE servers`, `DROP TABLE raft_applied`, `ALTER TABLE join_tokens DROP COLUMN role`,
+		`DROP TABLE ca_rotation_nodes`, `DROP TABLE ca_rotation`,
 		`ALTER TABLE cluster DROP COLUMN epoch`, `ALTER TABLE nodes DROP COLUMN dials`,
 		`ALTER TABLE rollouts DROP COLUMN step_seen`, `ALTER TABLE nodes DROP COLUMN version`, `ALTER TABLE apps DROP COLUMN origin`,
 		`DROP TABLE registries`, `DROP TABLE tls_locks`, `DROP TABLE tls_storage`, `DROP TABLE app_routes`,

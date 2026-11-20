@@ -15,9 +15,12 @@ const tokenTimeout = 10 * time.Second
 // JoinTokens returns the join-token table as a pki.TokenStore. Each call is
 // one transaction, and the database runs IMMEDIATE transactions, so two
 // concurrent Consume calls for one token can't both succeed.
-func (s *Store) JoinTokens() pki.TokenStore { return joinTokens{s} }
+func (s *Store) JoinTokens() pki.TokenStore { return joinTokens{s: s, role: roleWorker} }
 
-type joinTokens struct{ s *Store }
+type joinTokens struct {
+	s    *Store
+	role string
+}
 
 // Add records an unused token hash that expires at expires. A hash that is
 // already stored is an error.
@@ -25,8 +28,8 @@ func (j joinTokens) Add(hash [32]byte, expires time.Time) error {
 	ctx, cancel := context.WithTimeout(context.Background(), tokenTimeout)
 	defer cancel()
 	return j.s.tx(ctx, func(tx *sql.Tx) error {
-		_, err := tx.ExecContext(ctx, `INSERT INTO join_tokens (hash, expires, used_at) VALUES (?, ?, 0)`,
-			hash[:], expires.UnixNano())
+		_, err := tx.ExecContext(ctx, `INSERT INTO join_tokens (hash, expires, used_at, role) VALUES (?, ?, 0, ?)`,
+			hash[:], expires.UnixNano(), j.role)
 		return err
 	})
 }
@@ -39,7 +42,7 @@ func (j joinTokens) Consume(hash [32]byte, now time.Time) error {
 	defer cancel()
 	return j.s.tx(ctx, func(tx *sql.Tx) error {
 		var expires, usedAt int64
-		err := tx.QueryRowContext(ctx, `SELECT expires, used_at FROM join_tokens WHERE hash = ?`, hash[:]).
+		err := tx.QueryRowContext(ctx, `SELECT expires, used_at FROM join_tokens WHERE hash = ? AND role = ?`, hash[:], j.role).
 			Scan(&expires, &usedAt)
 		if errors.Is(err, sql.ErrNoRows) {
 			return pki.ErrInvalidToken

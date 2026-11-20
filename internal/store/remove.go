@@ -69,7 +69,17 @@ func (s *Store) RemoveNode(ctx context.Context, id string, force bool) (Removal,
 		if err != nil && !errors.Is(err, sql.ErrNoRows) {
 			return err
 		}
-		if id == local {
+		// With several servers, a server's node is removed once the server
+		// is (hivemind server remove); with one, never.
+		var isServer, servers int
+		if err := tx.QueryRowContext(ctx, `SELECT EXISTS (SELECT 1 FROM servers WHERE id = ?), (SELECT count(*) FROM servers)`, id).
+			Scan(&isServer, &servers); err != nil {
+			return err
+		}
+		if isServer == 1 {
+			return fmt.Errorf("%w: %w: node %s runs a server of the cluster; remove the server first (hivemind server remove %s)", ErrConflict, ErrIsServer, id, id)
+		}
+		if id == local && servers == 0 {
 			return fmt.Errorf("%w: node %s runs the server, and the server's own node cannot be removed", ErrConflict, id)
 		}
 		var name string
