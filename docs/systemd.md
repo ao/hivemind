@@ -85,7 +85,9 @@ sudo hivemind join 10.0.0.5 --role server --token <token from join-token --role 
 # When it logs "this server is a voter of the cluster now", stop it with Ctrl-C.
 ```
 
-Then write the server unit above, with this machine's own address in `--advertise` (`10.0.0.6` here, not the first server's), and enable it the same way. `sudo hivemind servers` on any server lists it as a `follower`. A joined server has no `admin.token`, and `join` writes no client config, so its CLI needs the cluster's admin token: `sudo HIVEMIND_TOKEN=hm_... hivemind status`.
+Then write the server unit above, with this machine's own address in `--advertise` (`10.0.0.6` here, not the first server's), and enable it the same way. `sudo hivemind servers` on the first server lists it as a `follower`. A joined server has no `admin.token`, and `join` writes no client config, so its CLI needs the cluster's admin token: `sudo HIVEMIND_TOKEN=hm_... hivemind status`, with `--server https://10.0.0.6:4483 --ca-cert <CA file>` once its API listens there ([upgrading](upgrading.md#adding-servers)).
+
+Stop `join` only once it has logged that line. One stopped before `joined the cluster as a server` leaves a store in the data directory: `join` then refuses the directory (`already holds a cluster`), and the unit's `serve` exits with `no cluster in /var/lib/hivemind` and says to run `hivemind init`, which is not the fix. Empty the directory and join again with a new token. With the second server of a cluster, the cluster has no leader from the stop until the unit has started the server again, about 4 s on c7g.large machines: writes get `503` meanwhile, and running containers are not affected.
 
 ## What the settings do
 
