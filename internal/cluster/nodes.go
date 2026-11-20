@@ -296,8 +296,24 @@ func (a *nodeAPI) getStatus(w http.ResponseWriter, r *http.Request) {
 
 // fail maps a store error to a reply. The details of an unexpected error go
 // to the log only.
+//
+// A write lost to a change of leader gets the API's 503 and message
+// (internal/server's fail), and a warning: with ErrNotLeader nothing was
+// written, and the reply is marked no leader, so that a worker sends it to
+// another server; with ErrOutcomeUnknown the write may yet be applied, and
+// the agent's next pass sends its report or renewal again. Before, both
+// fell to the 500 below and an error line, on the old leader at every
+// change of leader (ninth soak), and a worker did not move on from a 500.
 func (a *nodeAPI) fail(w http.ResponseWriter, r *http.Request, err error) {
 	switch {
+	case errors.Is(err, store.ErrNotLeader):
+		a.log.Warn("a node's request was refused: this server does not lead now", "path", r.URL.Path, "err", err)
+		w.Header().Set(nodeapi.NoLeaderHeader, "1")
+		w.Header().Set("Retry-After", "1")
+		writeError(w, http.StatusServiceUnavailable, err.Error())
+	case errors.Is(err, store.ErrOutcomeUnknown):
+		a.log.Warn("a node's write may or may not have been applied: the leader changed while it was in the log", "path", r.URL.Path, "err", err)
+		writeError(w, http.StatusServiceUnavailable, err.Error()+": check, and try again if it is not")
 	case errors.Is(err, store.ErrNodeRemoved):
 		writeError(w, http.StatusForbidden, nodeapi.RemovedMessage)
 	case errors.Is(err, store.ErrNotFound):
