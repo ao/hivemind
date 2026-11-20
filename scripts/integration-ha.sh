@@ -33,7 +33,8 @@
 #     follower and catches up
 #   - the leader's serve is stopped with SIGTERM: it hands the leadership
 #     on first, so another server leads within 5 s of the signal and its log
-#     says so; started again, it is a follower
+#     says so; writes through both followers during the stop are counted,
+#     and none fails for want of a leader; started again, it is a follower
 #   - a partition that isolates the leader (docker network disconnect): it
 #     steps down; the other two elect a leader and take writes; a write
 #     through the isolated server is refused with "no leader"; after the
@@ -435,6 +436,23 @@ GL=$(leader_of 0)
 GI=$(index_of "$GL") || cl_fail "no leader before the leader's stop: $(roles 0 | tr '\n' ';')"
 GF=()
 for i in 0 1 2; do [ "$i" -ne "$GI" ] && GF[${#GF[@]}]=$i; done
+# gwriter I: on server I, 20 registry credentials 0.25 s apart, through its
+# own API, each line "ok N" or "fail N reason".
+gwriter() {
+	docker exec -d -e "HIVEMIND_TOKEN=$TOKEN" "${S[$1]}" sh -c "rm -f /tmp/gw.done; i=0
+		while [ \$i -lt 20 ]; do
+			i=\$((i+1))
+			if echo pw | hivemind registry login g$1-\$i.ha.test --username u --password-stdin >/dev/null 2>/tmp/gw.err; then
+				echo \"ok \$i\"
+			else
+				echo \"fail \$i \$(head -c 200 /tmp/gw.err | tr '\n' ' ')\"
+			fi
+			sleep 0.25
+		done >/tmp/gw.out 2>&1; touch /tmp/gw.done"
+}
+gwriter "${GF[0]}"
+gwriter "${GF[1]}"
+sleep 1
 STOP_MS=$(date +%s%3N)
 docker exec "${S[$GI]}" pkill -TERM -x hivemind || cl_fail "no hivemind on ${S[$GI]}"
 until elected "$GL" "${GF[@]}"; do
@@ -447,6 +465,19 @@ wait_for 30 serve_stopped "$GI" || cl_fail "${S[$GI]}'s serve did not stop after
 docker exec "${S[$GI]}" grep -q "handed the leadership on" /var/log/hivemind.log ||
 	cl_fail "the stopped leader did not hand the leadership on: $(docker exec "${S[$GI]}" tail -n 20 /var/log/hivemind.log)"
 cl_note "the leader's serve, stopped with SIGTERM, handed the leadership on: $(local_leader "${GF[0]}") led ${HANDOVER_MS} ms after the signal"
+gw_done() { docker exec "${S[${GF[0]}]}" test -e /tmp/gw.done && docker exec "${S[${GF[1]}]}" test -e /tmp/gw.done; }
+wait_for 120 gw_done || cl_fail "the writers through the followers did not finish"
+GW_OK=0
+GW_FAIL=0
+for i in "${GF[@]}"; do
+	GW_OK=$((GW_OK + $(docker exec "${S[$i]}" grep -c '^ok ' /tmp/gw.out || true)))
+	GW_FAIL=$((GW_FAIL + $(docker exec "${S[$i]}" grep -c '^fail ' /tmp/gw.out || true)))
+	# The CLI tries again while no server leads, so none may fail for it.
+	if docker exec "${S[$i]}" grep -q '^fail .*no leader' /tmp/gw.out; then
+		cl_fail "a write through ${S[$i]} failed for want of a leader during the leader's stop: $(docker exec "${S[$i]}" grep '^fail ' /tmp/gw.out | tr '\n' ';')"
+	fi
+done
+cl_note "writes through the followers during the leader's stop: $GW_OK acknowledged, $GW_FAIL failed$( [ "$GW_FAIL" -eq 0 ] || echo ": $(for i in "${GF[@]}"; do docker exec "${S[$i]}" grep '^fail ' /tmp/gw.out; done | tr '\n' ';')")"
 serve_server "$GI"
 follows_again() { [ "$(roles "$GI" | awk -v id="$GL" '$1 == id { print $2 }')" = follower ]; }
 wait_for 90 follows_again || cl_fail "the stopped leader is not a follower after its start: $(roles "$GI" | tr '\n' ';')"

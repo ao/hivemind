@@ -11,8 +11,10 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"net/http/httptrace"
 	"net/http/httputil"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"github.com/ao/hivemind/internal/pki"
@@ -201,11 +203,24 @@ func (n *Node) Forward(kind string, w http.ResponseWriter, r *http.Request) {
 		WriteNotLeader(w, n.notLeader())
 		return
 	}
+	n.forwardTo(kind, id, addr, w, r)
+}
+
+// forwardTo is Forward to the leader id at addr.
+func (n *Node) forwardTo(kind, id, addr string, w http.ResponseWriter, r *http.Request) {
 	// The leader keeps its own time limits; a follower that kept its own
 	// would cut a log stream through it.
 	rc := http.NewResponseController(w)
 	_ = rc.SetReadDeadline(time.Time{})
 	_ = rc.SetWriteDeadline(time.Time{})
+	// sent is set once the request is written to the connection to the
+	// leader: until then, the leader cannot have acted on it.
+	var sent atomic.Bool
+	r = r.WithContext(httptrace.WithClientTrace(r.Context(), &httptrace.ClientTrace{WroteRequest: func(i httptrace.WroteRequestInfo) {
+		if i.Err == nil {
+			sent.Store(true)
+		}
+	}}))
 	proxy := &httputil.ReverseProxy{
 		Rewrite: func(pr *httputil.ProxyRequest) {
 			pr.Out.URL.Scheme = "https"
@@ -223,12 +238,29 @@ func (n *Node) Forward(kind string, w http.ResponseWriter, r *http.Request) {
 		},
 		Transport:     n.fwdClient.Transport,
 		FlushInterval: -1,
-		ErrorHandler: func(w http.ResponseWriter, _ *http.Request, err error) {
-			w.Header().Set(HeaderNoLeader, "1")
-			writeJSONError(w, http.StatusServiceUnavailable, fmt.Sprintf("the leader, %s at %s, did not answer this server: %v", id, addr, err))
+		ErrorHandler: func(w http.ResponseWriter, out *http.Request, err error) {
+			forwardFailed(w, out.Method, id, addr, sent.Load(), err)
 		},
 	}
 	proxy.ServeHTTP(w, r)
+}
+
+// forwardFailed answers a request that the leader did not answer. It is
+// marked no leader, so that a client sends it to another server, only when
+// the leader cannot have acted on it: it did not reach the leader, or it
+// is a GET or a HEAD, which change nothing. A write that reached the
+// leader may have been applied, and a client that sent it again could
+// apply it twice; the answer says so. Before, every such answer was
+// marked, writes included.
+func forwardFailed(w http.ResponseWriter, method, id, addr string, sent bool, err error) {
+	if !sent || method == http.MethodGet || method == http.MethodHead {
+		w.Header().Set(HeaderNoLeader, "1")
+		w.Header().Set("Retry-After", "1")
+		writeJSONError(w, http.StatusServiceUnavailable, fmt.Sprintf("the leader, %s at %s, did not answer this server: %v", id, addr, err))
+		return
+	}
+	writeJSONError(w, http.StatusServiceUnavailable, fmt.Sprintf("the leader, %s at %s, did not answer this server after it was sent the request, "+
+		"so the request may or may not have been applied: check, and try again if it was not: %v", id, addr, err))
 }
 
 // WriteNotLeader answers 503 for a request this server cannot serve

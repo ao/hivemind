@@ -12,11 +12,13 @@ import (
 	"io/fs"
 	"net"
 	"net/http"
+	"net/http/httptrace"
 	"net/url"
 	"os"
 	"path/filepath"
 	"slices"
 	"strings"
+	"sync/atomic"
 	"syscall"
 	"time"
 
@@ -360,10 +362,24 @@ func firstNonEmpty(vs ...string) string {
 	return ""
 }
 
+// While a server answers that no server can take the request now, as
+// during an election, the CLI tries the servers again every leaderRetry,
+// for up to leaderWait after the first such answer: a new leader leads 1
+// to 2.5 s after the old one is lost (eighth soak).
+var (
+	leaderWait  = 3 * time.Second
+	leaderRetry = 500 * time.Millisecond
+)
+
 // send makes one request and returns the response for a 2xx status. Any
 // other status becomes an error with the server's message. With a list of
-// servers, a server that cannot be reached, or that answers that no
-// server leads, is passed for the next, from the one that answered last.
+// servers, it starts at the one that answered last, and passes for the
+// next one a server it cannot connect to, and one that answers that it
+// did not act on the request and another server may (a 503 marked no
+// leader). It also passes a server whose connection broke after the
+// request was sent, but only for a GET or a HEAD: a write sent again
+// could be applied twice. When some server answered that none leads, it
+// tries them all again for a few seconds (leaderWait).
 func (c *apiClient) send(ctx context.Context, method, path string, body any) (*http.Response, error) {
 	var b []byte
 	if body != nil {
@@ -372,39 +388,71 @@ func (c *apiClient) send(ctx context.Context, method, path string, body any) (*h
 			return nil, err
 		}
 	}
-	start := 0
-	for i, s := range c.bases {
-		if s == c.base {
-			start = i
-		}
-	}
+	safe := method == http.MethodGet || method == http.MethodHead
 	var err error
-	for i := 0; i < max(len(c.bases), 1); i++ {
-		base := c.base
-		if len(c.bases) > 0 {
-			base = c.bases[(start+i)%len(c.bases)]
-		}
-		var resp *http.Response
-		resp, err = c.sendTo(ctx, base, method, path, b, body != nil)
-		if err == nil {
-			c.base = base
-			if len(c.bases) > 1 && base != c.lastSaved {
-				saveLastServer(c.bases, base)
-				c.lastSaved = base
+	var firstNoLeader time.Time
+	for {
+		noLeader := false
+		start := 0
+		for i, s := range c.bases {
+			if s == c.base {
+				start = i
 			}
-			return resp, nil
 		}
-		var re *reachError
-		var ae *apiError
-		if ctx.Err() != nil || !(errors.As(err, &re) || errors.As(err, &ae) && ae.noLeader) {
+		for i := 0; i < max(len(c.bases), 1); i++ {
+			base := c.base
+			if len(c.bases) > 0 {
+				base = c.bases[(start+i)%len(c.bases)]
+			}
+			var resp *http.Response
+			resp, err = c.sendTo(ctx, base, method, path, b, body != nil)
+			if err == nil {
+				c.base = base
+				if len(c.bases) > 1 && base != c.lastSaved {
+					saveLastServer(c.bases, base)
+					c.lastSaved = base
+				}
+				return resp, nil
+			}
+			var re *reachError
+			var ae *apiError
+			switch {
+			case ctx.Err() != nil:
+				return nil, err
+			case errors.As(err, &ae) && ae.noLeader:
+				noLeader = true
+			case errors.As(err, &re) && (!re.sent || safe):
+			default:
+				return nil, err
+			}
+		}
+		if !noLeader {
 			return nil, err
 		}
+		if firstNoLeader.IsZero() {
+			firstNoLeader = time.Now()
+		}
+		if time.Since(firstNoLeader) >= leaderWait {
+			return nil, err
+		}
+		t := time.NewTimer(leaderRetry)
+		select {
+		case <-ctx.Done():
+			t.Stop()
+			return nil, err
+		case <-t.C:
+		}
 	}
-	return nil, err
 }
 
-// reachError is a request that reached no server.
-type reachError struct{ msg string }
+// reachError is a request that got no answer from a server: it could not
+// connect, or the connection broke. sent is true once the whole request
+// was written to the connection, after which the server may have acted on
+// it.
+type reachError struct {
+	msg  string
+	sent bool
+}
 
 func (e *reachError) Error() string { return e.msg }
 
@@ -414,7 +462,13 @@ func (c *apiClient) sendTo(ctx context.Context, base, method, path string, b []b
 	if hasBody {
 		rd = bytes.NewReader(b)
 	}
-	req, err := http.NewRequestWithContext(ctx, method, base+path, rd)
+	var sent atomic.Bool
+	trace := &httptrace.ClientTrace{WroteRequest: func(i httptrace.WroteRequestInfo) {
+		if i.Err == nil {
+			sent.Store(true)
+		}
+	}}
+	req, err := http.NewRequestWithContext(httptrace.WithClientTrace(ctx, trace), method, base+path, rd)
 	if err != nil {
 		return nil, err
 	}
@@ -429,9 +483,14 @@ func (c *apiClient) sendTo(ctx context.Context, base, method, path string, b []b
 			return nil, ctx.Err()
 		}
 		if msg := tlsReason(err, c.caPath); msg != "" {
-			return nil, &reachError{fmt.Sprintf("cannot reach hivemind at %s: %s", base, msg)}
+			return nil, &reachError{msg: fmt.Sprintf("cannot reach hivemind at %s: %s", base, msg)}
 		}
-		return nil, &reachError{fmt.Sprintf("cannot reach hivemind at %s: %s", base, reachReason(err))}
+		re := &reachError{msg: fmt.Sprintf("cannot reach hivemind at %s: %s", base, reachReason(err)), sent: sent.Load()}
+		if re.sent && method != http.MethodGet && method != http.MethodHead {
+			re.msg = fmt.Sprintf("lost the connection to hivemind at %s after the request was sent (%s), so it may or may not have been applied: check, and try again if it was not",
+				base, reachReason(err))
+		}
+		return nil, re
 	}
 	if resp.StatusCode/100 == 2 {
 		return resp, nil
