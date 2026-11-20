@@ -2,7 +2,13 @@
 
 Notable changes to hivemind, newest first. Versions follow [Semantic Versioning](https://semver.org). A release is cut by pushing a `v*` tag; its notes are the matching section below.
 
-## [2.2.0] - Unreleased
+## [2.2.0] - 2026-11-20
+
+2.1.0 was not released on its own, and its changes are in this release too: node certificate renewal, `hivemind backup` and `hivemind restore`, and `hivemind logs` for replicas on workers. They are listed under 2.1.0 in [CHANGELOG.md](https://github.com/ao/hivemind/blob/v2.2.0/CHANGELOG.md).
+
+### Upgrading from 2.0.0
+
+The server migrates its store in place, from schema version 6 to 17, on its first start, and a 2.0.0 binary cannot open it after that, so take a backup with the new binary's `hivemind backup` first. The server and the workers can be upgraded in either order: `scripts/integration-mixed.sh` runs a 2.0.0 server with a 2.2.0 worker, and a 2.2.0 server with a 2.0.0 worker. A 2.0.0 worker cannot renew its certificate, so upgrade each one within 365 days of its join. Routers need TCP ports 30000 to 32767 open between the nodes, where the routed replicas' ports are published. See [docs/upgrading.md](docs/upgrading.md#from-200-to-220).
 
 ### Added
 
@@ -170,7 +176,7 @@ Notable changes to hivemind, newest first. Versions follow [Semantic Versioning]
 - `hivemind compose convert` reported a route's value that the app spec refuses, such as `protocol: grpc`, only once the service's other problems were fixed, though docs/compose.md says one run lists every problem (fourth acceptance run). The routes and the health check of a service's `x-hivemind` are now checked by the app spec's rules in the same run as the other problems, apart from values that could not be read at all. Other limits of the app spec, such as `deploy.replicas: 101`, are still checked once a service has no other problem, and docs/compose.md says so.
 - `hivemind deploy --help` and `hivemind compose --help`, and docs/cli.md, which is made from them, gave a route a host, a port and a path, and no protocol (fourth acceptance run). Both now give `protocol`: `http`, the default, or `h2c`.
 
-## [2.1.0] - Unreleased
+## [2.1.0] - not released on its own; its changes are in 2.2.0
 
 ### Added
 
