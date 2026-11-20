@@ -20,7 +20,7 @@ Raft needs a log store (the entries) and a stable store (the current term and th
 
 ### Snapshots
 
-The FSM snapshot is the store's own snapshot, `VACUUM INTO` a file (the path `hivemind backup` uses), streamed to raft's file snapshot store in `<data-dir>/raft/snapshots`, which keeps the last two. Raft takes one after 8192 entries or two minutes, whichever is later, and keeps 10240 entries after it, so a follower that was down for a few minutes catches up from the log, and one that was down for longer gets the snapshot. With ten nodes reporting every 2 s, which is 5 entries a second, that is a snapshot about every 27 minutes.
+The FSM snapshot is the store's own snapshot, `VACUUM INTO` a file (the path `hivemind backup` uses), streamed to raft's file snapshot store in `<data-dir>/raft/snapshots`, which keeps the last two. Raft takes one after 8192 entries or two minutes, whichever is later, and keeps 10240 entries after it, so a follower that was down for a few minutes catches up from the log, and one that was down for longer gets the snapshot. Each node's reports and lease renewals are entries: a steady cluster of three servers and two workers appended 210 a minute ([measurements](#measurements)), and the eighth soak's six nodes, with a write every 2 s, 5.7 a second: a snapshot about every 26 minutes.
 
 A snapshot is restored into the open store in one transaction: the file is attached, every table is emptied and filled from it with foreign keys checked at commit, and the file is detached. A snapshot from another schema version is refused (see [versions](#versions)).
 
@@ -228,5 +228,14 @@ On one c8g.4xlarge (16 arm64 vCPUs, Amazon Linux 2023), with the three servers a
 | Requests through the workers' routers during the failover, all 200 | 40 | 40 |
 
 In run 1, the old leader's replicas ran on other nodes 34 s after the kill, with a 30 s start grace. Three `PUT /v1/apps` on a three-server cluster in an earlier run of the same script took 8.9, 8.9 and 9.1 ms on the leader, as its request log has them; a cluster of one was not timed in the same way, so the cost of the log over one server is not measured here. In the unit tests, three servers on loopback with timeouts cut to 300 ms elected a new leader 608 ms after the leader stopped.
+
+The Raft log of a steady cluster, by `scripts/raft-rate.sh` on the same machine: three servers and two workers as Docker-in-Docker containers, 50 apps of 2 replicas that no node can take (64 CPUs each), as the eighth soak's write-load had, nothing written through the API, and the entries each server appended in 300 s after 60 s to settle, read from its `raft.db`:
+
+| | Entries | Bytes | A minute |
+|---|---|---|---|
+| At 7e6a508, before a pending replica's reason was written only when it changed and statements that changed nothing were left out | 1,171 | 856,699 | 234 entries, 167 KiB |
+| At 0d0a814, with both | 1,051 | 283,770 | 210 entries, 55 KiB |
+
+The three servers appended the same entries, to within one. Most of what is left is the nodes' reports and lease renewals, each an entry that changes rows; the change took away two thirds of the bytes, the reasons written again and the statements that changed no row, and one entry in ten, the transactions that changed nothing at all.
 
 The binary for linux/amd64, built with `-trimpath -ldflags "-s -w"`, is 21,549,216 bytes, 1,642,496 bytes (8.3%) more than at the commit this branch was cut from (19,906,720).
