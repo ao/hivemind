@@ -99,6 +99,31 @@ func (s *Store) ListServers(ctx context.Context) ([]Server, error) {
 	return out, rows.Err()
 }
 
+// ReplicasToMove counts what a drain of the node would move: the replicas
+// without a volume that should run on it, and the surges placed on it.
+// hivemind server remove refuses a server whose node has any: a removed
+// server's serve stops with its agent, its containers keep running, and
+// once its node is lost they are placed again elsewhere and run twice. A
+// drained node has none, and neither has a lost one, whose replicas the
+// loss has placed again already.
+func (s *Store) ReplicasToMove(ctx context.Context, node string) (int, error) {
+	reps, err := queryAssignments(ctx, s.rdb, `r.node_id = ? AND r.desired = 'running'`, node)
+	if err != nil {
+		return 0, err
+	}
+	n := 0
+	for _, r := range reps {
+		if len(r.Spec.Volumes) == 0 {
+			n++
+		}
+	}
+	var surges int
+	if err := s.rdb.QueryRowContext(ctx, `SELECT count(*) FROM surges WHERE node_id = ?`, node).Scan(&surges); err != nil {
+		return 0, err
+	}
+	return n + surges, nil
+}
+
 // ServerJoinTokens returns the join tokens for servers as a
 // pki.TokenStore. They are rows of the join-token table with the server
 // role: a server's token is refused for a worker's join, and a worker's

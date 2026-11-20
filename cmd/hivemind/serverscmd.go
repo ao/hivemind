@@ -90,21 +90,24 @@ func serverRemoveCmd() *cobra.Command {
 		Use:   "remove <id>",
 		Short: "Remove a server from the cluster",
 		Long: `Remove a server from the cluster's Raft configuration and its list of
-servers (docs/ha.md#membership). The removed server stops serving; its
-containers keep running, and its node stays a node like any other: move its
-replicas with hivemind node drain and remove it with hivemind node remove.
-Its certificate is refused on the server port from then on. To make the
-machine a server again, give it an empty data directory and a new server
-join token.
+servers (docs/ha.md#membership). The removed server stops serving, with
+exit status 3, and its agent with it; its containers keep running. So drain
+its node first, with hivemind node drain <id>: a server whose node still has
+replicas without a volume is refused, as they would be placed again on
+other nodes and run twice. Once the server is removed, its node is a node
+like any other: remove it with hivemind node remove. Its certificate is
+refused on the server port from then on. To make the machine a server
+again, give it an empty data directory and a new server join token.
 
 The last voting server cannot be removed. A removal that would leave fewer
 servers that the leader heard from in the last 10 s than a majority of
-those that stay is refused, unless --force: a cluster of three with one
-server down that loses another has no majority.`,
+those that stay is refused too. --force removes the server anyway, in both
+cases: a cluster of three with one server down that loses another has no
+majority.`,
 		Args: cobra.ExactArgs(1),
 	}
 	cf := addClientFlags(cmd)
-	cmd.Flags().BoolVar(&force, "force", false, "remove the server even if the servers that stay cannot reach a majority")
+	cmd.Flags().BoolVar(&force, "force", false, "remove the server even if its node has replicas to move, or the servers that stay cannot reach a majority")
 	cmd.RunE = func(cmd *cobra.Command, args []string) error {
 		c, err := cf.client()
 		if err != nil {

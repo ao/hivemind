@@ -403,7 +403,7 @@ containers_of() {
 }
 no_duplicates() {
 	local dup
-	dup=$( (for a in app0 app1 app2 who; do containers_of "$a"; done) | awk '{ print $2 }' | sort | uniq -d)
+	dup=$( (for a in app0 app1 app2 who pin; do containers_of "$a"; done) | awk '{ print $2 }' | sort | uniq -d)
 	[ -z "$dup" ]
 }
 # apps_back: each app runs two replicas, none on the dead leader's node.
@@ -573,19 +573,46 @@ wait_for 60 voters_are 2 3 || cl_fail "the cluster did not recover: $(roles 2 | 
 echo pw | hmi 2 registry login quorum-back.ha.test --username u --password-stdin >/dev/null || cl_fail "no write after the servers came back"
 cl_note "the two servers came back; writes work again"
 
-# server remove, of a follower: it leaves the configuration, its serve
-# stops with the removal message, and the two left take writes.
-LEADER=$(leader_of 2)
-LI=$(index_of "$LEADER") || cl_fail "no leader before server remove"
-RI=""
-for i in 0 1 2; do [ "$i" -ne "$LI" ] && RI=$i; done
-out=$(hm "$LI" server remove "${SID[$RI]}" 2>&1) || cl_fail "server remove ${SID[$RI]}: $out"
+# removed_stopped I: server I's serve has stopped, with the removal message.
 removed_stopped() {
-	! docker exec "${S[$RI]}" pgrep -x hivemind >/dev/null && docker exec "${S[$RI]}" grep -q "was removed from the cluster's servers" /var/log/hivemind.log
+	! docker exec "${S[$1]}" pgrep -x hivemind >/dev/null && docker exec "${S[$1]}" grep -q "was removed from the cluster's servers" /var/log/hivemind.log
 }
-wait_for 30 removed_stopped || cl_fail "the removed server's serve did not stop: $(docker exec "${S[$RI]}" tail -n 5 /var/log/hivemind.log)"
-wait_for 20 voters_are "$LI" 2 || cl_fail "the cluster does not list two voters after the removal: $(roles "$LI" | tr '\n' ';')"
-echo pw | hmi "$LI" registry login after-remove.ha.test --username u --password-stdin >/dev/null || cl_fail "no write after the removal"
-cl_note "server remove: ${SID[$RI]} left the configuration and its serve stopped with the removal message; the two left take writes: $out"
+# live_server NOT: a server whose serve runs, other than server NOT.
+live_server() {
+	local i
+	for i in 0 1 2; do
+		[ "$i" -ne "$1" ] && docker exec "${S[$i]}" pgrep -x hivemind >/dev/null && echo "$i" && return 0
+	done
+	return 1
+}
+
+# server remove of s0, the server init made, whose node runs a replica: it
+# is refused, and the refusal gives the drain. Drained first, s0 is
+# removed: it leaves the configuration, its serve stops with the removal
+# message, the servers left take writes, and no replica runs twice.
+TI=0
+K=$(live_server "$TI") || cl_fail "no server runs but ${S[$TI]}"
+NSERVERS=$(roles "$K" | wc -l)
+others=$(hm "$K" nodes | awk -v t="${SID[$TI]}" '$1 ~ /^node-/ && $1 != t && / ready / && / eligible / { print $1 }')
+for id in $others; do hm "$K" node eligibility "$id" --disable >/dev/null || cl_fail "eligibility --disable $id"; done
+hm "$K" deploy --name pin --image nginx:alpine --replicas 1 >/dev/null || cl_fail "deploy pin"
+pinned() { [ "$(app_rows "$K" pin | awk -v t="${SID[$TI]}" '$2 == t && $3 == "running"' | wc -l)" -eq 1 ]; }
+wait_for 120 pinned || cl_fail "pin does not run on ${SID[$TI]}: $(app_rows "$K" pin | tr '\n' ';')"
+for id in $others; do hm "$K" node eligibility "$id" --enable >/dev/null || cl_fail "eligibility --enable $id"; done
+if out=$(hm "$K" server remove "${SID[$TI]}" 2>&1); then
+	cl_fail "server remove took ${SID[$TI]}, whose node runs pin's replica: $out"
+fi
+grep -q "hivemind node drain ${SID[$TI]}" <<<"$out" || cl_fail "the refusal of server remove does not give the drain: $out"
+docker exec "${S[$TI]}" pgrep -x hivemind >/dev/null || cl_fail "${S[$TI]}'s serve stopped after a refused server remove"
+cl_note "server remove of ${SID[$TI]}, whose node runs pin's replica, is refused: ${out:0:240}"
+out=$(hm "$K" node drain "${SID[$TI]}" --deadline 5m 2>&1) || cl_fail "node drain ${SID[$TI]}: $out"
+out=$(hm "$K" server remove "${SID[$TI]}" 2>&1) || cl_fail "server remove ${SID[$TI]} after its drain: $out"
+wait_for 30 removed_stopped "$TI" || cl_fail "the removed server's serve did not stop: $(docker exec "${S[$TI]}" tail -n 5 /var/log/hivemind.log)"
+wait_for 30 voters_are "$K" $((NSERVERS - 1)) || cl_fail "the cluster does not list $((NSERVERS - 1)) voters after the removal: $(roles "$K" | tr '\n' ';')"
+echo pw | hmi "$K" registry login after-remove.ha.test --username u --password-stdin >/dev/null || cl_fail "no write after the removal"
+wait_for 120 app_running "$K" pin 1 || cl_fail "pin does not run one replica after the removal: $(app_rows "$K" pin | tr '\n' ';')"
+sleep 20
+no_duplicates || cl_fail "a replica runs twice after the drained server's removal: $( (for a in app0 app1 app2 who pin; do containers_of "$a"; done) | sort | tr '\n' ';')"
+cl_note "drained first, ${SID[$TI]} left the configuration, its serve stopped with the removal message, the servers left take writes, and no replica runs twice: $out"
 cl_note "ha: election ${ELECTION_MS} ms after the kill, API writes again at ${API_MS} ms; a leader ${HANDOVER_MS} ms after the leader's SIGTERM; election ${PARTITION_MS} ms after the cut; writes acknowledged ${ACKED_BEFORE} before and ${ACKED_AFTER} after the kill, all kept on every server; ${FAILED} refused; ${ROUTER_TOTAL} router requests, all 200"
 cl_note "ha: all checks passed"

@@ -682,3 +682,35 @@ func TestDrainCountsTheReplicasANodeLossTook(t *testing.T) {
 		t.Fatalf("drain of a node that stayed: %+v; want no loss", d)
 	}
 }
+
+// ReplicasToMove counts the replicas without a volume on a node, which a
+// removed server's node would run twice: not a replica with a volume, and
+// none once the node is lost and its replicas are placed again.
+func TestReplicasToMove(t *testing.T) {
+	e := newDrainEnv(t, nil, nodeA, nodeB)
+	mustPut(t, e.s, app("calm", 3))
+	mustPut(t, e.s, dbApp())
+	count := func(node string) int {
+		t.Helper()
+		n, err := e.s.ReplicasToMove(e.ctx, node)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return n
+	}
+	calm := map[string]int{}
+	for _, r := range replicasOf(t, e.s, "calm") {
+		calm[r.NodeID]++
+	}
+	if a, b := count(nodeA), count(nodeB); a != calm[nodeA] || b != calm[nodeB] || a+b != 3 {
+		t.Fatalf("to move: %d on node-a, %d on node-b; want calm's, %v, and not db's", a, b, calm)
+	}
+	e.clock.Advance(16 * time.Second)
+	e.renew(nodeB)
+	if lost, err := e.s.ReconcileNodes(e.ctx); err != nil || len(lost) != 1 || lost[0] != nodeA {
+		t.Fatalf("sweep: lost %v, %v; want node-a", lost, err)
+	}
+	if a, b := count(nodeA), count(nodeB); a != 0 || b != 3 {
+		t.Fatalf("to move once node-a is lost: %d on node-a, %d on node-b; want 0 and 3", a, b)
+	}
+}

@@ -1118,17 +1118,20 @@ hivemind server
 #### hivemind server remove
 
 Remove a server from the cluster's Raft configuration and its list of
-servers (docs/ha.md#membership). The removed server stops serving; its
-containers keep running, and its node stays a node like any other: move its
-replicas with hivemind node drain and remove it with hivemind node remove.
-Its certificate is refused on the server port from then on. To make the
-machine a server again, give it an empty data directory and a new server
-join token.
+servers (docs/ha.md#membership). The removed server stops serving, with
+exit status 3, and its agent with it; its containers keep running. So drain
+its node first, with hivemind node drain <id>: a server whose node still has
+replicas without a volume is refused, as they would be placed again on
+other nodes and run twice. Once the server is removed, its node is a node
+like any other: remove it with hivemind node remove. Its certificate is
+refused on the server port from then on. To make the machine a server
+again, give it an empty data directory and a new server join token.
 
 The last voting server cannot be removed. A removal that would leave fewer
 servers that the leader heard from in the last 10 s than a majority of
-those that stay is refused, unless --force: a cluster of three with one
-server down that loses another has no majority.
+those that stay is refused too. --force removes the server anyway, in both
+cases: a cluster of three with one server down that loses another has no
+majority.
 
 ```
 hivemind server remove <id> [flags]
@@ -1138,7 +1141,7 @@ hivemind server remove <id> [flags]
 |---|---|---|---|---|
 | `--ca-cert` | string | - | - | PEM file of the CA certificates to trust for an https server, instead of the system's (env HIVEMIND_CA_CERT; default from the client config) |
 | `--client-config` | string | - | `HIVEMIND_CLIENT_CONFIG` | client config file (env HIVEMIND_CLIENT_CONFIG; default $XDG_CONFIG_HOME/hivemind/config.yaml or ~/.config/hivemind/config.yaml) |
-| `--force` | bool | - | - | remove the server even if the servers that stay cannot reach a majority |
+| `--force` | bool | - | - | remove the server even if its node has replicas to move, or the servers that stay cannot reach a majority |
 | `--json` | bool | - | - | print JSON instead of a table |
 | `--server` | string | - | `HIVEMIND_SERVER` | server URL, or the URLs of several servers, comma separated, tried in order from the one that answered last (env HIVEMIND_SERVER; default from the client config, then http://127.0.0.1:4483) |
 | `--token` | string | - | `HIVEMIND_TOKEN` | API token (env HIVEMIND_TOKEN; default from the client config's token file) |

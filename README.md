@@ -99,7 +99,7 @@ A token works once, and it expires after 24 hours. `hivemind join-token --ttl 1h
 
 `hivemind nodes` lists the nodes. To take a machine out of the cluster, run `hivemind node drain <id>` on the server, which moves its replicas to other nodes, each new copy starting before the old one stops, then `hivemind node remove <id>`. The server refuses the node's certificate from then on. In 2.0.0, which has no `node drain`, stop hivemind on the machine before `node remove`. See [concepts](docs/concepts.md#draining-a-node).
 
-To add a server rather than a worker, for a cluster of three or five, run `hivemind join-token --role server` on the server, and `hivemind join 10.0.0.5 --role server --token <token> --advertise <the new machine's address>` on the new machine. The servers also need TCP port 4486 open between them. See [several servers](docs/ha.md#membership). To remove a server, drain its node with `hivemind node drain <id>` while it serves, then run `hivemind server remove <id>` and `hivemind node remove <id>`.
+To add a server rather than a worker, for a cluster of three or five, run `hivemind join-token --role server` on the server, and `hivemind join 10.0.0.5 --role server --token <token> --advertise <the new machine's address>` on the new machine. The servers also need TCP port 4486 open between them. See [several servers](docs/ha.md#membership). To remove a server, drain its node with `hivemind node drain <id>` while it serves, then run `hivemind server remove <id>`, which refuses a server whose node still has replicas to move, and `hivemind node remove <id>`.
 
 ## Compose files
 

@@ -559,6 +559,16 @@ func (h *haServe) removeServer(ctx context.Context, id string, force bool) (stri
 		return "", fmt.Errorf("%w: without %s, %d servers vote, and the leader has heard from %d of them in the last 10 s, fewer than the %d a write needs; "+
 			"bring them back first, or remove it anyway with --force (force=true in the API)", store.ErrConflict, id, staying, heard, staying/2+1)
 	}
+	// A removed server's agent stops with its serve, and its containers
+	// keep running: the replicas of its node move first, with a drain
+	// (the fifth acceptance run's second finding).
+	toMove, err := h.st.ReplicasToMove(ctx, id)
+	if err != nil {
+		return "", err
+	}
+	if toMove > 0 && !force {
+		return "", fmt.Errorf("%w: %w", store.ErrConflict, replicasOnServerError(id, toMove))
+	}
 	// The row first, while this server still leads: removing the leader
 	// itself ends its leadership once the change commits.
 	rows, err := h.st.ListServers(ctx)
@@ -584,9 +594,27 @@ func (h *haServe) removeServer(ctx context.Context, id string, force bool) (stri
 		}
 		return "", err
 	}
-	h.log.Info("server removed from the cluster", "server", id, "forced", force)
-	return fmt.Sprintf("The node of server %s is a node like any other now: move its replicas with hivemind node drain %s, "+
-		"and remove it with hivemind node remove %s", id, id, id), nil
+	h.log.Info("server removed from the cluster", "server", id, "forced", force, "replicas_on_node", toMove)
+	return serverRemovedNext(id, toMove), nil
+}
+
+// replicasOnServerError is server remove's refusal of a server whose node
+// still has replicas to move.
+func replicasOnServerError(id string, n int) error {
+	return fmt.Errorf("the node of server %s has %d %s without a volume. A removed server's serve stops with its agent, and its containers "+
+		"keep running while the replicas are placed again on other nodes, so they would run twice. Drain the node first: "+
+		"hivemind node drain %s, then hivemind server remove %s. Or remove it anyway with --force (force=true in the API)",
+		id, n, plural(n, "replica", "replicas"), id, id)
+}
+
+// serverRemovedNext is what server remove says to do next.
+func serverRemovedNext(id string, toMove int) string {
+	if toMove > 0 {
+		return fmt.Sprintf("Its node still had %d %s without a volume, which are placed again on other nodes once its lease runs out; "+
+			"its containers keep running on the machine until it joins again or they are removed with docker rm. "+
+			"Remove the node with hivemind node remove %s", toMove, plural(toMove, "replica", "replicas"), id)
+	}
+	return fmt.Sprintf("Its node is a node like any other now; remove it with hivemind node remove %s", id)
 }
 
 // apiHandler is the API as every server serves it: a follower passes each
