@@ -34,7 +34,8 @@
 #   - the leader's serve is stopped with SIGTERM: it hands the leadership
 #     on first, so another server leads within 5 s of the signal and its log
 #     says so; writes through both followers during the stop are counted,
-#     and none fails for want of a leader; started again, it is a follower
+#     and none fails for want of a leader; it exits within 8 s, without the
+#     cluster listener's shutdown warning; started again, it is a follower
 #   - a partition that isolates the leader (docker network disconnect): it
 #     steps down; the other two elect a leader and take writes; a write
 #     through the isolated server is refused with "no leader"; after the
@@ -461,10 +462,20 @@ until elected "$GL" "${GF[@]}"; do
 done
 HANDOVER_MS=$(ms_since "$STOP_MS")
 serve_stopped() { ! docker exec "${S[$1]}" pgrep -x hivemind >/dev/null; }
-wait_for 30 serve_stopped "$GI" || cl_fail "${S[$GI]}'s serve did not stop after SIGTERM"
+until serve_stopped "$GI"; do
+	[ "$(ms_since "$STOP_MS")" -lt 30000 ] || cl_fail "${S[$GI]}'s serve did not stop within 30 s of SIGTERM"
+	sleep 0.2
+done
+STOPPED_MS=$(ms_since "$STOP_MS")
 docker exec "${S[$GI]}" grep -q "handed the leadership on" /var/log/hivemind.log ||
 	cl_fail "the stopped leader did not hand the leadership on: $(docker exec "${S[$GI]}" tail -n 20 /var/log/hivemind.log)"
-cl_note "the leader's serve, stopped with SIGTERM, handed the leadership on: $(local_leader "${GF[0]}") led ${HANDOVER_MS} ms after the signal"
+# Once a follower, it passed its own node's log poll to the new leader,
+# which its node listener's stop ends at once, rather than wait 10 s for
+# it and warn (the eighth soak's fifth finding).
+if docker exec "${S[$GI]}" grep -q 'msg="cluster shutdown"' /var/log/hivemind.log || [ "$STOPPED_MS" -ge 8000 ]; then
+	cl_fail "the stopped leader's serve took ${STOPPED_MS} ms to stop: $(docker exec "${S[$GI]}" tail -n 20 /var/log/hivemind.log)"
+fi
+cl_note "the leader's serve, stopped with SIGTERM, handed the leadership on: $(local_leader "${GF[0]}") led ${HANDOVER_MS} ms after the signal, and the process exited ${STOPPED_MS} ms after it"
 gw_done() { docker exec "${S[${GF[0]}]}" test -e /tmp/gw.done && docker exec "${S[${GF[1]}]}" test -e /tmp/gw.done; }
 wait_for 120 gw_done || cl_fail "the writers through the followers did not finish"
 GW_OK=0
