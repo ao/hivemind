@@ -2,7 +2,13 @@
 
 Notable changes to hivemind, newest first. Versions follow [Semantic Versioning](https://semver.org). A release is cut by pushing a `v*` tag; its notes are the matching section below.
 
-## [2.3.0] - Unreleased
+## [2.3.0] - 2026-11-20
+
+A cluster can now have three or five servers instead of one ([docs/ha.md](docs/ha.md)).
+
+### Upgrading from 2.2.0
+
+A server upgraded on its own changes nothing until a second server joins: no Raft, no new listener, and writes go to the store as before. It migrates its store in place on its first start, from schema version 17 to 18, which adds tables and a column only, and a 2.2.0 binary cannot open it after that, so take a backup with `hivemind backup` first. Every server of a cluster runs the same release: a server will not apply an entry from a leader at another schema version, and a joining server must run the leader's version. A worker of 2.2.0 keeps working through the server it joined, which passes its requests to the leader, but it cannot move to another server when that one is down; upgrade the workers to have them fail over. A cluster of several servers needs TCP port 4486 open between the servers, and from nowhere else. `hivemind ca rotate start` needs a cluster of one server in this release. No test or soak has upgraded a 2.2.0 cluster in place. See [docs/upgrading.md](docs/upgrading.md#from-220-to-230).
 
 ### Added
 
