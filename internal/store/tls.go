@@ -175,8 +175,14 @@ func (s *Store) TLSDelete(ctx context.Context, key string) error {
 		return err
 	}
 	lo, hi := descendants(key)
-	_, err := s.db.ExecContext(ctx, `DELETE FROM tls_storage WHERE key = ? OR (key >= ? AND key < ?)`, key, lo, hi)
-	return err
+	// A transaction of its own, as every write is, so that it is replicated
+	// with the rest when the cluster has several servers (docs/ha.md). The
+	// TLS storage is not in the routing table.
+	return s.tx(ctx, func(tx *sql.Tx) error {
+		keepsRoutes(tx)
+		_, err := tx.ExecContext(ctx, `DELETE FROM tls_storage WHERE key = ? OR (key >= ? AND key < ?)`, key, lo, hi)
+		return err
+	})
 }
 
 // TLSExists reports whether key holds a value or prefixes other keys.
@@ -351,16 +357,19 @@ func (s *Store) TLSRenewLock(ctx context.Context, name, owner string, ttl time.D
 	if ttl <= 0 || ttl > maxTLSLockTTL {
 		return fmt.Errorf("%w: lock lifetime %s is not in (0, %s]", ErrInvalid, ttl, maxTLSLockTTL)
 	}
-	now := s.now().UnixNano()
-	res, err := s.db.ExecContext(ctx, `UPDATE tls_locks SET expires = ? WHERE name = ? AND owner = ? AND expires > ?`,
-		now+int64(ttl), name, owner, now)
-	if err != nil {
-		return err
-	}
-	if n, _ := res.RowsAffected(); n == 0 {
-		return fmt.Errorf("TLS lock %q is not held by this owner: %w", name, ErrNotFound)
-	}
-	return nil
+	return s.tx(ctx, func(tx *sql.Tx) error {
+		keepsRoutes(tx)
+		now := s.now().UnixNano()
+		res, err := tx.ExecContext(ctx, `UPDATE tls_locks SET expires = ? WHERE name = ? AND owner = ? AND expires > ?`,
+			now+int64(ttl), name, owner, now)
+		if err != nil {
+			return err
+		}
+		if n, _ := res.RowsAffected(); n == 0 {
+			return fmt.Errorf("TLS lock %q is not held by this owner: %w", name, ErrNotFound)
+		}
+		return nil
+	})
 }
 
 // TLSUnlock releases a lock that owner holds. A lock held by someone else is
@@ -369,12 +378,15 @@ func (s *Store) TLSUnlock(ctx context.Context, name, owner string) error {
 	if err := ValidTLSLockName(name); err != nil {
 		return err
 	}
-	res, err := s.db.ExecContext(ctx, `DELETE FROM tls_locks WHERE name = ? AND owner = ?`, name, owner)
-	if err != nil {
-		return err
-	}
-	if n, _ := res.RowsAffected(); n == 0 {
-		return fmt.Errorf("TLS lock %q is not held by this owner: %w", name, ErrNotFound)
-	}
-	return nil
+	return s.tx(ctx, func(tx *sql.Tx) error {
+		keepsRoutes(tx)
+		res, err := tx.ExecContext(ctx, `DELETE FROM tls_locks WHERE name = ? AND owner = ?`, name, owner)
+		if err != nil {
+			return err
+		}
+		if n, _ := res.RowsAffected(); n == 0 {
+			return fmt.Errorf("TLS lock %q is not held by this owner: %w", name, ErrNotFound)
+		}
+		return nil
+	})
 }

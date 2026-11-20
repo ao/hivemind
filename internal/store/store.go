@@ -1101,14 +1101,20 @@ func (s *Store) SetNodeVersion(ctx context.Context, id, version string) error {
 	if err := checkNodeVersion(version); err != nil {
 		return err
 	}
-	res, err := s.db.ExecContext(ctx, `UPDATE nodes SET version = ? WHERE id = ?`, version, id)
-	if err != nil {
-		return err
-	}
-	if n, _ := res.RowsAffected(); n == 0 {
-		return fmt.Errorf("node %q: %w", id, ErrNotFound)
-	}
-	return nil
+	// A transaction of its own, as every write is, so that it is replicated
+	// with the rest when the cluster has several servers (docs/ha.md). The
+	// routing table does not read the version.
+	return s.tx(ctx, func(tx *sql.Tx) error {
+		keepsRoutes(tx)
+		res, err := tx.ExecContext(ctx, `UPDATE nodes SET version = ? WHERE id = ?`, version, id)
+		if err != nil {
+			return err
+		}
+		if n, _ := res.RowsAffected(); n == 0 {
+			return fmt.Errorf("node %q: %w", id, ErrNotFound)
+		}
+		return nil
+	})
 }
 
 // checkNodeVersion refuses a version that is too long or holds a character

@@ -199,10 +199,16 @@ func (s *Store) NoteCARotationNode(ctx context.Context, n CARotationNode) error 
 	if n.NodeID == "" {
 		return fmt.Errorf("%w: a node ID is required", ErrInvalid)
 	}
-	_, err := s.db.ExecContext(ctx, `INSERT INTO ca_rotation_nodes (node_id, trusts, renewed, old_build, seen_at)
-		SELECT ?, ?, ?, ?, ? WHERE EXISTS (SELECT 1 FROM ca_rotation)
-		ON CONFLICT (node_id) DO UPDATE SET trusts = excluded.trusts, renewed = excluded.renewed,
-			old_build = excluded.old_build, seen_at = excluded.seen_at`,
-		n.NodeID, n.Trusts, n.Renewed, n.OldBuild, s.now().UnixNano())
-	return err
+	// A transaction of its own, as every write is, so that it is replicated
+	// with the rest when the cluster has several servers (docs/ha.md). The
+	// marks are not in the routing table.
+	return s.tx(ctx, func(tx *sql.Tx) error {
+		keepsRoutes(tx)
+		_, err := tx.ExecContext(ctx, `INSERT INTO ca_rotation_nodes (node_id, trusts, renewed, old_build, seen_at)
+			SELECT ?, ?, ?, ?, ? WHERE EXISTS (SELECT 1 FROM ca_rotation)
+			ON CONFLICT (node_id) DO UPDATE SET trusts = excluded.trusts, renewed = excluded.renewed,
+				old_build = excluded.old_build, seen_at = excluded.seen_at`,
+			n.NodeID, n.Trusts, n.Renewed, n.OldBuild, s.now().UnixNano())
+		return err
+	})
 }
