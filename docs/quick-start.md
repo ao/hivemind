@@ -161,6 +161,7 @@ The app is hidden at once. Its containers stop and are removed on the next pass,
 
 - [Concepts](concepts.md) explains generations, reconcile, health checks, restarts, placement and the security defaults.
 - [Add a machine](../README.md#add-a-machine) joins a worker to this server.
+- [Several servers](ha.md#membership) adds servers, for a cluster that keeps working when one of them is lost.
 - [Security](security.md) lists every listener and file.
 - [CLI reference](cli.md) lists every flag.
 - [HTTP API](api.md) describes the routes that the CLI calls.

@@ -138,10 +138,12 @@ What a follower's router can read that is stale: a certificate, key or account t
 `init` makes a cluster of one, with no Raft. To add a server:
 
 ```sh
-# On a server of the cluster. A server token works once and expires after 1 hour by default.
+# On a server of the cluster, which runs with --advertise (here 10.0.0.5), as for a
+# worker's join. A server token works once and expires after 1 hour by default.
 hivemind join-token --role server
 
-# On the new machine, which needs Docker Engine and the hivemind binary.
+# On the new machine, which needs Docker Engine and the hivemind binary, and an empty
+# data directory. TCP 4484 to 4486 must be open between it and the other servers.
 hivemind join 10.0.0.5 --role server --token <token> --advertise 10.0.0.6
 ```
 

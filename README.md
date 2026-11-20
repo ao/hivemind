@@ -99,6 +99,8 @@ A token works once, and it expires after 24 hours. `hivemind join-token --ttl 1h
 
 `hivemind nodes` lists the nodes. To take a machine out of the cluster, run `hivemind node drain <id>` on the server, which moves its replicas to other nodes, each new copy starting before the old one stops, then `hivemind node remove <id>`. The server refuses the node's certificate from then on. In 2.0.0, which has no `node drain`, stop hivemind on the machine before `node remove`. See [concepts](docs/concepts.md#draining-a-node).
 
+To add a server rather than a worker, for a cluster of three or five, run `hivemind join-token --role server` on the server, and `hivemind join 10.0.0.5 --role server --token <token> --advertise <the new machine's address>` on the new machine. The servers also need TCP port 4486 open between them. See [several servers](docs/ha.md#membership). The node of a server is removed with `hivemind server remove <id>` before `node remove`.
+
 ## Compose files
 
 `hivemind compose deploy compose.yaml` makes an app of each service in a Docker Compose file, and `hivemind compose convert compose.yaml` prints the app specs instead. Only part of Compose is read, and any other key is refused with a reason. A port with no address is published on `127.0.0.1`, not on every interface as Compose does, and apps do not find each other by service name. See [docs/compose.md](docs/compose.md).
@@ -156,7 +158,7 @@ make docs              # regenerate docs/cli.md
 make quickstart-check  # run the quick start above against a node in Docker-in-Docker
 ```
 
-`scripts/integration-cluster.sh` runs three nodes in Docker-in-Docker and checks placement and node loss. It needs Docker.
+`scripts/integration-cluster.sh` runs three nodes in Docker-in-Docker and checks placement and node loss, and `scripts/integration-ha.sh` three servers and two workers, with the leader killed, cut off and stopped. They need Docker.
 
 ## License
 
