@@ -926,6 +926,9 @@ func runServe(ctx context.Context, cfg *config.Config, log *slog.Logger, rt runt
 	case runErr = <-serveErr:
 	case runErr = <-hs.fatal:
 	}
+	// A leader hands the leadership on first, so the cluster has one while
+	// this server's API and router stop, which can take 10 s.
+	hs.handover()
 	api.CloseStreams()
 	sctx, cancel := context.WithTimeout(context.Background(), shutdownTimeout)
 	defer cancel()
@@ -949,6 +952,8 @@ func runServe(ctx context.Context, cfg *config.Config, log *slog.Logger, rt runt
 	}
 	hs.work.stop()
 	if n := hs.node.Load(); n != nil {
+		// Again: the others may have elected this server while it stopped.
+		hs.handover()
 		if err := n.Close(); err != nil {
 			log.Warn("raft shutdown", "err", err)
 		}

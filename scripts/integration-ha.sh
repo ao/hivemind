@@ -31,6 +31,9 @@
 #     through both workers' routers to a routed app are all 200
 #   - the old leader comes back with its data directory: it rejoins as a
 #     follower and catches up
+#   - the leader's serve is stopped with SIGTERM: it hands the leadership
+#     on first, so another server leads within 5 s of the signal and its log
+#     says so; started again, it is a follower
 #   - a partition that isolates the leader (docker network disconnect): it
 #     steps down; the other two elect a leader and take writes; a write
 #     through the isolated server is refused with "no leader"; after the
@@ -426,6 +429,31 @@ done
 cl_note "${S[$LI]} came back as a follower, and has every acknowledged write"
 wait_for 60 no_duplicates || cl_fail "a replica runs twice after the old leader came back: $( (for a in app0 app1 app2 who; do containers_of "$a"; done) | sort | tr '\n' ';')"
 
+# The leader's serve stopped with SIGTERM, as systemctl stop sends it: it
+# hands the leadership on first, so another server leads before it stops.
+GL=$(leader_of 0)
+GI=$(index_of "$GL") || cl_fail "no leader before the leader's stop: $(roles 0 | tr '\n' ';')"
+GF=()
+for i in 0 1 2; do [ "$i" -ne "$GI" ] && GF[${#GF[@]}]=$i; done
+STOP_MS=$(date +%s%3N)
+docker exec "${S[$GI]}" pkill -TERM -x hivemind || cl_fail "no hivemind on ${S[$GI]}"
+until elected "$GL" "${GF[@]}"; do
+	[ "$(ms_since "$STOP_MS")" -lt 5000 ] || cl_fail "no new leader within 5 s of the leader's stop: $(local_get "${GF[0]}" /v1/servers)"
+	sleep 0.05
+done
+HANDOVER_MS=$(ms_since "$STOP_MS")
+serve_stopped() { ! docker exec "${S[$1]}" pgrep -x hivemind >/dev/null; }
+wait_for 30 serve_stopped "$GI" || cl_fail "${S[$GI]}'s serve did not stop after SIGTERM"
+docker exec "${S[$GI]}" grep -q "handed the leadership on" /var/log/hivemind.log ||
+	cl_fail "the stopped leader did not hand the leadership on: $(docker exec "${S[$GI]}" tail -n 20 /var/log/hivemind.log)"
+cl_note "the leader's serve, stopped with SIGTERM, handed the leadership on: $(local_leader "${GF[0]}") led ${HANDOVER_MS} ms after the signal"
+serve_server "$GI"
+follows_again() { [ "$(roles "$GI" | awk -v id="$GL" '$1 == id { print $2 }')" = follower ]; }
+wait_for 90 follows_again || cl_fail "the stopped leader is not a follower after its start: $(roles "$GI" | tr '\n' ';')"
+for i in 0 1 2; do
+	wait_for 30 voters_are "$i" 3 || cl_fail "${S[$i]} does not list three voters after the stopped leader's start: $(roles "$i" | tr '\n' ';')"
+done
+
 # A partition that isolates the leader.
 LEADER=$(leader_of 0)
 LI=$(index_of "$LEADER") || cl_fail "no leader before the partition"
@@ -511,5 +539,5 @@ wait_for 30 removed_stopped || cl_fail "the removed server's serve did not stop:
 wait_for 20 voters_are "$LI" 2 || cl_fail "the cluster does not list two voters after the removal: $(roles "$LI" | tr '\n' ';')"
 echo pw | hmi "$LI" registry login after-remove.ha.test --username u --password-stdin >/dev/null || cl_fail "no write after the removal"
 cl_note "server remove: ${SID[$RI]} left the configuration and its serve stopped with the removal message; the two left take writes: $out"
-cl_note "ha: election ${ELECTION_MS} ms after the kill, API writes again at ${API_MS} ms; election ${PARTITION_MS} ms after the cut; writes acknowledged ${ACKED_BEFORE} before and ${ACKED_AFTER} after the kill, all kept on every server; ${FAILED} refused; ${ROUTER_TOTAL} router requests, all 200"
+cl_note "ha: election ${ELECTION_MS} ms after the kill, API writes again at ${API_MS} ms; a leader ${HANDOVER_MS} ms after the leader's SIGTERM; election ${PARTITION_MS} ms after the cut; writes acknowledged ${ACKED_BEFORE} before and ${ACKED_AFTER} after the kill, all kept on every server; ${FAILED} refused; ${ROUTER_TOTAL} router requests, all 200"
 cl_note "ha: all checks passed"

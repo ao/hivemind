@@ -673,6 +673,49 @@ func (n *Node) IsVoterID(id string) bool {
 	return false
 }
 
+// Handover passes the leadership to another voter when this server leads
+// and the configuration has one, and returns once this server no longer
+// leads, the transfer failed, or ctx ended. A server that stops calls it
+// first: raft picks the follower that is furthest along, brings it up to
+// date and has it start an election at once (TimeoutNow), which the other
+// followers grant though they heard from this leader lately. Without it a
+// stopping leader led until its Raft stopped, at the end of its stop, and
+// the others waited out a heartbeat timeout before they elected one: in
+// the eighth soak, 10 s with the API and router closed, then 1.0 to 1.7 s
+// with no leader. Writes that come meanwhile are refused as on a server
+// that does not lead, and a client may send them again. Returns nil when
+// there is nothing to hand over.
+func (n *Node) Handover(ctx context.Context) error {
+	if n.raft.State() != raft.Leader {
+		return nil
+	}
+	others := 0
+	for _, s := range n.configuration() {
+		if s.Suffrage == raft.Voter && string(s.ID) != n.cfg.ID {
+			others++
+		}
+	}
+	if others == 0 {
+		return nil
+	}
+	start := time.Now()
+	n.log.Info("this server leads, and hands the leadership to another server before it stops", "id", n.cfg.ID)
+	f := n.raft.LeadershipTransfer()
+	errc := make(chan error, 1)
+	go func() { errc <- f.Error() }()
+	select {
+	case err := <-errc:
+		if err != nil {
+			return fmt.Errorf("handing the leadership on: %w", err)
+		}
+	case <-ctx.Done():
+		return fmt.Errorf("handing the leadership on: %w", ctx.Err())
+	}
+	id, _ := n.Leader()
+	n.log.Info("handed the leadership on", "to", id, "took", time.Since(start).Round(time.Millisecond))
+	return nil
+}
+
 // Close stops Raft and the server port.
 func (n *Node) Close() error {
 	var err error

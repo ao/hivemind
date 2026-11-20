@@ -25,6 +25,7 @@ Notable changes to hivemind, newest first. Versions follow [Semantic Versioning]
 What the eighth soak, three servers on seven machines ([docs/soak.md](docs/soak.md)), found in the branch of several servers before this release:
 
 - With a server that is down first in its list, every CLI call waited 30 s for it (the first after its machine went down) or 3.1 s (the kernel's time to give up on the address) before it tried the next. With several servers the CLI now gives each 2 s for the TCP connect and 5 s for the TLS handshake, and starts at the server that answered the last command given the same list, which it keeps in a 0600 file in the user's cache directory, one per list. A test with a listener that drops SYNs first in the list gets the answer from the second in under 3 s, and the next call at once.
+- A leader whose `serve` was stopped kept the leadership through its stop, 10 s with its API and router closed while a stream through its router was held, and then stopped Raft without handing it on, so the cluster had no leader for 1.0 to 1.7 s after each of three leader restarts. A stopping leader now hands the leadership to the follower furthest along (raft's leadership transfer) before its API and router stop, waiting up to 3 s, and again before its Raft stops. In the unit test, three servers on loopback with 300 ms timeouts, another server led 21 to 102 ms after the transfer began; `scripts/integration-ha.sh` stops the leader with SIGTERM and checks that another server leads before it has stopped.
 
 ## [2.2.0] - 2026-11-20
 

@@ -482,3 +482,66 @@ func TestRemoveServer(t *testing.T) {
 		t.Fatal("the removed server's certificate reached the leader's server port")
 	}
 }
+
+// TestHandover: a leader that hands the leadership on before it stops
+// leaves the cluster without a leader that writes for less than raft's
+// heartbeat timeout, which a leader that just stops costs at the least
+// (the eighth soak's second finding); writes go on through the new
+// leader. A follower, or a server that is the only voter, has nothing to
+// hand over.
+func TestHandover(t *testing.T) {
+	c := newTestCluster(t, 3)
+	c.start()
+	old := c.leader()
+	var f *testServer
+	for _, s := range c.servers {
+		if s != old {
+			f = s
+			break
+		}
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	if err := f.node.Handover(ctx); err != nil || !old.node.IsLeader() {
+		t.Fatalf("a follower's handover: %v; the leader still leads: %v", err, old.node.IsLeader())
+	}
+	if _, err := old.st.PutApp(ctx, spec.App{Name: "before", Image: "nginx", Replicas: 2}); err != nil {
+		t.Fatal(err)
+	}
+	start := time.Now()
+	if err := old.node.Handover(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if old.node.IsLeader() {
+		t.Fatal("the server that handed the leadership on still leads")
+	}
+	var nl *testServer
+	for nl == nil {
+		for _, s := range c.servers {
+			if s != old && s.node.IsLeader() {
+				nl = s
+			}
+		}
+		if time.Since(start) > 5*time.Second {
+			t.Fatal("no new leader 5 s after the handover")
+		}
+		time.Sleep(2 * time.Millisecond)
+	}
+	gap := time.Since(start)
+	t.Logf("%s leads, and writes, %s after the handover began", nl.id, gap.Round(time.Millisecond))
+	if gap >= testTiming.Heartbeat {
+		t.Fatalf("a leader that writes %s after the handover began, no sooner than after a stop without one (%s)", gap, testTiming.Heartbeat)
+	}
+	old.node.Close()
+	old.node = nil
+	if _, err := nl.st.PutApp(ctx, spec.App{Name: "after", Image: "nginx", Replicas: 1}); err != nil {
+		t.Fatal(err)
+	}
+	c.converged("after:1,before:2")
+
+	one := newTestCluster(t, 1)
+	one.start()
+	if err := one.leader().node.Handover(ctx); err != nil || !one.servers[0].node.IsLeader() {
+		t.Fatalf("the only voter's handover: %v; it leads: %v", err, one.servers[0].node.IsLeader())
+	}
+}

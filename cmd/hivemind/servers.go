@@ -189,6 +189,26 @@ type haServe struct {
 	extras func(c *nodeapi.Client)
 }
 
+// handoverTimeout bounds the handover of the leadership as serve stops.
+// Raft's own transfer gives up after its election timeout, 1 s.
+const handoverTimeout = 3 * time.Second
+
+// handover passes the leadership to another server, if this one leads a
+// cluster of several, before serve stops (ha.Node.Handover). If that
+// fails, serve stops as it did before, and the others elect a leader once
+// they stop hearing from this one.
+func (h *haServe) handover() {
+	n := h.node.Load()
+	if n == nil {
+		return
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), handoverTimeout)
+	defer cancel()
+	if err := n.Handover(ctx); err != nil {
+		h.log.Warn("this server leads and stops, and could not hand the leadership on; the others elect a leader once it has stopped", "err", err)
+	}
+}
+
 // leader reports whether this server writes: always in a cluster of one.
 func (h *haServe) leader() bool {
 	n := h.node.Load()
