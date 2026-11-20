@@ -586,6 +586,35 @@ live_server() {
 	return 1
 }
 
+# A server removed while it is down: a follower's node is drained, its
+# serve stopped, and the server removed. Started again, it never gets the
+# entry that deletes its row; it learns of its removal from the other
+# servers' node API replies, which list the servers without it, and stops
+# with the removal message and exit status 3, rather than running as a
+# candidate without end.
+L=$(leader_of 0)
+RI=""
+for i in 1 2; do [ "${SID[$i]}" != "$L" ] && RI=$i && break; done
+[ -n "$RI" ] || cl_fail "no follower among s1 and s2: $(roles 0 | tr '\n' ';')"
+out=$(hm 0 node drain "${SID[$RI]}" --deadline 5m 2>&1) || cl_fail "node drain ${SID[$RI]}: $out"
+docker exec "${S[$RI]}" pkill -x hivemind || cl_fail "no hivemind on ${S[$RI]}"
+serve_down() { ! docker exec "${S[$1]}" pgrep -x hivemind >/dev/null; }
+wait_for 30 serve_down "$RI" || cl_fail "${S[$RI]}'s serve did not stop"
+out=$(hm 0 server remove "${SID[$RI]}" 2>&1) || cl_fail "server remove of ${SID[$RI]}, which is down: $out"
+wait_for 20 voters_are 0 2 || cl_fail "the cluster does not list two voters after the removal of a server that is down: $(roles 0 | tr '\n' ';')"
+docker exec "${S[$RI]}" rm -f /tmp/serve.rc
+BACK=$(date +%s)
+docker exec -d -e HIVEMIND_TEST_LOCAL_READS=1 -e HIVEMIND_MIN_READY=0s -e HIVEMIND_START_GRACE=30s "${S[$RI]}" \
+	sh -c "hivemind serve --advertise ${SIP[$RI]} >>/var/log/hivemind.log 2>&1; echo \$? >/tmp/serve.rc"
+wait_for 90 docker exec "${S[$RI]}" test -s /tmp/serve.rc ||
+	cl_fail "the server removed while it was down did not stop when it came back: $(docker exec "${S[$RI]}" tail -n 10 /var/log/hivemind.log)"
+rc=$(docker exec "${S[$RI]}" cat /tmp/serve.rc)
+[ "$rc" = 3 ] || cl_fail "the server removed while it was down exited with $rc, not 3: $(docker exec "${S[$RI]}" tail -n 10 /var/log/hivemind.log)"
+docker exec "${S[$RI]}" grep -q "server ${SID[$RI]} was removed from the cluster's servers" /var/log/hivemind.log ||
+	cl_fail "the server removed while it was down did not give the removal message: $(docker exec "${S[$RI]}" tail -n 10 /var/log/hivemind.log)"
+wait_for 60 hm 0 node remove "${SID[$RI]}" || cl_fail "node remove ${SID[$RI]}: $(hm 0 node remove "${SID[$RI]}" 2>&1)"
+cl_note "${S[$RI]} (${SID[$RI]}), removed while it was down, stopped with exit status 3 and the removal message $(($(date +%s) - BACK)) s after it came back"
+
 # server remove of s0, the server init made, whose node runs a replica: it
 # is refused, and the refusal gives the drain. Drained first, s0 is
 # removed: it leaves the configuration, its serve stops with the removal

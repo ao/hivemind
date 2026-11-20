@@ -11,6 +11,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -187,6 +188,12 @@ type haServe struct {
 	// work: its node's log requests and router counters through the node
 	// API. Set by serve.
 	extras func(c *nodeapi.Client)
+	// listed is the last list of servers a node API reply to this server's
+	// own node named (nodeapi.ServersHeader), and nodeRemoved is set once
+	// the node API refused its node as removed: how a server that was
+	// removed while it was down learns it (watchRemoved).
+	listed      atomic.Pointer[[]string]
+	nodeRemoved atomic.Bool
 }
 
 // handoverTimeout bounds the handover of the leadership as serve stops.
@@ -272,6 +279,7 @@ func (h *haServe) started(n *ha.Node) {
 	if err != nil {
 		h.log.Error("this server's own node cannot reach the node API", "err", err)
 	} else {
+		c.OnServers(func(list []string) { h.listed.Store(&list) })
 		h.remote.Store(c)
 		if h.extras != nil {
 			h.extras(c)
@@ -280,17 +288,38 @@ func (h *haServe) started(n *ha.Node) {
 	go h.watchRemoved(n)
 }
 
-// watchRemoved stops serve once this server is removed from the cluster.
+// serverRemovedError is the error serve stops with once this server is removed.
+func serverRemovedError(id string) error {
+	return &exitError{code: exitRemoved, err: fmt.Errorf("server %s was removed from the cluster's servers (hivemind server remove); "+
+		"its containers keep running. To use this machine as a server again, give it an empty --data-dir and a new server join token", id)}
+}
+
+// watchRemoved stops serve once this server is removed from the cluster:
+// once it has applied the deletion of its own row, as a server removed
+// while it runs does; or, for one that was down when it was removed and
+// never gets that entry, once the node API refuses its node as removed,
+// or the other servers' node API replies leave it out of the list of
+// servers while it knows no leader (the fifth acceptance run's third
+// finding: such a server ran as a candidate whose vote requests the others
+// refused, without end).
 func (h *haServe) watchRemoved(n *ha.Node) {
 	t := time.NewTicker(5 * time.Second)
 	defer t.Stop()
 	w := removalWatch{seen: h.hadState}
+	self := net.JoinHostPort(h.cfg.Advertise, strconv.Itoa(h.cfg.ClusterPort))
 	for range t.C {
 		servers, err := h.st.ListServers(context.Background())
-		if n.Removed() || (err == nil && w.removed(servers, h.selfID)) {
+		var listed []string
+		if p := h.listed.Load(); p != nil {
+			listed = *p
+		}
+		unlisted := w.unlisted(listed, self, n.HasLeader())
+		if n.Removed() || h.nodeRemoved.Load() || unlisted || (err == nil && w.removed(servers, h.selfID)) {
+			if unlisted {
+				h.log.Warn("the other servers no longer list this one, and it knows no leader", "listed", strings.Join(listed, ","), "self", self)
+			}
 			select {
-			case h.fatal <- &exitError{code: exitRemoved, err: fmt.Errorf("server %s was removed from the cluster's servers (hivemind server remove); "+
-				"its containers keep running. To use this machine as a server again, give it an empty --data-dir and a new server join token", h.selfID)}:
+			case h.fatal <- serverRemovedError(h.selfID):
 			default:
 			}
 			return
@@ -305,7 +334,18 @@ func (h *haServe) watchRemoved(n *ha.Node) {
 // seen its own row, as one that has just joined and is still applying the
 // entries that add the servers, is not taken as removed; one that had Raft
 // state when serve started has seen it before.
-type removalWatch struct{ seen bool }
+//
+// A server that was down when it was removed never applies the deletion.
+// Its own node's requests go to the other servers while it knows no
+// leader, and their replies name the servers in their stores, without it.
+// unlisted takes that as its removal at the second check in a row that
+// finds it so, a check every 5 s, so that a list from a server that has
+// not yet applied a join, or a moment without a leader, is not.
+type removalWatch struct {
+	seen bool
+	// strikes counts the checks in a row that found this server unlisted.
+	strikes int
+}
 
 func (w *removalWatch) removed(servers []store.Server, self string) bool {
 	if hasServer(servers, self) {
@@ -313,6 +353,18 @@ func (w *removalWatch) removed(servers []store.Server, self string) bool {
 		return false
 	}
 	return w.seen && len(servers) > 0
+}
+
+// unlisted reports whether this server, whose node listener is self, is
+// taken as removed: the last list of servers a reply named has others but
+// not self, and it knows no leader, at this check and the one before.
+func (w *removalWatch) unlisted(listed []string, self string, hasLeader bool) bool {
+	if hasLeader || len(listed) == 0 || slices.Contains(listed, self) {
+		w.strikes = 0
+		return false
+	}
+	w.strikes++
+	return w.strikes >= 2
 }
 
 // ownClient is the node API client of this server's own node: its server
@@ -383,7 +435,7 @@ func (h *haServe) register(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
-	return c.Register(ctx, h.selfID, nodeapi.Register{Name: h.hostname, CPU: info.NCPU, Memory: info.MemTotal, Address: h.nodeAddr})
+	return serverSource{h: h}.note(c.Register(ctx, h.selfID, nodeapi.Register{Name: h.hostname, CPU: info.NCPU, Memory: info.MemTotal, Address: h.nodeAddr}))
 }
 
 // joinServer admits a server (cluster.ServerJoiner), on the leader.
@@ -649,30 +701,42 @@ func (s serverSource) remote() *workerSource {
 	return &workerSource{client: c, register: s.h.register}
 }
 
+// note records a refusal of this server's node as removed, which tells a
+// server that was removed while it was down of its removal (watchRemoved):
+// a server's node is removed only once the server is.
+func (s serverSource) note(err error) error {
+	if errors.Is(err, nodeapi.ErrNodeRemoved) {
+		s.h.nodeRemoved.Store(true)
+	}
+	return err
+}
+
 func (s serverSource) AssignmentsForNode(ctx context.Context, id string) ([]store.Assignment, error) {
 	if r := s.remote(); r != nil {
-		return r.AssignmentsForNode(ctx, id)
+		a, err := r.AssignmentsForNode(ctx, id)
+		return a, s.note(err)
 	}
 	return s.h.st.AssignmentsForNode(ctx, id)
 }
 
 func (s serverSource) ReportStatus(ctx context.Context, id string, st []store.Status) error {
 	if r := s.remote(); r != nil {
-		return r.ReportStatus(ctx, id, st)
+		return s.note(r.ReportStatus(ctx, id, st))
 	}
 	return s.h.st.ReportStatus(ctx, id, st)
 }
 
 func (s serverSource) RenewLease(ctx context.Context, id string) error {
 	if r := s.remote(); r != nil {
-		return r.RenewLease(ctx, id)
+		return s.note(r.RenewLease(ctx, id))
 	}
 	return s.h.st.RenewLease(ctx, id)
 }
 
 func (s serverSource) StatusForNode(ctx context.Context, id string) ([]store.Status, error) {
 	if r := s.remote(); r != nil {
-		return r.StatusForNode(ctx, id)
+		st, err := r.StatusForNode(ctx, id)
+		return st, s.note(err)
 	}
 	return s.h.st.StatusForNode(ctx, id)
 }

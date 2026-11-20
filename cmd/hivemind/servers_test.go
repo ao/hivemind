@@ -2,6 +2,8 @@ package main
 
 import (
 	"context"
+	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -238,5 +240,63 @@ func TestRemovalWatch(t *testing.T) {
 	}
 	if restarted.removed(nil, me.ID) {
 		t.Fatal("an empty table is taken as a removal")
+	}
+}
+
+// TestRemovalWatchUnlisted: a server that was removed while it was down
+// is taken as removed at the second check in a row whose last list of
+// servers leaves it out while it knows no leader; not with a leader, not
+// with a list that names it or no list, and not at one check alone.
+func TestRemovalWatchUnlisted(t *testing.T) {
+	const self = "10.0.0.5:4484"
+	others := []string{"10.0.0.6:4484", "10.0.0.7:4484"}
+	all := append([]string{self}, others...)
+	var w removalWatch
+	for i, step := range []struct {
+		listed    []string
+		hasLeader bool
+		removed   bool
+	}{
+		{nil, false, false},
+		{all, false, false},
+		{others, true, false},
+		{others, false, false},
+		{all, false, false},
+		{others, false, false},
+		{others, true, false},
+		{others, false, false},
+		{others, false, true},
+	} {
+		if got := w.unlisted(step.listed, self, step.hasLeader); got != step.removed {
+			t.Fatalf("step %d, listed %v, leader %v: removed %v, want %v", i, step.listed, step.hasLeader, got, step.removed)
+		}
+	}
+}
+
+// TestServerSourceNotesARemovedNode: the node API's refusal of a server's
+// own node as removed is noted, which stops serve (watchRemoved); another
+// error is not.
+func TestServerSourceNotesARemovedNode(t *testing.T) {
+	h := &haServe{}
+	s := serverSource{h: h}
+	if err := s.note(errors.New("connection refused")); err == nil || h.nodeRemoved.Load() {
+		t.Fatalf("another error: %v, noted %v", err, h.nodeRemoved.Load())
+	}
+	if err := s.note(fmt.Errorf("renewing the lease: %w", nodeapi.ErrNodeRemoved)); !errors.Is(err, nodeapi.ErrNodeRemoved) || !h.nodeRemoved.Load() {
+		t.Fatalf("a removed node: %v, noted %v", err, h.nodeRemoved.Load())
+	}
+}
+
+// TestServerRemoveRefusalGivesTheDrain: server remove's refusal of a
+// server whose node has replicas to move names the drain and --force.
+func TestServerRemoveRefusalGivesTheDrain(t *testing.T) {
+	msg := replicasOnServerError("node-abc", 2).Error()
+	for _, want := range []string{"has 2 replicas without a volume", "run twice", "hivemind node drain node-abc", "then hivemind server remove node-abc", "--force"} {
+		if !strings.Contains(msg, want) {
+			t.Fatalf("refusal %q lacks %q", msg, want)
+		}
+	}
+	if next := serverRemovedNext("node-abc", 0); !strings.Contains(next, "hivemind node remove node-abc") || strings.Contains(next, "drain") {
+		t.Fatalf("next after a drained removal: %q", next)
 	}
 }
