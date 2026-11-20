@@ -314,7 +314,7 @@ On a kernel without swap accounting, Docker ignores `MemorySwap` and logs a warn
 
 The totals are what the node reports, and a worker reports its own. Placement trusts those figures. A worker that reports more capacity than it has will be given more replicas.
 
-An app whose spec sets no `resources.memory` has no memory limit, and no app has a PID limit: hivemind sets no `PidsLimit`, and the spec has no field for one, because a 2.1 worker refuses its whole assignment list when a spec has a field it does not know. A replica that uses all the memory, or forks without end, can take down the other replicas on its node, and on the server's node `serve` and its store with them. Set `resources.memory` on every app; see [security](security.md#apps-on-one-node).
+An app whose spec sets no `resources.memory` has no memory limit, and no app has a PID limit: hivemind sets no `PidsLimit`, and the spec has no field for one, because a 2.0.0 worker refuses its whole assignment list when a spec has a field it does not know. A replica that uses all the memory, or forks without end, can take down the other replicas on its node, and on the server's node `serve` and its store with them. Set `resources.memory` on every app; see [security](security.md#apps-on-one-node).
 
 ## Container logs
 

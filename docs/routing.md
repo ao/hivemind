@@ -1,6 +1,6 @@
 # HTTPS routing
 
-A node started with `--route-addr` runs a router: an HTTPS reverse proxy that serves the hosts named in the apps' `routes`, with certificates from an ACME CA, and sends each request to a Ready replica of the app, on any node. This is new in the unreleased 2.2.0.
+A node started with `--route-addr` runs a router: an HTTPS reverse proxy that serves the hosts named in the apps' `routes`, with certificates from an ACME CA, and sends each request to a Ready replica of the app, on any node. This is new in 2.2.0.
 
 ```yaml
 name: web
@@ -125,7 +125,7 @@ The router does not take the prefix off before it sends a request on, and there 
 
 A router of a build before path routes cannot tell paths apart, and decodes the routing table strictly: a `path` field, or a host listed twice, would make it refuse the whole table and serve its last one. The server gives each router the table it can read. This build's router asks the node API for the table with `?paths=1` (and `protocols=1`, see [protocols](#mixed-versions-of-route-protocols)) and gets every route. A router that does not ask gets one entry per host and no paths, and a host with a path route is in it with no endpoints: that router answers `503` for the host, and keeps its certificate, rather than send the requests for `/api` to `web`, with the cookies and `Authorization` headers that clients send `api`. Hosts without path routes are served by such a router as before.
 
-The server decides by what the router asks, not by its version. A version does not say whether a build has path routes: routing and path routes are both in the unreleased 2.2.0, builds between them are described from the same tag, and a build from source without a tag reports `dev`. The version is in the warnings, which say which nodes to upgrade:
+The server decides by what the router asks, not by its version. A version does not say whether a build has path routes: routing and path routes are both new in 2.2.0, the builds made between them are described from the same tag, and a build from source without a tag reports `dev`. The version is in the warnings, which say which nodes to upgrade:
 
 - the server logs `this node's router is of a build before path routes, and answers 503 for the hosts that have them; upgrade the node`, with the node, its version and the hosts, when such a router first reads a table with such hosts, and again when they change;
 - `hivemind routes` names each such router that read the table in the last minute on standard error, with the hosts it answers `503` for, and `GET /v1/routes` lists them in `old_routers`;

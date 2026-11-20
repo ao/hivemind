@@ -70,7 +70,7 @@ web: created, generation 1, 1 replica
 web: 1 replica running and ready
 ```
 
-The server stores the spec, and the agent pulls the image and starts the container on its next pass, which the server triggers at once. The first pull can take a while. Without `--wait`, `deploy` returns once the spec is stored, after the first line. With it, `deploy` waits until the replica is running and ready, and has stayed so for 3 seconds. While it waits it prints why the replica waits each time the reason changes, such as `web: replica 0: pulling nginx:alpine, started 10:02:11 UTC; the registry has not answered yet`. After 5 minutes, or `--timeout`, it prints the app's status and exits with status 1; the app stays deployed. `--wait` is new in the unreleased 2.2.0.
+The server stores the spec, and the agent pulls the image and starts the container on its next pass, which the server triggers at once. The first pull can take a while. Without `--wait`, `deploy` returns once the spec is stored, after the first line. With it, `deploy` waits until the replica is running and ready, and has stayed so for 3 seconds. While it waits it prints why the replica waits each time the reason changes, such as `web: replica 0: pulling nginx:alpine, started 10:02:11 UTC; the registry has not answered yet`. After 5 minutes, or `--timeout`, it prints the app's status and exits with status 1; the app stays deployed. `--wait` is new in 2.2.0.
 
 `--port 127.0.0.1:8080:80` publishes container port 80 on host address 127.0.0.1, port 8080. The address is optional, and it defaults to 127.0.0.1.
 

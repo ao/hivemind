@@ -169,7 +169,7 @@ The server renews its own listener certificate the same way, from its CA, withou
 
 A renewal that fails is tried again at the next check, and logged. A worker whose certificate has expired, after more than about four months of failed renewals or a machine that was off for that long, cannot renew: the server refuses the certificate. It logs, and fails at start with, the fix: run `hivemind node remove <id>` on the server, then join the machine again with an empty data directory and a new join token.
 
-`hivemind nodes` shows each node's certificate expiry, and `/metrics` has `hivemind_node_cert_expiry_timestamp_seconds`. A node that joined before 2.1 has its expiry recorded on its first request to a 2.1 server.
+`hivemind nodes` shows each node's certificate expiry, and `/metrics` has `hivemind_node_cert_expiry_timestamp_seconds`. A node that joined under 2.0.0 has its expiry recorded on its first request to a 2.2.0 server.
 
 The cluster CA lasts ten years. In its last year, certificates are issued to end when the CA does, and the server logs a warning once a day that names `hivemind ca rotate start`. When the CA expires, no node can reach the server. Before then, rotate it in place: `hivemind ca rotate start`, `renew` and `finish` replace it with a new CA without joining any machine again ([CA rotation](ca-rotation.md)). The same steps replace a CA whose key may have leaked; that page says what they do not undo.
 

@@ -1,6 +1,6 @@
 # Private registries
 
-`hivemind registry login` stores a username and password, or a token, for an image registry. Each node then sends it when it pulls an image from that registry. This is new in the unreleased 2.2.0.
+`hivemind registry login` stores a username and password, or a token, for an image registry. Each node then sends it when it pulls an image from that registry. This is new in 2.2.0.
 
 ```sh
 printf '%s' "$TOKEN" | hivemind registry login ghcr.io --username octocat --password-stdin
@@ -100,4 +100,4 @@ Treat a credential as exposed to every machine that runs an image from its regis
 
 ## Workers older than 2.2
 
-A 2.1 worker decodes its assignments with a decoder that refuses unknown fields. Had the server added a credential to one assignment, the worker would refuse the whole list and stop reconciling every replica on the node. So a 2.2 worker asks for credentials, with `?registry_auth=1` on its assignments request, and the server sends them only to a node that asks. A 2.1 worker gets none: it pulls a private image without a credential, the pull fails with Docker's message, and its other replicas are not affected. Placement does not know which workers can pull a private image, so upgrade the workers before you deploy one, or drain the old ones. A 2.2 worker with a 2.1 server asks and gets nothing, because that server has no credentials.
+A 2.0.0 worker decodes its assignments with a decoder that refuses unknown fields. Had the server added a credential to one assignment, the worker would refuse the whole list and stop reconciling every replica on the node. So a 2.2 worker asks for credentials, with `?registry_auth=1` on its assignments request, and the server sends them only to a node that asks. A 2.0.0 worker gets none: it pulls a private image without a credential, the pull fails with Docker's message, and its other replicas are not affected. Placement does not know which workers can pull a private image, so upgrade the workers before you deploy one, or drain the old ones. A 2.2 worker with a 2.0.0 server asks and gets nothing, because that server has no credentials.
