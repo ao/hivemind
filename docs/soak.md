@@ -1817,3 +1817,256 @@ scripts/soak/metrics-report.sh "$SOAK_DIR/metrics-steady-begin.txt" "$SOAK_DIR/m
 ```
 
 Before each stop, power-off or start the operator makes, `scripts/soak/scenario.sh fault NAME MACHINE stop` (or `poweroff`, `start`) puts the request's time in the log.
+
+# Eighth soak: three servers
+
+Seven new machines, on 2026-11-20, on the branch of [several servers](ha.md) at 23763ae, with three servers. Every write the API acknowledged was in the store of every server afterwards, the three stores held the same rows after every scenario, and no copy of a replica ran on two nodes. Under the routing soak's clients and a write-load through hivemind's own CLI, with every server in its list: the leader's machine powered off, twice; the leader cut off from the other servers; two of the three servers powered off; the leader's `hivemind` restarted, and a follower's; a rolling update of every app with the leader restarted in the middle of it, twice; and an hour of steady state. Times are UTC; the machines' private addresses are shown renumbered, 10.0.0.N for hivemind-soakk-N.
+
+## The scenarios
+
+| | Writes acknowledged, of those made | Acknowledged writes missing from a server's store | Failed HTTP requests and unary gRPC calls through the other routers | Misrouted | Longest without a successful API read, for a client that knows every server |
+|---|---|---|---|---|---|
+| The leader's machine powered off (hivemind-soakk-1, the first server in the client's list) | 75 of 75 | 0 | 0 and 0 | 0 | 30.5 s: no read failed, but each call took 3.1 s, the first 30.0 s ([below](#a-dead-server-first-in-the-clients-list)) |
+| The leader's machine powered off (hivemind-soakk-3, the last in the list) | 185 of 185 | 0 | 0 and 0 | 0 | 9.0 s |
+| The leader cut off from the other servers for 70 s | 96 of 96 | 0 | 0 and 0 | 0 | 9.0 s |
+| Two of the three servers powered off for 2 to 3 minutes | 98 of 119; 21 refused with `503`, no leader | 0 | 0 and 1 per router, the call in flight when its replica's machine died | 0 | 123.0 s, the time without a leader |
+| The leader's `hivemind` restarted | 62 of 63; 1 refused with `503` | 0 | 0 and 0 | 0 | 2.5 s |
+| A follower's `hivemind` restarted | 61 of 61 | 0 | 0 and 0 | 0 | 0.5 s |
+| A rolling update of every app, the leader's `hivemind` restarted during it (two runs) | 72 of 74, 62 of 64; 1 refused with `503` in each, and the scale of that app | 0 | 0 and 0 | 0 | 1.5 s, 1.5 s |
+| Steady state, 1 hour | 1699 of 1699 | 0 | 0 of 858202 and 0 of 107040, through all six routers | 0 | none failed; the slowest read 44.9 ms |
+
+"The other routers" are those of the machines whose `hivemind` kept running: each faulted server's own router failed while its machine or process was down, as a single server's did in the earlier soaks. A new leader led 1.0 to 2.5 s after the old one's machine went down, its `hivemind` stopped, or it was cut off, from the servers' own logs. Each old leader came back as a follower and caught up from the log. Two things cost the clients time that the cluster did not need: the CLI spends 3 to 30 s on a dead server at the head of its list before it tries the next, on every call ([below](#a-dead-server-first-in-the-clients-list)); and a leader that is stopped keeps its leadership for the 10 s of its stop and hands it to nobody, so the cluster then has no leader for 1.0 to 1.7 s, and the restarted server's router fails TLS handshakes until one leads ([below](#the-leaders-hivemind-restarted-and-a-followers)).
+
+## The machines and the build
+
+| | |
+|---|---|
+| Machines | 7 EC2 c7g.large in one subnet: 2 vCPU (Graviton3), 3.7 GiB (MemTotal 3897240 kB), Amazon Linux 2023.12.20261119, kernel 6.18.62-127.179.amzn2023.aarch64, Docker 25.0.18 |
+| Roles | hivemind-soakk-1, 2 and 3 the servers (1 made by `init`, 2 and 3 joined with server tokens), 4 to 6 workers, 7 the outside machine |
+| hivemind | 5f68e26, which is 23763ae and two commits of the harness, no Go change: `CGO_ENABLED=0 go build -trimpath -ldflags "-s -w -X main.version=v2.0.0-309-g5f68e26 -X main.commit=5f68e26ff6f8" ./cmd/hivemind`, Go 1.27.4 (golang:1.27), linux/arm64, sha256 1cd6c688...48dcb1a. `hivemind nodes` showed v2.0.0-309-g5f68e26 under VERSION |
+| The gRPC server and client | `test/h2ctest`, last changed in 9c218f1, built the same way with `-ldflags "-s -w"`, sha256 8581bdf9...42b21b |
+| Service | Each server's unit: `serve --advertise <its address> --api-addr <its address>:4483 --api-tls-cert ... --api-tls-key ...` and the router's flags; each worker's `serve --role worker` with no flags |
+| API and its client | Each server's API on its private address, port 4483, with a certificate from a CA made for the run. The client on the outside machine is hivemind's CLI with `HIVEMIND_SERVER=https://10.0.0.1:4483,https://10.0.0.2:4483,https://10.0.0.3:4483`, in that order, and the admin token from a 0600 file |
+| Outside machine | Pebble (revision 5caaab3), pebble-challtestsrv, registry:2, curl with nghttp2 |
+| Network | The soak security group, which now allows TCP 4483, 4486, 30000 to 32767 and 32768 to 60999 within the group. Before set-up, a listener on 10.0.0.1's address on 4486, 4483, 30000, 32767, 32768 and 60999, and a connection to each from the six other machines: all answered |
+
+## Set-up
+
+The seventh soak's apps, routes and clients, on six routers: every node, the three servers included, runs a router on its own address, and each HTTP stream and gRPC client goes through each of the six. hivemind-soakk-1 ran `init` and its unit. Each of the other two servers got a token from `hivemind join-token --role server` and ran `hivemind join 10.0.0.1 --role server --token <token> --advertise <its address>` in the foreground: hivemind-soakk-2 logged that it had joined at 04:53:04.70, installed the leader's snapshot 0.08 s later, asked to be a voter at 04:53:06.74 once it had caught up, and was one in the leader's list by 04:53:07.03; hivemind-soakk-3 took the same 2.0 s from its join to its request. Then the harness stopped the foreground `join` and started the server's unit, and the workers joined 10.0.0.1. Each worker's `node.json` then had `server` 10.0.0.1:4484 and all three servers under `servers`. `hivemind servers` on each of the three listed the same three, hivemind-soakk-1 the leader, each with a last contact of 0.1 s or less. From the binaries' install to every router serving the three hosts took 100 s, and the cluster converged 4 s later, 20 replicas. The paths went to the same apps through each router as in the fourth soak, and a unary call, a server stream, a bidirectional stream and a unary call over HTTP/1.1 reached `grpc` through each of the six routers.
+
+The first try at set-up stopped at the first server join: the foreground `join` took 10.1 s to stop after its SIGTERM, which the harness's 10 s ssh limit did not wait for. Each server's `join` took that long, with `level=WARN msg="cluster shutdown" err="context deadline exceeded"` 10.0 s after `shutting down`; the two servers were emptied and the set-up run again from the start.
+
+## Method
+
+The harness of [scripts/soak](../scripts/soak), with what the run of several servers added to it: the servers' `ha.sh` scenarios, each run with the write-load and its check, and the HTTP and gRPC clients through every router.
+
+- The write-load: one write a second (one every 2 s in the steady state) through the CLI on the outside machine, which knows all three servers: deploy a new app `wl-TAG-N` with `WL_SEQ=N` and 64 CPUs, so that its replica waits as pending and never starts a container, then scale it to 2. A write counts as acknowledged when the CLI exits 0. After the scenario, each server's own store, copied by `hivemind backup` on that server, and `GET /v1/apps` must hold every acknowledged deploy with its `WL_SEQ` and every acknowledged scale, and the three stores must hold the same rows; the apps are then deleted.
+- The probe: `hivemind nodes --json` through the same client every 0.5 s, and `GET /v1/nodes` on each server's API directly.
+- Once a second during each scenario: port 22 of each server, each server's own view (`hivemind servers --json` on it), the leader a majority of them names, each node's state, convergence, and any replica running on two nodes. New in this soak, that last check compares the copy, app, replica and generation: during a rolling update the old and the new copy of a replica run side by side by design, which the check before counted.
+- `service-restart follower`: a follower's `hivemind` restarted. `rollout-leader`: every app deployed again at once with a new value in its environment (the image apps at their other version) and the compose project again, and 3 s later the leader's `hivemind` restarted; a sampler on the outside machine reads `hivemind status --json` through the client every 0.5 s and records each app below its count.
+- The times of the leader changes come from the servers' journals, raft's lines and hivemind's `this server leads the cluster`, since the once-a-second observer took its first look 8 to 10 s after a fault: it asks every server over ssh, and a dead or cut-off one costs it its timeout.
+- The machines were powered off from inside (`sysrq o`) and started with `aws ec2 start-instances` when the harness asked.
+
+## Results
+
+### The leader's machine powered off, twice
+
+| | First: hivemind-soakk-1 | | Second: hivemind-soakk-3 | |
+|---|---|---|---|---|
+| | UTC | After the power-off | UTC | After the power-off |
+| Power-off command | 04:57:25.13 | | 05:00:42.58 | |
+| The first follower's heartbeat timeout; an election | 04:57:26.18 | +1.05 | 05:00:44.89 | +2.32 |
+| A new leader (term 4, hivemind-soakk-3; term 5, hivemind-soakk-2) | 04:57:26.69 | +1.56 | 05:00:45.07 | +2.49 |
+| The old leader's node `waiting` (the new leader's start grace) | | +17.1 | | +16.6 |
+| Its node lost, its replicas placed on the others; converged (in the second run, but for `kv`, which waits for its node) | 04:59:32.3 | +127.2 | 05:02:49.1 | +126.5 |
+| Start request; port 22 open | 04:59:45.5, 04:59:59.5 | +140.3, +154.4 | 05:03:04.7, 05:03:19.2 | +142.1, +156.6 |
+| Its node ready; a follower in the new leader's view | 05:00:01.0, 05:00:02.0 | +155.9, +156.9 | 05:03:21.4, 05:03:21.4 | +158.8, +158.8 |
+
+The power-off goes through two ssh hops, so the machine died a moment after the command; these times are from the command. In the first run hivemind-soakk-2 timed out first, but hivemind-soakk-3, which had heard from the leader more recently, refused its pre-vote; hivemind-soakk-3's own timeout came 0.5 s later, and it won. The old leader's node then waited for the new leader's start grace, 2 minutes, as [leader-only work](ha.md#leader-only-work) says, and was lost when it ended, its replicas then placed on the other nodes, `kv` waiting for its node in the second run. Started again, the old leader's `hivemind` was a follower 2.2 to 2.5 s after its port 22 opened, and took the log from where it had stopped, with no snapshot. Every write the client made was acknowledged in both runs: 75 (38 deploys, 37 scales) and 185 (93, 92), and each was in all three stores. No request or call through the five other routers failed or reached another app; through the second run's, 4 requests per router for `paths.soak.test/api/x` took 5.5 s: `papi` 1 ran on the dead machine, and a request sent on an idle connection to it waits 5 s for TCP_USER_TIMEOUT before it goes to the other replica, as [routing](routing.md#limits) says. Each worker's router logged `reading the routing table; serving the last one` once, 10.4 to 10.8 s after the power-off, a read that timed out, and read the table again 10 s later in the first run and at once in the second.
+
+#### A dead server first in the client's list
+
+The difference between the two runs is the client's. With hivemind-soakk-1 down, every CLI call first dialled 10.0.0.1:4483: the first write after the power-off took 30.0 s, the CLI's dial timeout, then each of the next 37 writes took 3.1 s, the time the kernel takes to give up resolving the dead address (`no route to host`), until the machine was back. So the write-load made 42 writes in the 154 s the machine was down, against one a second when hivemind-soakk-3, last in the list, was the one down: p50 26 ms, p99 48 ms, the longest 5.3 s and the longest between two acknowledged writes 6.3 s, around the election. In the quorum loss below, the first read through the client after the power-off took 50.7 s, both dead servers first in the list, before it got the survivor's `503`. Nothing failed; the API was just slow for any client whose list starts with a dead server, and a script with a timeout under 30 s would have failed.
+
+### The leader cut off from the other servers
+
+iptables on the leader, hivemind-soakk-2, dropped TCP 4484 and 4486 to and from the two other servers, both ways; clients still reached its API and its router.
+
+| | UTC | Seconds |
+|---|---|---|
+| The rules in place | 05:04:03.35 | |
+| hivemind-soakk-2: `failed to contact quorum of nodes, stepping down` | 05:04:03.81 | +0.46 |
+| A new leader, hivemind-soakk-3 (term 6) | 05:04:05.77 | +2.42 |
+| hivemind-soakk-2's own API: `503`, `{"error": "no leader: this server reaches 1 of the 3 servers, and a write needs 2; running containers are not affected"}` | to the heal | |
+| The rules removed | 05:05:13.75 | +70.4 |
+| hivemind-soakk-2 a follower, its API `200` | 05:05:14.4 | +71.0 |
+
+While it was cut off, hivemind-soakk-2 asked for a pre-vote every 1.1 to 1.7 s, and none raised the term, which stayed 6; at the heal the two others refused its pre-vote because they had a leader, and it followed without an election. Its router, which clients still reached, served its last table, and no request or call through any of the six routers failed. All 96 writes were acknowledged and in the three stores; the slowest write took 8.0 s and the slowest read 8.5 s, both begun as the partition began (the CLI does not say which server answered them).
+
+### Two of the three servers powered off
+
+The leader, hivemind-soakk-3, kept running; hivemind-soakk-1 and 2 were powered off together.
+
+| | UTC | Seconds |
+|---|---|---|
+| Power-off commands | 05:05:56.33 | |
+| hivemind-soakk-3 steps down | 05:05:56.86 | +0.53 |
+| Its API answers `503`, `no leader: this server reaches 1 of the 3 servers, and a write needs 2; running containers are not affected` | | from +10.3, the first look |
+| The containers on hivemind-soakk-3 and the three workers: the same IDs and start times as before, at each look every 10 s | | +10.6 to +120 |
+| hivemind-soakk-1 started (+103.4), its raft started | 05:07:56.40 | +120.1 |
+| hivemind-soakk-3 elected (term 7) | 05:07:58.35 | +122.0 |
+| hivemind-soakk-2 started (+169.7), ready, every server back | 05:09:04.1 | +187.8 |
+
+For the 2 minutes without a leader, 21 writes were refused with that `503`, 10 deploys and 11 scales, none of them applied afterwards; the 98 acknowledged ones were in the three stores. The reads through the client failed with the same `503` (11): the first took 50.7 s, each of the others 3.1 s. Through hivemind-soakk-3's router and the workers', no HTTP request failed: they served their last table, and each worker's agent logged `cannot reach the server` 30 s in and `the server answers again` 1 min 33 s after that. One unary call through each of them failed with a `502` after 5.4 s, the call in flight on the router's connection to `grpc` 1, on hivemind-soakk-2, when that machine died, which [routing](routing.md#streams-and-their-limits) documents, and the held stream through hivemind-soakk-3's router was reset. The second server's return was a follower, and the cluster converged with no node lost: the nodes were `waiting` in the new leader's start grace and reported to it.
+
+### The leader's hivemind restarted, and a follower's
+
+`systemctl restart hivemind` on the leader, hivemind-soakk-3, and then on a follower, hivemind-soakk-1.
+
+| The leader's restart | UTC | Seconds |
+|---|---|---|
+| `shutting down` | 05:09:45.37 | |
+| The router's 10 s wait for its held stream ends; the process exits | 05:09:55.37 | +10.0 |
+| The new process: raft started | 05:09:55.57 | +10.2 |
+| hivemind-soakk-3 elected again (term 8), leads | 05:09:56.93, 05:09:57.10 | +11.7 |
+
+For the 10 s of its stop, hivemind-soakk-3 stayed the leader: its own API and router were closed, writes through the two followers succeeded, and every node's log poll got `503 the server is shutting down`. At the end it stopped Raft with no handover, and the cluster had no leader for 1.7 s, until the restarted process won the next election itself. In that time 4 reads and 1 write got `503`, no leader. Its router listened again at 05:09:55.59 with no routing table, since no server led, and every TLS handshake through it failed, 21 requests on each of its four HTTP streams with curl's error 35 and 10 unary calls with `tls: internal error`, until it read the table and its certificates at 05:09:57.59. Through the other five routers nothing failed.
+
+The follower's restart cost nothing but its own: its API and router refused connections for 10.0 s, and every write (61) and read went through.
+
+### A rolling update of every app while the leader changes
+
+Every app deployed again at once through the client (the 7 apps and the compose project, 9 rollouts), and 3 s later the leader's `hivemind` restarted.
+
+| | First run | Second run |
+|---|---|---|
+| Deploys; the image apps to | 05:12:10.5; version 2 | 05:17:00.9; version 1 |
+| The leader restarted | hivemind-soakk-3, 05:12:13.5 | hivemind-soakk-1, 05:17:03.87 |
+| It stops, 10 s later | 05:12:23.58 | 05:17:13.93 |
+| A new leader | hivemind-soakk-1 (term 9), 05:12:24.58, 1.0 s later | hivemind-soakk-2 (term 10), 05:17:14.96, 1.03 s later |
+| No rollout in progress | +22.5 s after the restart | +15.4 s |
+| Converged | +34.4 s | +25.6 s |
+| Every replica at the new generation | 2 | 3 |
+| Samples of `hivemind status` through the client, failed, below a count | 94, 2 (`503`), 7 (all `kv`) | 75, 2, 3 (all `kv`) |
+| Writes acknowledged | 72 of 74 | 62 of 64 |
+
+The rollouts went on under the stopping leader for its 10 s and under the new one after it: no app but `kv`, which moves in place, was below its count in any sample. The second run checks the copies by generation: in no look did the same copy run on two nodes. The first run's check counted the old and new copies of a surge as twice, which is why it was run again. In each run one deploy got the `503` of the second without a leader, and the scale of that app then `not found`; neither app was in any store. Through the restarted server's router the same failures as in the restart above; through the others, no HTTP request or unary call failed, and the held streams on a copy that was replaced were reset when it stopped, as documented.
+
+## Steady state
+
+On 5f68e26, 1 hour, from 05:18:12.8 to 06:18:13.1, after the scenarios: the 24 HTTP streams (four through each router), the 12 gRPC clients, the API probe, and the write-load at one write every 2 s, each app deployed, scaled, and deleted 100 cycles later, so that the store held about 100 of them; no watcher. hivemind-soakk-2 led the whole hour, in term 10 from the second rolling update, and no server logged an election, a heartbeat timeout or a change of leader: `this server leads the cluster`, raft's `entering candidate state` and `heartbeat timeout` 0 times on each of the three.
+
+| The write-load and the API | |
+|---|---|
+| Writes, through the client that knows every server | 1699: 600 deploys, 600 scales, 499 deletes; all acknowledged |
+| Time per write, p50 / p90 / p99 / p99.9 / max | 31.7 / 35.5 / 43.5 / 59.7 / 73.2 ms (a new CLI process each time, a TLS connection, the follower's pass to the leader, the Raft round and the leader's apply) |
+| By kind, p50 / p99 / max | deploy 32.5 / 47.2 / 73.2 ms, scale 32.5 / 43.7 / 56.5 ms, delete 16.5 / 23.3 / 27.1 ms |
+| The check | Each server's own store held exactly the 100 apps kept, each with its `WL_SEQ` and 2 replicas, and none of the 500 deleted; the three stores the same rows; the clean deleted 100, 0 left |
+| Reads through the client, `hivemind nodes --json` every 0.5 s | 7176, none failed; p50 9.6, p99 18.8, max 44.9 ms |
+| Each server's API, `GET /v1/nodes` directly every 0.5 s | 7176 `200` from each of the three |
+| `GET /v1/status`, `/v1/nodes`, `/v1/apps` through a server, 300 each | all `200`; p50 13.9, 6.5 and 4.1 ms; p99 28.7, 16.0 and 7.6 ms; max 34.5, 18.8 and 9.3 ms. The status reply was 47 KB with the 100 apps, against 7 KB at the start |
+
+| HTTP, through the six routers | |
+|---|---|
+| Requests, all 24 streams | 858202 |
+| Succeeded | 858202 (100 %) |
+| Misrouted | 0 |
+| Requests of 1.5 s or more | 0 |
+| Longest gap between two successful requests on a stream | 0.31 s |
+| Total time per request (TCP connect, TLS handshake, request and reply), p50 / p90 / p99 / p99.9 / max | 2.4 / 3.4 / 5.9 / 9.6 / 214.0 ms |
+| TLS handshake, p50 / p99 / max | 1.5 / 3.5 / 212.6 ms |
+| TLS done to first byte of the reply, p50 / p99 / max | 0.6 / 2.1 / 19.9 ms |
+| Certificates issued in the window | 20 (5 for `api`, 9 for `paths`, 6 for `www`) |
+| Certificate checks (a fresh handshake with every router for each host every 30 s) | 2142, none failed |
+
+| Host and path | Requests | Succeeded | Misrouted | p50 / p99 / p99.9 / max (ms) |
+|---|---|---|---|---|
+| `api.soak.test/` | 214591 | 214591 | 0 | 2.4 / 5.8 / 9.4 / 21.9 |
+| `paths.soak.test/` (proot) | 214538 | 214538 | 0 | 2.4 / 5.9 / 9.7 / 20.7 |
+| `paths.soak.test/api/x` (papi) | 214538 | 214538 | 0 | 2.4 / 5.9 / 9.6 / 214.0 |
+| `www.soak.test/` | 214535 | 214535 | 0 | 2.4 / 5.9 / 9.6 / 28.5 |
+
+| gRPC, through the six routers | |
+|---|---|
+| Unary calls | 107040, all succeeded |
+| Time per call (a new process, TCP connect, TLS handshake and call), p50 / p90 / p99 / p99.9 / max | 5.3 / 7.9 / 12.7 / 18.8 / 31.2 ms |
+| Longest gap between two successful calls through a router | 0.23 s |
+| Server streams that ended in the window | 18, each complete: 1000 messages and `grpc-status` 0 |
+| Messages | 21588 |
+| Longest gap between two messages of a router's streams, the next stream's start included | 1.03 s |
+
+| Probe | Result |
+|---|---|
+| Status answered, converged, all 20 replicas running, no replica on two machines | 360 of 360 |
+| `kv` value read back, and the same as written | 360 of 360 |
+| Events: lost nodes, restarts, failed probes; errors in any node's journal | none; the only warnings, on every node, certmagic's `certificate is in emergency renewal window`, 11 to 13 each |
+
+The hivemind process on each node, 60 samples a minute apart:
+
+| Node | RSS first / last / max (MiB) | Threads first / last | Open fds first / last / max | CPU, % of one CPU | Restarts |
+|---|---|---|---|---|---|
+| hivemind-soakk-1 (follower) | 37.7 / 43.0 / 43.0 | 9 / 9 | 60 / 51 / 60 | 5.07 | 0 |
+| hivemind-soakk-2 (the leader) | 43.5 / 46.5 / 47.1 | 10 / 10 | 71 / 59 / 71 | 8.77 | 0 |
+| hivemind-soakk-3 (follower) | 42.2 / 43.1 / 43.7 | 9 / 9 | 71 / 64 / 71 | 4.87 | 0 |
+| hivemind-soakk-4 | 25.2 / 25.0 / 25.5 | 9 / 9 | 28 / 26 / 28 | 4.62 | 0 |
+| hivemind-soakk-5 | 24.9 / 25.1 / 25.3 | 8 / 8 | 28 / 26 / 28 | 3.60 | 0 |
+| hivemind-soakk-6 | 25.1 / 25.1 / 25.2 | 8 / 9 | 28 / 27 / 30 | 3.72 | 0 |
+
+The seventh soak's one server used 27 to 28 MiB and 4.76 % of one CPU under four routers and no write-load. Here each server holds a whole copy of the store and the Raft log, and the leader takes every API and node API request, the followers passing theirs on: the harness's probes alone sent it about 8 API requests a second, each in its request log, which was 31904 lines in the hour against 147 and 189 on the followers. hivemind-soakk-1's RSS rose by 5.3 MiB in the window; its process had started at 05:17, a minute before, in the second rolling update. The store grew from 300 to 332 KiB on each server, with a 4 MiB WAL.
+
+The Raft log, on each server:
+
+| | 05:18 | 06:18 |
+|---|---|---|
+| `raft.db` and its WAL | 21.6 to 22.7 MB | 66.0 to 66.7 MB |
+| Snapshots kept | 1 | 2, 0.6 MB together |
+| Entries in the log at 06:20 | | 13434, 3.1 KB on average, the oldest compacted at the snapshot of 06:12 |
+
+Raft took a snapshot at 05:18 to 05:20, 05:46 and 06:12 on each server, 8600 to 9200 entries apart, which is 5.7 entries a second with six nodes and the write-load; each compacted the log to the 10240 entries before it, as [snapshots](ha.md#snapshots) says. So the file stops growing at about the size of 19000 entries, here about 60 MB with a quarter of its pages free, and an 8 MB WAL, against a store of 332 KiB. Most of it is one statement. The decoded last 3000 entries held 31608 `UPDATE replicas SET pending_reason = ?, updated_at = ?`, 63 % of their bytes: a placement pass writes the reason of every pending replica again, with a new time, though the reason has not changed, and the write-load's 100 apps had 200 replicas that could never be placed. 138 of those 3000 entries, one every 3.8 s, were 20 to 30 KB: a deploy, a scale or a node's report, each with 194 of these updates beside its own statements, which are under 1 KB. The cleanup statements of each report (`DELETE FROM surges ... AND NOT EXISTS`, and the same for replicas and apps) were another 18 %; the recorder keeps a statement whether or not it changed a row.
+
+The routers' counters in the leader's `/metrics`, read at the window's two ends, against the clients' `200`s through each router: every router but hivemind-soakk-1's was within 3 of its clients; hivemind-soakk-1's counted 14, 24 and 17 more for `api`, `paths` and `www`, about Pebble's three HTTP-01 validations for each of the window's 5, 9 and 6 issuances.
+
+## What did not work, and what was not measured
+
+- With a dead server first in its list, the CLI takes 3 to 30 s on it at each call before it tries the next ([above](#a-dead-server-first-in-the-clients-list)): 30.0 s for the first call after the machine went down, the CLI's dial timeout, then 3.1 s for each, the kernel's time to give up on the address; 50.7 s for a call with two dead servers first. Nothing failed, but the client's writes went from one a second to one every 3.1 s.
+- A leader that is stopped keeps its leadership for the whole of its stop, 10 s with a held stream through its router, while every node's log poll gets `503`, and then stops Raft without handing the leadership on. The cluster had no leader for 1.0 to 1.7 s after each of the three restarts of a leader, and refused reads and writes with `503` in that time; the restarted server won the next election itself once.
+- A server's router that starts while no server leads has no routing table and no certificates, and fails every TLS handshake (curl's error 35, `tls: internal error`) until a leader answers: 1.9 s after the leader's restart above. A router that was running keeps its last table, as documented; one that starts has none.
+- Stopping a server's foreground `join --role server` took 10.0 s, with `level=WARN msg="cluster shutdown" err="context deadline exceeded"`, before any worker had joined. The first set-up stopped on it.
+- Each placement pass writes the reason of every pending replica again, with a new time, so with the write-load's 200 pending replicas a deploy, a scale or a report was a Raft entry of 28 to 30 KB, and these updates were 63 % of the log's bytes ([above](#steady-state-6)); the log settles at about 60 MB on each server for a store of 332 KiB. Statements that changed no row are recorded and replicated too.
+- hashicorp/raft logs each failed heartbeat and append to an unreachable server at error: about 25 lines a minute for one dead server (71 on the leader in the first power-off's 3 minutes), 204 on the survivor of the quorum loss.
+- The once-a-second observer took its first look 8 to 10 s after a fault; the times above are from the servers' journals instead. Its check for a replica on two nodes counted a rolling update's surge until it compared generations.
+- Not run: a server machine replaced by an empty one and joined again; `hivemind server remove`; five servers; a follower behind by more than the log keeps (10240 entries after a snapshot, about 30 minutes here), which would get a snapshot on its return; a server's disk full; clock skew between the servers; a partition that cuts the leader off from the workers but not the servers; the leader's `hivemind` killed (SIGKILL) rather than its machine powered off or its service restarted.
+- One hour of steady state is too short for leak figures.
+
+## Running it, with three servers
+
+The soak security group must allow TCP 4483 and 4486 between the machines, besides 4484, 4485 and the route ports. On the control machine:
+
+```sh
+export SOAK_DIR=$PWD/.scratch/run SOAK_SERVERS=3 SOAK_ROUTES=1 SOAK_PATHS=1 SOAK_GRPC=1 BIN=$SOAK_DIR/hivemind
+printf 'n-1 IP1\nn-2 IP2\nn-3 IP3\nn-4 IP4\nn-5 IP5\nn-6 IP6\n' >"$SOAK_DIR/nodes"   # the three servers first
+printf 'n-7 IP7\n' >"$SOAK_DIR/outside"
+scripts/soak/outside.sh setup
+scripts/soak/setup.sh                         # checks 4486 and 4483 first; 3 servers, 3 workers, the client on n-7
+scripts/soak/outside.sh client-start
+scripts/soak/wload.sh probe-start
+scripts/soak/scenario.sh probe-start
+scripts/soak/scenario.sh watch-start
+scripts/soak/scenario.sh leader-kill          # start the machine when the log says "start ... machine now"
+scripts/soak/scenario.sh leader-kill
+scripts/soak/scenario.sh leader-partition 60
+scripts/soak/scenario.sh quorum-loss          # two such notes: one machine, then the other
+scripts/soak/scenario.sh service-restart
+scripts/soak/scenario.sh service-restart follower
+scripts/soak/scenario.sh rollout-leader
+scripts/soak/scenario.sh watch-stop
+WL_EVERY_MS=2000 scripts/soak/scenario.sh steady 3600
+
+scripts/soak/wload.sh fetch; scripts/soak/outside.sh fetch
+scripts/soak/ha-report.sh "$SOAK_DIR/soak.log" "$SOAK_DIR/wl"
+scripts/soak/client-report.sh "$SOAK_DIR/soak.log" "$SOAK_DIR/client"
+SOAK_DURATIONS=scripts/soak/durations-soakha.txt scripts/soak/report.sh "$SOAK_DIR/soak.log"
+scripts/soak/metrics-report.sh "$SOAK_DIR/metrics-steady-begin.txt" "$SOAK_DIR/metrics-steady-end.txt" "$SOAK_DIR/client"
+```
+
+The operator's start of a machine: `scripts/soak/scenario.sh fault NAME MACHINE start` puts the request's time in the log. `HA_FAULT=service` kills and starts `hivemind` instead of powering the machine off, for a run with no operator.
