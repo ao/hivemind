@@ -65,12 +65,12 @@ Every error is a JSON object with one field:
 | 403 | A cookie request to an unsafe method without the session's CSRF token: `{"error":"csrf_token_invalid"}` |
 | 404 | No such app or node, no drain of the node, no container for the replica on its node, or no such CA rotation step (`no such step: the steps are start, renew, finish and abort`). Unknown routes give `{"error":"not found"}` |
 | 405 | Wrong method for a known path: `{"error":"method not allowed"}` |
-| 409 | Removing the server's own node, or a node that still renews its lease without `force=true`. An ineligible node that runs nothing needs no `force`. A put whose `routes` name a host that another app routes: `{"error":"conflict: host www.example.com is routed by app web; remove it there first"}`, or a host and path: `conflict: host www.example.com with path /api is routed by app api; ...` |
+| 409 | Removing the server's own node, or a node that still renews its lease without `force=true`. An ineligible node that runs nothing needs no `force`. A put whose `routes` name a host that another app routes: `{"error":"conflict: host www.example.com is routed by app web; remove it there first"}`, or a host and path: `conflict: host www.example.com with path /api is routed by app api; ...`. Removing the node of a server before the server itself (`hivemind server remove`), and removing a server that is the only voter, or whose removal would leave fewer servers the leader heard from than a write needs, without `force=true` |
 | 413 | Request body over 1 MiB |
 | 429 | Too many failed logins from this address, or too many log streams open to one node |
 | 500 | Unexpected failure. The message is `internal error`, and the details go to the server log |
 | 502 | A worker could not read a log, or broke the stream before it started |
-| 503 | The container engine cannot be reached: `the container engine is unavailable`. For logs, also a lost node, the engine on the replica's node, or a server without `--advertise` |
+| 503 | The container engine cannot be reached: `the container engine is unavailable`. For logs, also a lost node, the engine on the replica's node, or a server without `--advertise`. In a cluster of several servers, also no leader: `no leader: ...`, with the header `Hivemind-No-Leader: 1` when the server did not act on the request and another server may ([several servers](ha.md#the-api)) |
 | 504 | A worker did not answer a log request in 10 seconds |
 | 507 | The server's disk is full: `the server's disk is full, so the change was not saved: ...`. Nothing of the change is stored, and reads still work |
 
@@ -85,7 +85,7 @@ Every error is a JSON object with one field:
 
 `POST /v1/join-tokens` issues a token for one machine to join the cluster with `hivemind join`. It needs the admin token like every other route. It needs the cluster CA that `init` creates. Without the CA, the route answers 503 and says to run `hivemind init`. A token can be used only while the server runs with `--advertise`, which opens the join listener.
 
-The body is optional. `ttl` is a Go duration such as `"1h"`. It defaults to `24h`, and it must be above zero and at most `168h`. Any other value gets 400.
+The body is optional. `ttl` is a Go duration such as `"1h"`. It defaults to `24h`, and it must be above zero and at most `168h`. Any other value gets 400. `"server": true` asks for a server join token instead, for `hivemind join --role server` ([several servers](ha.md#membership)): it defaults to `1h` and lasts at most `24h`, needs a server that runs with `--advertise`, and the reply has a `warning` when the cluster would then have two servers.
 
 ```json
 {"token": "hivemind-join-v1.<64 hex digits>.<43 characters>", "expires_at": "2026-11-14T10:00:00Z"}
@@ -217,7 +217,9 @@ Workers talk to the server over a second API, on the cluster port that `serve --
 | `GET /v1/status` | none | 200, a list of `AppStatus` | Replicas of every app |
 | `POST /v1/session` | none | 200, `{"csrf_token"}`, and the session cookie | Log in. See [sessions](#sessions) |
 | `DELETE /v1/session` | none | 204 | Log out |
-| `POST /v1/join-tokens` | `{"ttl": "1h"}`, optional | 201, `{"token", "expires_at"}` | Issue a token that lets one machine join. See [join tokens](#join-tokens) |
+| `POST /v1/join-tokens` | `{"ttl": "1h"}`, optional; `"server": true` for a server's token | 201, `{"token", "expires_at"}`, and `warning` for a server's | Issue a token that lets one machine join. See [join tokens](#join-tokens) |
+| `GET /v1/servers` | none | 200, `{"leader", "answered_by", "servers": [{"id", "name", "advertise", "node_port", "raft_addr", "role", "last_contact"}], "note"}` | List the servers, as `hivemind servers` does. Without a leader, the server asked answers from its own copy, with `leader` empty and a `note` that says why ([membership](ha.md#membership)) |
+| `DELETE /v1/servers/{id}` | none. `?force=true` removes it though the servers left could not reach a majority | 200, `{"id", "next"}` | Remove a server from the cluster. `next` says what to do with its node. `409` for a refused removal |
 | `GET /v1/nodes` | none | 200, a list of `NodeView` | List the nodes. See [nodes](#nodes) |
 | `DELETE /v1/nodes/{id}` | none. `?force=true` removes a node that still renews its lease | 200, `RemoveNodeReply` | Remove a node for good |
 | `POST /v1/nodes/{id}/eligibility` | `{"eligible": false}` or `true` | 200, `{"id", "name", "eligible", "drain_cancelled"}` | Stop or let a node take new replicas. See [nodes](#nodes) |

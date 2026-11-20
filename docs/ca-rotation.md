@@ -10,6 +10,8 @@ hivemind ca rotate finish    # the old CA is trusted nowhere, and its key is del
 
 `hivemind ca status` shows where a rotation is and which nodes it waits for. `hivemind ca rotate abort` undoes a rotation before `finish`. Every command needs the admin token and runs against the server's API (`GET /v1/ca`, `POST /v1/ca/rotation/{start,renew,finish,abort}`); a worker has no part in it but to follow what the server says.
 
+A rotation needs a cluster of one server in 2.3.0: `start` is refused while the cluster has more than one, and a server join while a rotation is in progress. To rotate the CA of a cluster of several servers, remove all but one with `hivemind server remove`, rotate, and join the others again ([several servers](ha.md#compatibility)).
+
 Two reasons to rotate: the CA is in its last year (the server warns once a day then), or its key may have leaked. See [after a leak](#after-a-leak) for what a rotation does and does not do in the second case.
 
 ## Terms
