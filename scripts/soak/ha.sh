@@ -84,6 +84,8 @@ if [ -z "${WLOAD:-}" ]; then
 	if [ "$SOAK_API_TLS" = 1 ] && [ -n "${WL_CLIENT:-$OUT_NAME}" ]; then WLOAD=1; else WLOAD=0; fi
 fi
 HA_T0=0
+# the write-load's tag of the scenario that runs: its name, or NAME-r2, ... for a rerun
+WL_TAG=""
 
 # majority: how many servers make a majority.
 majority() { echo $((SOAK_SERVERS / 2 + 1)); }
@@ -230,7 +232,7 @@ ha_begin() {
 	ev scenario "$name placement $(awk -F'\t' 'FILENAME == ARGV[1] { split($0, x, " "); nm[x[1]] = x[2]; next } $1 == "R" && index($2, "wl-") != 1 { printf "%s|%s@%s ", $2, $3, nm[$4] }' "$IDS_FILE" "$pre")"
 	ports_log "$name before"
 	if [ "$WLOAD" = 1 ]; then
-		"$HERE/wload.sh" start "$name" || die "$name: the write-load did not start"
+		WL_TAG=$("$HERE/wload.sh" tag "$name") && "$HERE/wload.sh" start "$WL_TAG" || die "$name: the write-load did not start"
 		sleep "$WL_WARM"
 	fi
 }
@@ -241,8 +243,8 @@ ha_end() {
 	local name=$1 s f wl=none
 	if [ "$WLOAD" = 1 ]; then
 		"$HERE/wload.sh" stop || true
-		if "$HERE/wload.sh" check "$name"; then wl=pass; else wl=FAIL; fi
-		if [ "$WL_CLEAN" = 1 ]; then "$HERE/wload.sh" clean "$name" || wl="$wl,clean-FAIL"; fi
+		if "$HERE/wload.sh" check "$WL_TAG"; then wl=pass; else wl=FAIL; fi
+		if [ "$WL_CLEAN" = 1 ]; then "$HERE/wload.sh" clean "$WL_TAG" || wl="$wl,clean-FAIL"; fi
 	fi
 	for s in "${SRV_NAMES[@]}"; do
 		f=$SOAK_DIR/journal-$name-$s.txt
@@ -260,7 +262,7 @@ ha_fault() {
 	local name=$1 T=$2
 	if [ "$HA_FAULT" = service ]; then
 		ev event "$name $T fault kill-service"
-		on "$T" "sudo systemctl kill -s KILL hivemind.service; sudo systemctl stop hivemind.service" || ev event "$name $T fault-failed"
+		SSH_TIMEOUT=60 on "$T" "sudo systemctl kill -s KILL hivemind.service; sudo systemctl stop hivemind.service" || ev event "$name $T fault-failed"
 	else
 		ev event "$name $T fault poweroff"
 		SSH_TIMEOUT=6 on "$T" "sudo sh -c 'echo 1 > /proc/sys/kernel/sysrq; echo o > /proc/sysrq-trigger'" >/dev/null 2>&1 || true
@@ -274,7 +276,7 @@ ha_back() {
 	local name=$1 T=$2
 	if [ "$HA_FAULT" = service ]; then
 		ev event "$name $T fault start-service"
-		on "$T" "sudo systemctl start hivemind.service" || ev event "$name $T start-failed"
+		SSH_TIMEOUT=60 on "$T" "sudo systemctl start hivemind.service" || ev event "$name $T start-failed"
 	else
 		ev event "$name $T return-asked"
 		note "$name: start $T's machine now (SOAK_PREFIX=<prefix> soak-ec2.sh start $T); then: scenario.sh fault $name $T start"
@@ -496,21 +498,25 @@ quorum_loss() {
 # servers, a new leader may be elected. Ends converged, 30 s after the API
 # answered again at the earliest.
 service_restart() {
-	local name=service-restart T tf t now up_at=0 end
+	local name=service-restart T tf t now up_at=0 went=0 end
 	ha_begin "$name"
 	if [ "$SOAK_SERVERS" -gt 1 ]; then T=$(leader) || die "$name: no leader"; else T=$SERVER; fi
 	ev event "$name target $T"
 	tf=$(now_ms)
 	ev event "$name $T fault restart"
-	on "$T" "sudo systemctl restart hivemind.service" || ev event "$name $T restart-failed"
+	# in the background, so the loop sees the API go: the stop waits up to 10 s
+	# for the router's held streams (docs/routing.md), so 60 s for the command
+	(SSH_TIMEOUT=60 on "$T" "sudo systemctl restart hivemind.service" || ev event "$name $T restart-failed") &
 	end=$(($(date +%s) + 900))
 	while [ "$(date +%s)" -lt "$end" ]; do
 		t=$(now_ms)
 		now=$(date +%s)
 		ha_observe "$name"
-		[ "$up_at" != 0 ] || [ "$HAPI" != ok ] || {
+		[ "$HAPI" != fail ] || went=1
+		# back: answering after it was seen down (or 60 s on, if it never was)
+		[ "$up_at" != 0 ] || [ "$HAPI" != ok ] || { [ "$went" = 0 ] && [ "$now" -lt $((tf / 1000 + 60)) ]; } || {
 			up_at=$now
-			ev event "$name api-back ms_after_fault=$(($(now_ms) - tf))"
+			ev event "$name api-back ms_after_fault=$(($(now_ms) - tf)) seen_down=$went"
 		}
 		[ "$up_at" != 0 ] && [ "$HCONV" = yes ] && [ "$now" -ge $((up_at + 30)) ] && break
 		ha_tick "$t"
@@ -524,7 +530,10 @@ service_restart() {
 # holds about that many.
 steady() {
 	local secs=${1:-3600} wl=none
-	if [ "$WLOAD" = 1 ]; then WL_KEEP=${STEADY_KEEP:-100} "$HERE/wload.sh" start steady || die "steady: the write-load did not start"; fi
+	local tag=steady
+	if [ "$WLOAD" = 1 ]; then
+		tag=$("$HERE/wload.sh" tag steady) && WL_KEEP=${STEADY_KEEP:-100} "$HERE/wload.sh" start "$tag" || die "steady: the write-load did not start"
+	fi
 	ev mark "steady begin"
 	metrics_snap steady-begin
 	sleep "$secs"
@@ -532,8 +541,8 @@ steady() {
 	ev mark "steady end"
 	if [ "$WLOAD" = 1 ]; then
 		"$HERE/wload.sh" stop || true
-		if "$HERE/wload.sh" check steady; then wl=pass; else wl=FAIL; fi
-		[ "$WL_CLEAN" != 1 ] || "$HERE/wload.sh" clean steady || wl="$wl,clean-FAIL"
+		if "$HERE/wload.sh" check "$tag"; then wl=pass; else wl=FAIL; fi
+		[ "$WL_CLEAN" != 1 ] || "$HERE/wload.sh" clean "$tag" || wl="$wl,clean-FAIL"
 	fi
 	ev event "steady write-check $wl"
 }

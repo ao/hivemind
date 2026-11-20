@@ -32,7 +32,8 @@ WL=${2:?write-load dir}
 
 # name start end fault (Unix seconds)
 gawk '
-$3 == "scenario" && $5 == "begin" { s[$4] = $2 / 1000; order[++n] = $4; f[$4] = 0 }
+# a scenario run again: the last run counts
+$3 == "scenario" && $5 == "begin" { if (!($4 in s)) order[++n] = $4; s[$4] = $2 / 1000; f[$4] = 0; delete e[$4] }
 $3 == "event" && ($4 in s) && !($4 in e) && f[$4] == 0 && / fault / { f[$4] = $2 / 1000 }
 $3 == "scenario" && $5 == "end" && ($4 in s) && !($4 in e) { e[$4] = $2 / 1000 }
 END { for (i = 1; i <= n; i++) { w = order[i]; if (w in e) printf "%s %.3f %.3f %.3f\n", w, s[w], e[w], f[w] } }' "$LOG" |
@@ -99,7 +100,10 @@ END { for (i = 1; i <= n; i++) { w = order[i]; if (w in e) printf "%s %.3f %.3f 
 					print ""
 				}' "$WL/direct.log"
 		fi
-		if [ -s "$WL/$name.log" ]; then
+		# the write-load's tag in this window: the scenario's name, or NAME-r2, ... for a rerun
+		tag=$(gawk -v ws="$ws" -v we="$we" '$3 == "wl" && $4 == "start" && $2 / 1000 >= ws && $2 / 1000 <= we { t = $5 } END { print t }' "$LOG")
+		tag=${tag:-$name}
+		if [ -s "$WL/$tag.log" ]; then
 			gawk -v wf="$wf" '
 				function pct(p,   i) { i = int(p * na + 0.999999); if (i < 1) i = 1; if (i > na) i = na; return sprintf("%.0f", lat[i] * 1000) }
 				{
@@ -116,11 +120,11 @@ END { for (i = 1; i <= n; i++) { w = order[i]; if (w in e) printf "%s %.3f %.3f 
 					printf "\n"
 					for (k in ec) printf "- %d x %s\n", ec[k], k
 					if (bad) printf "\n"
-				}' "$WL/$name.log"
+				}' "$WL/$tag.log"
 		fi
 		echo "Write check:"
 		echo
-		grep -E " wl check $name |\bwl clean $name " "$LOG" | sed 's/^[^ ]* [^ ]* wl /- /' | cut -c1-300 || echo "- none"
+		grep -E " wl check $tag |\bwl clean $tag " "$LOG" | sed 's/^[^ ]* [^ ]* wl /- /' | cut -c1-300 || echo "- none"
 		echo
 		grep -E " event $name journal " "$LOG" | sed 's/^[^ ]* [^ ]* event [^ ]* /- /' || true
 		echo

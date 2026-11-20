@@ -392,6 +392,10 @@ server_listed() { [ -n "$(server_role "$1")" ]; }
 # servers_line: each server's view, "NAME[leader=... roles=...]", for a log line.
 servers_line() {
 	local s j v out=""
+	if [ "$SOAK_SERVERS" = 1 ]; then
+		echo "one server: $SERVER"
+		return 0
+	fi
 	for s in "${SRV_NAMES[@]}"; do
 		if port22 "$s" && j=$(servers_json "$s"); then v=$(view_of "$j"); else v="api=fail"; fi
 		out+="${s}[${v:-api=fail}] "
@@ -802,6 +806,10 @@ node_id_on() {
 		h=$(on "$1" hostname 2>/dev/null) || return 1
 		id=$(hma nodes --json 2>/dev/null | jq -r --arg h "$h" '[.[] | select(.server)] as $s | if ($s | length) == 1 then $s[0].id else ($s[] | select(.name == $h) | .id) end' | head -n 1)
 	fi
+	# with several servers, the ID hivemind servers gives the server at NAME's address
+	if { [ -z "$id" ] || [ "$id" = null ]; } && [ "$SOAK_SERVERS" -gt 1 ]; then
+		id=$(hma "servers --json" 2>/dev/null | jq -r --arg ip "$(ip_of "$1")" '.servers[] | select((.advertise // "" | sub(":[0-9]+$"; "")) == $ip) | .id' | head -n 1)
+	fi
 	[ -n "$id" ] && [ "$id" != null ] && echo "$id"
 }
 
@@ -913,6 +921,8 @@ ports_check() {
 	[ "${PORTS_CHECK:-1}" = 1 ] || return 0
 	[ "$SOAK_SERVERS" -gt 1 ] && ports+=" 4486"
 	[ "$SOAK_API_TLS" = 1 ] && ports+=" $API_PORT"
+	# PORTS_EXTRA: more ports to test, logged only
+	ports+=${PORTS_EXTRA:+ $PORTS_EXTRA}
 	[ -n "$ports" ] || return 0
 	on "$SERVER" "cat > /tmp/soak-listen.py" <<<"$REMOTE_LISTEN" || die "ports_check: listener to $SERVER"
 	on "$SERVER" "setsid nohup timeout 40 python3 /tmp/soak-listen.py $SERVER_IP$ports >/tmp/soak-listen.log 2>&1 </dev/null &" || die "ports_check: listener on $SERVER"
@@ -934,7 +944,7 @@ ports_check() {
 		done
 		ev ports-check "$n to $SERVER ($SERVER_IP):$line"
 	done
-	m=$(on "$SERVER" "cat /tmp/soak-listen.log; pkill -f '[s]oak-listen.py'; rm -f /tmp/soak-listen.py /tmp/soak-listen.log" 2>/dev/null | tr '\n' ' ')
+	m=$(on "$SERVER" "cat /tmp/soak-listen.log; pkill -f 'python3 /tmp/[s]oak-listen'; rm -f /tmp/soak-listen.py /tmp/soak-listen.log" 2>/dev/null | tr '\n' ' ') || true
 	[ -z "$m" ] || ev ports-check "listener said: $m"
 	[ -z "$bad" ] || die "ports_check: closed:$bad. The soak security group must allow TCP 4486 and $API_PORT from itself (aws ec2 authorize-security-group-ingress --group-id <hivemind-soak-sg> --ip-permissions 'IpProtocol=tcp,FromPort=4486,ToPort=4486,UserIdGroupPairs=[{GroupId=<hivemind-soak-sg>}]' 'IpProtocol=tcp,FromPort=$API_PORT,ToPort=$API_PORT,UserIdGroupPairs=[{GroupId=<hivemind-soak-sg>}]')"
 	ev ports-check "ok:$ports"

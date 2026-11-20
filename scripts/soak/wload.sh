@@ -15,6 +15,7 @@
 #   wload.sh fetch [TAG]       the logs to $SOAK_DIR/wl/
 #   wload.sh check TAG         every server's store against the writes the API
 #                              acknowledged; fails if one is missing anywhere
+#   wload.sh tag NAME          NAME, or NAME-r2, ..., the first tag not used yet
 #   wload.sh clean TAG         delete TAG's apps, through the client; then check
 #                              that every server's store has none
 #
@@ -22,7 +23,8 @@
 # private address, port 4483, and trusts the run's API CA. The client is
 # hivemind's own CLI with HIVEMIND_SERVER naming every server
 # (https://a:4483,https://b:4483,...; with one server, the one URL), the
-# token from a 0600 file in its client config.
+# token from a 0600 file in its client config. WL_SERVERS sets the list and
+# its order (the CLI tries them in order, docs/ha.md#the-api).
 #
 # The writes, one at a time, every $WL_EVERY_MS ms (default 1000), cycle
 # through:
@@ -54,7 +56,7 @@
 # (the data directory, with SQLite's VACUUM INTO; a follower would pass an API
 # request to the leader, so hivemind apps against each server reads the
 # leader's) and sqlite3 on the copy, the apps table's rows of TAG. It also
-# reads hivemind apps --json through the API. For each source:
+# reads GET /v1/apps through the API (the leader's store). For each source:
 #   - every acknowledged deploy's app is there with its WL_SEQ, unless an
 #     acknowledged delete followed;
 #   - every acknowledged scale's app has 2 replicas, unless a delete followed;
@@ -78,6 +80,8 @@ WL_KEEP=${WL_KEEP:-0}
 WL_CPU=${WL_CPU:-64}
 WL_PROBE_MS=${WL_PROBE_MS:-500}
 WL_CHECK_WAIT=${WL_CHECK_WAIT:-30}
+# the client's list of servers, in the order it tries them (default every server, in $NODES_FILE's order)
+WL_SERVERS=${WL_SERVERS:-$(api_urls)}
 LDIR=$SOAK_DIR/wl
 mkdir -p "$LDIR"
 
@@ -170,7 +174,7 @@ tag=$1
 . $d/env
 f=$d/$tag.clean.log
 for try in 1 2 3 4 5 6 7 8 9 10; do
-	l=$(timeout 70 $d/hivemind apps --json 2>/dev/null) && break
+	l=$(timeout 70 $d/hivemind status --json 2>/dev/null) && break
 	sleep 3
 done
 [ -n "$l" ] || exit 1
@@ -202,6 +206,24 @@ echo "#method $m"
 sqlite3 -separator ' ' "$t/hivemind.db" "SELECT name, generation, replicas, deleted, COALESCE(json_extract(spec, '\$.env.WL_SEQ'), '-') FROM apps WHERE name LIKE 'wl-$tag-%' ORDER BY name"
 EOF
 
+# GET /v1/apps on a server's API with the admin token (args: api_args in
+# lib.sh); the CLI of 2.2 has no apps command.
+read -r -d '' REMOTE_APPS <<'EOF' || true
+u=$1 tf=$2 ca=$3
+co=()
+[ "$ca" = - ] || co=(--cacert "$ca")
+printf 'header = "Authorization: Bearer %s"\n' "$(cat "$tf")" | curl -fsS -K - "${co[@]}" -m 30 "$u/v1/apps"
+EOF
+
+# push_scripts: the loop, the probe and the clean, as this harness has them, to the client.
+push_scripts() {
+	cl "sudo tee $WDIR/wl.sh >/dev/null && sudo chmod 755 $WDIR/wl.sh" <<<"$WL_LOOP" &&
+		cl "sudo tee $WDIR/wl-probe.sh >/dev/null && sudo chmod 755 $WDIR/wl-probe.sh" <<<"$WL_PROBE" &&
+		cl "sudo tee $WDIR/wl-clean.sh >/dev/null && sudo chmod 755 $WDIR/wl-clean.sh" <<<"$WL_CLEAN" &&
+		cl "sudo sed -i 's|^export HIVEMIND_SERVER=.*|export HIVEMIND_SERVER=$WL_SERVERS|' $WDIR/env" ||
+		die "wload: the scripts to $WLH"
+}
+
 client_setup() {
 	local want got
 	want=$(sha256sum "$BIN" | cut -d' ' -f1)
@@ -211,7 +233,7 @@ client_setup() {
 	[ "$got" = "$want" ] || die "wload: $WLH: CLI digest $got, want $want"
 	on "$SERVER" "sudo cat $DATA/admin.token" | cl "sudo sh -c 'umask 077; cat > $WDIR/admin.token'" || die "wload: the admin token to $WLH"
 	cl "sudo tee $WDIR/api-ca.pem >/dev/null" <"$API_TLS_DIR/ca.crt" || die "wload: the API's CA to $WLH"
-	cl "sudo bash -s $WDIR '$(api_urls)'" <<'EOF' || die "wload: the client's config on $WLH"
+	cl "sudo bash -s $WDIR '$WL_SERVERS'" <<'EOF' || die "wload: the client's config on $WLH"
 set -e
 d=$1
 umask 077
@@ -219,12 +241,10 @@ printf 'token-file: %s\nca-cert: %s\n' "$d/admin.token" "$d/api-ca.pem" >"$d/cli
 printf 'export HIVEMIND_SERVER=%s\nexport HIVEMIND_CLIENT_CONFIG=%s\n' "$2" "$d/client.yaml" >"$d/env"
 printf 'header = "Authorization: Bearer %s"\n' "$(cat "$d/admin.token")" >"$d/curlrc"
 EOF
-	cl "sudo tee $WDIR/wl.sh >/dev/null && sudo chmod 755 $WDIR/wl.sh" <<<"$WL_LOOP"
-	cl "sudo tee $WDIR/wl-probe.sh >/dev/null && sudo chmod 755 $WDIR/wl-probe.sh" <<<"$WL_PROBE"
-	cl "sudo tee $WDIR/wl-clean.sh >/dev/null && sudo chmod 755 $WDIR/wl-clean.sh" <<<"$WL_CLEAN"
+	push_scripts
 	local out
 	out=$(cl "sudo bash -c '. $WDIR/env && $WDIR/hivemind version && $WDIR/hivemind nodes --json | jq length'" 2>&1) || die "wload: a call through the client on $WLH failed: $(tr '\n' ' ' <<<"$out")"
-	ev wl "client $WLH servers=$(api_urls) cli=\"$(head -n 1 <<<"$out")\" nodes=$(tail -n 1 <<<"$out")"
+	ev wl "client $WLH servers=$WL_SERVERS cli=\"$(head -n 1 <<<"$out")\" nodes=$(tail -n 1 <<<"$out")"
 }
 
 start() {
@@ -232,8 +252,21 @@ start() {
 	tag_ok "$tag"
 	cl "sudo test ! -e $WDIR/$tag.log" || die "wload: $tag has a log already; use another tag"
 	cl "! pgrep -f '$WDIR/[w]l.sh ' >/dev/null" || die "wload: a write loop runs already; wload.sh stop first"
-	cl "sudo rm -f $WDIR/wl.stop && sudo setsid nohup $WDIR/wl.sh $tag $WL_EVERY_MS $WL_KEEP $WL_CPU >/dev/null 2>&1 </dev/null &" || die "wload: start on $WLH"
-	ev wl "start $tag every_ms=$WL_EVERY_MS keep=$WL_KEEP cpu=$WL_CPU servers=$(api_urls)"
+	push_scripts
+	# one command in the background, not a list: a list's subshell would keep the session's output open
+	cl "sudo rm -f $WDIR/wl.stop; sudo setsid nohup $WDIR/wl.sh $tag $WL_EVERY_MS $WL_KEEP $WL_CPU >/dev/null 2>&1 </dev/null &" || die "wload: start on $WLH"
+	ev wl "start $tag every_ms=$WL_EVERY_MS keep=$WL_KEEP cpu=$WL_CPU servers=$WL_SERVERS"
+}
+
+# free_tag NAME: NAME, or NAME-r2, NAME-r3, ... the first without a log on the client.
+free_tag() {
+	local k=1 t=$1
+	tag_ok "$1"
+	while cl "sudo test -e $WDIR/$t.log"; do
+		k=$((k + 1))
+		t=$1-r$k
+	done
+	echo "$t"
 }
 
 # stop: the loop ends after the write in flight (a CLI call gives up after
@@ -246,8 +279,9 @@ stop() {
 
 probe_start() {
 	cl "pgrep -f '$WDIR/[w]l-probe.sh' >/dev/null" && return 0
+	push_scripts
 	cl "sudo setsid nohup $WDIR/wl-probe.sh $WL_PROBE_MS >/dev/null 2>&1 </dev/null &" || die "wload: probe on $WLH"
-	ev wl "probe start every_ms=$WL_PROBE_MS servers=$(api_urls)"
+	ev wl "probe start every_ms=$WL_PROBE_MS servers=$WL_SERVERS"
 }
 
 probe_stop() {
@@ -283,7 +317,8 @@ store_rows() {
 # api_rows TAG FILE: the same through the API (the leader's store).
 api_rows() {
 	local j
-	j=$(SSH_TIMEOUT=60 hma "apps --json") || return 1
+	local s
+	s=$(api_server) && j=$(SSH_TIMEOUT=60 on "$s" "sudo bash -s $(api_args "$s")" <<<"$REMOTE_APPS") || return 1
 	{
 		echo "#method api"
 		jq -r --arg p "wl-$1-" '(if type == "array" then . else (.apps // []) end)[] | select(.name | startswith($p)) | "\(.name) \(.generation) \(.replicas) 0 \(.spec.env.WL_SEQ // "-")"' <<<"$j" | sort
@@ -392,8 +427,9 @@ check() {
 clean() {
 	local tag=$1 s f left=0 n
 	tag_ok "$tag"
+	push_scripts
 	SSH_TIMEOUT=1800 cl "sudo $WDIR/wl-clean.sh $tag" || die "wload: clean $tag: the apps could not be listed"
-	fetch "$tag"
+	fetch
 	n=$(awk '$6 == "rc=0"' "$LDIR/$tag.clean.log" 2>/dev/null | wc -l)
 	# the deletes finish in the store when the replicas are gone; pending ones have none
 	sleep 5
@@ -417,6 +453,7 @@ probe-stop) probe_stop ;;
 status) status ;;
 fetch) fetch "${1:-}" ;;
 check) check "${1:?tag}" ;;
+tag) free_tag "${1:?name}" ;;
 clean) clean "${1:?tag}" ;;
 eval) evaluate "${1:?tag}" "${2:?rows file}" ;;
 *)
