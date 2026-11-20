@@ -16,7 +16,7 @@ The 2.3.0 CLI works with a 2.2.0 server for the commands 2.2.0 has. `hivemind se
 
 In a cluster of one, only `hivemind.db` changes, by the migration. A worker's files stay as 2.2.0 wrote them.
 
-Once a second server joins, every server has `raft/`, with the Raft log in `raft/raft.db` and its snapshots, and each server that joined has `server.json` and the CA files it received ([security](security.md#files)). A worker of 2.3.0 adds `servers`, the list of the servers' node listeners, to its `node.json`. A 2.2.0 binary refuses that file (`node.json is not valid: json: unknown field "servers"`).
+Once a second server joins, every server has `raft/`, with the Raft log in `raft/raft.db` and its snapshots, and each server that joined has `server.json` and the CA files it received ([security](security.md#files)). A worker of 2.3.0 adds `servers`, the list of the servers' node listeners, to its `node.json`. A 2.2.0 binary refuses that file (`node.json is not valid: json: unknown field "servers"`), calls the data directory damaged and says to join again; the directory is fine, and the 2.3.0 binary runs it.
 
 ### Workers of 2.2.0
 
