@@ -139,6 +139,9 @@ type swapTransport struct {
 	current   atomic.Pointer[string]
 	onServers atomic.Pointer[func([]string)]
 	others    sync.Map // host:port -> *otherTransport
+	// home, if set, says when a request starts at the server of its URL
+	// rather than at current (WithHome).
+	home func() bool
 }
 
 type otherTransport struct {
@@ -301,6 +304,13 @@ func noLeader(resp *http.Response) bool {
 // moves to the next one when a server does not answer or answers that no
 // server leads, as long as the request's body can be sent again. It
 // returns the server that answered.
+//
+// A request whose context ends before a server has given it a connection
+// makes the next request start at the server after that one: a server
+// whose process is stopped takes the TCP connection in its kernel and
+// never answers the TLS handshake, and a caller that bounds its requests
+// more tightly than the handshake, as a router without a table does,
+// would otherwise try it first every time (ninth soak).
 func (s *swapTransport) send(r *http.Request) (*http.Response, string, error) {
 	list := s.serverList()
 	if len(list) < 2 {
@@ -308,9 +318,13 @@ func (s *swapTransport) send(r *http.Request) (*http.Response, string, error) {
 		return resp, r.URL.Host, err
 	}
 	start := 0
-	if p := s.current.Load(); p != nil {
+	from := s.current.Load()
+	if s.home != nil && s.home() {
+		from = &r.URL.Host
+	}
+	if from != nil {
 		for i, h := range list {
-			if h == *p {
+			if h == *from {
 				start = i
 			}
 		}
@@ -337,7 +351,14 @@ func (s *swapTransport) send(r *http.Request) (*http.Response, string, error) {
 				req.Body = b
 			}
 		}
+		var connected atomic.Bool
+		req = req.WithContext(httptrace.WithClientTrace(req.Context(), &httptrace.ClientTrace{
+			GotConn: func(httptrace.GotConnInfo) { connected.Store(true) }}))
 		resp, err := s.transportFor(host).RoundTrip(req)
+		if err != nil && !connected.Load() && r.Context().Err() != nil {
+			next := list[(start+i+1)%len(list)]
+			s.current.Store(&next)
+		}
 		if err == nil && !noLeader(resp) {
 			if lastResp != nil {
 				lastResp.Body.Close()
@@ -409,6 +430,16 @@ func WithServers(list []string) ClientOption {
 			c.tr.servers.Store(&ok)
 		}
 	}
+}
+
+// WithHome makes every request start at the server of the client's base
+// URL, rather than at the one that answered last, while f reports true. A
+// server's own node passes its own node listener as the base, and whether
+// it knows a leader: its listener then passes each request to the leader
+// it knows, and a request does not go first to another server that may be
+// gone. f must not block.
+func WithHome(f func() bool) ClientOption {
+	return func(c *Client) { c.tr.home = f }
 }
 
 // OnServers makes the client call f with each new list of servers a reply

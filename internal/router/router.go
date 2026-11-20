@@ -39,6 +39,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/caddyserver/certmagic"
@@ -153,6 +154,8 @@ type Router struct {
 	// wholeWait after Serve began; from New when Config.Whole is nil.
 	whole     chan struct{}
 	wholeOnce sync.Once
+	// hasTable is set once SetTable has given the router a table.
+	hasTable atomic.Bool
 	// wholeWait is WholeWait, and shutdownWait shutdownTimeout, but for
 	// tests.
 	wholeWait, shutdownWait time.Duration
@@ -389,28 +392,66 @@ func waited(err error) error {
 	return err
 }
 
+// pollTimeout bounds one read of the poll while the router has a table.
+const pollTimeout = 10 * time.Second
+
 // poll reads the table every Poll until Shutdown. A failed read keeps the
 // last table, so the router goes on serving while the server is away.
+//
+// A router that has no table yet, as one that started while no server led,
+// reads it every warmRetry instead, each read bounded by readAttempt, and
+// the bound doubled after each read that ran out of it, up to pollTimeout,
+// for a server that is slow rather than gone. In the ninth soak such a
+// router on a server gave its first poll the 10 s of pollTimeout, all of
+// it spent on another server whose process was stopped, though its own
+// server led after 3 s of it: it failed every TLS handshake for those
+// 10 s. A read that gives way lets the next one, on a server, read the
+// store once this server leads.
 func (rt *Router) poll() {
 	t := time.NewTicker(rt.cfg.Poll)
 	defer t.Stop()
 	failing := false
+	bound := readAttempt
 	for {
-		ctx, cancel := context.WithTimeout(rt.ctx, 10*time.Second)
+		has := rt.hasTable.Load()
+		limit := pollTimeout
+		if !has {
+			limit = bound
+		}
+		ctx, cancel := context.WithTimeout(rt.ctx, limit)
 		tab, err := rt.cfg.Routes(ctx)
+		ranOut := ctx.Err() != nil
 		cancel()
 		switch {
 		case err != nil && rt.ctx.Err() == nil:
 			if !failing {
-				rt.log.Warn("reading the routing table; serving the last one", "err", err)
+				if has {
+					rt.log.Warn("reading the routing table; serving the last one", "err", err)
+				} else {
+					rt.log.Warn("reading the routing table; the router has none yet, and reads it again shortly", "err", err)
+				}
 			}
 			failing = true
+			if ranOut {
+				bound = min(2*bound, pollTimeout)
+			}
 		case err == nil:
 			if failing {
 				rt.log.Info("reading the routing table again")
 			}
 			failing = false
+			bound = readAttempt
 			rt.SetTable(tab)
+		}
+		if err != nil && !has {
+			retry := time.NewTimer(warmRetry)
+			select {
+			case <-rt.ctx.Done():
+				retry.Stop()
+				return
+			case <-retry.C:
+				continue
+			}
 		}
 		select {
 		case <-rt.ctx.Done():
@@ -422,10 +463,12 @@ func (rt *Router) poll() {
 
 // warmTimeout bounds what a starting router waits for before it takes TLS
 // connections: the table, read again every warmRetry while a read fails,
-// and loading its hosts' certificates from storage.
+// and loading its hosts' certificates from storage. readAttempt bounds
+// each of those reads.
 const (
 	warmTimeout = 5 * time.Second
 	warmRetry   = 250 * time.Millisecond
+	readAttempt = time.Second
 )
 
 // warm reads the table, loads from storage the certificate of each of its
@@ -438,6 +481,13 @@ const (
 // table, and failed every TLS handshake for 1.9 s, until its poll read the
 // table from the new leader. A table that cannot be read by then, as when
 // the server is away, leaves the router to its poll, as before.
+//
+// Each read gives way after readAttempt, so that one stuck on a server
+// that does not answer leaves time for the next. In the ninth soak, a
+// restarted leader's router gave its one read the whole of warmTimeout,
+// spent on a server whose process was stopped, though its own server led
+// after 1.7 s, and the next read, which would have read that server's
+// store, came at the end.
 func (rt *Router) warm() {
 	ctx, cancel := context.WithTimeout(rt.ctx, warmTimeout)
 	defer cancel()
@@ -445,7 +495,10 @@ func (rt *Router) warm() {
 	var err error
 	tries := 1
 	for ; ; tries++ {
-		if tab, err = rt.cfg.Routes(ctx); err == nil {
+		actx, acancel := context.WithTimeout(ctx, readAttempt)
+		tab, err = rt.cfg.Routes(actx)
+		acancel()
+		if err == nil {
 			break
 		}
 		t := time.NewTimer(warmRetry)
@@ -641,6 +694,7 @@ func (rt *Router) readTable(at time.Time, done chan struct{}) {
 // hosts, and stops managing hosts that left. Serve calls it after each read;
 // tests call it directly.
 func (rt *Router) SetTable(tab Table) {
+	rt.hasTable.Store(true)
 	rt.proxy.setTable(tab)
 	rt.mu.Lock()
 	var add []string

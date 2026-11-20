@@ -332,7 +332,14 @@ func (h *haServe) ownClient() (*nodeapi.Client, error) {
 			}
 		}
 	}
-	return nodeapi.NewClient("https://"+self, tlsCfg, nodeapi.WithVersion(version), nodeapi.WithServers(list))
+	// While this server knows a leader, its own listener passes each
+	// request to it: a request starts there, not at the server that
+	// answered last, which may have gone since.
+	home := func() bool {
+		n := h.node.Load()
+		return n != nil && n.HasLeader()
+	}
+	return nodeapi.NewClient("https://"+self, tlsCfg, nodeapi.WithVersion(version), nodeapi.WithServers(list), nodeapi.WithHome(home))
 }
 
 // onLeader runs while this server leads a cluster of several. A new leader
@@ -649,7 +656,11 @@ var (
 
 // routes is the router's table on a server: the store's while it leads,
 // the leader's through the node API otherwise, so that a follower's router
-// keeps its last table, as a worker's does, while no server leads.
+// keeps its last table, as a worker's does, while no server leads. Each
+// read looks again: the router bounds its reads while it has no table, so
+// that one stuck on a server that does not answer gives way to the next,
+// which reads the store once this server leads, and goes through this
+// server's own listener to the leader once it knows one (ownClient).
 func (h *haServe) routes(local func(context.Context) (router.Table, error)) func(context.Context) (router.Table, error) {
 	var missing *nodeapi.MissingRoute
 	return func(ctx context.Context) (router.Table, error) {
