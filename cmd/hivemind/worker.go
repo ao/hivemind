@@ -15,8 +15,10 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"time"
 
@@ -52,6 +54,10 @@ type workerState struct {
 	NodeID string    `json:"node_id"`
 	Server string    `json:"server"` // host:port of the server's cluster port
 	Joined time.Time `json:"joined"`
+	// Servers is every server of a cluster of several, host:port of each
+	// node listener, as the servers last named them (docs/ha.md#workers).
+	// The worker uses the first that answers. Empty for one server.
+	Servers []string `json:"servers,omitempty"`
 }
 
 // joinedWorker is a worker's state, read from disk and checked.
@@ -96,6 +102,18 @@ overrides the file. A config file that exists, such as one given with
 --config, is not changed: join refuses worker flags then, before it uses the
 token. A worker has no API listener, so --advertise does not apply to it.
 
+--role server joins this machine as another server of the cluster
+(docs/ha.md), with a token from hivemind join-token --role server and its own
+--advertise address, which the other servers and the workers must reach
+on --cluster-port (4484), the join port above it and the server port two
+above it (4486). The server it reaches turns Raft on if the cluster had one
+server, and adds this one; the reply has this server's node ID and the
+cluster CA with its key, which join writes to the data directory with
+server.json. join then runs the server in the foreground, as hivemind serve
+does: it gets the cluster's store from the leader, and becomes a voter once
+it has caught up. Start it again later with hivemind serve. The admin token
+is not sent: give this server's CLI the cluster's token with HIVEMIND_TOKEN.
+
 The worker registers the local address of its connection to the server as
 its private address; its routed replicas publish their ports there.
 --route-addr <ip> also runs the HTTPS router on this machine, with
@@ -107,11 +125,22 @@ certificates through the server.`,
 			if err != nil {
 				return err
 			}
+			role, _ := cmd.Flags().GetString("role")
+			switch role {
+			case "worker":
+			case "server":
+				return runJoinServer(cmd, cfg, args[0])
+			default:
+				return fmt.Errorf("--role %q must be worker or server", role)
+			}
 			if cfg.Advertise != "" {
-				return errors.New("--advertise does not apply to join: a worker runs no listener")
+				return errors.New("--advertise does not apply to join: a worker runs no listener (join --role server takes it, for a server)")
 			}
 			if cfg.ClusterAddr != "" {
 				return errors.New("--cluster-addr does not apply to join: a worker runs no cluster listener")
+			}
+			if cmd.Flags().Changed("cluster-port") {
+				return errors.New("--cluster-port does not apply to join: a worker runs no cluster listener; give the server's cluster port in <server>")
 			}
 			token, _ := cmd.Flags().GetString("token")
 			if token == "" {
@@ -163,8 +192,7 @@ certificates through the server.`,
 	config.BindWorker(cmd.Flags(), config.Options{})
 	cmd.Flags().String("token", "", "join token from hivemind join-token on the server")
 	_ = cmd.Flags().SetAnnotation("token", noEnvAnnotation, []string{"true"})
-	cmd.Flags().Lookup("advertise").Hidden = true
-	cmd.Flags().Lookup("cluster-addr").Hidden = true
+	cmd.Flags().String("role", "worker", "worker, or server for another server of the cluster, with a token from join-token --role server")
 	return cmd
 }
 
@@ -557,10 +585,16 @@ func runWorker(ctx context.Context, cfg *config.Config, log *slog.Logger, rt run
 	keeper := newTrustKeeper(cfg.DataDir, w.state.NodeID, host, w.trust, w.holder, log.With("component", "ca"))
 	keeper.renewed() // ca.crt in its order, after a crash between a renewal and its reorder
 	client, err := nodeapi.NewClient("https://"+w.state.Server, w.tlsCfg, nodeapi.WithVersion(version),
-		nodeapi.WithEpochGuard(workerEpochGuard(cfg.DataDir, log)), nodeapi.WithCATrust(keeper.header))
+		nodeapi.WithEpochGuard(workerEpochGuard(cfg.DataDir, log)), nodeapi.WithCATrust(keeper.header),
+		nodeapi.WithServers(w.state.Servers))
 	if err != nil {
 		return err
 	}
+	// A cluster of several servers names them on every reply; the worker
+	// keeps the list in node.json, so that it has them after a restart.
+	saver := &serversSaver{dir: cfg.DataDir, state: w.state, log: log}
+	client.OnServers(saver.save)
+	defer client.OnServers(nil)
 	keeper.client = client
 	client.OnCA(keeper.seen)
 	defer client.OnCA(nil)
@@ -891,4 +925,31 @@ func (w workerSource) RenewLease(ctx context.Context, id string) error {
 func (w workerSource) StatusForNode(ctx context.Context, id string) ([]store.Status, error) {
 	sts, err := w.client.StatusForNode(ctx, id)
 	return sts, w.check(err)
+}
+
+// serversSaver writes the server list a reply named to node.json, in the
+// background, the latest list last.
+type serversSaver struct {
+	dir   string
+	log   *slog.Logger
+	mu    sync.Mutex
+	state workerState
+}
+
+func (s *serversSaver) save(list []string) {
+	go func() {
+		s.mu.Lock()
+		defer s.mu.Unlock()
+		if slices.Equal(s.state.Servers, list) {
+			return
+		}
+		next := s.state
+		next.Servers = list
+		if err := replaceWorkerState(s.dir, next); err != nil {
+			s.log.Warn("keeping the cluster's servers in node.json", "err", err)
+			return
+		}
+		s.state = next
+		s.log.Info("the cluster has several servers; this worker uses the first that answers", "servers", strings.Join(list, ","))
+	}()
 }

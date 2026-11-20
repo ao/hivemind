@@ -1,0 +1,827 @@
+package main
+
+import (
+	"context"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"io/fs"
+	"log/slog"
+	"net"
+	"net/http"
+	"os"
+	"path/filepath"
+	"strconv"
+	"strings"
+	"sync"
+	"sync/atomic"
+	"time"
+
+	"github.com/spf13/cobra"
+
+	"github.com/ao/hivemind/internal/agent"
+	"github.com/ao/hivemind/internal/auth"
+	"github.com/ao/hivemind/internal/carotate"
+	"github.com/ao/hivemind/internal/cluster"
+	"github.com/ao/hivemind/internal/config"
+	"github.com/ao/hivemind/internal/ha"
+	"github.com/ao/hivemind/internal/nodeapi"
+	"github.com/ao/hivemind/internal/pki"
+	"github.com/ao/hivemind/internal/router"
+	"github.com/ao/hivemind/internal/runtime"
+	"github.com/ao/hivemind/internal/runtime/docker"
+	"github.com/ao/hivemind/internal/server"
+	"github.com/ao/hivemind/internal/store"
+	"github.com/ao/hivemind/internal/tlsstore"
+)
+
+// A cluster of several servers (docs/ha.md): what serve runs for it.
+
+// serverStateFile is server.json, in the data directory of a server that
+// joined a cluster with hivemind join --role server: its node ID and the
+// servers it joined. A server that init made has none.
+const serverStateFile = "server.json"
+
+// serverState is server.json.
+type serverState struct {
+	NodeID  string               `json:"node_id"`
+	Joined  time.Time            `json:"joined"`
+	Servers []nodeapi.ServerInfo `json:"servers"`
+}
+
+// errNotJoinedServer means the data directory holds no joined server.
+var errNotJoinedServer = errors.New("this machine has not joined a cluster as a server")
+
+func readServerState(dir string) (serverState, error) {
+	var st serverState
+	raw, err := os.ReadFile(filepath.Join(dir, serverStateFile))
+	if errors.Is(err, fs.ErrNotExist) {
+		return st, errNotJoinedServer
+	}
+	if err != nil {
+		return st, err
+	}
+	if err := json.Unmarshal(raw, &st); err != nil {
+		return st, fmt.Errorf("%s is not valid: %w", serverStateFile, err)
+	}
+	if err := pki.ValidateNodeID(st.NodeID); err != nil {
+		return st, fmt.Errorf("%s: %w", serverStateFile, err)
+	}
+	return st, nil
+}
+
+// writeServerState writes server.json, mode 0600, with O_EXCL.
+func writeServerState(dir string, st serverState) error {
+	b, err := json.MarshalIndent(st, "", "  ")
+	if err != nil {
+		return err
+	}
+	f, err := os.OpenFile(filepath.Join(dir, serverStateFile), os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
+	if err != nil {
+		return err
+	}
+	if _, err := f.Write(append(b, '\n')); err != nil {
+		f.Close()
+		return err
+	}
+	if err := f.Sync(); err != nil {
+		f.Close()
+		return err
+	}
+	return f.Close()
+}
+
+// startingReplicator is the store's replicator on a server of a cluster of
+// several until Raft runs: it refuses every write, so that nothing writes
+// the store but the log.
+type startingReplicator struct{}
+
+func (startingReplicator) CanWrite() (uint64, error) {
+	return 0, fmt.Errorf("%w: this server is starting", store.ErrNotLeader)
+}
+
+func (startingReplicator) Replicate(context.Context, uint64, []byte) error {
+	return fmt.Errorf("%w: this server is starting", store.ErrNotLeader)
+}
+
+// leaderWork is what only the leader runs: the sweep, rollouts and drains,
+// and the CA rotation manager's run. A cluster of one runs it from the
+// start; a server of several from when it leads, until it stops.
+type leaderWork struct {
+	run     func(ctx context.Context, started time.Time)
+	mu      sync.Mutex
+	cancel  context.CancelFunc
+	done    chan struct{}
+	started atomic.Int64
+}
+
+// start runs the work from started, unless it runs already; it reports
+// whether it started it.
+func (l *leaderWork) start(started time.Time) bool {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	if l.cancel != nil {
+		return false
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	l.cancel, l.done = cancel, make(chan struct{})
+	l.started.Store(started.UnixNano())
+	go func(done chan struct{}) {
+		defer close(done)
+		l.run(ctx, started)
+	}(l.done)
+	return true
+}
+
+// stop ends the work, and waits for it.
+func (l *leaderWork) stop() {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	if l.cancel == nil {
+		return
+	}
+	l.cancel()
+	<-l.done
+	l.cancel, l.done = nil, nil
+}
+
+func (l *leaderWork) running() bool {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return l.cancel != nil
+}
+
+// since is when the work last started.
+func (l *leaderWork) since() time.Time { return time.Unix(0, l.started.Load()) }
+
+// haServe holds what serve runs for a cluster of several servers. Its node
+// is nil in a cluster of one, until a server joins.
+type haServe struct {
+	cfg      *config.Config
+	log      *slog.Logger
+	st       *store.Store
+	rot      *carotate.Manager
+	nodes    *cluster.Cluster
+	holder   *cluster.HAHolder
+	selfID   string
+	hostname string
+	nodeAddr string
+	rt       runtime.Runtime
+	seeds    []string
+	work     *leaderWork
+	// fatal takes an error that stops serve.
+	fatal chan error
+
+	node   atomic.Pointer[ha.Node]
+	remote atomic.Pointer[nodeapi.Client]
+	// mu serialises turning Raft on and the server joins.
+	mu sync.Mutex
+	// handlers is what forwarded requests reach once this server leads.
+	handlers ha.Handlers
+	// extras starts what a server of several runs beside the leader's
+	// work: its node's log requests and router counters through the node
+	// API. Set by serve.
+	extras func(c *nodeapi.Client)
+}
+
+// leader reports whether this server writes: always in a cluster of one.
+func (h *haServe) leader() bool {
+	n := h.node.Load()
+	return n == nil || n.IsLeader()
+}
+
+func (h *haServe) raftPort() int { return h.cfg.ClusterPort + 2 }
+
+func (h *haServe) haConfig() ha.Config {
+	return ha.Config{DataDir: h.cfg.DataDir, Store: h.st, ID: h.selfID, Advertise: h.cfg.Advertise, Bind: h.nodeAddr,
+		Port: h.raftPort(), Cert: h.nodes.CertHolder(), Trust: h.rot.Accept(), Seeds: h.seeds,
+		Removed: func(id string) bool {
+			removed, err := h.st.IsNodeRemoved(context.Background(), id)
+			return err == nil && removed
+		},
+		OnLeader: h.onLeader,
+		Fatal: func(err error) {
+			select {
+			case h.fatal <- err:
+			default:
+			}
+		},
+		Logger: h.log.With("component", "raft")}
+}
+
+// open starts Raft on a server that has been in a cluster of several.
+func (h *haServe) open() error {
+	n, err := ha.Open(h.haConfig())
+	if err != nil {
+		return err
+	}
+	h.started(n)
+	return nil
+}
+
+// enable turns Raft on in this cluster of one, at its first server join.
+func (h *haServe) enable(ctx context.Context) (*ha.Node, error) {
+	if n := h.node.Load(); n != nil {
+		return n, nil
+	}
+	if h.cfg.Advertise == "" {
+		return nil, fmt.Errorf("%w: this server runs without --advertise", store.ErrConflict)
+	}
+	h.log.Info("a server joins: this cluster of one turns Raft on, with its store as the log's first snapshot; writes go through the log from now on")
+	n, err := ha.Enable(ctx, h.haConfig())
+	if err != nil {
+		return nil, fmt.Errorf("turning Raft on: %w", err)
+	}
+	h.started(n)
+	return n, nil
+}
+
+// started makes n the cluster's Raft node: the listeners pass requests
+// to the leader through it, it serves the requests passed to this server,
+// and this server's own node reaches the leader through the node API.
+func (h *haServe) started(n *ha.Node) {
+	n.SetHandlers(h.handlers)
+	h.node.Store(n)
+	h.holder.Set(n)
+	c, err := h.ownClient()
+	if err != nil {
+		h.log.Error("this server's own node cannot reach the node API", "err", err)
+	} else {
+		h.remote.Store(c)
+		if h.extras != nil {
+			h.extras(c)
+		}
+	}
+	go h.watchRemoved(n)
+}
+
+// watchRemoved stops serve once this server is removed from the cluster.
+func (h *haServe) watchRemoved(n *ha.Node) {
+	t := time.NewTicker(5 * time.Second)
+	defer t.Stop()
+	for range t.C {
+		if n.Removed() {
+			select {
+			case h.fatal <- &exitError{code: exitRemoved, err: fmt.Errorf("server %s was removed from the cluster's servers (hivemind server remove); "+
+				"its containers keep running. To use this machine as a server again, give it an empty --data-dir and a new server join token", h.selfID)}:
+			default:
+			}
+			return
+		}
+	}
+}
+
+// ownClient is the node API client of this server's own node: its server
+// certificate, the cluster CA, and every server, this one first.
+func (h *haServe) ownClient() (*nodeapi.Client, error) {
+	host := h.cfg.Advertise
+	tlsCfg, err := pki.ClientTLSConfigTrust(h.rot.Accept().Load(), h.nodes.CertHolder(), host)
+	if err != nil {
+		return nil, err
+	}
+	self := net.JoinHostPort(host, strconv.Itoa(h.cfg.ClusterPort))
+	list := []string{self}
+	if servers, err := h.st.ListServers(context.Background()); err == nil {
+		for _, s := range servers {
+			if s.ID != h.selfID {
+				list = append(list, s.NodeAddr())
+			}
+		}
+	}
+	return nodeapi.NewClient("https://"+self, tlsCfg, nodeapi.WithVersion(version), nodeapi.WithServers(list))
+}
+
+// onLeader runs while this server leads a cluster of several. A new leader
+// sets the start grace, as serve does at its start, so that the nodes that
+// were up wait for their first report to it, and registers its own node.
+func (h *haServe) onLeader(ctx context.Context) {
+	if !h.work.running() {
+		started := time.Now()
+		if err := h.st.SetStarted(ctx, started, h.cfg.StartGrace); err != nil && ctx.Err() == nil {
+			h.log.Error("setting the start grace as the new leader", "err", err)
+		}
+		if err := h.upsertOwnNode(ctx); err != nil && ctx.Err() == nil {
+			h.log.Warn("registering this server's own node as the new leader", "err", err)
+		}
+		noteWaiting(ctx, h.st, h.cfg.StartGrace, h.log)
+		h.work.start(started)
+	}
+	<-ctx.Done()
+	h.work.stop()
+}
+
+// upsertOwnNode registers this server's node in the store, as serve does
+// at its start in a cluster of one.
+func (h *haServe) upsertOwnNode(ctx context.Context) error {
+	info, err := h.rt.Info(ctx)
+	if err != nil {
+		return err
+	}
+	return h.st.UpsertNode(ctx, store.Node{ID: h.selfID, Name: h.hostname, CPU: info.NCPU, Memory: info.MemTotal, Address: h.nodeAddr,
+		Version: nodeapi.CleanVersion(version)})
+}
+
+// register registers this server's node through the node API, as a worker
+// does, when it is not the leader.
+func (h *haServe) register(ctx context.Context) error {
+	c := h.remote.Load()
+	if c == nil {
+		return errors.New("no node API client")
+	}
+	info, err := h.rt.Info(ctx)
+	if err != nil {
+		return err
+	}
+	return c.Register(ctx, h.selfID, nodeapi.Register{Name: h.hostname, CPU: info.NCPU, Memory: info.MemTotal, Address: h.nodeAddr})
+}
+
+// joinServer admits a server (cluster.ServerJoiner), on the leader.
+func (h *haServe) joinServer(ctx context.Context, id string, req nodeapi.JoinServerRequest) (nodeapi.JoinServerReply, error) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	n, err := h.enable(ctx)
+	if err != nil {
+		return nodeapi.JoinServerReply{}, err
+	}
+	if !n.IsLeader() {
+		return nodeapi.JoinServerReply{}, store.ErrNotLeader
+	}
+	servers, err := h.st.ListServers(ctx)
+	if err != nil {
+		return nodeapi.JoinServerReply{}, err
+	}
+	if len(servers) >= store.MaxServers {
+		return nodeapi.JoinServerReply{}, fmt.Errorf("%w: the cluster has %d servers, the most it takes", store.ErrConflict, len(servers))
+	}
+	if !hasServer(servers, h.selfID) {
+		if err := h.st.PutServer(ctx, store.Server{ID: h.selfID, Advertise: h.cfg.Advertise, NodePort: h.cfg.ClusterPort, RaftAddr: n.Addr()}); err != nil {
+			return nodeapi.JoinServerReply{}, err
+		}
+	}
+	raftAddr := ha.RaftAddr(req.Advertise, req.NodePort+2)
+	for _, s := range servers {
+		if s.Advertise == req.Advertise && s.NodePort == req.NodePort {
+			return nodeapi.JoinServerReply{}, fmt.Errorf("%w: server %s already advertises %s", store.ErrConflict, s.ID, s.NodeAddr())
+		}
+	}
+	if err := h.st.PutServer(ctx, store.Server{ID: id, Advertise: req.Advertise, NodePort: req.NodePort, RaftAddr: raftAddr}); err != nil {
+		return nodeapi.JoinServerReply{}, err
+	}
+	if err := n.AddNonvoter(id, raftAddr); err != nil {
+		_ = h.st.DeleteServer(context.Background(), id)
+		return nodeapi.JoinServerReply{}, err
+	}
+	ca := h.rot.Current()
+	keyPEM, err := ca.KeyPEM()
+	if err != nil {
+		return nodeapi.JoinServerReply{}, err
+	}
+	reply := nodeapi.JoinServerReply{NodeID: id, CAPEM: string(ca.CertPEM), CAKeyPEM: string(keyPEM)}
+	if servers, err = h.st.ListServers(ctx); err != nil {
+		return nodeapi.JoinServerReply{}, err
+	}
+	for _, s := range servers {
+		reply.Servers = append(reply.Servers, nodeapi.ServerInfo{ID: s.ID, Advertise: s.Advertise, NodePort: s.NodePort, RaftAddr: s.RaftAddr})
+	}
+	return reply, nil
+}
+
+func hasServer(servers []store.Server, id string) bool {
+	for _, s := range servers {
+		if s.ID == id {
+			return true
+		}
+	}
+	return false
+}
+
+// issueServerToken makes a server join token.
+func (h *haServe) issueServerToken(ttl time.Duration) (string, time.Time, string, error) {
+	if h.rot.Rotating() {
+		return "", time.Time{}, "", fmt.Errorf("%w: a CA rotation is in progress, and a server cannot join during one: finish or abort it first", store.ErrConflict)
+	}
+	count := 1
+	if n := h.node.Load(); n != nil {
+		count = len(n.Members())
+	}
+	if count >= store.MaxServers {
+		return "", time.Time{}, "", fmt.Errorf("%w: the cluster has %d servers, the most it takes", store.ErrConflict, count)
+	}
+	warning := ""
+	if count+1 == 2 {
+		warning = "with this server the cluster has two, and a write needs both: losing either stops writes. Add a third for a cluster that keeps working while one server is down"
+	}
+	tokens := pki.NewTokens(h.st.ServerJoinTokens())
+	tok, exp, err := tokens.Issue(h.rot.Listener().Fingerprint(), ttl)
+	return tok, exp, warning, err
+}
+
+// servers answers GET /v1/servers.
+func (h *haServe) servers(ctx context.Context) (server.ServersReply, error) {
+	names := map[string]string{}
+	if nodes, err := h.st.ListNodes(ctx); err == nil {
+		for _, n := range nodes {
+			names[n.ID] = n.Name
+		}
+	}
+	n := h.node.Load()
+	if n == nil {
+		now := time.Now().UTC()
+		return server.ServersReply{Leader: h.selfID, AnsweredBy: h.selfID, Note: "a cluster of one server",
+			Servers: []server.ServerEntry{{ID: h.selfID, Name: names[h.selfID], Advertise: h.cfg.Advertise, NodePort: h.cfg.ClusterPort,
+				Role: "leader", LastContact: &now}}}, nil
+	}
+	rows, err := h.st.ListServers(ctx)
+	if err != nil {
+		return server.ServersReply{}, err
+	}
+	byID := map[string]store.Server{}
+	for _, r := range rows {
+		byID[r.ID] = r
+	}
+	leader, _ := n.Leader()
+	rep := server.ServersReply{Leader: leader, AnsweredBy: h.selfID}
+	for _, m := range n.Members() {
+		e := server.ServerEntry{ID: m.ID, Name: names[m.ID], RaftAddr: m.Addr, Role: "follower"}
+		if r, ok := byID[m.ID]; ok {
+			e.Advertise, e.NodePort = r.Advertise, r.NodePort
+		} else if host, _, err := net.SplitHostPort(m.Addr); err == nil {
+			e.Advertise = host
+		}
+		switch {
+		case !m.Voter:
+			e.Role = "nonvoter"
+		case m.Leader:
+			e.Role = "leader"
+		}
+		if !m.LastContact.IsZero() {
+			t := m.LastContact.UTC()
+			e.LastContact = &t
+		}
+		rep.Servers = append(rep.Servers, e)
+	}
+	if leader == "" {
+		rep.Note = "no leader"
+		if _, err := n.CanWrite(); err != nil {
+			rep.Note = err.Error()
+		}
+	}
+	return rep, nil
+}
+
+// removeServer answers DELETE /v1/servers/{id}, on the leader.
+func (h *haServe) removeServer(ctx context.Context, id string, force bool) (string, error) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	n := h.node.Load()
+	if n == nil {
+		return "", fmt.Errorf("%w: the cluster has one server, which cannot be removed", store.ErrConflict)
+	}
+	var target *ha.Member
+	voters, staying, heard := 0, 0, 0
+	now := time.Now()
+	for _, m := range n.Members() {
+		if m.ID == id {
+			mm := m
+			target = &mm
+			continue
+		}
+		if m.Voter {
+			staying++
+			if now.Sub(m.LastContact) < 10*time.Second {
+				heard++
+			}
+		}
+	}
+	for _, m := range n.Members() {
+		if m.Voter {
+			voters++
+		}
+	}
+	if target == nil {
+		return "", fmt.Errorf("server %q: %w", id, store.ErrNotFound)
+	}
+	if target.Voter && voters == 1 {
+		return "", fmt.Errorf("%w: %s is the cluster's only voting server", store.ErrConflict, id)
+	}
+	if target.Voter && heard < staying/2+1 && !force {
+		return "", fmt.Errorf("%w: without %s, %d servers vote, and the leader has heard from %d of them in the last 10 s, fewer than the %d a write needs; "+
+			"bring them back first, or remove it anyway with --force (force=true in the API)", store.ErrConflict, id, staying, heard, staying/2+1)
+	}
+	// The row first, while this server still leads: removing the leader
+	// itself ends its leadership once the change commits.
+	rows, err := h.st.ListServers(ctx)
+	if err != nil {
+		return "", err
+	}
+	var row *store.Server
+	for i := range rows {
+		if rows[i].ID == id {
+			row = &rows[i]
+		}
+	}
+	if row != nil {
+		if err := h.st.DeleteServer(ctx, id); err != nil {
+			return "", err
+		}
+	}
+	if err := n.RemoveServer(id); err != nil {
+		if row != nil {
+			if perr := h.st.PutServer(context.Background(), *row); perr != nil {
+				h.log.Warn("putting the server's row back after a failed removal", "server", id, "err", perr)
+			}
+		}
+		return "", err
+	}
+	h.log.Info("server removed from the cluster", "server", id, "forced", force)
+	return fmt.Sprintf("the node of server %s is a node like any other now: move its replicas with hivemind node drain %s, "+
+		"and remove it with hivemind node remove %s", id, id, id), nil
+}
+
+// apiHandler is the API as every server serves it: a follower passes each
+// request to the leader, but GET /healthz, and GET /v1/servers while no
+// server leads; a request's forwarding headers are dropped first.
+func (h *haServe) apiHandler(local http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		ha.StripForwardHeaders(r.Header)
+		n := h.node.Load()
+		if n == nil || n.IsLeader() || r.URL.Path == "/healthz" ||
+			(r.Method == http.MethodGet && r.URL.Path == "/v1/servers" && !n.HasLeader()) {
+			local.ServeHTTP(w, r)
+			return
+		}
+		n.Forward(ha.KindAPI, w, r)
+	})
+}
+
+// serverSource is the agent's Source on a server: the store while this
+// server leads, or the cluster has one server; the node API otherwise,
+// through this server's own node listener, as a worker does.
+type serverSource struct {
+	h *haServe
+}
+
+func (s serverSource) remote() *workerSource {
+	c := s.h.remote.Load()
+	if c == nil || s.h.leader() {
+		return nil
+	}
+	return &workerSource{client: c, register: s.h.register}
+}
+
+func (s serverSource) AssignmentsForNode(ctx context.Context, id string) ([]store.Assignment, error) {
+	if r := s.remote(); r != nil {
+		return r.AssignmentsForNode(ctx, id)
+	}
+	return s.h.st.AssignmentsForNode(ctx, id)
+}
+
+func (s serverSource) ReportStatus(ctx context.Context, id string, st []store.Status) error {
+	if r := s.remote(); r != nil {
+		return r.ReportStatus(ctx, id, st)
+	}
+	return s.h.st.ReportStatus(ctx, id, st)
+}
+
+func (s serverSource) RenewLease(ctx context.Context, id string) error {
+	if r := s.remote(); r != nil {
+		return r.RenewLease(ctx, id)
+	}
+	return s.h.st.RenewLease(ctx, id)
+}
+
+func (s serverSource) StatusForNode(ctx context.Context, id string) ([]store.Status, error) {
+	if r := s.remote(); r != nil {
+		return r.StatusForNode(ctx, id)
+	}
+	return s.h.st.StatusForNode(ctx, id)
+}
+
+var (
+	_ agent.Source       = serverSource{}
+	_ agent.LeaseRenewer = serverSource{}
+)
+
+// routes is the router's table on a server: the store's while it leads,
+// the leader's through the node API otherwise, so that a follower's router
+// keeps its last table, as a worker's does, while no server leads.
+func (h *haServe) routes(local func(context.Context) (router.Table, error)) func(context.Context) (router.Table, error) {
+	var missing *nodeapi.MissingRoute
+	return func(ctx context.Context) (router.Table, error) {
+		c := h.remote.Load()
+		if c == nil || h.leader() {
+			return local(ctx)
+		}
+		if missing == nil {
+			missing = nodeapi.NewMissingRoute(c, "routing table", h.log.With("component", "router"))
+		}
+		return nodeRoutes(c, h.selfID, missing)(ctx)
+	}
+}
+
+// tlsBackend is the router's TLS storage on a server: the store while it
+// leads, the node API otherwise.
+type tlsBackend struct {
+	h     *haServe
+	local tlsstore.Backend
+}
+
+func (b tlsBackend) pick() tlsstore.Backend {
+	c := b.h.remote.Load()
+	if c == nil || b.h.leader() {
+		return b.local
+	}
+	return c.TLS(b.h.selfID)
+}
+
+func (b tlsBackend) Load(ctx context.Context, key string) ([]byte, error) {
+	return b.pick().Load(ctx, key)
+}
+func (b tlsBackend) Store(ctx context.Context, key string, v []byte) error {
+	return b.pick().Store(ctx, key, v)
+}
+func (b tlsBackend) Delete(ctx context.Context, key string) error { return b.pick().Delete(ctx, key) }
+func (b tlsBackend) Exists(ctx context.Context, key string) (bool, error) {
+	return b.pick().Exists(ctx, key)
+}
+func (b tlsBackend) List(ctx context.Context, prefix string, recursive bool) ([]string, error) {
+	return b.pick().List(ctx, prefix, recursive)
+}
+func (b tlsBackend) Stat(ctx context.Context, key string) (store.TLSKeyInfo, error) {
+	return b.pick().Stat(ctx, key)
+}
+func (b tlsBackend) TryLock(ctx context.Context, name, owner string, ttl time.Duration) (bool, error) {
+	return b.pick().TryLock(ctx, name, owner, ttl)
+}
+func (b tlsBackend) RenewLock(ctx context.Context, name, owner string, ttl time.Duration) error {
+	return b.pick().RenewLock(ctx, name, owner, ttl)
+}
+func (b tlsBackend) Unlock(ctx context.Context, name, owner string) error {
+	return b.pick().Unlock(ctx, name, owner)
+}
+
+// followerReporter posts this server's router counters to the leader while
+// it does not lead: the leader's /metrics shows its own router's directly.
+type followerReporter struct {
+	h *haServe
+	c *nodeapi.Client
+}
+
+func (f followerReporter) ReportRouter(ctx context.Context, id string, r nodeapi.RouterReport) error {
+	if f.h.leader() {
+		return nil
+	}
+	return f.c.ReportRouter(ctx, id, r)
+}
+
+// waitForStore waits until a joined server has the cluster's store, which
+// the leader sends it as a Raft snapshot, and returns the cluster record.
+func waitForStore(ctx context.Context, st *store.Store, log *slog.Logger) (store.Cluster, error) {
+	logged := false
+	for {
+		cl, err := st.GetCluster(ctx)
+		if err == nil {
+			return cl, nil
+		}
+		if !errors.Is(err, store.ErrNotFound) {
+			return store.Cluster{}, err
+		}
+		if !logged {
+			log.Info("waiting for the leader to send this server the cluster's store")
+			logged = true
+		}
+		select {
+		case <-ctx.Done():
+			return store.Cluster{}, ctx.Err()
+		case <-time.After(500 * time.Millisecond):
+		}
+	}
+}
+
+// seedIDs are the servers a joined server takes on the server port before
+// the leader has sent it the configuration.
+func seedIDs(st serverState) []string {
+	var out []string
+	for _, s := range st.Servers {
+		if s.ID != st.NodeID {
+			out = append(out, s.ID)
+		}
+	}
+	return out
+}
+
+// serverHereError is what init and join say on a machine whose data
+// directory holds a joined server.
+func serverHereError(dir, doing string) error {
+	st, err := readServerState(dir)
+	if err != nil {
+		return nil
+	}
+	return fmt.Errorf("%s holds server %s of a cluster (%s), so %s here: run hivemind serve", dir, st.NodeID,
+		filepath.Join(dir, serverStateFile), strings.TrimSpace(doing))
+}
+
+// runJoinServer is join --role server: it joins this machine as another
+// server of the cluster at arg, writes what the reply holds to the data
+// directory, and runs the server.
+func runJoinServer(cmd *cobra.Command, cfg *config.Config, arg string) error {
+	ctx := cmd.Context()
+	token, _ := cmd.Flags().GetString("token")
+	if token == "" {
+		return errors.New("--token is required: run hivemind join-token --role server on a server of the cluster to get one")
+	}
+	if cfg.Advertise == "" {
+		return errors.New("--advertise is required with --role server: the address of this machine that the other servers and the workers reach")
+	}
+	host, port, err := splitServer(arg)
+	if err != nil {
+		return err
+	}
+	if port == defaultClusterPort+1 {
+		return fmt.Errorf("%s is the default join port, but join takes the server's cluster port, %s, or no port, and dials the join port above it",
+			net.JoinHostPort(host, strconv.Itoa(port)), net.JoinHostPort(host, strconv.Itoa(defaultClusterPort)))
+	}
+	settings, err := joinSettings(cmd.Flags(), cfg)
+	if err != nil {
+		return err
+	}
+	log, err := newLogger(cfg, cmd.ErrOrStderr())
+	if err != nil {
+		return err
+	}
+	slog.SetDefault(log)
+	dir := cfg.DataDir
+	release, err := lockDataDir(dir)
+	if err != nil {
+		return err
+	}
+	if err := checkEmptyForServer(dir); err != nil {
+		release()
+		return err
+	}
+	// The address this server binds is checked before the token is used.
+	if _, err := clusterAddress(ctx, cfg, interfaceAddrs, lookupName, log); err != nil {
+		release()
+		return err
+	}
+	joinAddr := net.JoinHostPort(host, strconv.Itoa(port+1))
+	reply, err := nodeapi.JoinServer(ctx, joinAddr, nodeapi.JoinServerRequest{Token: token, Advertise: cfg.Advertise,
+		NodePort: cfg.ClusterPort, Version: nodeapi.CleanVersion(version)})
+	if err != nil {
+		release()
+		return err
+	}
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		release()
+		return err
+	}
+	if err := os.Chmod(dir, 0o700); err != nil {
+		release()
+		return err
+	}
+	if _, err := pki.WriteCAFiles(dir, []byte(reply.CAPEM), []byte(reply.CAKeyPEM)); err != nil {
+		release()
+		return fmt.Errorf("writing the cluster CA: %w", err)
+	}
+	if err := writeServerState(dir, serverState{NodeID: reply.NodeID, Joined: time.Now().UTC(), Servers: reply.Servers}); err != nil {
+		release()
+		return err
+	}
+	log.Info("joined the cluster as a server; it becomes a voter once it has caught up with the log", "node", reply.NodeID,
+		"servers", len(reply.Servers))
+	if len(settings) > 0 {
+		if err := config.WriteFile(cfg.ConfigFile, joinServerConfigHeader, settings); err != nil {
+			release()
+			return fmt.Errorf("this machine joined the cluster, but writing %s failed: %w; run hivemind serve with the same flags", cfg.ConfigFile, err)
+		}
+	}
+	release()
+	rt, err := docker.New(cfg.DockerHost)
+	if err != nil {
+		return err
+	}
+	return runServe(ctx, cfg, log, rt)
+}
+
+// joinServerConfigHeader is the comment line of the config file a server's
+// join writes.
+const joinServerConfigHeader = "Written by hivemind join --role server: the settings it was given. serve reads this file."
+
+// checkEmptyForServer refuses a data directory that holds a cluster
+// already: a server, a worker, a CA or a store with a cluster record.
+func checkEmptyForServer(dir string) error {
+	if err := workerHereError(dir, "it cannot join as a server"); err != nil {
+		return err
+	}
+	if err := serverHereError(dir, "it cannot join again"); err != nil {
+		return err
+	}
+	for _, name := range []string{auth.TokenFileName, pki.CAKeyFile, pki.CACertFile, storeFileName, filepath.Join("raft", "raft.db")} {
+		if _, err := os.Lstat(filepath.Join(dir, name)); err == nil {
+			return fmt.Errorf("%s already holds a cluster (%s is present): join a server with an empty --data-dir", dir, name)
+		} else if !errors.Is(err, fs.ErrNotExist) {
+			return err
+		}
+	}
+	return nil
+}

@@ -151,13 +151,14 @@ func Bind(fs *pflag.FlagSet, opts Options) {
 
 // workerSettings are the settings a worker reads, for join: its data
 // directory and config file, its Docker daemon, its log, its agent's
-// interval and its router. advertise and cluster-addr are there too, so
-// that join can refuse them with the reason, rather than as unknown flags.
+// interval and its router. advertise, cluster-addr and cluster-port are
+// there too: a server's join (join --role server) takes them, and a
+// worker's refuses them with the reason, rather than as unknown flags.
 var workerSettings = map[string]bool{
 	"config": true, "data-dir": true, "docker-host": true, "log-level": true, "log-format": true, "reconcile-interval": true,
 	"route-addr": true, "route-http-port": true, "route-https-port": true, "route-max-conns-per-ip": true,
 	"acme-email": true, "acme-ca": true,
-	"advertise": true, "cluster-addr": true,
+	"advertise": true, "cluster-addr": true, "cluster-port": true,
 }
 
 // BindWorker binds the flags of the settings a worker reads, for join. The

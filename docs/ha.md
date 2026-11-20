@@ -126,13 +126,13 @@ A follower's own node, its agent, router and log requests, uses the node API too
 
 ```sh
 # On a server of the cluster. A server token works once and expires after 1 hour by default.
-hivemind join-token --server
+hivemind join-token --role server
 
 # On the new machine, which needs Docker Engine and the hivemind binary.
 hivemind join 10.0.0.5 --role server --token <token> --advertise 10.0.0.6
 ```
 
-`join --role server` joins the cluster, and runs the new server in the foreground, as `join` runs a worker; `hivemind serve --advertise 10.0.0.6` runs it again after a stop. A server token and a worker token are not interchangeable: each is refused where the other is expected, with the same message as an unknown token.
+`join --role server` joins the cluster, and runs the new server in the foreground, as `join` runs a worker; `hivemind serve --advertise 10.0.0.6` runs it again after a stop. A server token and a worker token are not interchangeable: each is refused where the other is expected, with the same message as an unknown token. (The flag is `--role server`, as on `join`, not `--server`: every command that calls the API already has `--server`, the API's URL.)
 
 What a joining server receives, in the join reply: its node ID, chosen by the leader, the CA certificate and the CA's private key, and the list of servers. It needs the key to issue its own listener certificate, and, once it is the leader, the workers' certificates. The reply goes over the join listener's TLS 1.3 connection, whose CA the joining machine has pinned by the fingerprint in the token, before it sends the token: the check a worker's join makes. The token is single use, expires, and is stored as a hash; the join listener's limit on failed joins applies. The key is written with mode 0600 in the 0700 data directory. The admin token is not sent: its SHA-256 is in the store, and the store comes by Raft snapshot over the server port. The joining server writes no `admin.token`; give its CLI the token with `HIVEMIND_TOKEN`.
 
@@ -152,7 +152,7 @@ Then, for every server join:
 
 `hivemind server remove <id>` removes a server from the Raft configuration and the server table. It refuses to remove the last voter, and refuses a removal that would leave fewer servers that the leader heard from in the last 10 s than a majority of those that stay, unless given `--force`. The removed server's serve stops, its containers keep running, and its node is a node like any other: drain it and remove it with `hivemind node drain` and `hivemind node remove`. Its certificate is refused on the server port from then on. To use the machine as a server again, give it an empty data directory and a new server token.
 
-How many servers: 3 or 5. With 2, both are needed for a write, so losing either stops writes: no better than one, and worse, since two machines can fail. `join-token --server` warns when the cluster would have 2. Joins past 7 servers are refused: each write waits for a majority, and more servers make that slower without a need for it in a cluster of ten machines.
+How many servers: 3 or 5. With 2, both are needed for a write, so losing either stops writes: no better than one, and worse, since two machines can fail. `join-token --role server` warns when the cluster would have 2. Joins past 7 servers are refused: each write waits for a majority, and more servers make that slower without a need for it in a cluster of ten machines.
 
 When a majority of the servers is down, or cut off from the rest, there is no leader: no writes, no placement, no rescheduling. The containers keep running, every worker keeps its own, and every router keeps serving with the routing table it last read. The API answers `503` with the reason ([clients](#the-api)). When enough servers are back, they elect a leader, which starts with the start grace.
 

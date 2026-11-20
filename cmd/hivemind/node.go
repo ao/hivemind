@@ -25,6 +25,7 @@ import (
 	"github.com/ao/hivemind/internal/carotate"
 	"github.com/ao/hivemind/internal/cluster"
 	"github.com/ao/hivemind/internal/config"
+	"github.com/ao/hivemind/internal/ha"
 	"github.com/ao/hivemind/internal/logging"
 	"github.com/ao/hivemind/internal/logrelay"
 	"github.com/ao/hivemind/internal/nodeapi"
@@ -181,6 +182,9 @@ func runInit(cmd *cobra.Command, flags *pflag.FlagSet, clientConfigFlag string) 
 	// Everything that makes init refuse is checked before it creates
 	// anything, the store included.
 	if err := workerHereError(dir, "init would make a second cluster"); err != nil {
+		return err
+	}
+	if err := serverHereError(dir, "init would make a second cluster"); err != nil {
 		return err
 	}
 	if err := upgrade.CheckDataDir(dir); err != nil {
@@ -524,26 +528,47 @@ func runServe(ctx context.Context, cfg *config.Config, log *slog.Logger, rt runt
 	if w, err := readWorkerState(cfg.DataDir); err == nil {
 		return fmt.Errorf("%s holds worker %s of the cluster at %s: run hivemind serve --role worker", cfg.DataDir, w.NodeID, w.Server)
 	}
+	// A server that joined a cluster of several has server.json; one that
+	// has been in such a cluster has Raft state. Either runs Raft from the
+	// start (docs/ha.md).
+	joined, jerr := readServerState(cfg.DataDir)
+	if jerr != nil && !errors.Is(jerr, errNotJoinedServer) {
+		return jerr
+	}
+	isJoined := jerr == nil
+	several := isJoined || ha.HasState(cfg.DataDir)
+	if several && cfg.Advertise == "" {
+		return fmt.Errorf("%s holds a server of a cluster of several, which needs --advertise: the address the other servers and the workers reach it at", cfg.DataDir)
+	}
 	st, err := store.Open(ctx, filepath.Join(cfg.DataDir, storeFileName), store.WithMinReady(cfg.MinReady),
 		store.WithLogger(log.With("component", "store")))
 	if err != nil {
 		return err
 	}
 	defer st.Close()
-	// A store restored from before epochs got its epoch in a file, for
-	// this start, which has just migrated it.
-	if epoch, ok, err := backup.ApplyEpochFile(ctx, cfg.DataDir, st); err != nil {
+	if several {
+		// Nothing writes the store but the log from here on.
+		st.SetReplicator(startingReplicator{})
+	} else if epoch, ok, err := backup.ApplyEpochFile(ctx, cfg.DataDir, st); err != nil {
+		// A store restored from before epochs got its epoch in a file, for
+		// this start, which has just migrated it.
 		return err
 	} else if ok {
 		log.Info("the restored store has its epoch now, as restore left it to the first start after the migration", "epoch", epoch)
 	}
-	cl, err := st.GetCluster(ctx)
-	if errors.Is(err, store.ErrNotFound) {
-		return fmt.Errorf("no cluster in %s: run `hivemind init` first", cfg.DataDir)
+	var cl store.Cluster
+	selfID := joined.NodeID
+	if !isJoined {
+		cl, err = st.GetCluster(ctx)
+		if errors.Is(err, store.ErrNotFound) {
+			return fmt.Errorf("no cluster in %s: run `hivemind init` first", cfg.DataDir)
+		}
+		if err != nil {
+			return err
+		}
+		selfID = cl.NodeID
 	}
-	if err != nil {
-		return err
-	}
+	st.SetLocalNode(selfID)
 
 	var tlsCfg *tls.Config
 	if cfg.APITLSCert != "" {
@@ -565,18 +590,10 @@ func runServe(ctx context.Context, cfg *config.Config, log *slog.Logger, rt runt
 		return err
 	}
 
-	sessions, err := auth.NewSessions(12 * time.Hour)
-	if err != nil {
-		return err
-	}
-	authn, err := auth.NewAuthenticator(auth.TokenHash(cl.AdminTokenHash), sessions)
-	if err != nil {
-		return err
-	}
 	// The rotation manager loads the cluster CA, and first finishes a step
 	// of a CA rotation that a stop interrupted, so nothing reads the CA
 	// files before it.
-	rot, err := openCARotation(ctx, cfg.DataDir, st, cl.NodeID, log)
+	rot, err := openCARotation(ctx, cfg.DataDir, st, selfID, log)
 	if err != nil {
 		return err
 	}
@@ -616,6 +633,12 @@ func runServe(ctx context.Context, cfg *config.Config, log *slog.Logger, rt runt
 		routeReaders = nodeapi.NewRouteReaders()
 	}
 
+	hostname, _ := os.Hostname()
+	// What a cluster of several servers runs (servers.go). Its node is nil
+	// while the cluster has one server.
+	hs := &haServe{cfg: cfg, log: log, st: st, rot: rot, holder: &cluster.HAHolder{}, selfID: selfID, hostname: hostname,
+		nodeAddr: nodeAddr, rt: rt, seeds: seedIDs(joined), fatal: make(chan error, 1)}
+
 	// Every listener is bound before this start is recorded, so a start
 	// that fails to bind, as with a wrong address, records neither the
 	// start nor the node's address; cluster.Listen records only the expiry
@@ -637,6 +660,9 @@ func runServe(ctx context.Context, cfg *config.Config, log *slog.Logger, rt runt
 		if nodes != nil {
 			_ = nodes.Close()
 		}
+		if n := hs.node.Load(); n != nil {
+			_ = n.Close()
+		}
 	}
 	// The router opens only with --route-addr. It is the one listener that
 	// may bind every address: it serves the apps' public traffic.
@@ -653,7 +679,10 @@ func runServe(ctx context.Context, cfg *config.Config, log *slog.Logger, rt runt
 	var reportedOnce sync.Once
 	if cfg.RouteAddr != "" {
 		reported = make(chan struct{})
-		if rtr, err = newRouter(cfg, log, storeRoutes(st), tlsstore.StoreBackend{St: st, NodeID: cl.NodeID}, reported); err != nil {
+		// On a follower of a cluster of several, the router reads the table
+		// and keeps its certificates through the node API (servers.go).
+		if rtr, err = newRouter(cfg, log, hs.routes(storeRoutes(st)),
+			tlsBackend{h: hs, local: tlsstore.StoreBackend{St: st, NodeID: selfID}}, reported); err != nil {
 			return err
 		}
 		routerReport = rtr.Report
@@ -681,92 +710,168 @@ func runServe(ctx context.Context, cfg *config.Config, log *slog.Logger, rt runt
 			log.Warn("test build: node certificates are issued with a short lifetime", "lifetime", lifetime)
 		}
 		c, err := cluster.Listen(cluster.Config{Store: st, Rotation: rot, Tokens: pki.NewTokens(st.JoinTokens()),
-			Advertise: cfg.Advertise, Bind: nodeAddr, Port: cfg.ClusterPort, LocalNodeID: cl.NodeID,
+			Advertise: cfg.Advertise, Bind: nodeAddr, Port: cfg.ClusterPort, LocalNodeID: selfID,
 			Logger: log.With("component", "cluster"), NodeCertLifetime: lifetime, Logs: logs,
-			RouterReports: routerReports, RouteReaders: routeReaders, Version: version, Epoch: cl.Epoch})
+			RouterReports: routerReports, RouteReaders: routeReaders, Version: version, Epoch: cl.Epoch,
+			HA: hs.holder, JoinServer: hs.joinServer, ServerTokens: pki.NewTokens(st.ServerJoinTokens())})
 		if err != nil {
 			closeListeners()
 			return err
 		}
 		nodes = c
+		hs.nodes = c
+	}
+	if several {
+		// Raft before anything that reads the cluster record: a server that
+		// has just joined gets the store from the leader, as a snapshot.
+		if err := hs.open(); err != nil {
+			closeListeners()
+			return fmt.Errorf("starting Raft: %w", err)
+		}
+		if isJoined {
+			if cl, err = waitForStore(ctx, st, log); err != nil {
+				closeListeners()
+				return err
+			}
+		} else if cl, err = st.GetCluster(ctx); err != nil {
+			closeListeners()
+			return err
+		}
+		nodes.SetEpoch(cl.Epoch)
 	}
 
-	noteAddressChange(ctx, st, cfg, cl.NodeID, nodeAddr, log)
-	// The start is recorded before this process renews any lease, its own
-	// node's included: the workers that were up before it wait for their
-	// first report for the start grace.
+	sessions, err := auth.NewSessions(12 * time.Hour)
+	if err != nil {
+		closeListeners()
+		return err
+	}
+	authn, err := auth.NewAuthenticator(auth.TokenHash(cl.AdminTokenHash), sessions)
+	if err != nil {
+		closeListeners()
+		return err
+	}
+
+	noteAddressChange(ctx, st, cfg, selfID, nodeAddr, log)
+	// In a cluster of one, the start is recorded before this process renews
+	// any lease, its own node's included: the workers that were up before
+	// it wait for their first report for the start grace. A server of
+	// several does so when it becomes the leader (haServe.onLeader).
 	started := time.Now()
-	if err := st.SetStarted(ctx, started, cfg.StartGrace); err != nil {
-		closeListeners()
-		return err
-	}
-	hostname, _ := os.Hostname()
-	if err := st.UpsertNode(ctx, store.Node{ID: cl.NodeID, Name: hostname, CPU: info.NCPU, Memory: info.MemTotal, Address: nodeAddr,
-		Version: nodeapi.CleanVersion(version)}); err != nil {
-		closeListeners()
-		return err
-	}
-	noteWaiting(ctx, st, cfg.StartGrace, log)
-
 	m := server.NewMetrics()
-	// After each agent pass, which has just reported status, the rollout and
-	// drain controllers move the next replica or check a deadline. The agent
-	// passes on every interval, so deadlines are checked even when nothing
-	// reports.
 	agentLog := log.With("component", "agent")
+	hs.work = &leaderWork{run: func(ctx context.Context, since time.Time) {
+		var wg sync.WaitGroup
+		if rot != nil {
+			// It moves the server's certificate in a CA rotation, and warns
+			// in the CA's last year.
+			wg.Add(1)
+			go func() {
+				defer wg.Done()
+				rot.Run(ctx)
+			}()
+		}
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			sweep(ctx, st, log.With("component", "sweep"), sweepInterval, since)
+		}()
+		wg.Wait()
+	}}
+	if !several {
+		if err := st.SetStarted(ctx, started, cfg.StartGrace); err != nil {
+			closeListeners()
+			return err
+		}
+		if err := st.UpsertNode(ctx, store.Node{ID: selfID, Name: hostname, CPU: info.NCPU, Memory: info.MemTotal, Address: nodeAddr,
+			Version: nodeapi.CleanVersion(version)}); err != nil {
+			closeListeners()
+			return err
+		}
+		noteWaiting(ctx, st, cfg.StartGrace, log)
+	}
+
+	// After each agent pass, which has just reported status, the rollout and
+	// drain controllers move the next replica or check a deadline, on the
+	// leader. The agent passes on every interval, so deadlines are checked
+	// even when nothing reports.
 	onPass := func(d time.Duration, err error) {
 		if reported != nil {
 			reportedOnce.Do(func() { close(reported) })
 		}
 		m.ObserveReconcile(d, err)
-		if aerr := st.AdvanceRollouts(context.Background()); aerr != nil {
+		if !hs.leader() || !hs.work.running() {
+			return
+		}
+		if aerr := st.AdvanceRollouts(context.Background()); aerr != nil && !errors.Is(aerr, store.ErrNotLeader) {
 			agentLog.Warn("advance rollouts", "err", aerr)
 		}
-		advanceDrains(context.Background(), st, agentLog, started)
+		advanceDrains(context.Background(), st, agentLog, hs.work.since())
 	}
-	ag, err := agent.New(agent.Config{NodeID: cl.NodeID, Runtime: rt, Source: st,
+	ag, err := agent.New(agent.Config{NodeID: selfID, Runtime: rt, Source: serverSource{h: hs},
 		Interval: cfg.ReconcileInterval, Logger: agentLog, OnPass: onPass, RouteBind: nodeAddr})
 	if err != nil {
 		closeListeners()
 		return err
 	}
-	api, err := server.New(server.Config{Store: st, Runtime: rt, NodeID: cl.NodeID, Auth: authn,
+	var issueServer func(time.Duration) (string, time.Time, string, error)
+	if rot != nil && nodes != nil {
+		issueServer = hs.issueServerToken
+	}
+	api, err := server.New(server.Config{Store: st, Runtime: rt, NodeID: selfID, Auth: authn,
 		Trigger: ag.Trigger, Logger: log.With("component", "api"), Metrics: m, IssueJoinToken: issue,
 		Backup: writeBackup, Logs: logs, RouterReport: routerReport, RouterReports: routerReports, RouteReaders: routeReaders,
-		Started: started, Version: version, Advertise: cfg.Advertise, CA: rot})
+		Started: started, Version: version, Advertise: cfg.Advertise, CA: rot,
+		Servers: hs.servers, RemoveServer: hs.removeServer, IssueServerJoinToken: issueServer})
 	if err != nil {
 		closeListeners()
 		return err
 	}
-	hs := server.NewHTTPServer(api.Handler(), log)
-	hs.TLSConfig = tlsCfg
+	if nodes != nil {
+		hs.handlers = ha.Handlers{API: api.Handler(), Node: nodes.NodeHandler(), Join: nodes.JoinHandler()}
+		if n := hs.node.Load(); n != nil {
+			n.SetHandlers(hs.handlers)
+		}
+	}
+	httpSrv := server.NewHTTPServer(hs.apiHandler(api.Handler()), log)
+	httpSrv.TLSConfig = tlsCfg
 	var mhs *http.Server
 	if mln != nil {
 		mhs = server.NewHTTPServer(api.MetricsHandler(), log)
 	}
 
 	agentCtx, stopAgent := context.WithCancel(context.Background())
-	var wg sync.WaitGroup
-	if rot != nil {
-		// It moves the server's certificate in a CA rotation, and warns in
-		// the CA's last year.
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
-			rot.Run(agentCtx)
-		}()
+	defer stopAgent()
+	// What a server of several runs beside the leader's work: its node
+	// answers log requests and posts its router's counters through the
+	// node API, as a worker does, so the leader can reach them.
+	var extrasOnce sync.Once
+	hs.extras = func(c *nodeapi.Client) {
+		extrasOnce.Do(func() {
+			go func() {
+				ls := &nodeapi.LogServer{Client: c, NodeID: selfID, Runtime: rt, Logger: log.With("component", "logs")}
+				_ = ls.Run(agentCtx)
+			}()
+			if rtr != nil {
+				rlog := log.With("component", "router")
+				go reportRouter(agentCtx, followerReporter{h: hs, c: c}, selfID, rtr.Report, routerReportEvery,
+					nodeapi.NewMissingRoute(c, "router metrics", rlog), rlog)
+			}
+		})
 	}
-	wg.Add(2)
+	if c := hs.remote.Load(); c != nil {
+		hs.extras(c)
+	}
+	var wg sync.WaitGroup
+	if !several {
+		hs.work.start(started)
+	}
+	wg.Add(1)
 	go func() {
 		defer wg.Done()
 		_ = ag.Run(agentCtx)
 	}()
-	go func() {
-		defer wg.Done()
-		sweep(agentCtx, st, log.With("component", "sweep"), sweepInterval, started)
-	}()
 
-	serveErr := make(chan error, 4)
+	serveErr := make(chan error, 5)
 	if rtr != nil {
 		go func() {
 			if err := rtr.Serve(); err != nil {
@@ -785,9 +890,9 @@ func runServe(ctx context.Context, cfg *config.Config, log *slog.Logger, rt runt
 	go func() {
 		var err error
 		if tlsCfg != nil {
-			err = hs.ServeTLS(ln, "", "")
+			err = httpSrv.ServeTLS(ln, "", "")
 		} else {
-			err = hs.Serve(ln)
+			err = httpSrv.Serve(ln)
 		}
 		serveErr <- fmt.Errorf("API server: %w", err)
 	}()
@@ -795,7 +900,7 @@ func runServe(ctx context.Context, cfg *config.Config, log *slog.Logger, rt runt
 		go func() { serveErr <- fmt.Errorf("metrics server: %w", mhs.Serve(mln)) }()
 		log.Info("serving metrics", "addr", mln.Addr().String())
 	}
-	log.Info("hivemind serving", "addr", ln.Addr().String(), "tls", tlsCfg != nil, "node", cl.NodeID,
+	log.Info("hivemind serving", "addr", ln.Addr().String(), "tls", tlsCfg != nil, "node", selfID,
 		"docker", info.ServerVersion, "version", version)
 
 	var runErr error
@@ -803,11 +908,12 @@ func runServe(ctx context.Context, cfg *config.Config, log *slog.Logger, rt runt
 	case <-ctx.Done():
 		log.Info("shutting down")
 	case runErr = <-serveErr:
+	case runErr = <-hs.fatal:
 	}
 	api.CloseStreams()
 	sctx, cancel := context.WithTimeout(context.Background(), shutdownTimeout)
 	defer cancel()
-	if err := hs.Shutdown(sctx); err != nil && !errors.Is(err, http.ErrServerClosed) {
+	if err := httpSrv.Shutdown(sctx); err != nil && !errors.Is(err, http.ErrServerClosed) {
 		log.Warn("API shutdown", "err", err)
 	}
 	if rtr != nil {
@@ -823,6 +929,12 @@ func runServe(ctx context.Context, cfg *config.Config, log *slog.Logger, rt runt
 	if mhs != nil {
 		if err := mhs.Shutdown(sctx); err != nil && !errors.Is(err, http.ErrServerClosed) {
 			log.Warn("metrics shutdown", "err", err)
+		}
+	}
+	hs.work.stop()
+	if n := hs.node.Load(); n != nil {
+		if err := n.Close(); err != nil {
+			log.Warn("raft shutdown", "err", err)
 		}
 	}
 	stopAgent()

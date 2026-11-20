@@ -37,6 +37,8 @@ hivemind
 | `routes` | Show the routing table |
 | `scale` | Set an app's replica count |
 | `serve` | Run the server and the agent on this node |
+| `server` | Change the servers of the cluster |
+| `servers` | List the servers of the cluster |
 | `status` | Show apps, their replicas and container state |
 | `version` | Print the version of the CLI and of the server |
 
@@ -491,6 +493,18 @@ overrides the file. A config file that exists, such as one given with
 --config, is not changed: join refuses worker flags then, before it uses the
 token. A worker has no API listener, so --advertise does not apply to it.
 
+--role server joins this machine as another server of the cluster
+(docs/ha.md), with a token from hivemind join-token --role server and its own
+--advertise address, which the other servers and the workers must reach
+on --cluster-port (4484), the join port above it and the server port two
+above it (4486). The server it reaches turns Raft on if the cluster had one
+server, and adds this one; the reply has this server's node ID and the
+cluster CA with its key, which join writes to the data directory with
+server.json. join then runs the server in the foreground, as hivemind serve
+does: it gets the cluster's store from the leader, and becomes a voter once
+it has caught up. Start it again later with hivemind serve. The admin token
+is not sent: give this server's CLI the cluster's token with HIVEMIND_TOKEN.
+
 The worker registers the local address of its connection to the server as
 its private address; its routed replicas publish their ports there.
 --route-addr <ip> also runs the HTTPS router on this machine, with
@@ -505,12 +519,16 @@ hivemind join <server> [flags]
 |---|---|---|---|---|
 | `--acme-ca` | string | `https://acme-v02.api.letsencrypt.org/directory` | `HIVEMIND_ACME_CA` | ACME directory URL the routers get certificates from |
 | `--acme-email` | string | - | `HIVEMIND_ACME_EMAIL` | contact email of the ACME account; required with --route-addr, and setting it accepts the CA's terms |
+| `--advertise` | string | - | `HIVEMIND_ADVERTISE` | IP or host name other nodes use to reach this server; serve opens the cluster listeners on it |
+| `--cluster-addr` | string | - | `HIVEMIND_CLUSTER_ADDR` | IP address of this machine the cluster listeners bind; default: the address --advertise names or resolves to |
+| `--cluster-port` | string | `4484` | `HIVEMIND_CLUSTER_PORT` | port of the node-to-node listener; the join listener uses the port above it |
 | `--config` | string | - | `HIVEMIND_CONFIG` | YAML config file (default <data-dir>/hivemind.yaml) |
 | `--data-dir` | string | see description | `HIVEMIND_DATA_DIR` | directory for node state. The default is /var/lib/hivemind for root, and $XDG_STATE_HOME/hivemind or ~/.local/state/hivemind for other users. |
 | `--docker-host` | string | `unix:///var/run/docker.sock` | `HIVEMIND_DOCKER_HOST` | Docker Engine endpoint |
 | `--log-format` | string | `text` | `HIVEMIND_LOG_FORMAT` | log format: text or json |
 | `--log-level` | string | `info` | `HIVEMIND_LOG_LEVEL` | log level: debug, info, warn or error |
 | `--reconcile-interval` | string | `2s` | `HIVEMIND_RECONCILE_INTERVAL` | how often the agent reconciles containers and renews its lease (at most 5s) |
+| `--role` | string | `worker` | - | worker, or server for another server of the cluster, with a token from join-token --role server |
 | `--route-addr` | string | - | `HIVEMIND_ROUTE_ADDR` | IP address the HTTPS router listens on, such as 0.0.0.0 for every interface; empty means no router on this node |
 | `--route-http-port` | string | `80` | `HIVEMIND_ROUTE_HTTP_PORT` | port of the router's HTTP listener, for ACME HTTP-01 challenges and redirects to https |
 | `--route-https-port` | string | `443` | `HIVEMIND_ROUTE_HTTPS_PORT` | port of the router's HTTPS listener |
@@ -524,8 +542,17 @@ on the other machine. The token is single use, and it expires after --ttl
 (default 24h, at most 168h). Its text carries the cluster CA's fingerprint, so
 the joining machine only trusts this cluster's CA.
 
+--role server prints a server join token instead, for
+"hivemind join <server> --role server --token <token> --advertise <address>"
+on a machine that is to be another server of the cluster (docs/ha.md). It
+expires after 1h by default, at most 24h: the joining server receives the
+cluster CA's private key. A worker's join refuses it, and a server's join
+refuses a worker's token. A cluster of two servers needs both for a write,
+so the command warns when the token would make two; use three or five.
+
 The token goes to standard output alone, so scripts can capture it. The
-expiry goes to standard error. With --json, both go to standard output as JSON.
+expiry, and a warning, go to standard error. With --json, all go to
+standard output as JSON.
 
 ```
 hivemind join-token [flags]
@@ -536,9 +563,10 @@ hivemind join-token [flags]
 | `--ca-cert` | string | - | - | PEM file of the CA certificates to trust for an https server, instead of the system's (env HIVEMIND_CA_CERT; default from the client config) |
 | `--client-config` | string | - | `HIVEMIND_CLIENT_CONFIG` | client config file (env HIVEMIND_CLIENT_CONFIG; default $XDG_CONFIG_HOME/hivemind/config.yaml or ~/.config/hivemind/config.yaml) |
 | `--json` | bool | - | - | print JSON instead of a table |
+| `--role` | string | `worker` | - | worker, or server for a token that joins another server of the cluster |
 | `--server` | string | - | `HIVEMIND_SERVER` | server URL (env HIVEMIND_SERVER; default from the client config, then http://127.0.0.1:4483) |
 | `--token` | string | - | `HIVEMIND_TOKEN` | API token (env HIVEMIND_TOKEN; default from the client config's token file) |
-| `--ttl` | string | - | - | how long the token lasts, such as 1h (default 24h0m0s) |
+| `--ttl` | string | - | - | how long the token lasts, such as 1h (default 24h0m0s, 1h0m0s with --role server) |
 
 ### hivemind logs
 
@@ -1074,6 +1102,74 @@ hivemind serve [flags]
 | `--route-https-port` | string | `443` | `HIVEMIND_ROUTE_HTTPS_PORT` | port of the router's HTTPS listener |
 | `--route-max-conns-per-ip` | string | `256` | `HIVEMIND_ROUTE_MAX_CONNS_PER_IP` | most connections the router keeps open from one client IP address (an IPv6 /64), over both its ports; 0 means no limit, for a router behind a proxy that does not pass client addresses |
 | `--start-grace` | string | `2m` | `HIVEMIND_START_GRACE` | how long after serve starts a worker that was up before it waits for its first report, keeping its replicas and its routes, before it is lost; when no such worker has reported by then, they all wait until one does, and the others that long again from then; at least 15s |
+
+### hivemind server
+
+Change the servers of the cluster
+
+```
+hivemind server
+```
+
+| Command | Description |
+|---|---|
+| `remove` | Remove a server from the cluster |
+
+#### hivemind server remove
+
+Remove a server from the cluster's Raft configuration and its list of
+servers (docs/ha.md#membership). The removed server stops serving; its
+containers keep running, and its node stays a node like any other: move its
+replicas with hivemind node drain and remove it with hivemind node remove.
+Its certificate is refused on the server port from then on. To make the
+machine a server again, give it an empty data directory and a new server
+join token.
+
+The last voting server cannot be removed. A removal that would leave fewer
+servers that the leader heard from in the last 10 s than a majority of
+those that stay is refused, unless --force: a cluster of three with one
+server down that loses another has no majority.
+
+```
+hivemind server remove <id> [flags]
+```
+
+| Flag | Type | Default | Environment | Description |
+|---|---|---|---|---|
+| `--ca-cert` | string | - | - | PEM file of the CA certificates to trust for an https server, instead of the system's (env HIVEMIND_CA_CERT; default from the client config) |
+| `--client-config` | string | - | `HIVEMIND_CLIENT_CONFIG` | client config file (env HIVEMIND_CLIENT_CONFIG; default $XDG_CONFIG_HOME/hivemind/config.yaml or ~/.config/hivemind/config.yaml) |
+| `--force` | bool | - | - | remove the server even if the servers that stay cannot reach a majority |
+| `--json` | bool | - | - | print JSON instead of a table |
+| `--server` | string | - | `HIVEMIND_SERVER` | server URL (env HIVEMIND_SERVER; default from the client config, then http://127.0.0.1:4483) |
+| `--token` | string | - | `HIVEMIND_TOKEN` | API token (env HIVEMIND_TOKEN; default from the client config's token file) |
+
+### hivemind servers
+
+List the servers of the cluster (docs/ha.md): ID, the host name of each
+server's node, the address it advertises with its node listener's port,
+its Raft role, and when the leader last heard from it.
+
+ROLE is leader, follower, or nonvoter for a server that has joined and
+is catching up with the log: it becomes a voter once it has. A cluster of
+one lists its one server, and says so.
+
+LAST CONTACT is how long ago the server that answered last heard from each
+one: the leader hears from every follower at each heartbeat. "-" is never,
+or another follower, which a follower cannot tell. When no server leads, as
+while a majority is down, the server asked answers from its own copy of the
+configuration, and a line after the table says there is no leader and why.
+
+```
+hivemind servers [flags]
+```
+
+| Flag | Type | Default | Environment | Description |
+|---|---|---|---|---|
+| `--ca-cert` | string | - | - | PEM file of the CA certificates to trust for an https server, instead of the system's (env HIVEMIND_CA_CERT; default from the client config) |
+| `--client-config` | string | - | `HIVEMIND_CLIENT_CONFIG` | client config file (env HIVEMIND_CLIENT_CONFIG; default $XDG_CONFIG_HOME/hivemind/config.yaml or ~/.config/hivemind/config.yaml) |
+| `--json` | bool | - | - | print JSON instead of a table |
+| `--server` | string | - | `HIVEMIND_SERVER` | server URL (env HIVEMIND_SERVER; default from the client config, then http://127.0.0.1:4483) |
+| `--token` | string | - | `HIVEMIND_TOKEN` | API token (env HIVEMIND_TOKEN; default from the client config's token file) |
 
 ### hivemind status
 

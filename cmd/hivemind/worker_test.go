@@ -516,8 +516,8 @@ func TestJoinOnARemovedNodesMachine(t *testing.T) {
 }
 
 // join binds the settings a worker reads, and none of the server's, so its
-// help and docs/cli.md list only those. --advertise and --cluster-addr stay,
-// hidden, to be refused with the reason.
+// help and docs/cli.md list only those. --advertise, --cluster-addr and
+// --cluster-port are for join --role server, and a worker's join refuses them.
 func TestJoinTakesTheWorkersFlags(t *testing.T) {
 	isolate(t)
 	root := newRoot(strings.NewReader(""), io.Discard, io.Discard)
@@ -525,13 +525,13 @@ func TestJoinTakesTheWorkersFlags(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, name := range []string{"api-addr", "api-tls-cert", "api-tls-key", "metrics-addr", "min-ready", "start-grace", "cluster-port"} {
+	for _, name := range []string{"api-addr", "api-tls-cert", "api-tls-key", "metrics-addr", "min-ready", "start-grace"} {
 		if join.Flags().Lookup(name) != nil {
 			t.Errorf("join has --%s, which only the server reads", name)
 		}
 	}
 	for _, name := range []string{"token", "data-dir", "config", "docker-host", "log-level", "log-format", "reconcile-interval",
-		"route-addr", "route-http-port", "route-https-port", "route-max-conns-per-ip", "acme-email", "acme-ca"} {
+		"route-addr", "route-http-port", "route-https-port", "route-max-conns-per-ip", "acme-email", "acme-ca", "role", "cluster-port"} {
 		if join.Flags().Lookup(name) == nil {
 			t.Errorf("join has no --%s", name)
 		}
