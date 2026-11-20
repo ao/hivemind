@@ -214,6 +214,17 @@ jobs:
       - uses: actions/checkout@v4
       - run: ./scripts/integration-ca.sh
 
+  # A cluster of three servers and two workers with routers: formation by
+  # join, the leader killed during writes, the old leader back, a partition
+  # that isolates the leader, quorum lost, and a server removed.
+  integration-ha:
+    name: Integration (several servers)
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - run: ./scripts/integration-ha.sh
+
   # A cluster of mixed versions: the 2.0.0 release binary as the server and
   # as a worker, and this build as a worker and then as the upgraded server;
   # then a CA rotation with the 2.0.0 worker, upgraded in place during it.
