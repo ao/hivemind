@@ -258,11 +258,13 @@ func listenServerPort(ip string, port int) (net.Listener, error) {
 
 // observedTransport is raft's network transport, noting when each peer
 // last answered the leader's AppendEntries, heartbeats included: the
-// "last contact" hivemind servers shows.
+// "last contact" hivemind servers shows. An answer also ends the limit on
+// the peer's failure lines (peerlog.go), if any.
 type observedTransport struct {
 	*raft.NetworkTransport
-	mu   sync.Mutex
-	seen map[raft.ServerID]time.Time
+	mu    sync.Mutex
+	seen  map[raft.ServerID]time.Time
+	fails *peerFailures
 }
 
 func (t *observedTransport) AppendEntries(id raft.ServerID, target raft.ServerAddress, args *raft.AppendEntriesRequest,
@@ -272,6 +274,9 @@ func (t *observedTransport) AppendEntries(id raft.ServerID, target raft.ServerAd
 		t.mu.Lock()
 		t.seen[id] = time.Now()
 		t.mu.Unlock()
+		if t.fails != nil {
+			t.fails.answered(string(target))
+		}
 	}
 	return err
 }

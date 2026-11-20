@@ -171,7 +171,7 @@ func openNode(cfg Config, setReplicator bool) (*Node, error) {
 	n.tlsm = &tlsMaterial{cert: cfg.Cert, trust: cfg.Trust, allow: n.allow}
 	n.mux = newMux(ln, n.tlsm, log, serverAddr(n.addr))
 	nt := raft.NewNetworkTransportWithLogger(&streamLayer{connQueue: n.mux.raft, m: n.tlsm}, 3, 10*time.Second, hl.Named("transport"))
-	n.trans = &observedTransport{NetworkTransport: nt, seen: map[raft.ServerID]time.Time{}}
+	n.trans = &observedTransport{NetworkTransport: nt, seen: map[raft.ServerID]time.Time{}, fails: hl.fails}
 
 	rc := raft.DefaultConfig()
 	rc.LocalID = raft.ServerID(cfg.ID)
