@@ -1,5 +1,50 @@
 # Upgrading
 
+## From 2.2.0 to 2.3.0
+
+A server upgraded to 2.3.0 changes nothing until a second server joins: it runs no Raft, opens no new listener, and writes go to the store as before. Adding servers is a separate step, after the upgrade ([below](#adding-servers)).
+
+No test or soak has upgraded a 2.2.0 cluster in place. The [eighth soak](soak.md#eighth-soak-three-servers) made its cluster of three servers with this release from the start, and `scripts/integration-mixed.sh` runs 2.0.0 binaries beside this release, not 2.2.0 ones.
+
+1. Back up the server with the 2.2.0 binary: `sudo hivemind backup /root/hivemind-2.2.0.tar`. This file is the only way back to 2.2.0.
+2. Upgrade the server: install the new binary over the old one, as in the [README](../README.md#install), and run `sudo systemctl restart hivemind`. The server migrates the store on that start, from schema version 17 to 18, and logs `msg="store schema migrated" from=17 to=18 adds="several servers"`. Version 18 adds the Raft applied index, the server table and a role for join tokens: tables and a column, nothing changed in what is there.
+3. Upgrade each worker the same way, one at a time; with routed apps, wait for its routed replicas to be ready before the next ([routed apps](#routed-apps)).
+
+The 2.3.0 CLI works with a 2.2.0 server for the commands 2.2.0 has. `hivemind servers` and `hivemind server remove` say `the server runs v2.2.0, which has no servers command; upgrade the server` (or `server remove`).
+
+### What 2.3.0 changes on disk
+
+In a cluster of one, only `hivemind.db` changes, by the migration. A worker's files stay as 2.2.0 wrote them.
+
+Once a second server joins, every server has `raft/`, with the Raft log in `raft/raft.db` and its snapshots, and each server that joined has `server.json` and the CA files it received ([security](security.md#files)). A worker of 2.3.0 adds `servers`, the list of the servers' node listeners, to its `node.json`. A 2.2.0 binary refuses that file (`node.json is not valid: json: unknown field "servers"`).
+
+### Workers of 2.2.0
+
+A 2.2.0 worker keeps working with 2.3.0 servers: it uses the server it joined, which passes its requests to the leader. It cannot move to another server: when its server is down, it keeps its containers and waits, as with one server. An upgraded worker learns the servers from the next reply of any server and moves to the next one in its list when one does not answer or has no leader, so upgrade the workers before you rely on that.
+
+### Adding servers
+
+Every server runs the same release: a server will not apply a Raft entry from a leader at another schema version, and a joining server must run the leader's version. So upgrade the first server before you add any: a 2.2.0 server refuses `join-token --role server` with `400` (`unknown field "server"`), and takes no server joins.
+
+1. Open TCP port 4486 between the server machines, and from nowhere else, and ports 4484 and 4485 from every node to every server ([security](security.md#several-servers)). On EC2, that is a security group rule for TCP 4486 from the servers' own group.
+2. Finish any CA rotation: a server join is refused while one is in progress, and in 2.3.0 `hivemind ca rotate start` is refused while the cluster has more than one server ([compatibility](ha.md#compatibility)).
+3. Join two more servers, one after the other, as in [membership](ha.md#membership): `hivemind join-token --role server` on the first server, then `hivemind join <first server> --role server --token <token> --advertise <its own address>` on each new machine. `hivemind servers` lists them, and shows each as a `nonvoter` until it has caught up with the log.
+4. Give the CLI every server: `HIVEMIND_SERVER=https://10.0.0.5:4483,https://10.0.0.6:4483,https://10.0.0.7:4483`. Each server's API listens on `127.0.0.1:4483` unless it is given another `--api-addr`, which needs TLS ([the API](api.md#tls)); a joined server has no `admin.token`, so give its CLI the cluster's admin token with `HIVEMIND_TOKEN`.
+
+### Going back to 2.2.0
+
+From a cluster of one, restore the backup from step 1 into an empty data directory with the 2.2.0 binary's `hivemind restore`, run 2.2.0 on it, and install 2.2.0 on the workers again. Everything that changed since the backup is lost. A 2.2.0 binary refuses the migrated store:
+
+```
+error: opening /var/lib/hivemind/hivemind.db: store schema is newer than this build: the store has schema version 18 and this build knows up to 17; use a newer hivemind
+```
+
+There is no tested way back to 2.2.0 once a second server has joined.
+
+## From 2.0.0 to 2.3.0
+
+A 2.0.0 cluster upgrades to 2.3.0 the way the next section upgrades it to 2.2.0, with the 2.3.0 binary: the server migrates the store from schema version 6 to 18 on its first start, and a 2.0.0 binary then refuses it with schema version 18 in the message. `scripts/integration-mixed.sh` runs that upgrade, of the server and of a 2.0.0 worker, with this release's binary. Then add servers as [above](#adding-servers).
+
 ## From 2.0.0 to 2.2.0
 
 These steps were run on two clusters of three machines (c7g.large, Amazon Linux 2023, Docker 25.0.18), each on 2.0.0 under the [systemd units](systemd.md), with apps that had a volume, a host port, a health check and no port. One cluster was upgraded server first, the other workers first. In both, no container on any node was restarted or moved by the upgrade, every worker stayed `ready`, and the old certificates kept working.
