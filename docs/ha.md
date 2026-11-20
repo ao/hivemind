@@ -1,6 +1,6 @@
 # Several servers
 
-This is the design of the highly available control plane, for the unreleased 2.3.0. Until it, a cluster has one server: if that machine goes down, the containers keep running, but nothing is placed, lost nodes are not rescheduled, and the API is gone. With this, a cluster can have 3 or 5 servers. They elect a leader, every server keeps a full copy of the store, and the cluster keeps working while a majority of the servers is up. A write the API acknowledged is on a majority of the servers before the answer goes out, so losing a minority loses none, and a replica is placed by one leader at a time, so it is never placed twice.
+This is the design of the highly available control plane, new in 2.3.0. A cluster of one server, as every cluster was before it, depends on that machine: if it goes down, the containers keep running, but nothing is placed, lost nodes are not rescheduled, and the API is gone. A cluster can instead have 3 or 5 servers. They elect a leader, every server keeps a full copy of the store, and the cluster keeps working while a majority of the servers is up. A write the API acknowledged is on a majority of the servers before the answer goes out, so losing a minority loses none, and a replica is placed by one leader at a time, so it is never placed twice.
 
 One server works as before. `init` makes a cluster of one, and nothing in this document runs until a second server joins.
 

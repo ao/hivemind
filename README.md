@@ -8,11 +8,11 @@
 
 hivemind runs containers on a few Linux machines, using Docker Engine on each one. You describe an app with flags or a YAML file. hivemind keeps the requested number of replicas running, and starts a replacement when a container exits or fails its health check.
 
-Version 2 is a rewrite of version 1, and 2.2.0 is the current release. A cluster has one server and any number of workers. A worker joins with a token, and the server and the worker then talk over TLS with certificates from the cluster's own CA.
+Version 2 is a rewrite of version 1, and 2.3.0 is the current release. A cluster has one server, or three or five that keep it working while a majority of them is up ([several servers](docs/ha.md)), and any number of workers. A worker joins with a token, and the servers and the workers then talk over TLS with certificates from the cluster's own CA.
 
 Any node can run an HTTPS router that gets certificates from Let's Encrypt or another ACME CA, routes requests by host and path prefix, and speaks HTTP/2 without TLS to gRPC servers. `hivemind compose` deploys a Docker Compose file, `node drain` moves the replicas off a machine before it leaves, `registry login` lets the nodes pull from private registries, `backup` and `restore` bring a lost server back on a new machine, at a new address too, and `ca rotate` replaces the cluster CA without joining the machines again.
 
-hivemind is for 1 to 10 Linux machines on one network. It has one server, or in the unreleased 2.3.0 three or five ([several servers](docs/ha.md)), publishes container ports on host ports or behind its HTTPS router, and has no overlay network, no built-in DNS and no tenancy. Docker Swarm, Nomad and k3s do much more than that. hivemind is smaller to learn and run, and it is not a replacement for them. The automated cluster test runs three nodes.
+hivemind is for 1 to 10 Linux machines on one network. It publishes container ports on host ports or behind its HTTPS router, and has no overlay network, no built-in DNS and no tenancy. Docker Swarm, Nomad and k3s do much more than that. hivemind is smaller to learn and run, and it is not a replacement for them. The automated cluster test runs three nodes.
 
 ## Install
 
@@ -111,7 +111,7 @@ An app can name `routes: [{host: www.example.com, port: 80}]`, and a node starte
 
 - The API listens on `127.0.0.1:4483`. Every route except `GET /healthz` needs the admin token that `init` prints. A non-loopback `--api-addr` needs TLS as well. With a certificate from a private CA, give the CLI that CA with `--ca-cert` or `HIVEMIND_CA_CERT`.
 - `serve --advertise` opens two more ports, on that address only. Port 4484 is the node API. It accepts only a machine that holds a certificate from the cluster CA. Port 4485 takes join requests, and each one needs a join token.
-- In a cluster of several servers (unreleased 2.3.0), each server also opens the server port, 4486, on the same address: TLS 1.3 with client certificates of the server role only, for Raft and for the requests followers pass to the leader. Allow it between the servers only ([security](docs/security.md#several-servers)).
+- In a cluster of several servers, each server also opens the server port, 4486, on the same address: TLS 1.3 with client certificates of the server role only, for Raft and for the requests followers pass to the leader. Allow it between the servers only ([security](docs/security.md#several-servers)).
 - `--route-addr` opens the router, on ports 80 and 443. It is the one listener that may bind `0.0.0.0`, and it has no authentication: it serves the routed apps' public traffic.
 - Nothing else listens. Container ports are published on `127.0.0.1` unless the spec names another address. A routed app's ports are published on ports 30000 to 32767 of the node's private address, for the other nodes' routers; keep that network to the nodes, or firewall those ports.
 
@@ -119,11 +119,11 @@ An app can name `routes: [{host: www.example.com, port: 80}]`, and a node starte
 
 ## Limits
 
-- By default the server is one machine. If it goes down, running containers keep running, but nothing new is placed and lost nodes are not rescheduled. In the unreleased 2.3.0, a cluster can have three or five servers instead, which keep working while a majority of them is up ([several servers](docs/ha.md)); with two, losing either stops writes. All servers run the same release, a CA rotation needs a cluster of one, and a server that dies stays in the configuration until `hivemind server remove`. `hivemind backup` and `hivemind restore` bring it back on a new machine. The new machine can have any address when the server advertises a DNS name; when it advertises an IP address, give the new machine that address, or run `hivemind node set-server` on each worker. See [backup](docs/backup.md).
+- A cluster has 1, 3 or 5 servers ([several servers](docs/ha.md)). `init` makes a cluster of one, and one server is one machine: if it goes down, running containers keep running, but nothing new is placed, lost nodes are not rescheduled and the API is gone until it is back. Three or five keep working while a majority of them is up; with two, losing either stops writes. All servers run the same release, so they are upgraded together, not one at a time; a CA rotation needs a cluster of one; and a server that dies stays in the configuration until `hivemind server remove`. `hivemind backup` and `hivemind restore` bring a lost single server back on a new machine, and a cluster that lost a majority of its servers for good. The new machine can have any address when the server advertises a DNS name; when it advertises an IP address, give the new machine that address, or run `hivemind node set-server` on each worker. See [backup](docs/backup.md).
 - A node certificate lasts 365 days, and nodes renew theirs on day 243. A 2.0.0 node cannot renew, so upgrade it within a year of joining (see [upgrading](docs/upgrading.md#from-200-to-220)). The only way to revoke one is to remove the node. The cluster CA lasts ten years; `hivemind ca rotate` replaces it in place, without joining machines again, and a 2.0.0 worker must be upgraded or joined again for that. See [CA rotation](docs/ca-rotation.md).
 - A replica with a volume stays on its node. If that node is lost, the app is down until the node returns.
 - `deploy` does not reject a host port that another app already publishes. The second app's replicas go where the port is free. Any that cannot go stay `pending`, with the reason. `deploy` prints a warning for each of them that names the app holding the port, and `deploy --wait` exits 1 at once when running replicas hold the port on every node that could take it. See [concepts](docs/concepts.md#placement).
-- While a cluster is upgraded from 2.0.0, `hivemind logs` reads a replica on a worker only once the server and that worker both run 2.2.0. Until then, use `docker logs` on the worker.
+- While a cluster is upgraded from 2.0.0, `hivemind logs` reads a replica on a worker only once the server and that worker both run 2.2.0 or later. Until then, use `docker logs` on the worker.
 - hivemind never deletes a volume, including when its app is deleted. Remove unused volumes with `docker volume rm` on the node.
 - In a rolling update on one node, each replica of an app without routes is down while its new container starts, whether or not it has host ports. With a second eligible node, the new copy starts there first. A routed app's new copy always starts beside the old one. See [concepts](docs/concepts.md#rolling-updates).
 - There is no web UI. The CLI and the HTTP API are the interfaces. The API has login and logout routes for a browser session, with a CSRF token.
@@ -144,7 +144,7 @@ An app can name `routes: [{host: www.example.com, port: 80}]`, and a node starte
 - [Scale test on ten machines](docs/scale.md): 100 apps, 500 replicas
 - [CLI reference](docs/cli.md)
 - [HTTP API](docs/api.md)
-- [Upgrading from 2.0.0 or v1](docs/upgrading.md)
+- [Upgrading from 2.2.0, 2.0.0 or v1](docs/upgrading.md)
 - [Roadmap](ROADMAP.md)
 - [Assessment of v1](docs/ASSESSMENT.md) and [the v2 plan](docs/PLAN.md)
 
