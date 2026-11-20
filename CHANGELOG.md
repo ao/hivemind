@@ -20,6 +20,12 @@ Notable changes to hivemind, newest first. Versions follow [Semantic Versioning]
 - `hivemind ca rotate start` is refused while the cluster has more than one server, and a server join while a rotation is in progress.
 - `hivemind nodes` marks every server's node as a server, and `hivemind node remove` refuses the node of a server until `hivemind server remove`.
 
+### Fixed
+
+What the eighth soak, three servers on seven machines ([docs/soak.md](docs/soak.md)), found in the branch of several servers before this release:
+
+- With a server that is down first in its list, every CLI call waited 30 s for it (the first after its machine went down) or 3.1 s (the kernel's time to give up on the address) before it tried the next. With several servers the CLI now gives each 2 s for the TCP connect and 5 s for the TLS handshake, and starts at the server that answered the last command given the same list, which it keeps in a 0600 file in the user's cache directory, one per list. A test with a listener that drops SYNs first in the list gets the answer from the second in under 3 s, and the next call at once.
+
 ## [2.2.0] - 2026-11-20
 
 2.1.0 was not released on its own, and its changes are in this release too: node certificate renewal, `hivemind backup` and `hivemind restore`, and `hivemind logs` for replicas on workers. They are listed under 2.1.0 in [CHANGELOG.md](https://github.com/ao/hivemind/blob/v2.2.0/CHANGELOG.md).

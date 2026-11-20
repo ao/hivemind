@@ -3,6 +3,8 @@ package main
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -13,6 +15,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"syscall"
 	"time"
@@ -37,6 +40,16 @@ const (
 	requestTimeout  = 60 * time.Second
 	maxClientConfig = 64 << 10
 	maxResponse     = 16 << 20
+
+	// With one server, the CLI waits 30 s for the TCP connect. With
+	// several, it waits 2 s, and 5 s for the TLS handshake, and then tries
+	// the next server: one on the network that has not answered in that
+	// time is taken as gone. In the eighth soak, with the first of three
+	// servers powered off, every call waited 30 s, then 3.1 s, the kernel's
+	// time to give up on the address, before it tried the second.
+	connectTimeout     = 30 * time.Second
+	listConnectTimeout = 2 * time.Second
+	listTLSTimeout     = 5 * time.Second
 )
 
 // clientKeepAlive probes an idle connection to the server after 15 s, then
@@ -140,7 +153,7 @@ func addClientFlags(cmd *cobra.Command) *clientFlags {
 func addConnFlags(cmd *cobra.Command) *clientFlags {
 	f := &clientFlags{cmd: cmd}
 	fl := cmd.Flags()
-	fl.StringVar(&f.server, "server", "", "server URL, or the URLs of several servers, comma separated, tried in order (env "+envServer+"; default from the client config, then "+defaultServer+")")
+	fl.StringVar(&f.server, "server", "", "server URL, or the URLs of several servers, comma separated, tried in order from the one that answered last (env "+envServer+"; default from the client config, then "+defaultServer+")")
 	fl.StringVar(&f.token, "token", "", "API token (env "+envToken+"; default from the client config's token file)")
 	fl.StringVar(&f.clientConfig, "client-config", "", "client config file (env "+envClientConfig+"; default "+defaultClientConfigHint+")")
 	fl.StringVar(&f.caCert, "ca-cert", "", "PEM file of the CA certificates to trust for an https server, instead of the system's (env "+envCACert+"; default from the client config)")
@@ -161,6 +174,9 @@ type apiClient struct {
 	// name it.
 	caPath string
 	http   *http.Client
+	// lastSaved is the server of a list that the file of lastServerPath
+	// names, or "" for none (lastServer).
+	lastSaved string
 }
 
 // client resolves the server and token: flag, then environment, then the
@@ -254,8 +270,85 @@ func (f *clientFlags) client() (*apiClient, error) {
 	// A followed log can be quiet for hours, so it has no read timeout.
 	// TCP keepalives find a server machine that went away, which closes
 	// nothing, in about 30 s, where the defaults take some minutes.
-	tr.DialContext = (&net.Dialer{Timeout: 30 * time.Second, KeepAliveConfig: clientKeepAlive}).DialContext
-	return &apiClient{base: srv, bases: bases, token: token, tokenFrom: tokenFrom, caPath: caPath, http: &http.Client{Transport: tr}}, nil
+	dial := &net.Dialer{Timeout: connectTimeout, KeepAliveConfig: clientKeepAlive}
+	var last string
+	if len(bases) > 1 {
+		dial.Timeout = listConnectTimeout
+		tr.TLSHandshakeTimeout = listTLSTimeout
+		// The server that answered the last command of this list is tried
+		// first.
+		if last = lastServer(bases); last != "" {
+			srv = last
+		}
+	}
+	tr.DialContext = dial.DialContext
+	return &apiClient{base: srv, bases: bases, token: token, tokenFrom: tokenFrom, caPath: caPath, http: &http.Client{Transport: tr},
+		lastSaved: last}, nil
+}
+
+// userCacheDir is os.UserCacheDir, but for tests.
+var userCacheDir = os.UserCacheDir
+
+// lastServerPath is the file that names the server of the list bases that
+// answered last: in the user's cache directory, one file per list, named
+// by a hash of the list, so that two clusters' lists, or two orders of one
+// list, do not share one.
+func lastServerPath(bases []string) (string, error) {
+	d, err := userCacheDir()
+	if err != nil {
+		return "", err
+	}
+	sum := sha256.Sum256([]byte(strings.Join(bases, "\n")))
+	return filepath.Join(d, "hivemind", "server-"+hex.EncodeToString(sum[:8])), nil
+}
+
+// lastServer is the server of bases that answered the last command given
+// that list, or "" when no file names one. A file that names a server the
+// list does not have is ignored: it can only change which of the servers
+// given is tried first.
+func lastServer(bases []string) string {
+	p, err := lastServerPath(bases)
+	if err != nil {
+		return ""
+	}
+	f, err := os.Open(p)
+	if err != nil {
+		return ""
+	}
+	defer f.Close()
+	b, err := io.ReadAll(io.LimitReader(f, 4096))
+	if err != nil {
+		return ""
+	}
+	if s := strings.TrimSpace(string(b)); slices.Contains(bases, s) {
+		return s
+	}
+	return ""
+}
+
+// saveLastServer records base as the server of bases that answered last,
+// in a file of mode 0600 in a directory of mode 0700, replaced in one
+// rename. It is a hint for the next command, so a failure is ignored.
+func saveLastServer(bases []string, base string) {
+	p, err := lastServerPath(bases)
+	if err != nil {
+		return
+	}
+	if err := os.MkdirAll(filepath.Dir(p), 0o700); err != nil {
+		return
+	}
+	f, err := os.CreateTemp(filepath.Dir(p), ".server-*")
+	if err != nil {
+		return
+	}
+	_, werr := f.WriteString(base + "\n")
+	if cerr := f.Close(); werr != nil || cerr != nil {
+		os.Remove(f.Name())
+		return
+	}
+	if err := os.Rename(f.Name(), p); err != nil {
+		os.Remove(f.Name())
+	}
 }
 
 func firstNonEmpty(vs ...string) string {
@@ -295,6 +388,10 @@ func (c *apiClient) send(ctx context.Context, method, path string, body any) (*h
 		resp, err = c.sendTo(ctx, base, method, path, b, body != nil)
 		if err == nil {
 			c.base = base
+			if len(c.bases) > 1 && base != c.lastSaved {
+				saveLastServer(c.bases, base)
+				c.lastSaved = base
+			}
 			return resp, nil
 		}
 		var re *reachError
