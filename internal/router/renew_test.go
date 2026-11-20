@@ -10,6 +10,7 @@ import (
 	"crypto/x509"
 	"crypto/x509/pkix"
 	"encoding/pem"
+	"errors"
 	"io"
 	"log/slog"
 	"math/big"
@@ -170,5 +171,60 @@ func TestStartRenewsACertificateInItsRenewalWindow(t *testing.T) {
 	}
 	if got := served(fresh).NotAfter; got.Before(now.Add(23 * time.Hour)) {
 		t.Fatalf("%s served until %s", fresh, got)
+	}
+}
+
+// A router whose table cannot be read as it starts, as a server's while no
+// server leads during an election, reads it again until it can, for up to
+// warmTimeout, before it takes TLS connections: the first handshake gets the
+// certificate the storage has. In the eighth soak a restarted leader's
+// router read once, during the election its stop caused, and failed every
+// handshake until its poll read the table 1.9 s later.
+func TestStartWaitsForATableThatComesSoon(t *testing.T) {
+	st, err := store.Open(context.Background(), filepath.Join(t.TempDir(), "hivemind.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { st.Close() })
+	log := slog.New(slog.NewTextHandler(io.Discard, nil))
+	ts, err := tlsstore.New(tlsstore.StoreBackend{St: st, NodeID: "node-a"}, tlsstore.Options{Logger: log})
+	if err != nil {
+		t.Fatal(err)
+	}
+	const host = "www.example.com"
+	var mu sync.Mutex
+	reads := 0
+	routes := func(context.Context) (Table, error) {
+		mu.Lock()
+		defer mu.Unlock()
+		if reads++; reads <= 2 {
+			return nil, errors.New("no leader: this server reaches 1 of the 3 servers, and a write needs 2")
+		}
+		return Table{host: {}}, nil
+	}
+	rt, err := New(Config{Addr: "127.0.0.1", Routes: routes, Storage: ts, Email: "ops@example.com",
+		CA: "https://acme.invalid/dir", Logger: log, Metrics: NewMetrics(), Poll: time.Hour})
+	if err != nil {
+		t.Fatal(err)
+	}
+	rt.manage = func(context.Context, []string) error { return nil }
+	iss := newTestIssuer(t)
+	rt.magic.Issuers = []certmagic.Issuer{iss}
+	iss.store(t, ts, host, time.Now().Add(-time.Minute), time.Now().Add(24*time.Hour))
+
+	go func() { _ = rt.Serve() }()
+	t.Cleanup(func() { _ = rt.Shutdown() })
+	time.Sleep(100 * time.Millisecond)
+	pool := x509.NewCertPool()
+	pool.AddCert(iss.ca)
+	conn, err := tls.DialWithDialer(&net.Dialer{Timeout: 5 * time.Second}, "tcp", rt.HTTPSAddr(), &tls.Config{RootCAs: pool, ServerName: host})
+	if err != nil {
+		t.Fatalf("a handshake 100 ms after the start: %v", err)
+	}
+	conn.Close()
+	mu.Lock()
+	defer mu.Unlock()
+	if reads < 3 {
+		t.Fatalf("%d reads of the table", reads)
 	}
 }

@@ -61,6 +61,10 @@ func isChallengeKey(key string) bool {
 		path.Base(path.Dir(key)) == "challenge_tokens"
 }
 
+// IsChallengeKey is isChallengeKey, for a server's TLS storage, which reads
+// challenge tokens from the leader.
+func IsChallengeKey(key string) bool { return isChallengeKey(key) }
+
 // challengeReads bounds the reads of challenge tokens. For each key, one
 // read runs at a time, and a read starts no sooner than every after the one
 // before it started, so one host's challenge requests cause at most one read

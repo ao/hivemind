@@ -664,36 +664,95 @@ func (h *haServe) routes(local func(context.Context) (router.Table, error)) func
 	}
 }
 
-// tlsBackend is the router's TLS storage on a server: the store while it
-// leads, the node API otherwise.
+// tlsBackend is the router's TLS storage on a server. While the server
+// writes the store itself, as the leader or the one server, it is the
+// store. On a follower, writes, deletes and locks go to the leader through
+// the node API, as a worker's do, and reads go to the follower's own copy
+// of the store first (docs/ha.md#the-routers-tls-storage): its router then
+// loads the certificates and keys the store has while no server leads, as
+// when it starts during an election. A key the copy lacks is asked of the
+// leader, so that a key just stored, whose entry the follower has not
+// applied yet, is not taken for missing, which could make certmagic order
+// a certificate the storage has; and a challenge token is read from the
+// leader only, since its copy could be the previous challenge's.
 type tlsBackend struct {
-	h     *haServe
-	local tlsstore.Backend
+	// remote is the leader's storage through the node API, or nil while
+	// this server writes the store itself.
+	remote func() tlsstore.Backend
+	local  tlsstore.Backend
+}
+
+// remoteTLS is the leader's TLS storage for this server's router, or nil
+// when this server writes the store itself.
+func (h *haServe) remoteTLS() tlsstore.Backend {
+	c := h.remote.Load()
+	if c == nil || h.leader() {
+		return nil
+	}
+	return c.TLS(h.selfID)
 }
 
 func (b tlsBackend) pick() tlsstore.Backend {
-	c := b.h.remote.Load()
-	if c == nil || b.h.leader() {
-		return b.local
+	if r := b.remote(); r != nil {
+		return r
 	}
-	return c.TLS(b.h.selfID)
+	return b.local
 }
 
 func (b tlsBackend) Load(ctx context.Context, key string) ([]byte, error) {
-	return b.pick().Load(ctx, key)
+	r := b.remote()
+	if r == nil {
+		return b.local.Load(ctx, key)
+	}
+	if router.IsChallengeKey(key) {
+		return r.Load(ctx, key)
+	}
+	v, err := b.local.Load(ctx, key)
+	if err == nil || !errors.Is(err, fs.ErrNotExist) {
+		return v, err
+	}
+	return r.Load(ctx, key)
 }
 func (b tlsBackend) Store(ctx context.Context, key string, v []byte) error {
 	return b.pick().Store(ctx, key, v)
 }
 func (b tlsBackend) Delete(ctx context.Context, key string) error { return b.pick().Delete(ctx, key) }
 func (b tlsBackend) Exists(ctx context.Context, key string) (bool, error) {
-	return b.pick().Exists(ctx, key)
+	r := b.remote()
+	if r == nil {
+		return b.local.Exists(ctx, key)
+	}
+	if ok, err := b.local.Exists(ctx, key); err == nil && ok {
+		return true, nil
+	}
+	return r.Exists(ctx, key)
 }
+
+// List asks the leader, whose list is the whole one, and on a follower
+// that cannot reach a leader lists its own copy.
 func (b tlsBackend) List(ctx context.Context, prefix string, recursive bool) ([]string, error) {
-	return b.pick().List(ctx, prefix, recursive)
+	r := b.remote()
+	if r == nil {
+		return b.local.List(ctx, prefix, recursive)
+	}
+	keys, err := r.List(ctx, prefix, recursive)
+	if err != nil && !errors.Is(err, fs.ErrNotExist) {
+		if own, lerr := b.local.List(ctx, prefix, recursive); lerr == nil {
+			return own, nil
+		}
+	}
+	return keys, err
 }
 func (b tlsBackend) Stat(ctx context.Context, key string) (store.TLSKeyInfo, error) {
-	return b.pick().Stat(ctx, key)
+	r := b.remote()
+	if r == nil {
+		return b.local.Stat(ctx, key)
+	}
+	i, err := b.local.Stat(ctx, key)
+	if err == nil || !errors.Is(err, fs.ErrNotExist) {
+		return i, err
+	}
+	return r.Stat(ctx, key)
 }
 func (b tlsBackend) TryLock(ctx context.Context, name, owner string, ttl time.Duration) (bool, error) {
 	return b.pick().TryLock(ctx, name, owner, ttl)

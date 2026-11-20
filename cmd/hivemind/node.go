@@ -696,9 +696,10 @@ func runServe(ctx context.Context, cfg *config.Config, log *slog.Logger, rt runt
 	if cfg.RouteAddr != "" {
 		reported = make(chan struct{})
 		// On a follower of a cluster of several, the router reads the table
-		// and keeps its certificates through the node API (servers.go).
+		// through the node API, and its certificates from its own copy of
+		// the store, writing them through the node API (servers.go).
 		if rtr, err = newRouter(cfg, log, hs.routes(storeRoutes(st)),
-			tlsBackend{h: hs, local: tlsstore.StoreBackend{St: st, NodeID: selfID}}, reported); err != nil {
+			tlsBackend{remote: hs.remoteTLS, local: tlsstore.StoreBackend{St: st, NodeID: selfID}}, reported); err != nil {
 			return err
 		}
 		routerReport = rtr.Report

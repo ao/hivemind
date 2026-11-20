@@ -421,22 +421,44 @@ func (rt *Router) poll() {
 }
 
 // warmTimeout bounds what a starting router waits for before it takes TLS
-// connections: one read of the table, and loading its hosts' certificates
-// from storage.
-const warmTimeout = 5 * time.Second
+// connections: the table, read again every warmRetry while a read fails,
+// and loading its hosts' certificates from storage.
+const (
+	warmTimeout = 5 * time.Second
+	warmRetry   = 250 * time.Millisecond
+)
 
-// warm reads the table once, loads from storage the certificate of each of
-// its hosts that has one, and then sets the table, which starts managing the
-// hosts as usual. A host with no certificate yet is left to that. A table
-// that cannot be read, as when the server is away, leaves the router to its
-// poll, as before.
+// warm reads the table, loads from storage the certificate of each of its
+// hosts that has one, and then sets the table, which starts managing the
+// hosts as usual. A host with no certificate yet is left to that. A read
+// that fails is tried again every warmRetry, until warmTimeout: a server's
+// router that starts while no server leads, as during an election, gets
+// its table once one does. In the eighth soak, a restarted leader's router
+// read once, during the election its own stop caused, started without a
+// table, and failed every TLS handshake for 1.9 s, until its poll read the
+// table from the new leader. A table that cannot be read by then, as when
+// the server is away, leaves the router to its poll, as before.
 func (rt *Router) warm() {
 	ctx, cancel := context.WithTimeout(rt.ctx, warmTimeout)
 	defer cancel()
-	tab, err := rt.cfg.Routes(ctx)
-	if err != nil {
-		rt.log.Info("starting without a routing table; reading it again shortly", "err", err)
-		return
+	var tab Table
+	var err error
+	tries := 1
+	for ; ; tries++ {
+		if tab, err = rt.cfg.Routes(ctx); err == nil {
+			break
+		}
+		t := time.NewTimer(warmRetry)
+		select {
+		case <-ctx.Done():
+			t.Stop()
+			rt.log.Info("starting without a routing table; reading it again shortly", "err", err, "reads", tries)
+			return
+		case <-t.C:
+		}
+	}
+	if tries > 1 {
+		rt.log.Info("read the routing table", "reads", tries)
 	}
 	loaded := 0
 	var due []string
