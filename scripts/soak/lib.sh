@@ -495,6 +495,14 @@ dups() {
 	awk -F'\t' '$1 == "C" && $4 == "running" { k = $6 "|" $7; n[k]++; on[k] = on[k] (on[k] == "" ? "" : ",") $2 }
 		END { for (k in n) if (n[k] > 1) print k, on[k] }' "$1" | sort
 }
+# dups_gen FILE: the same for (app, replica, generation): the same copy of a
+# replica running on two nodes. During a rolling update an old and a new
+# generation of a replica run side by side by design (a surge), which dups
+# counts and this does not (the eighth soak).
+dups_gen() {
+	awk -F'\t' '$1 == "C" && $4 == "running" { k = $6 "|" $7 "|g" $8; n[k]++; on[k] = on[k] (on[k] == "" ? "" : ",") $2 }
+		END { for (k in n) if (n[k] > 1) print k, on[k] }' "$1" | sort
+}
 
 # unreachable FILE: the nodes that did not answer, comma separated.
 unreachable() { awk -F'\t' '$1 == "U" { s = s (s == "" ? "" : ",") $2 } END { print s }' "$1"; }
@@ -773,7 +781,7 @@ join_worker() {
 	on "$n" "sudo sh -c 'read -r T; nohup $HM join $(server_addr) --token \"\$T\"$(route_flags "$ip") >/var/log/hivemind-join.log 2>&1 </dev/null &'" <<<"$tok"
 	wait_for 60 on "$n" "sudo test -s $DATA/node.json" || die "$n did not join: $(on "$n" 'sudo tail -n 5 /var/log/hivemind-join.log' 2>&1)"
 	# join keeps running as the agent. Stop it, and let systemd run the worker.
-	on "$n" "sudo pkill -TERM -f '^$HM join' ; for i in \$(seq 1 20); do pgrep -f '^$HM join' >/dev/null || exit 0; sleep 0.5; done; exit 1" ||
+	SSH_TIMEOUT=60 on "$n" "sudo pkill -TERM -f '^$HM join' ; for i in \$(seq 1 80); do pgrep -f '^$HM join' >/dev/null || exit 0; sleep 0.5; done; exit 1" ||
 		die "$n: the foreground join did not stop"
 	# join writes the worker flags it was given to hivemind.yaml (docs/systemd.md),
 	# which the unit's plain serve --role worker reads. Its keys, mode and owner:
@@ -877,8 +885,12 @@ join_server() {
 	on "$n" "sudo sh -c 'read -r T; nohup $HM join $SERVER_IP --role server --token \"\$T\" --advertise $ip$JOIN_SERVER_FLAGS >/var/log/hivemind-join.log 2>&1 </dev/null &'" <<<"$tok"
 	wait_for 180 server_voter "$n" || die "$n is not a voting server 180 s after its join: role=$(server_role "$n") $(on "$n" 'sudo tail -n 5 /var/log/hivemind-join.log' 2>&1 | tr '\n' ' ')"
 	ev setup "$n joined as a server: role $(server_role "$n"); data $(on "$n" "sudo ls $DATA | tr '\n' ' '")"
-	on "$n" "sudo pkill -TERM -f '^$HM join' ; for i in \$(seq 1 40); do pgrep -f '^$HM join' >/dev/null || exit 0; sleep 0.5; done; exit 1" ||
+	# a server's stop can take 10 s, its cluster listeners' shutdown limit (the eighth soak)
+	local t0
+	t0=$(now_ms)
+	SSH_TIMEOUT=60 on "$n" "sudo pkill -TERM -f '^$HM join' ; for i in \$(seq 1 80); do pgrep -f '^$HM join' >/dev/null || exit 0; sleep 0.5; done; exit 1" ||
 		die "$n: the foreground join did not stop"
+	ev setup "$n foreground join stopped in $(($(now_ms) - t0)) ms: $(on "$n" "sudo grep -E 'shutting down|shutdown|stopped' /var/log/hivemind-join.log | tail -n 3 | cut -c1-160" | tr '\n' ';')"
 	install_unit "$n" "$(server_unit "$ip")"
 	ev setup "$n unit ExecStart=$(on "$n" "systemctl show -p ExecStart --value hivemind.service | sed -n 's/.*argv\[\]=\([^;]*\);.*/\1/p'")"
 	wait_for 120 server_voter "$n" || die "$n is not a voting server after its unit started: role=$(server_role "$n")"

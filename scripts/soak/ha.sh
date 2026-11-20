@@ -12,8 +12,11 @@
 #   scenario.sh quorum-loss          a majority of the servers powered off (two
 #                                    of three: the followers, or $QL_OFF); no
 #                                    leader; one back: a leader; then the rest
-#   scenario.sh service-restart      the leader's hivemind restarted (with one
+#   scenario.sh service-restart [follower]  the leader's (or a follower's)
+#                                    hivemind restarted (with one
 #                                    server, the server's)
+#   scenario.sh rollout-leader       a rolling update of every app, the
+#                                    leader's hivemind restarted during it
 #   scenario.sh steady [SECS]        the steady state (3600 s), with the
 #                                    write-load deleting as it goes
 #   scenario.sh servers [LABEL]      each server's view, one log line
@@ -126,7 +129,7 @@ api_answer() {
 
 # The observations' last values, for logging changes only.
 declare -A HP22 HV HNODE
-HLEAD="" HAPI="" HCONV="" HHELD="" HRUN="" HDUP=""
+HLEAD="" HAPI="" HCONV="" HHELD="" HRUN="" HDUP="" HSURGE=""
 
 # ha_observe NAME: one round of observations (above), about a second.
 ha_observe() {
@@ -201,10 +204,18 @@ ha_observe() {
 			HRUN=$c
 		}
 	fi
-	v=$(dups "$cur" | tr '\n' ';')
+	# the same copy (app, replica, generation) running on two nodes; and, as
+	# "surge", any two copies of a replica, old and new generations included,
+	# which a rolling update runs side by side by design
+	v=$(dups_gen "$cur" | tr '\n' ';')
 	[ "$v" = "$HDUP" ] || {
 		ev event "$name dups ${v:-none}"
 		HDUP=$v
+	}
+	v=$(dups "$cur" | tr '\n' ';')
+	[ "$v" = "$HSURGE" ] || {
+		ev event "$name surge ${v:-none}"
+		HSURGE=$v
 	}
 }
 
@@ -216,7 +227,7 @@ ha_tick() {
 
 ha_reset() {
 	HP22=() HV=() HNODE=()
-	HLEAD="" HAPI="" HCONV="" HHELD="" HRUN="" HDUP=""
+	HLEAD="" HAPI="" HCONV="" HHELD="" HRUN="" HDUP="" HSURGE=""
 }
 
 # ha_begin NAME: converged; the state before, the servers' views, the
@@ -493,14 +504,27 @@ quorum_loss() {
 	ha_end "$name"
 }
 
-# service_restart: the leader's hivemind restarted (systemctl restart; with
-# one server, the server's). The API is down while it restarts; with several
-# servers, a new leader may be elected. Ends converged, 30 s after the API
-# answered again at the earliest.
+# service_restart [leader|follower]: the leader's hivemind restarted
+# (systemctl restart; with one server, the server's), or with "follower" a
+# follower's, the scenario service-restart-follower. The API is down while
+# the leader restarts; with several servers, a new leader may be elected.
+# Ends converged, 30 s after the API answered again at the earliest; for a
+# follower, once it is a follower again in the leader's view.
 service_restart() {
-	local name=service-restart T tf t now up_at=0 went=0 end
+	local who=${1:-leader} name=service-restart T tf t now up_at=0 went=0 end L s v lastv="" back=0
+	case "$who" in leader) ;; follower) name=service-restart-follower ;; *) die "service-restart: leader or follower, not $who" ;; esac
 	ha_begin "$name"
-	if [ "$SOAK_SERVERS" -gt 1 ]; then T=$(leader) || die "$name: no leader"; else T=$SERVER; fi
+	if [ "$SOAK_SERVERS" -gt 1 ]; then
+		L=$(leader) || die "$name: no leader"
+		T=$L
+		if [ "$who" = follower ]; then
+			T=""
+			for s in "${SRV_NAMES[@]}"; do [ "$s" != "$L" ] && [ -z "$T" ] && T=$s; done
+		fi
+	else
+		[ "$who" = leader ] || die "$name needs several servers"
+		T=$SERVER
+	fi
 	ev event "$name target $T"
 	tf=$(now_ms)
 	ev event "$name $T fault restart"
@@ -518,10 +542,151 @@ service_restart() {
 			up_at=$now
 			ev event "$name api-back ms_after_fault=$(($(now_ms) - tf)) seen_down=$went"
 		}
-		[ "$up_at" != 0 ] && [ "$HCONV" = yes ] && [ "$now" -ge $((up_at + 30)) ] && break
+		if [ "$who" = follower ]; then
+			# the follower's own API, and its return as a follower
+			v=$(api_answer "$T")
+			[ "$v" = "${lastv:-}" ] || {
+				ev event "$name api $T $v"
+				lastv=$v
+			}
+			if [ "${back:-0}" = 0 ] && [ "$now" -ge $((tf / 1000 + 5)) ] && rejoined "$name" "$T"; then
+				ev event "$name $T rejoined-follower leader=$HLEAD"
+				back=1
+			fi
+			[ "${back:-0}" = 1 ] && [ "$HCONV" = yes ] && [ "$now" -ge $((tf / 1000 + 40)) ] && break
+		else
+			[ "$up_at" != 0 ] && [ "$HCONV" = yes ] && [ "$now" -ge $((up_at + 30)) ] && break
+		fi
 		ha_tick "$t"
 	done
 	ha_end "$name"
+}
+
+# The status sampler of rollout-leader, on the client machine through the
+# client that knows every server (wload.sh's CLI and env): hivemind status
+# --json every 0.5 s; one line per sample, "T sample N" and each app below
+# its count, or "T error ..." (the CLI's first line), as rollout-all's.
+read -r -d '' REMOTE_SAMPLER_CL <<'EOF' || true
+f=$1
+d=/var/lib/soak-client/wl
+. $d/env
+rm -f "$f" "$f.stop" "$f.below"
+while [ ! -e "$f.stop" ]; do
+	t=$(date -u +%s.%3N)
+	if o=$(timeout 70 $d/hivemind status --json 2>&1); then
+		l=$(printf '%s\n' "$o" | jq -r --arg t "$t" '"\($t) sample \(length)" + ([.[] | select((.name | startswith("wl-") | not) and (.running < .desired or .ready < .desired)) | " \(.name):desired=\(.desired),running=\(.running),ready=\(.ready),gen=\(.generation)"] | join(""))' 2>&1)
+		echo "$l $(date -u +%s.%3N)" >>"$f"
+		case "$l" in *"sample "*" "*) printf '== %s\n%s\n' "$t" "$(printf '%s' "$o" | jq -c '.[] | select(.name | startswith("wl-") | not) | {name, desired, running, ready, generation, rollout, replicas: [.replicas[] | {index, node_id, state, ready, generation, desired}]}')" >>"$f.below" ;; esac
+	else
+		echo "$t error $(printf '%s' "$o" | head -c 200 | tr '\n' ' ') $(date -u +%s.%3N)" >>"$f"
+	fi
+	sleep 0.5
+done
+EOF
+
+# rollout_leader: a rolling update of every app (the image apps to version
+# $RL_VERSION, 2 by default, a new ROLL in every app's environment, and the
+# compose project again), through any server, and RL_AFTER s (3) after the
+# PUTs, while rollouts are in progress, the leader's hivemind restarted
+# (systemctl restart), so the leader changes during the rollouts. Once a
+# second the HA observations, and each change of the rollouts' states; the
+# status sampler on the client machine (above); ends when no rollout is in
+# progress, a leader leads, the old one is back and the cluster has
+# converged, plus 10 s. Logs the samples below a count, and each app's
+# replicas' generations against the app's at the end.
+rollout_leader() {
+	local name=rollout-leader L tf t now end a v pids=() st busy seen=0 s="" rs_done=0 newl="" gone=0 back=0 done_at=0 f=/var/tmp/soak-rl-samples.txt cl
+	local apps="www api spread kv proot papi grpc"
+	need_servers "$name"
+	cl=${WL_CLIENT:-$OUT_NAME}
+	ha_begin "$name"
+	L=$(leader) || die "$name: no leader"
+	ev event "$name target $L"
+	on "$cl" "cat >/var/tmp/soak-rl-sampler.sh" <<<"$REMOTE_SAMPLER_CL" || die "$name: sampler to $cl"
+	on "$cl" "sudo setsid nohup bash /var/tmp/soak-rl-sampler.sh $f >/dev/null 2>&1 </dev/null &" || die "$name: sampler on $cl"
+	sleep 2
+	# the image apps to RL_VERSION (2; setup deployed version 1)
+	v=${RL_VERSION:-2}
+	ROLL="rl-$(date +%s)"
+	export ROLL
+	for a in $apps; do
+		hma_in "deploy -f -" <<<"$(app_spec "$a" "$v")" >/dev/null &
+		pids+=($!)
+	done
+	hma_in "compose deploy -" < <(shop_compose) >/dev/null &
+	pids+=($!)
+	for a in "${pids[@]}"; do wait "$a" || die "$name: a PUT failed"; done
+	unset ROLL
+	ev event "$name deploy every app version=$v"
+	tf=$(($(now_ms) + ${RL_AFTER:-3} * 1000))
+	end=$(($(date +%s) + 900))
+	while [ "$(date +%s)" -lt "$end" ]; do
+		t=$(now_ms)
+		now=$(date +%s)
+		if [ "$rs_done" = 0 ] && [ "$t" -ge "$tf" ]; then
+			tf=$(now_ms)
+			ev event "$name $L fault restart"
+			(SSH_TIMEOUT=60 on "$L" "sudo systemctl restart hivemind.service" || ev event "$name $L restart-failed") &
+			rs_done=1
+		fi
+		ha_observe "$name"
+		st=$(SSH_TIMEOUT=8 hma "status --json" 2>/dev/null) || st=""
+		if [ -n "$st" ]; then
+			busy=$(jq -r '[.[] | select(.rollout.state? == "in_progress")] | length' <<<"$st" 2>/dev/null)
+			[ "${busy:-0}" = 0 ] || seen=1
+			a=$(jq -r '[.[] | select(.rollout != null and (.name | startswith("wl-") | not)) | "\(.name):\(.rollout.state // "-")"] | join(",")' <<<"$st" 2>/dev/null)
+			[ "$a" = "$s" ] || {
+				ev event "$name rollouts ${a:-none}"
+				s=$a
+			}
+		else
+			busy=""
+		fi
+		# the leadership left L: no leader, or another one, after the fault
+		if [ "$rs_done" = 1 ] && [ "${gone:-0}" = 0 ] && { [ "$HLEAD" = none ] || { [ -n "$HLEAD" ] && [ "$HLEAD" != "$L" ]; }; }; then
+			gone=1
+			ev event "$name leadership-left $L leader=$HLEAD ms_after_fault=$(($(now_ms) - tf))"
+		fi
+		if [ "${gone:-0}" = 1 ] && [ -z "$newl" ] && [ "$HLEAD" != none ] && [ -n "$HLEAD" ]; then
+			newl=$HLEAD
+			ev event "$name new-leader $newl ms_after_fault=$(($(now_ms) - tf))"
+		fi
+		if [ -n "$newl" ] && [ "$back" = 0 ] && { rejoined "$name" "$L" || [ "$HLEAD" = "$L" ]; }; then
+			ev event "$name $L back role=$(role_in "${HV[$HLEAD]:-}" "$L") leader=$HLEAD"
+			back=1
+		fi
+		if [ "$back" = 1 ] && [ "$seen" = 1 ] && [ "$busy" = 0 ] && [ "$HCONV" = yes ]; then
+			[ "$done_at" != 0 ] || {
+				done_at=$now
+				ev event "$name rollouts-done $((now - tf / 1000)) s after the fault"
+			}
+			[ "$now" -lt $((done_at + 10)) ] || break
+		fi
+		ha_tick "$t"
+	done
+	[ "$(date +%s)" -lt "$end" ] || ev event "$name measure-timeout new_leader=${newl:-none} back=$back seen=$seen busy=${busy:-?} converged=$HCONV"
+	on "$cl" "touch $f.stop"
+	sleep 3
+	on "$cl" "cat $f" >"$SOAK_DIR/rollout-leader-samples.txt" 2>/dev/null || true
+	on "$cl" "cat $f.below 2>/dev/null" >"$SOAK_DIR/rollout-leader-below.txt" 2>/dev/null || true
+	f=$SOAK_DIR/rollout-leader-samples.txt
+	ev event "$name sampler samples=$(grep -c ' sample ' "$f") errors=$(grep -c ' error ' "$f") below=$(grep -cE ' sample [0-9]+ [a-z]' "$f") below_not_kv=$(grep -E ' sample [0-9]+ [a-z]' "$f" | grep -cE ' (www|api|spread|proot|papi|grpc|front|cache):') first=$(grep -m1 -E ' sample [0-9]+ [a-z]' "$f" | cut -c1-300)"
+	st=$(hma "status --json" 2>/dev/null) || st="[]"
+	ev event "$name generations $(jq -r '[.[] | select(.name | startswith("wl-") | not) | "\(.name):\(.generation)=\([.replicas[] | "\(.generation)\(if .state == "running" then "" else "/" + .state end)"] | join("+"))"] | join(" ")' <<<"$st")"
+	ha_end "$name"
+}
+
+# steady_journals SINCE: each server's journal since SINCE (Unix s), and one
+# line with its elections and leader changes: "this server leads the
+# cluster", raft's "entering candidate state" and "heartbeat timeout",
+# errors and warnings.
+steady_journals() {
+	local s f
+	for s in "${SRV_NAMES[@]}"; do
+		f=$SOAK_DIR/journal-steady-$s.txt
+		SSH_TIMEOUT=60 on "$s" "sudo journalctl -u hivemind --since @$1 -o short-iso-precise --no-pager" >"$f" 2>/dev/null || true
+		ev event "steady journal $s lines=$(wc -l <"$f") leads=$(grep -c 'this server leads the cluster' "$f" || true) no_longer_leads=$(grep -c 'no longer leads' "$f" || true) candidate=$(grep -c 'entering candidate state' "$f" || true) heartbeat_timeout=$(grep -c 'heartbeat timeout' "$f" || true) errors=$(grep -c 'level=ERROR' "$f" || true) warns=$(grep -c 'level=WARN' "$f" || true)"
+	done
 }
 
 # steady [SECS]: the steady state, as before (mark steady begin/end, the
@@ -529,16 +694,20 @@ service_restart() {
 # deletes the app it deployed $STEADY_KEEP (100) cycles before, so the store
 # holds about that many.
 steady() {
-	local secs=${1:-3600} wl=none
+	local secs=${1:-3600} wl=none t0
 	local tag=steady
 	if [ "$WLOAD" = 1 ]; then
 		tag=$("$HERE/wload.sh" tag steady) && WL_KEEP=${STEADY_KEEP:-100} "$HERE/wload.sh" start "$tag" || die "steady: the write-load did not start"
 	fi
 	ev mark "steady begin"
+	t0=$(date +%s)
+	ev event "steady servers $(servers_line)"
 	metrics_snap steady-begin
 	sleep "$secs"
 	metrics_snap steady-end
 	ev mark "steady end"
+	ev event "steady servers $(servers_line)"
+	steady_journals "$t0"
 	if [ "$WLOAD" = 1 ]; then
 		"$HERE/wload.sh" stop || true
 		if "$HERE/wload.sh" check "$tag"; then wl=pass; else wl=FAIL; fi
@@ -568,6 +737,13 @@ ha_selftest() {
 		;;
 	esac
 	[ "$(view_of 'not json')" = "" ] || { echo "FAIL bad json"; fails=$((fails + 1)); }
+	# a surge (web 0, generations 1 and 2 on two nodes) is not a copy twice;
+	# api 1, generation 3 on two nodes, is; an exited copy counts for neither
+	local f=$SOAK_DIR/selftest-dups.tsv
+	printf 'C\tn-1\taaa\trunning\tt\tweb\t0\t1\nC\tn-2\tbbb\trunning\tt\tweb\t0\t2\nC\tn-3\tccc\trunning\tt\tapi\t1\t3\nC\tn-4\tddd\trunning\tt\tapi\t1\t3\nC\tn-4\teee\texited\tt\tweb\t1\t2\nC\tn-1\tfff\trunning\tt\tweb\t1\t2\n' >"$f"
+	echo "dups: $(dups "$f" | tr '\n' ';') dups_gen: $(dups_gen "$f" | tr '\n' ';')"
+	[ "$(dups "$f" | wc -l)" = 2 ] || { echo "FAIL dups"; fails=$((fails + 1)); }
+	[ "$(dups_gen "$f")" = "api|1|g3 n-3,n-4" ] || { echo "FAIL dups_gen"; fails=$((fails + 1)); }
 	echo "ha-selftest: $fails failed"
 	[ "$fails" = 0 ]
 }

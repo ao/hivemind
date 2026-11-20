@@ -47,7 +47,15 @@ for f in hivemind.db hivemind.db-wal hivemind.db-shm; do
 	[ -f /var/lib/hivemind/$f ] && st="$st ${f#hivemind.}_bytes=$(stat -c %s /var/lib/hivemind/$f)"
 done
 # with several servers: the Raft log, stable store and snapshots (docs/ha.md)
-[ -d /var/lib/hivemind/raft ] && st="$st raft_bytes=$(du -sb /var/lib/hivemind/raft | cut -f1)"
+if [ -d /var/lib/hivemind/raft ]; then
+	st="$st raft_bytes=$(du -sb /var/lib/hivemind/raft | cut -f1)"
+	# the log and stable store (raft.db and its WAL), and the snapshots: how many, their bytes
+	st="$st raftdb_bytes=$(cat /var/lib/hivemind/raft/raft.db /var/lib/hivemind/raft/raft.db-wal 2>/dev/null | wc -c)"
+	st="$st raftwal_bytes=$(stat -c %s /var/lib/hivemind/raft/raft.db-wal 2>/dev/null || echo 0)"
+	st="$st snaps=$(ls -d /var/lib/hivemind/raft/snapshots/*/ 2>/dev/null | wc -l) snaps_bytes=$(du -sb /var/lib/hivemind/raft/snapshots 2>/dev/null | cut -f1)"
+	# the newest by time: the names are term-index-ms, which sort as strings badly
+	st="$st snap_last=$(ls -1t /var/lib/hivemind/raft/snapshots 2>/dev/null | grep -v tmp | head -n 1)"
+fi
 cs=$(docker ps -q --filter label=hivemind.app | wc -l)
 # Volumes no container uses (anonymous volumes left behind), and the json-file
 # logs of hivemind's containers: the most files one container has, and the

@@ -54,7 +54,8 @@
 #   scenario.sh ports LABEL                   each node's routed containers and host ports
 #   scenario.sh end NAME
 #   scenario.sh leader-kill | leader-partition [SECS] | quorum-loss |
-#               service-restart | steady [SECS] | servers [LABEL] | ha-selftest
+#               service-restart [leader|follower] | rollout-leader |
+#               steady [SECS] | servers [LABEL] | ha-selftest
 #                                             the scenarios of several servers,
 #                                             with the write-load: see ha.sh
 #
@@ -1974,7 +1975,8 @@ end) end_scenario "$@" ;;
 leader-kill) leader_kill ;;
 leader-partition) leader_partition "$@" ;;
 quorum-loss) quorum_loss ;;
-service-restart) service_restart ;;
+service-restart) service_restart "$@" ;;
+rollout-leader) rollout_leader ;;
 steady) steady "$@" ;;
 servers) ev servers "${1:-now} $(servers_line)" ;;
 ha-selftest) ha_selftest ;;

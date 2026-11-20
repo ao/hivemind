@@ -34,11 +34,13 @@ NODES_FILE=${NODES_FILE:-$(dirname "$LOG")/nodes}
 W=$(mktemp)
 trap 'rm -f "$W"' EXIT
 
-# name start end fault (Unix seconds; fault 0 when there is none)
+# name start end fault (Unix seconds; fault 0 when there is none). A
+# scenario run again is a window of its own, NAME#2, ... (the eighth soak
+# ran leader-kill twice); a run without an end line (aborted) has none.
 awk '
-$3 == "scenario" && $5 == "begin" { s[$4] = $2 / 1000; order[++n] = $4; f[$4] = 0 }
-$3 == "event" && ($4 in s) && !($4 in e) && f[$4] == 0 && / fault / { f[$4] = $2 / 1000 }
-$3 == "scenario" && $5 == "end" && ($4 in s) && !($4 in e) { e[$4] = $2 / 1000 }
+$3 == "scenario" && $5 == "begin" { c[$4]++; k = (c[$4] > 1 ? $4 "#" c[$4] : $4); cur[$4] = k; s[k] = $2 / 1000; order[++n] = k; f[k] = 0 }
+$3 == "event" && ($4 in cur) && !(cur[$4] in e) && f[cur[$4]] == 0 && / fault / { f[cur[$4]] = $2 / 1000 }
+$3 == "scenario" && $5 == "end" && ($4 in cur) && !(cur[$4] in e) { e[cur[$4]] = $2 / 1000 }
 $3 == "mark" && $4 == "steady" && $5 == "begin" { s["steady"] = $2 / 1000; order[++n] = "steady"; f["steady"] = 0 }
 $3 == "mark" && $4 == "steady" && $5 == "end" { e["steady"] = $2 / 1000 }
 END {
