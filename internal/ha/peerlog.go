@@ -33,6 +33,28 @@ var warnMsgs = map[string]bool{
 	"failed to decode incoming command": true,
 }
 
+// repeatedMsgs are raft's lines, at warn or error, that come over and over
+// while a server cannot reach the others or one comes and goes: each is
+// logged at warn, then once every peerFailEvery with the number left out.
+// In the ninth soak a server cut off from the others logged 43 election
+// timeouts in 65 s, and a server whose process was stopped and resumed
+// one failed flush of an answer at error, for a connection that had broken.
+var repeatedMsgs = map[string]bool{
+	"Election timeout reached, restarting election": true,
+	"failed to flush response":                      true,
+}
+
+// newerTermMsg is the line of a leader's replication to a server that
+// answered with a later term: another server was elected. It is info while
+// a handover that this server began is under way (handoverQuiet), as the
+// new leader's election is what it asked for, and a warning otherwise; it
+// was an error, at every planned handover (ninth soak).
+const newerTermMsg = "peer has newer term, stopping replication"
+
+// handoverQuiet is how long after a handover began a newer term is
+// expected.
+const handoverQuiet = 10 * time.Second
+
 // peerFailEvery is how often a server's failed RPCs are logged.
 const peerFailEvery = 30 * time.Second
 
@@ -42,7 +64,9 @@ type peerFailures struct {
 	mu    sync.Mutex
 	now   func() time.Time
 	l     *slog.Logger
-	peers map[string]*peerFail
+	peers map[string]*peerFail // by server address, or "msg:" and a repeatedMsgs line
+	// handover is when this server last began a handover (handingOver).
+	handover time.Time
 }
 
 type peerFail struct {
@@ -108,14 +132,40 @@ func peerKey(v any) string {
 	return fmt.Sprint(v)
 }
 
-// limit decides how hcLogger logs a line of raft's at error: unchanged, at
-// warn, or not at all; with the arguments to add.
-func (p *peerFailures) limit(msg string, args []any) (slog.Level, bool, []any) {
-	if warnMsgs[msg] {
+// handingOver notes that this server begins a handover of the leadership.
+func (p *peerFailures) handingOver() {
+	p.mu.Lock()
+	p.handover = p.now()
+	p.mu.Unlock()
+}
+
+// inHandover reports whether a handover this server began is under way.
+func (p *peerFailures) inHandover() bool {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return !p.handover.IsZero() && p.now().Sub(p.handover) < handoverQuiet
+}
+
+// limit decides how hcLogger logs a line of raft's at warn or error, lv:
+// unchanged, at another level, or not at all; with the arguments to add.
+func (p *peerFailures) limit(lv slog.Level, msg string, args []any) (slog.Level, bool, []any) {
+	switch {
+	case p == nil:
+		return lv, true, nil
+	case repeatedMsgs[msg]:
+		return p.limited("msg:" + msg)
+	case lv != slog.LevelError:
+		return lv, true, nil
+	case warnMsgs[msg]:
+		return slog.LevelWarn, true, nil
+	case msg == newerTermMsg:
+		if p.inHandover() {
+			return slog.LevelInfo, true, nil
+		}
 		return slog.LevelWarn, true, nil
 	}
 	key, ok := peerFailMsgs[msg]
-	if !ok || p == nil {
+	if !ok {
 		return slog.LevelError, true, nil
 	}
 	peer := ""
@@ -125,7 +175,13 @@ func (p *peerFailures) limit(msg string, args []any) (slog.Level, bool, []any) {
 			break
 		}
 	}
-	log, left := p.take(peer)
+	return p.limited(peer)
+}
+
+// limited is a line counted under key: at warn, or not at all, with the
+// number left out since the last.
+func (p *peerFailures) limited(key string) (slog.Level, bool, []any) {
+	log, left := p.take(key)
 	if !log {
 		return 0, false, nil
 	}

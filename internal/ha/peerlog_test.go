@@ -23,6 +23,13 @@ func (l *lockedBuffer) Write(p []byte) (int, error) {
 	return l.b.Write(p)
 }
 
+// String is what was written since the last take.
+func (l *lockedBuffer) String() string {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return l.b.String()
+}
+
 // take returns the lines written since the last take.
 func (l *lockedBuffer) take() []string {
 	l.mu.Lock()
@@ -81,5 +88,44 @@ func TestPeerFailuresAreLimited(t *testing.T) {
 	if len(lines) != 3 || !strings.Contains(lines[0], "level=WARN") || !strings.Contains(lines[1], "level=ERROR") ||
 		!strings.Contains(lines[2], "level=WARN") {
 		t.Fatalf("a failure after the answer, another error, a broken connection: %q", lines)
+	}
+}
+
+// TestRaftsRepeatedLinesAreLimited: raft's election timeouts while a server
+// cannot win one, and its failed flushes of an answer on a broken
+// connection, are a warning, then one every 30 s with the number left out;
+// a leader's "peer has newer term" is info while a handover it began is
+// under way, and a warning otherwise, not an error (the ninth soak's
+// fifth finding). Raft's other warnings are as they were.
+func TestRaftsRepeatedLinesAreLimited(t *testing.T) {
+	var buf lockedBuffer
+	h := newHCLogger(slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelDebug})))
+	now := time.Unix(1_700_000_000, 0)
+	h.fails.now = func() time.Time { return now }
+	for i := 0; i < 43; i++ {
+		now = now.Add(time.Second)
+		h.Warn("Election timeout reached, restarting election")
+	}
+	h.Error("failed to flush response", "error", errors.New("write tcp 10.0.0.2:4486->10.0.0.3:51234: write: broken pipe"))
+	h.Error("failed to flush response", "error", errors.New("write: broken pipe"))
+	lines := buf.take()
+	if len(lines) != 3 || !strings.Contains(lines[0], "level=WARN") || !strings.Contains(lines[0], "Election timeout reached") ||
+		strings.Contains(lines[0], "repeated") || !strings.Contains(lines[1], "Election timeout reached") || !strings.Contains(lines[1], "repeated=29") ||
+		!strings.Contains(lines[2], "level=WARN") || !strings.Contains(lines[2], "failed to flush response") {
+		t.Fatalf("43 election timeouts in 43 s and two failed flushes: %q", lines)
+	}
+
+	h.Error(newerTermMsg, "peer", "10.0.0.3:4486")
+	h.fails.handingOver()
+	now = now.Add(time.Second)
+	h.Named("replication").Error(newerTermMsg, "peer", "10.0.0.3:4486")
+	now = now.Add(handoverQuiet)
+	h.Error(newerTermMsg, "peer", "10.0.0.3:4486")
+	h.Warn("heartbeat timeout reached, starting election", "last-leader-addr", "10.0.0.3:4486")
+	h.Warn("heartbeat timeout reached, starting election", "last-leader-addr", "10.0.0.3:4486")
+	lines = buf.take()
+	if len(lines) != 5 || !strings.Contains(lines[0], "level=WARN") || !strings.Contains(lines[1], "level=INFO") ||
+		!strings.Contains(lines[2], "level=WARN") || !strings.Contains(lines[3], "level=WARN") || !strings.Contains(lines[4], "level=WARN") {
+		t.Fatalf("a newer term before, during and after a handover, and two other warnings: %q", lines)
 	}
 }

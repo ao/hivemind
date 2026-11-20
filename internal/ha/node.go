@@ -91,6 +91,8 @@ type Node struct {
 	snaps *raft.FileSnapshotStore
 	mux   *mux
 	tlsm  *tlsMaterial
+	// fails limits raft's repeated lines, and knows of a handover (peerlog.go).
+	fails *peerFailures
 	addr  string // this server's Raft address
 
 	fwdSrv    *http.Server
@@ -136,6 +138,7 @@ func openNode(cfg Config, setReplicator bool) (*Node, error) {
 	}
 	n := &Node{cfg: cfg, log: log, stop: make(chan struct{})}
 	hl := newHCLogger(log)
+	n.fails = hl.fails
 	logs, err := openLogStore(filepath.Join(dir, logFile))
 	if err != nil {
 		return nil, err
@@ -700,6 +703,8 @@ func (n *Node) Handover(ctx context.Context) error {
 	}
 	start := time.Now()
 	n.log.Info("this server leads, and hands the leadership to another server before it stops", "id", n.cfg.ID)
+	// The followers' answers with the new leader's term are expected now.
+	n.fails.handingOver()
 	f := n.raft.LeadershipTransfer()
 	errc := make(chan error, 1)
 	go func() { errc <- f.Error() }()
@@ -711,9 +716,40 @@ func (n *Node) Handover(ctx context.Context) error {
 	case <-ctx.Done():
 		return fmt.Errorf("handing the leadership on: %w", ctx.Err())
 	}
-	id, _ := n.Leader()
-	n.log.Info("handed the leadership on", "to", id, "took", time.Since(start).Round(time.Millisecond))
+	took := time.Since(start).Round(time.Millisecond)
+	if id := n.newLeader(ctx); id != "" {
+		n.log.Info("handed the leadership on", "to", id, "took", took)
+	} else {
+		n.log.Info("handed the leadership on; no other server has said it leads yet", "took", took)
+	}
 	return nil
+}
+
+// newLeaderWait bounds Handover's wait for the new leader's name.
+const newLeaderWait = time.Second
+
+// newLeader waits, up to newLeaderWait or the end of ctx, until this
+// server hears from another that leads, and returns its ID, or "". Raft's
+// transfer ends once the follower was told to start its election, before
+// it has won: the old leader then knows no leader until the new one's
+// first message, so Handover logged to="" (ninth soak).
+func (n *Node) newLeader(ctx context.Context) string {
+	t := time.NewTimer(newLeaderWait)
+	defer t.Stop()
+	tick := time.NewTicker(5 * time.Millisecond)
+	defer tick.Stop()
+	for {
+		if id, _ := n.Leader(); id != "" && id != n.cfg.ID {
+			return id
+		}
+		select {
+		case <-ctx.Done():
+			return ""
+		case <-t.C:
+			return ""
+		case <-tick.C:
+		}
+	}
 }
 
 // Close stops Raft and the server port.

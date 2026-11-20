@@ -12,7 +12,8 @@ import (
 // hcLogger writes raft's log lines to a slog.Logger, so they go through
 // the redacting handler at the configured level, as every other line does.
 // Raft's debug and trace lines are slog's debug. Its lines for a failed RPC
-// to another server are limited (peerlog.go).
+// to another server, and some others that come over and over, are limited
+// (peerlog.go).
 type hcLogger struct {
 	l     *slog.Logger
 	name  string
@@ -43,9 +44,9 @@ func (h *hcLogger) Log(level hclog.Level, msg string, args ...any) {
 	}
 	lv := slogLevel(level)
 	var more []any
-	if lv == slog.LevelError {
+	if lv >= slog.LevelWarn {
 		var ok bool
-		if lv, ok, more = h.fails.limit(msg, args); !ok {
+		if lv, ok, more = h.fails.limit(lv, msg, args); !ok {
 			return
 		}
 	}

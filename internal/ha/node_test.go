@@ -36,6 +36,8 @@ type testServer struct {
 	st   *store.Store
 	node *Node
 	cert *pki.CertHolder
+	// logs, if set, takes the server's log at info.
+	logs *lockedBuffer
 }
 
 type testCluster struct {
@@ -92,7 +94,7 @@ func (c *testCluster) issue(id string, server bool) tls.Certificate {
 func (c *testCluster) config(s *testServer, seeds ...string) Config {
 	return Config{DataDir: s.dir, Store: s.st, ID: s.id, Advertise: "127.0.0.1", Bind: "127.0.0.1", Port: s.port,
 		Cert: s.cert, Trust: c.trust, Seeds: seeds, Timing: testTiming,
-		Logger:   testLogger(s.id),
+		Logger:   s.logger(),
 		OnLeader: func(ctx context.Context) { c.leading.Store(s.id, true); <-ctx.Done(); c.leading.Store(s.id, false) },
 		Fatal:    func(err error) { c.t.Errorf("%s: fatal: %v", s.id, err) }}
 }
@@ -491,6 +493,9 @@ func TestRemoveServer(t *testing.T) {
 // hand over.
 func TestHandover(t *testing.T) {
 	c := newTestCluster(t, 3)
+	for _, s := range c.servers {
+		s.logs = &lockedBuffer{}
+	}
 	c.start()
 	old := c.leader()
 	var f *testServer
@@ -528,6 +533,15 @@ func TestHandover(t *testing.T) {
 		time.Sleep(2 * time.Millisecond)
 	}
 	gap := time.Since(start)
+	c.waitFor(5*time.Second, "the handover's line", func() bool { return strings.Contains(old.logs.String(), "handed the leadership on") })
+	for _, l := range strings.Split(old.logs.String(), "\n") {
+		if strings.Contains(l, "handed the leadership on") && !strings.Contains(l, " to="+nl.id+" ") {
+			t.Fatalf("the handover names no new leader: %s", l)
+		}
+		if strings.Contains(l, newerTermMsg) && !strings.Contains(l, "level=INFO") {
+			t.Fatalf("a planned handover: %s", l)
+		}
+	}
 	t.Logf("%s leads, and writes, %s after the handover began", nl.id, gap.Round(time.Millisecond))
 	if gap >= testTiming.Heartbeat {
 		t.Fatalf("a leader that writes %s after the handover began, no sooner than after a stop without one (%s)", gap, testTiming.Heartbeat)
@@ -544,4 +558,13 @@ func TestHandover(t *testing.T) {
 	if err := one.leader().node.Handover(ctx); err != nil || !one.servers[0].node.IsLeader() {
 		t.Fatalf("the only voter's handover: %v; it leads: %v", err, one.servers[0].node.IsLeader())
 	}
+}
+
+// logger is the server's logger: into logs at info when it is set, else
+// testLogger's.
+func (s *testServer) logger() *slog.Logger {
+	if s.logs != nil {
+		return slog.New(slog.NewTextHandler(s.logs, nil))
+	}
+	return testLogger(s.id)
 }
