@@ -10,10 +10,11 @@ This lists every listener the code opens, what each one exposes, and the files h
 | Metrics | Off. `--metrics-addr` starts it, and it must be loopback | The admin token | Prometheus metrics only |
 | Node listener | Off. Starts with `--advertise`, on one address: `--cluster-addr`, or the address `--advertise` names or resolves to on this machine. Port 4484 (`--cluster-port`) | TLS 1.3, and a client certificate that chains to a cluster CA the server accepts at that moment (two during a [CA rotation](ca-rotation.md), checked again at each request), names a node that was not removed, and is valid by the server's clock at each request. The node ID must match the one in the path | To a node: its own assignments, which include each replica's full spec and environment values, and the registry credential for each replica's image, if one is stored and the node asks for it. It can also report its own containers, register its own name, capacity and private address, get a new certificate for its own ID, take the log requests queued for it, and send the logs it was asked for. For its router: the whole routing table, and read and write access to the shared TLS storage, which holds every routed host's certificate and private key and the ACME account key. The cluster's CA certificates, which are public, and during a CA rotation the new CA's cross-certificate |
 | Join listener | Off. Starts with `--advertise`, on the node listener's address, port 4485 | TLS 1.3 with the server certificate. No client certificate. The join token is the credential. Only `POST /join` is routed | The CA certificate the token names, and a node certificate from that CA for each valid token |
+| Server port | Off. Opens only on a server of a cluster of several ([several servers](ha.md)), on the node listener's address, port 4486 (the cluster port plus two) | TLS 1.3 with a client certificate required on both sides: from a cluster CA the server accepts, naming a node, carrying the server role (`hivemind://role/server`, which only a server's own certificate has), and naming a server in the Raft configuration that was not removed. A worker's certificate is refused at the handshake | Raft's traffic: the log, with every write's statements and arguments, environment values and registry passwords among them, and snapshots of the whole store. On the leader, the requests followers pass to it: API requests with the caller's token or session, which the leader checks; node requests with the worker's certificate chain, which the leader verifies against the cluster CA again; and joins. Only this protocol takes the forwarding headers; the API and the node and join listeners delete them from every request |
 | Router, http | Off. Starts with `--route-addr`, on any node, port 80 (`--route-http-port`). It may be `0.0.0.0` | None. It serves the apps' public traffic | ACME HTTP-01 answers for the routed hosts, a `308` to https for every other request to one, and `404` for any other host |
 | Router, https | Off. Starts with `--route-addr`, port 443 (`--route-https-port`). It may be `0.0.0.0` | None of its own: whatever each app does. TLS 1.2 or later, with a certificate from the ACME CA for each routed host | Every routed app, to anyone who can reach the port. A host not in the routing table gets no certificate, and a TLS handshake for it fails |
 
-The API, metrics, node and join listeners bind to the address they are given, and refuse a wildcard address at startup, both in config validation and when the socket is bound. The router is the one listener that may bind `0.0.0.0` or `::`: it is meant to be public, and `--route-addr` has no default. A worker opens no listener but the router, when it has `--route-addr`. See [routing](#routing).
+The API, metrics, node and join listeners and the server port bind to the address they are given, and refuse a wildcard address at startup, both in config validation and when the socket is bound. The router is the one listener that may bind `0.0.0.0` or `::`: it is meant to be public, and `--route-addr` has no default. A worker opens no listener but the router, when it has `--route-addr`. See [routing](#routing).
 
 ### Logs from workers
 
@@ -39,12 +40,14 @@ The server's data directory is created with mode 0700.
 |---|---|---|
 | `hivemind.db`, with the WAL files beside it | 0600 | Apps and their specs, which include environment values. Replicas, nodes and their leases. The IDs of removed nodes. Node certificate expiry times. Join tokens as SHA-256 hashes. The admin token as a SHA-256 hash. The routers' TLS storage: each routed host's certificate and private key, the ACME account and its private key, and pending challenge tokens. Registry credentials: each registry's host, username and password, the password in plain text like environment values |
 | `admin.token` | 0600 | The admin token, in plain text. This is the only copy |
-| `ca.key` | 0600 | The cluster CA's private key. It can sign any node certificate |
+| `ca.key` | 0600 | The cluster CA's private key. It can sign any node certificate. In a cluster of several servers, every server has it ([several servers](#several-servers)) |
 | `ca.crt` | 0644 | The cluster CA certificate. Public |
 | `ca-next.key`, `ca-next.crt` | 0600, 0644 | Only during a [CA rotation](ca-rotation.md): the new CA's key and certificate. `finish` renames them over `ca.key` and `ca.crt`; `abort` deletes them |
 | `hivemind.yaml` | 0600 when `init` writes it; as you create it otherwise | Optional settings for `serve`. `init` writes the serve flags it was given here; nothing else writes it. A `token` key in it is refused |
 | `hivemind.lock` | 0600 | The pid of the `serve` that holds it locked |
 | `restored-epoch` | 0600 | Only after `restore` of a store from before epochs, until `serve` first opens it: the epoch to give the restored cluster ([backup](backup.md#restoring)) |
+| `raft/raft.db`, with its WAL files, and `raft/snapshots/` | 0600 files in 0700 directories | Only on a server of a cluster of several ([several servers](ha.md)): the Raft log, whose entries are the store's write statements with their arguments, so environment values, registry passwords and the routers' TLS keys among them, and snapshots, which are copies of `hivemind.db`. As sensitive as `hivemind.db`. A backup does not hold them |
+| `server.json` | 0600 | Only on a server that joined with `hivemind join --role server`: its node ID and the servers it joined. Such a server has `ca.key` and `ca.crt` from the join reply, and no `admin.token` |
 
 The CLI config that `init` writes is `~/.config/hivemind/config.yaml`, with mode 0600, in a directory that is 0700 when it is created. It names the server and the token file, and with `--api-tls-cert`, the API certificate as `ca-cert`. It does not hold the token.
 
@@ -64,6 +67,23 @@ A worker's data directory is created with mode 0700.
 A worker has no CA key, no database and no admin token.
 
 A backup file (`hivemind backup`) is written with mode 0600. It holds `hivemind.db`, `ca.key`, `ca.crt` and `admin.token`, and during a CA rotation `ca-next.key` and `ca-next.crt`, so it grants everything the server's data directory does. A backup taken before a rotation's `finish` holds the old CA's key after it. A restored data directory is 0700, with every file 0600, `ca.crt` included. See [backup](backup.md).
+
+## Several servers
+
+In a cluster of several servers ([several servers](ha.md)), every server holds what the one server held: `ca.key`, which signs any certificate, the store, with every environment value and registry password, the admin token's hash, and the Raft log, which holds the same values. A server that is compromised can do what the one server could, so each needs the care the one server needed, and the cluster has as many to secure as it has servers. A server that joins gets the CA's key in the join reply, over the join listener's TLS 1.3 connection, whose CA it pinned by the fingerprint in its server join token before it sent the token. A server join token works once, lasts an hour by default and 24 hours at most, and is refused for a worker's join, as a worker's token is for a server's. The admin token itself is never sent: a joined server checks the token against the hash in the store.
+
+The servers talk to each other on the server port, 4486 by default ([listeners](#listeners)). Who needs to reach what:
+
+| From | To | Ports |
+|---|---|---|
+| Each server | Every other server | 4486, the server port; 4484, which its own node uses as a worker does |
+| Each worker | Every server | 4484, the node listener; 4485, the join listener, to join |
+| A new server | Any server | 4485, to join; then the others reach it on 4486 |
+| The CLI and API clients | Any server's API | `--api-addr`, 4483 by default, on loopback unless you give another |
+
+Allow 4486 between the servers and from nowhere else: a worker has no use for it, and its certificate is refused there anyway. Allow 4484 and 4485 from the workers to every server, so that a worker can go to another server when one is down. On EC2, that is a security group rule for TCP 4486 from the servers' own group, and one for 4484 to 4485 from the group of the workers and servers.
+
+A follower passes API requests to the leader with the caller's credential, which the leader checks as if the caller had reached it directly; the follower does not check it. The caller's address and whether it came over TLS go with the request in headers that the leader takes only on the server port, from another server: the API and the node and join listeners delete those headers from every request they get, so a client cannot claim another address, and a worker cannot claim another node's certificate.
 
 ## What a compromised worker can do
 

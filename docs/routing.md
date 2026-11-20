@@ -259,6 +259,8 @@ Containers made by an earlier 2.2 build have ephemeral host ports, from 32768 to
 | `--route-http-port` (80) | `--route-addr` | The internet: ACME HTTP-01 and redirects |
 | `--route-https-port` (443) | `--route-addr` | The internet: the apps' traffic |
 | 30000 to 32767, routed containers' [host ports](#route-host-ports) | The node's private address | The other nodes' routers only |
+| 4484 and 4485, the node and join listeners | A server's cluster address | The workers, and the other servers' own nodes: every node reaches every server, so a worker's router can read the table through another server when one is down |
+| 4486, the server port ([several servers](ha.md)) | A server's cluster address, in a cluster of several | The other servers only |
 
 Docker publishes the routed containers' host ports on the node's private address, so any machine that can reach that address can reach the apps directly, without the router. On a private network that only the cluster's nodes share, that is the same exposure as the network itself. Otherwise, allow those ports from the other nodes only. Docker adds its own iptables rules for published ports, so a filter goes in its `DOCKER-USER` chain and matches the original destination. For a node at `10.0.0.5` whose peers are in `10.0.0.0/24`:
 

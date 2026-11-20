@@ -24,7 +24,7 @@ The FSM snapshot is the store's own snapshot, `VACUUM INTO` a file (the path `hi
 
 A snapshot is restored into the open store in one transaction: the file is attached, every table is emptied and filled from it with foreign keys checked at commit, and the file is detached. A snapshot from another schema version is refused (see [versions](#versions)).
 
-The store records the index of the last entry it applied, in the same transaction as the entry (`raft_applied`, schema version 18). Raft starts without restoring its last snapshot into the store (`NoSnapshotRestoreOnStart`), since the store on disk is already at least that far, and replays the entries after the snapshot; the store skips those it has applied. Without the index, a restart would apply them twice.
+The store records the index of the last entry it applied, in the same transaction as the entry (`raft_applied`, schema version 18). Raft starts without restoring its last snapshot into the store (`NoSnapshotRestoreOnStart`), since the store on disk is already at least that far, and replays the entries after the snapshot; the store skips those it has applied. Without the index, a restart would apply them twice. A store older than the latest snapshot, as when a server stopped between raft saving a snapshot the leader sent it and the store loading it, loads that snapshot before raft starts.
 
 ### The transport
 
@@ -36,22 +36,22 @@ Two things share the port, told apart by ALPN: `hivemind-raft/1` is Raft's own t
 
 The Raft address of a server is its advertise address with this port, such as `10.0.0.6:4486` or `hm-2.example.internal:4486`, and the dialing side checks that the certificate names that host, as a worker checks the server it dials.
 
-Timing: raft's defaults for a LAN, a heartbeat timeout and an election timeout of 1 s and a leader lease of 500 ms. A follower that hears nothing for 1 to 2 s starts an election, so a new leader is expected within a few seconds of the old one's loss; the test below measures it. A leader that cannot reach a majority for 500 ms steps down.
+Timing: raft's defaults for a LAN, a heartbeat timeout and an election timeout of 1 s and a leader lease of 500 ms. A follower that hears nothing for 1 to 2 s starts an election, so a new leader is expected within a few seconds of the old one's loss; the integration test measured 1.0 s after a kill and 1.9 s after a partition ([measurements](#measurements)). A leader that cannot reach a majority for 500 ms steps down. A connection on the server port is dialled with a 3 s timeout, and fails when the other machine has not acknowledged its data for 5 s (`TCP_USER_TIMEOUT`, on Linux), so a request passed to a leader whose machine is gone fails in seconds rather than at its client's timeout.
 
 ## Replicating the store
 
 Every write to the store goes through `Store.tx`, one SQLite transaction. Five writes did not: the node's version (`SetNodeVersion`), a node's CA rotation mark (`NoteCARotationNode`), and three of the routers' TLS storage operations (delete, renew a lock, unlock). They become transactions of their own.
 
-With more than one server, `Store.tx` runs on the leader only, and works like this:
+With more than one server, a transaction that writes runs on the leader only, and works like this:
 
-1. It takes the store's write lock, so the leader runs one write at a time, as today.
+1. It takes the store's write lock, so the leader runs one write at a time, as today, and notes the leadership it starts under.
 2. It runs the transaction as it does now, reads and writes, on the store's one write connection. A driver wrapper records each write statement that succeeds, with its arguments: `Exec`, and the `Exec` of a prepared statement. Reads are not recorded. The transaction's reads see its own writes, as before, so the code that decides what to write does not change.
 3. It rolls the transaction back.
 4. If it wrote anything, the statements, in order, are one Raft entry. `raft.Apply` returns once a majority of the servers have the entry in their logs and the leader has applied it.
 5. Every server, the leader included, applies an entry by running its statements in one transaction, with the update of the applied index, and committing it.
 6. The leader then runs what the transaction asked to run after its commit (the in-memory caches below), and returns.
 
-Readers see the store as it was until the entry is applied, as they see it until a commit today. The write lock is held from step 1 to step 6, so nothing else writes in between, and the state the transaction read is the state the entry is applied to.
+Readers see the store as it was until the entry is applied, as they see it until a commit today. The write lock is held from step 1 to step 6, so nothing else writes in between, and the state the transaction read is the state the entry is applied to. A new leader takes writes only once it has applied every entry of the terms before its own (a Raft barrier), and an entry is appended only under the leadership its transaction started under, so no transaction reads a state that misses an entry before its own. A transaction that recorded no write, a read, runs on any server, on its copy; one that writes on a follower is refused before anything is appended.
 
 ### Why replaying the writes gives the same rows
 
@@ -92,7 +92,7 @@ Only the leader runs:
 - the CA rotation manager's run, and the steps of a rotation;
 - issuing node certificates, at join and at renewal, since both arrive through the node and join listeners, which followers pass to the leader;
 - the routers' TLS storage and its locks, which are store writes;
-- backups, which a follower passes to the leader like any other API request.
+- backups through the API (`hivemind backup --api`), which a follower passes to the leader like any other request; `hivemind backup` on a server reads its own data directory, which has a copy of everything.
 
 Each server issues its own listener certificate when it starts, from the CA, and renews it, as the one server does today.
 
@@ -110,7 +110,7 @@ Every server serves the API on its `--api-addr`, as the one server does. A follo
 - The CLI then works with any server's address, or with a list of them (`HIVEMIND_SERVER=https://10.0.0.5:4483,https://10.0.0.6:4483`, or `--server` with the same), which it tries in order until one answers.
 - The caller's credential, the token or the session cookie and CSRF token, goes with the request, and the leader checks it, as if the caller had reached it directly. The follower does not check it: a session lives on the leader, so the follower could not. The follower sends, beside the request, the caller's address, for the leader's login limit and logs, and whether the caller came over TLS, which the backup route requires off loopback.
 
-When no server is the leader, as during an election or when a majority is down, a follower answers every other request with `503` and `{"error": "no leader: ..."}`, saying how many servers it can reach and how many a write needs, and that running containers are not affected. A request that was passed to a server that is no longer the leader gets the same `503`, and is not passed on again. A write whose leader lost the leadership while the write was in its log gets `503` saying the write may or may not have been applied: Raft can commit it under the next leader. The CLI prints these as they are.
+When no server is the leader, as during an election or when a majority is down, a follower answers every other request with `503` and `{"error": "no leader: ..."}`, saying how many servers it can reach and how many a write needs, and that running containers are not affected. A request that was passed to a server that is no longer the leader gets the same `503`, and is not passed on again. A write whose leader lost the leadership while the write was in its log gets `503` saying the write may or may not have been applied: Raft can commit it under the next leader. The CLI prints these as they are; given a list of servers, it tries the next one on a `503` that says there is no leader, as on a server that does not answer.
 
 ### Workers
 
@@ -118,7 +118,7 @@ A worker keeps the servers it knows in `node.json`, as `servers` (host:port of e
 
 A follower's node listener passes each request to the leader, with the worker's certificate chain, which the leader verifies again against the cluster CA before any handler reads it; every node route then works as on the one server. The follower's join listener passes joins to the leader the same way. So a worker can use any server, the log poll and the routers' TLS storage included, and its router keeps serving with the table it last read while no server answers, as it does today when the server is down.
 
-A follower's own node, its agent, router and log requests, uses the node API too, through its own node listener, with its server certificate as the client certificate (a node certificate is issued for both client and server use). On the leader they use the store directly, as on the one server.
+A follower's own node, its agent, router, log requests and router counters, uses the node API too, through its own node listener, with its server certificate as the client certificate (a node certificate is issued for both client and server use). On the leader they use the store directly, as on the one server. So a follower's router, like a worker's, keeps the table it last read while no server leads, rather than read its own copy, whose leases nothing renews then.
 
 ## Membership
 
@@ -164,7 +164,7 @@ A worker of 2.2.0 or older knows one server, the one it joined. It goes on worki
 
 All servers run the same release. A server will not apply an entry from a leader at another schema version, and a joining server must run the leader's version. To upgrade the servers, stop them all, upgrade them, and start them again; their containers keep running meanwhile. A rolling upgrade of the servers is not done.
 
-Backup: `hivemind backup` on any server is passed to the leader, which writes the archive as today: the store and the CA files. Raft's directory is not in it. Restore makes a cluster of one: the restored data directory has no Raft, and its epoch is one higher than the backup's, so every worker refuses the old servers' copies. The other servers join again, each with an empty data directory and a new server token, and their old node rows are removed with `hivemind node remove` as for any lost node.
+Backup: `hivemind backup` on any server copies that server's store and CA files, as on the one server, and `hivemind backup --api` is passed to the leader like any API request. Raft's directory and `server.json` are not in it. Restore makes a cluster of one: the restored data directory has no Raft, restore empties the store's server table and its applied index, and the epoch is one higher than the backup's, so every worker refuses the old servers' copies. The other servers join again, each with an empty data directory and a new server token, and their old node rows are removed with `hivemind node remove` as for any lost node. `serve` refuses a store that lists servers in a data directory without Raft state, as when `raft/` was deleted: serving it would start a second cluster beside the others ([backup](backup.md#a-cluster-of-several-servers)).
 
 The CA rotation needs a cluster of one in 2.3.0: `hivemind ca rotate start` is refused while the cluster has more than one server, and a server join is refused while a rotation is in progress. Each server keeps the CA files in its own data directory, and a rotation changes them on one machine; carrying the rotation's files and steps to every server is not done. To rotate with several servers, remove all but one, rotate, and join the others again.
 
@@ -178,6 +178,8 @@ What changes:
 - The admin token's hash is on every server. The token itself stays where `init` wrote it.
 
 What does not: the API still needs the admin token on every route but `GET /healthz`, checked by the leader; the node listener still needs a worker's certificate, checked by the follower at the handshake and by the leader again; the join listener still needs a token, redeemed by the leader.
+
+The forwarding headers, the caller's address, whether it came over TLS, and a worker's certificate chain, are taken only by the leader's server port, on the forward protocol, from a peer whose certificate has the server role. The API and the node and join listeners delete them from every request they get, first, so an API client cannot claim another address to get past the login limit, and a worker cannot claim another node's certificate; a test of each sends forged headers and is served as itself. Firewalls: allow 4486 between the servers and from nowhere else, and 4484 and 4485 from every node to every server ([security](security.md#several-servers), [routing](routing.md#ports-and-firewall)).
 
 ## What is not done
 
@@ -193,6 +195,12 @@ What does not: the API still needs the admin token on every route but `GET /heal
 - 3 to 7 servers, 3 or 5 recommended.
 - Every write waits for a majority of the servers to write the entry to their logs, and for the leader to apply it: a round trip on the network and a second fsync on each server, where one server has one fsync. All writes on the leader are serialised, as they are on the one server.
 - Network partitions: the side with a majority elects a leader and goes on. A leader on the minority side steps down within 500 ms of losing the majority, and its API answers `503`. A worker on the minority side keeps its containers, and goes to a server on the majority side if it can reach one. When the partition heals, the minority's servers take the majority's log, and their nodes report again.
+
+## Testing
+
+Unit tests: the store's replication (a workload over every table applied on a leader, a follower and a store that applies the entries afterwards and again, compared row by row, and against a store without replication; refused writes on a follower; caches after a change of leader; snapshots), the log store, three servers on loopback (formation from a cluster of one, a leader stopped, two of three down, forwarding with forged headers), the cluster listeners (forwarding, forged headers on the node listener, server join refusals, the servers header), the node API client's failover, and the CLI.
+
+`scripts/integration-ha.sh`, CI's `ha` step, runs three servers and two workers with routers in Docker, and checks formation by join, deploys through every server, the leader killed during writes, the old leader back, a partition that isolates the leader, and quorum lost. To read each server's own copy of the store, it uses a test-only setting, `HIVEMIND_TEST_LOCAL_READS=1`, which only a binary built with `-tags hivemind_testknobs` reads: a server then answers a GET that carries `Hivemind-Test-Local-Read: 1` from its own store. A release binary refuses to start with it set.
 
 ## Measurements
 

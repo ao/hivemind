@@ -47,6 +47,14 @@ Then it raises the cluster's epoch in the restored store to one more than the ba
 
 The directory gets mode 0700 and every file mode 0600. On any failure, `restore` removes the files it wrote, and the directory if it created it. Like `init`, it writes a client config for the CLI on this machine, unless one exists.
 
+### A cluster of several servers
+
+In a cluster of several servers ([several servers](ha.md)), take the backup on any server: `hivemind backup` reads that server's own copy of the store and its CA files, which every server has, and `hivemind backup --api` goes to the leader. A server that joined has no `admin.token`, so its backups hold none; the admin token works with the restored store all the same. The Raft directory, `raft/`, and `server.json` are not in a backup.
+
+`restore` makes a cluster of one: it empties the store's list of servers, as well as raising the epoch. Start it with `serve`, and join the other servers again with `hivemind join-token --role server` and `hivemind join --role server`, each with an empty data directory; their old copies are at the lower epoch, which the workers refuse. Remove their old nodes with `hivemind node remove`. A data directory whose store lists servers and that has no Raft state, as when `raft/` was deleted, is refused by `serve`, which would otherwise start a second cluster beside the others: restore a backup into an empty directory instead.
+
+While a majority of the servers is up, a lost server needs no restore: remove it with `hivemind server remove <id>`, and join a new machine as a server. A restore is for losing a majority of them for good.
+
 ## Replacing a lost server
 
 The workers keep running their containers while the server is gone (see [concepts](concepts.md#server-and-workers)). Each worker dials the address in its `node.json`, the one it joined, and checks that the server's certificate names it. When the server advertises a DNS name, which is the recommended set-up ([concepts](concepts.md#the-servers-address)), the new machine can have any IP address: update the name's record, and the workers follow it. When it advertises an IP address, give the new machine that address, or move each worker to the new one with `hivemind node set-server` ([below](#at-a-new-ip-address)).

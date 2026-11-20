@@ -1,6 +1,6 @@
 # Concepts
 
-This describes the build on this branch. It runs one server and any number of workers, on Linux machines with Docker Engine. Where a limit applies, the section says so. [PLAN.md](PLAN.md) has the full plan.
+This describes the build on this branch. It runs one server, or three or five ([several servers](#several-servers)), and any number of workers, on Linux machines with Docker Engine. Where a limit applies, the section says so. [PLAN.md](PLAN.md) has the full plan.
 
 ## Server and workers
 
@@ -11,6 +11,14 @@ A worker is another machine that joined with `hivemind join`. It runs an agent a
 `hivemind serve` runs the server and its agent in one process. `hivemind serve --role worker` runs a worker that has already joined. Stopping either one leaves its containers running, but nothing changes them until the agent runs again. If the server is down, workers keep their containers and no new replica is placed.
 
 The agent keeps no state of its own. Its record is the set of containers and their labels, so an agent that restarts picks them up again.
+
+## Several servers
+
+In the unreleased 2.3.0 a cluster can have several servers, three or five, instead of one ([several servers](ha.md)). They run Raft: one of them is the leader, which runs the sweep, placement, rollouts, drains and the CA rotation manager, and every write goes through the Raft log, so each server has a copy of the store, and a write is acknowledged once a majority has it. The cluster goes on while a majority of the servers is up; with three, while one is down. Each server is also a node, with an agent and its own containers.
+
+Every server serves the API and the node and join listeners. A follower passes each request to the leader, so the CLI can use any server, or a list of them (`HIVEMIND_SERVER=https://10.0.0.5:4483,https://10.0.0.6:4483`). A worker keeps the servers in its `node.json` and uses the first that answers. When the leader is lost, the others elect a new one, in about a second on a LAN (1.0 s in the integration test), and the new leader gives every node that was up the start grace before it counts as lost, as a server does after a restart ([leases](#leases-and-node-loss)). When a majority is down, there is no leader: nothing is placed or rescheduled, the API answers `503` with the reason, and every container keeps running.
+
+`init` makes a cluster of one, which runs no Raft. `hivemind join-token --role server` and `hivemind join <server> --role server --token <token> --advertise <address>` add a server; `hivemind servers` lists them, and `hivemind server remove <id>` removes one. The servers use a port of their own, 4486, between themselves ([security](security.md#several-servers)).
 
 ## Joining a machine
 

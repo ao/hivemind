@@ -2,6 +2,24 @@
 
 Notable changes to hivemind, newest first. Versions follow [Semantic Versioning](https://semver.org). A release is cut by pushing a `v*` tag; its notes are the matching section below.
 
+## [2.3.0] - Unreleased
+
+### Added
+
+- A cluster of several servers ([docs/ha.md](docs/ha.md)). Three or five servers elect a leader with Raft (hashicorp/raft v1.8.0), each keeps a copy of the store, and the cluster keeps placing, rescheduling and answering the API while a majority of them is up. A write is acknowledged once a majority has it in its log. `hivemind join-token --role server` issues a server join token (1 hour by default, at most 24), and `hivemind join <server> --role server --token <token> --advertise <address>` joins another server, which gets the cluster CA with its key and the store, and becomes a voter once it has caught up. The first server join turns Raft on in a cluster of one, with its store as the log's first snapshot; until then nothing changes. `hivemind servers` lists the servers with their role and the leader's last contact with each, and `hivemind server remove <id>` removes one. Up to 7 servers.
+- The store is replicated as the leader's recorded write statements: each transaction runs on the leader as before, with the write connection's driver recording each write that succeeds with its arguments, and is rolled back; the statements are one entry of the log, which every server applies in one transaction. Schema version 18 adds the applied index, the server table, and a role for join tokens. A test applies the same entries on two stores and compares every row of every table, and compares them with a store that ran the same work without replication. The five writes that ran outside a transaction run in one.
+- The server port, 4486 by default (the cluster port plus two), on each server of a cluster of several, on its cluster address only: TLS 1.3, client certificates of the server role only (a second URI name in a server's own certificate, `hivemind://role/server`), for Raft and for what followers pass to the leader. The Raft log is a SQLite file of its own, `raft/raft.db`, with snapshots beside it.
+- A follower passes every API request to the leader with the caller's credential, every node API request with the worker's certificate chain, which the leader verifies again, and every join; the leader takes the forwarding headers only on the server port, and the API and the cluster listeners delete them from every other request. Without a leader, the API answers `503` with `no leader: this server reaches N of the M servers, and a write needs K`, and `GET /v1/servers` from the server's own state. The CLI takes a comma-separated list of servers in `--server` or `HIVEMIND_SERVER`, and tries the next on a server that does not answer or has no leader.
+- A worker keeps every server in `node.json` (`servers`), from the `Hivemind-Servers` header of the node API replies, and moves to the next server when one does not answer or has no leader. A worker of 2.2.0 or older works through the server it joined, without failover.
+- Only the leader runs the sweep, rollouts, drains and the CA rotation manager; a new leader sets the start grace (`--start-grace`) and registers its own node, so a failover does not mark live workers lost. A follower's agent, router, log requests and router counters reach the leader through the node API, as a worker's do.
+- `scripts/integration-ha.sh` runs three servers and two workers with routers in Docker: formation by join, deploys through every server, the leader killed during writes (every acknowledged write kept on every server, a new leader, no replica twice, the workers' routers answering every request), the old leader back as a follower, a partition that isolates the leader, and two of three servers down. CI runs it as the `ha` step.
+
+### Changed
+
+- `hivemind restore` makes a cluster of one: it empties the server table of a store from a cluster of several. A store that lists servers in a data directory without Raft state is refused by `serve`, which would otherwise start a second cluster beside the others.
+- `hivemind ca rotate start` is refused while the cluster has more than one server, and a server join while a rotation is in progress.
+- `hivemind nodes` marks every server's node as a server, and `hivemind node remove` refuses the node of a server until `hivemind server remove`.
+
 ## [2.2.0] - 2026-11-20
 
 2.1.0 was not released on its own, and its changes are in this release too: node certificate renewal, `hivemind backup` and `hivemind restore`, and `hivemind logs` for replicas on workers. They are listed under 2.1.0 in [CHANGELOG.md](https://github.com/ao/hivemind/blob/v2.2.0/CHANGELOG.md).
