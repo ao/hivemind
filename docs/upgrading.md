@@ -1,27 +1,64 @@
 # Upgrading
 
-## From 2.0.0
+## From 2.0.0 to 2.2.0
 
 These steps were run on two clusters of three machines (c7g.large, Amazon Linux 2023, Docker 25.0.18), each on 2.0.0 under the [systemd units](systemd.md), with apps that had a volume, a host port, a health check and no port. One cluster was upgraded server first, the other workers first. In both, no container on any node was restarted or moved by the upgrade, every worker stayed `ready`, and the old certificates kept working.
 
 1. Back up the server. 2.0.0 has no `backup` command, so use the new binary's, which only reads the data directory and works while the 2.0.0 server runs: `sudo ./hivemind-linux-arm64 backup /root/hivemind-2.0.0.tar`. This file is the only way back to 2.0.0.
-2. Upgrade the server: install the new binary over the old one, as in the [README](../README.md#install), and run `sudo systemctl restart hivemind`. The server migrates the store on that start, from schema version 6, and logs one line for each step, such as `msg="store schema migrated" from=6 to=7 adds="node certificate expiry"`; `hivemind backup` prints the schema version.
+2. Upgrade the server: install the new binary over the old one, as in the [README](../README.md#install), and run `sudo systemctl restart hivemind`. The server migrates the store on that start, from schema version 6 to 17, and logs one line for each step, such as `msg="store schema migrated" from=6 to=7 adds="node certificate expiry"`; `hivemind backup` prints the schema version.
 3. Upgrade each worker the same way: install, then `sudo systemctl restart hivemind`. Upgrade it in place. Do not drain a 2.0.0 worker first: its agent stops containers one after another without renewing its lease, and with a few containers that each take 10 s to stop, the server marks it lost and places its replicas again.
+4. Before you deploy a routed app, open TCP ports 30000 to 32767 between the nodes, and give each node that should run a router its flags ([below](#routers-and-the-firewall)).
 
-A newer CLI works with a 2.0.0 server for the commands 2.0.0 has. `hivemind nodes` shows `-` for what 2.0.0 does not report, such as ELIGIBILITY. `hivemind status` shows `-` under READY, because 2.0.0 sends no ready count. A command whose route 2.0.0 lacks says so: `the server is older than 2.2 and has no node drain; upgrade the server`.
+The workers can be upgraded first instead ([below](#upgrading-the-workers-first)).
+
+A 2.2.0 CLI works with a 2.0.0 server for the commands 2.0.0 has. `hivemind nodes` shows `-` for what 2.0.0 does not report, such as ELIGIBILITY. `hivemind status` shows `-` under READY, because 2.0.0 sends no ready count. A command whose route 2.0.0 lacks says so: `the server is older than 2.2 and has no node drain; upgrade the server`.
 
 `hivemind nodes` has a VERSION column: each node from 2.2 on reports its version with every request to the server, and the server's node shows the server's. A node that still runs 2.0.0 shows `-`. `hivemind version` prints the server's version.
 
-A 2.0.0 worker keeps working with a newer server: `status`, `nodes`, `deploy` and `scale` work. Its replicas' logs get `worker node-... runs a hivemind older than 2.1, which cannot stream logs; upgrade it`, it takes no routed replicas, and it cannot renew its certificate. Upgrade every 2.0.0 worker within 365 days of its join. Once two thirds of its certificate's life have passed, an upgraded worker renews at its next start or hourly check, using the certificate 2.0.0 issued. A worker whose certificate has expired cannot renew: the server marks it lost and places its replicas again, while its old containers keep running on the machine. To bring it back, run `hivemind node remove <id>` on the server, then join the machine again with an empty data directory and a new join token; the join removes the old containers. `hivemind nodes` shows each node's CERT EXPIRES, and marks a 2.0.0 worker's `not renewing` from day 244, and the server logs a warning for it once a day.
+### What changes on disk
 
-Upgrading the workers first also works. A new worker with a 2.0.0 server logs one warning for each feature the server lacks, such as `the server is older than this worker and has no log streaming; upgrade the server`, and the same for lease renewal between status reports, certificate renewal and, with `--route-addr`, the routing table. It does not call those routes again until the server's version changes, or for 10 minutes. The node is registered: do not join it again. A 2.0.0 server refuses the worker's address, so the worker registers without one and takes no routed replicas; `hivemind nodes` shows `-` for its ADDRESS. Once the server is upgraded, the worker sees the server's new version in its next reply and registers its address, without a restart, and logs `the server took this node's address; it takes routed replicas now`.
+On the server, `serve` migrates `hivemind.db` in place, in one transaction, and adds `hivemind.lock`, which holds its pid while it runs. Nothing else in the data directory changes. It writes no `hivemind.yaml`: in 2.2.0 `init` writes the serve flags it is given to that file, but a 2.0.0 cluster was made without one, so its flags stay in the unit's `ExecStart`.
+
+On a worker, the upgrade adds `hivemind.lock` and changes nothing else at its start: `node.json`, `node.key`, `node.crt` and `ca.crt` stay as `join` wrote them, and the worker keeps its node ID. `node.key` and `node.crt` are replaced when the worker renews its certificate, from day 243, and `node.crt` is mode 0600 after that; `ca.crt` changes only in a [CA rotation](ca-rotation.md). In 2.2.0, `join` writes the worker flags it is given, such as the router's, to `<data-dir>/hivemind.yaml`, and `serve --role worker` reads them from there. A worker that joined under 2.0.0 has no such file, and the upgrade does not write one. [Security](security.md#files) lists every file.
+
+### Routers and the firewall
+
+The upgrade starts no router. To run one on a node, add `--route-addr` and `--acme-email` to its unit's `ExecStart`, after `--advertise` on the server or `--role worker` on a worker, and restart it:
+
+```ini
+ExecStart=/usr/local/bin/hivemind serve --role worker --route-addr 0.0.0.0 --acme-email ops@example.com
+```
+
+Or write `route-addr: "0.0.0.0"` and `acme-email: "ops@example.com"` to `<data-dir>/hivemind.yaml`; a flag in `ExecStart` overrides the file. `--acme-ca` takes another ACME CA than Let's Encrypt, and `--route-http-port` (80), `--route-https-port` (443) and `--route-max-conns-per-ip` (256) keep their defaults unless given. `hivemind nodes` shows `yes` under ROUTER for each node whose router runs. See [routing](routing.md#example).
+
+A node with `--route-addr` listens on ports 80 and 443 of that address, for the routed apps' clients, and on port 80 for the ACME CA's HTTP-01 requests. A routed replica publishes its route ports on ports 30000 to 32767 of its node's private address, and every node's router must reach them on every other node. A 2.0.0 cluster needed only ports 4484 and 4485 open to the server, so open TCP 30000 to 32767 between all the nodes before you deploy a routed app; on EC2, that is a security group rule for the range from the nodes' own group. Without it, a router reaches only the replicas on its own node: its dials to the other nodes time out after 2 seconds, and a router on a node with no replica of the host answers `502`. Keep the range closed to anything but the nodes ([ports and firewall](routing.md#ports-and-firewall)).
+
+### A 2.0.0 worker beside a 2.2.0 server
+
+A 2.0.0 worker keeps working with a 2.2.0 server until it is upgraded: it keeps its lease, runs its replicas and takes new ones, and `status`, `nodes`, `deploy` and `scale` cover it. It cannot:
+
+- stream logs: `hivemind logs` of its replicas gets `worker node-... runs a hivemind older than 2.1, which cannot stream logs; upgrade it`;
+- take routed replicas: it reports no private address, so placement passes it over for an app with routes;
+- pull with a credential from `registry login`: it does not ask for one, so a private image fails to pull there ([registries](registries.md#workers-older-than-22));
+- follow a CA rotation: `ca rotate renew` refuses until it is given `--force`, `finish` refuses while the worker is in the cluster, and `finish --force` cuts it off ([CA rotation](ca-rotation.md#workers-of-an-earlier-build));
+- exit with status 3 when it is removed: it exits with 1, and its unit restarts it until it is disabled ([systemd](systemd.md#what-the-settings-do));
+- be drained without risk: see step 3;
+- renew its certificate.
+
+Upgrade every 2.0.0 worker within 365 days of its join. Once two thirds of its certificate's life have passed, an upgraded worker renews at its next start or hourly check, using the certificate 2.0.0 issued. A worker whose certificate has expired cannot renew: the server marks it lost and places its replicas again, while its old containers keep running on the machine. To bring it back, run `hivemind node remove <id>` on the server, then join the machine again with an empty data directory and a new join token; the join removes the old containers. `hivemind nodes` shows each node's CERT EXPIRES, and marks a 2.0.0 worker's `not renewing` from day 244, and the server logs a warning for it once a day.
+
+### Upgrading the workers first
+
+Upgrading the workers first also works. A 2.2.0 worker with a 2.0.0 server logs one warning for each feature the server lacks, such as `the server is older than this worker and has no log streaming; upgrade the server`, and the same for lease renewal between status reports, certificate renewal and, with `--route-addr`, the routing table. It does not call those routes again until the server's version changes, or for 10 minutes. The node is registered: do not join it again. A 2.0.0 server refuses the worker's address, so the worker registers without one and takes no routed replicas; `hivemind nodes` shows `-` for its ADDRESS. Once the server is upgraded, the worker sees the server's new version in its next reply and registers its address, without a restart, and logs `the server took this node's address; it takes routed replicas now`.
 
 `scripts/integration-mixed.sh` runs these mixed states in Docker: a 2.0.0 server with a worker of this build and a 2.0.0 worker, then the server upgraded in place, and checks the messages above. It then rotates the cluster CA with the 2.0.0 worker in the cluster, and upgrades that worker in place in the middle of the rotation ([CA rotation](ca-rotation.md#workers-of-an-earlier-build)).
+
+### Going back to 2.0.0
 
 A 2.0.0 binary refuses a migrated store, and leaves its files unchanged:
 
 ```
-error: opening /var/lib/hivemind/hivemind.db: store schema is newer than this build: the store has schema version 16 and this build knows up to 6; use a newer hivemind
+error: opening /var/lib/hivemind/hivemind.db: store schema is newer than this build: the store has schema version 17 and this build knows up to 6; use a newer hivemind
 ```
 
 To go back to 2.0.0, restore the backup from step 1 into an empty data directory with the new binary's `hivemind restore`, then run 2.0.0 on it. `restore` leaves a 2.0.0 store at its schema version, and writes the cluster's epoch to `restored-epoch` beside it ([backup](backup.md#restoring)), which 2.0.0 ignores. Everything that changed since the backup is lost.
@@ -69,7 +106,7 @@ v2 serves the API on `127.0.0.1:4483`, and every route except `GET /healthz` nee
 
 ### Networking
 
-v1 bound `*:7946` for its membership protocol (memberlist). v2 has no membership protocol. Its API listens on `127.0.0.1:4483`, and nothing else listens unless the server runs with `--advertise`, or a node with `--route-addr`. With `--advertise`, v2 opens two ports on that address only: 4484 for the node API and 4485 for joins. `--route-addr` (unreleased 2.2.0) opens the HTTPS router on ports 80 and 443. See [security](security.md#listeners).
+v1 bound `*:7946` for its membership protocol (memberlist). v2 has no membership protocol. Its API listens on `127.0.0.1:4483`, and nothing else listens unless the server runs with `--advertise`, or a node with `--route-addr`. With `--advertise`, v2 opens two ports on that address only: 4484 for the node API and 4485 for joins. `--route-addr` opens the HTTPS router on ports 80 and 443. See [security](security.md#listeners).
 
 ### Removed
 
