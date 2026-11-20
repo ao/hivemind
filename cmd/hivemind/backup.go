@@ -98,8 +98,17 @@ hivemind restore.`,
 			if _, err := os.Stat(dbPath); err != nil {
 				return fmt.Errorf("no server store in %s: %w", dir, err)
 			}
+			// A server that joined a cluster of several runs as its own
+			// node, from server.json, and a restore of its backup does too.
+			var nodeID string
+			switch joined, err := readServerState(dir); {
+			case err == nil:
+				nodeID = joined.NodeID
+			case !errors.Is(err, errNotJoinedServer):
+				return err
+			}
 			write = func(ctx context.Context, w io.Writer) error {
-				_, err := backup.Write(ctx, w, backup.Options{DataDir: dir, TempDir: filepath.Dir(out), HivemindVersion: version,
+				_, err := backup.Write(ctx, w, backup.Options{DataDir: dir, TempDir: filepath.Dir(out), HivemindVersion: version, NodeID: nodeID,
 					Snapshot: func(ctx context.Context, dest string) error { return store.SnapshotFile(ctx, dbPath, dest) }})
 				return err
 			}

@@ -619,7 +619,7 @@ func runServe(ctx context.Context, cfg *config.Config, log *slog.Logger, rt runt
 	}
 	writeBackup := func(ctx context.Context, w io.Writer) error {
 		write := func() error {
-			_, err := backup.Write(ctx, w, backup.Options{DataDir: cfg.DataDir, Snapshot: st.SnapshotTo, HivemindVersion: version})
+			_, err := backup.Write(ctx, w, backup.Options{DataDir: cfg.DataDir, Snapshot: st.SnapshotTo, HivemindVersion: version, NodeID: selfID})
 			return err
 		}
 		if rot == nil {

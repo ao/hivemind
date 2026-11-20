@@ -643,5 +643,29 @@ wait_for 120 app_running "$K" pin 1 || cl_fail "pin does not run one replica aft
 sleep 20
 no_duplicates || cl_fail "a replica runs twice after the drained server's removal: $( (for a in app0 app1 app2 who pin; do containers_of "$a"; done) | sort | tr '\n' ';')"
 cl_note "drained first, ${SID[$TI]} left the configuration, its serve stopped with the removal message, the servers left take writes, and no replica runs twice: $out"
+
+# A restore once the first server has been removed: s0's node is removed
+# too, a backup is taken on a server that joined, and it is restored on
+# s0's machine into a new data directory. The restored server runs as the
+# node of the server the backup was taken on, which the cluster has not
+# removed, and serves a cluster of one. It runs without --advertise, so it
+# opens no cluster listener that the workers could reach.
+wait_for 60 hm "$K" node remove "${SID[$TI]}" || cl_fail "node remove ${SID[$TI]}: $(hm "$K" node remove "${SID[$TI]}" 2>&1)"
+docker exec "${S[$K]}" rm -f /root/ha-backup.tar
+out=$(docker exec "${S[$K]}" hivemind backup /root/ha-backup.tar 2>&1) || cl_fail "backup on ${S[$K]}: $out"
+grep -q "node ${SID[$K]}\." <<<"$out" || cl_fail "the backup on ${S[$K]} does not name its own node, ${SID[$K]}: $out"
+# docker cp cannot read the nodes' /tmp, a tmpfs; the archive goes through a pipe.
+docker exec "${S[$K]}" cat /root/ha-backup.tar | docker exec -i "${S[$TI]}" sh -c 'umask 077; cat >/root/ha-backup.tar' ||
+	cl_fail "copying the backup to ${S[$TI]}"
+out=$(docker exec "${S[$TI]}" hivemind restore /root/ha-backup.tar --data-dir /var/lib/hm-restored 2>&1) || cl_fail "restore on ${S[$TI]}: $out"
+grep -q "of node ${SID[$K]}," <<<"$out" || cl_fail "the restore does not run as ${SID[$K]}: $out"
+docker exec -d "${S[$TI]}" sh -c "hivemind serve --data-dir /var/lib/hm-restored >/var/log/hm-restored.log 2>&1; echo \$? >/tmp/restored.rc"
+restored_serves() {
+	docker exec -e "HIVEMIND_TOKEN=$TOKEN" -e HIVEMIND_SERVER=http://127.0.0.1:4483 "${S[$TI]}" hivemind servers 2>/dev/null |
+		grep -q "^${SID[$K]} .*leader" && docker exec -e "HIVEMIND_TOKEN=$TOKEN" -e HIVEMIND_SERVER=http://127.0.0.1:4483 "${S[$TI]}" hivemind status 2>/dev/null | grep -q '^app0 '
+}
+wait_for 60 restored_serves ||
+	cl_fail "the restored server does not serve as ${SID[$K]}: $(docker exec "${S[$TI]}" sh -c 'tail -n 10 /var/log/hm-restored.log; cat /tmp/restored.rc 2>/dev/null')"
+cl_note "with ${SID[$TI]}, the first server, removed, a backup taken on ${S[$K]} restores and serves as ${SID[$K]}, a cluster of one"
 cl_note "ha: election ${ELECTION_MS} ms after the kill, API writes again at ${API_MS} ms; a leader ${HANDOVER_MS} ms after the leader's SIGTERM; election ${PARTITION_MS} ms after the cut; writes acknowledged ${ACKED_BEFORE} before and ${ACKED_AFTER} after the kill, all kept on every server; ${FAILED} refused; ${ROUTER_TOTAL} router requests, all 200"
 cl_note "ha: all checks passed"

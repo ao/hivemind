@@ -194,3 +194,59 @@ func (s *Store) CountServers(ctx context.Context) (int, error) {
 	err := s.rdb.QueryRowContext(ctx, `SELECT count(*) FROM servers`).Scan(&n)
 	return n, err
 }
+
+// RunAsNodeFile makes the store file at path, which restore has just
+// written, the store of the server that runs as node: the cluster record
+// names it from then on, as serve reads it. A backup taken on a server that
+// joined a cluster of several names that server's node, and the record
+// names the first server's. A node on the removed list is ErrNodeRemoved:
+// serve would refuse it. Like MakeClusterOfOneFile it does not open the
+// file as a Store.
+func RunAsNodeFile(ctx context.Context, path, node string) error {
+	if err := pki.ValidateNodeID(node); err != nil {
+		return fmt.Errorf("%w: %v", ErrInvalid, err)
+	}
+	db, err := openExisting(path)
+	if err != nil {
+		return err
+	}
+	defer db.Close()
+	v, err := schemaVersion(ctx, db)
+	if err != nil {
+		return err
+	}
+	if v >= removalSchemaVersion {
+		removed, err := isRemoved(ctx, db, node)
+		if err != nil {
+			return err
+		}
+		if removed {
+			return fmt.Errorf("node %s: %w", node, ErrNodeRemoved)
+		}
+	}
+	var cur string
+	if err := db.QueryRowContext(ctx, `SELECT node_id FROM cluster WHERE id = 1`).Scan(&cur); err != nil {
+		return err
+	}
+	if cur == node {
+		return nil
+	}
+	tx, err := db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	if _, err := tx.ExecContext(ctx, `UPDATE cluster SET node_id = ? WHERE id = 1`, node); err != nil {
+		return err
+	}
+	if err := tx.Commit(); err != nil {
+		return err
+	}
+	if err := db.Close(); err != nil {
+		return err
+	}
+	return syncFile(path)
+}
+
+// removalSchemaVersion is the first schema version with removed_nodes.
+const removalSchemaVersion = 6

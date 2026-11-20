@@ -16,6 +16,7 @@ package backup
 import (
 	"archive/tar"
 	"bytes"
+	"cmp"
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
@@ -122,7 +123,10 @@ type Manifest struct {
 	HivemindVersion string    `json:"hivemind_version"`
 	// SchemaVersion is the store's schema version.
 	SchemaVersion int `json:"schema_version"`
-	// NodeID is the server's own node, from the store's cluster record.
+	// NodeID is the node of the server the backup was taken on, which the
+	// restored server runs as: the store's cluster record on the server
+	// init made, the node in server.json on one that joined. An earlier
+	// build named the cluster record on every server.
 	NodeID string `json:"node_id"`
 	Files  []File `json:"files"`
 }
@@ -147,6 +151,10 @@ type Options struct {
 	// not exist: store.SnapshotTo, or store.SnapshotFile for a store this
 	// process does not have open.
 	Snapshot func(ctx context.Context, dest string) error
+	// NodeID is the node of the server the backup is taken on, for the
+	// manifest: the node in server.json on a server that joined. Empty
+	// means the store's cluster record, the node of the server init made.
+	NodeID string
 	// HivemindVersion goes in the manifest.
 	HivemindVersion string
 	// Now is the clock for the manifest. Nil means time.Now.
@@ -191,7 +199,7 @@ func Write(ctx context.Context, w io.Writer, o Options) (Manifest, error) {
 	}
 	paths := map[string]string{StoreName: snap}
 	m := Manifest{Format: Format, Version: Version, Created: now().UTC(), HivemindVersion: o.HivemindVersion,
-		SchemaVersion: info.SchemaVersion, NodeID: info.NodeID}
+		SchemaVersion: info.SchemaVersion, NodeID: cmp.Or(o.NodeID, info.NodeID)}
 	for _, e := range entries {
 		// The new CA's files go in only while the copied store records
 		// the rotation they belong to: without one, they are a start's
@@ -440,6 +448,10 @@ func Verify(r io.Reader) (Manifest, error) {
 // ErrNotEmpty means the restore target already holds files.
 var ErrNotEmpty = errors.New("the data directory is not empty")
 
+// ErrRemovedNode means the backup names a node the cluster removed, which a
+// restored server cannot run as.
+var ErrRemovedNode = errors.New("the backup's node was removed")
+
 // Restored is what Restore did: the archive's manifest, and the epoch of
 // the restored cluster, one higher than the backup's.
 type Restored struct {
@@ -549,8 +561,21 @@ func Restore(ctx context.Context, r io.Reader, dir string) (res Restored, err er
 	case info.SchemaVersion > store.SchemaVersion:
 		return Restored{}, fmt.Errorf("%w: the store in the backup has schema version %d and this build knows up to %d; restore it with a newer hivemind",
 			store.ErrNewerSchema, info.SchemaVersion, store.SchemaVersion)
-	case info.SchemaVersion != m.SchemaVersion || info.NodeID != m.NodeID:
+	case info.SchemaVersion != m.SchemaVersion:
 		return Restored{}, fmt.Errorf("%w: the store does not match the manifest (schema %d, node %q)", ErrInvalid, info.SchemaVersion, info.NodeID)
+	case info.NodeID != m.NodeID && info.SchemaVersion < store.HASchemaVersion:
+		// Only a server that joined a cluster of several has a node of
+		// its own, and such a store is at HASchemaVersion or later.
+		return Restored{}, fmt.Errorf("%w: the store does not match the manifest (node %q, the manifest's %q)", ErrInvalid, info.NodeID, m.NodeID)
+	}
+	// The restored server runs as the backup's node: the server it was
+	// taken on. It cannot run as a node the cluster removed.
+	if err := store.RunAsNodeFile(ctx, dbPath, m.NodeID); err != nil {
+		if errors.Is(err, store.ErrNodeRemoved) {
+			return Restored{}, fmt.Errorf("%w: the backup's node %s was removed from the cluster, so a server restored from it cannot run as that node; "+
+				"take a backup on a server that is in the cluster now, with hivemind backup on it or hivemind backup --api", ErrRemovedNode, m.NodeID)
+		}
+		return Restored{}, err
 	}
 	if err := checkCAFiles(dir, info.CARotation); err != nil {
 		return Restored{}, fmt.Errorf("%w: cluster CA: %v", ErrInvalid, err)

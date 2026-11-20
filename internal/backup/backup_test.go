@@ -686,3 +686,50 @@ func TestRestoreRaisesTheEpoch(t *testing.T) {
 		t.Fatalf("a second restore of a backup at epoch 0: %+v, %v", res, err)
 	}
 }
+
+// A backup taken on a server that joined a cluster of several names that
+// server's node, and the restored server runs as it: the cluster record
+// names it. A backup that names a node the cluster removed, as one from
+// an earlier build whose first server was removed, is refused at once,
+// and the restore leaves nothing (the fifth acceptance run's first
+// finding).
+func TestRestoreRunsAsTheBackupsNode(t *testing.T) {
+	s := newServer(t)
+	ctx := context.Background()
+	write := func(node string) []byte {
+		t.Helper()
+		var b bytes.Buffer
+		m, err := Write(ctx, &b, Options{DataDir: s.dir, Snapshot: s.st.SnapshotTo, HivemindVersion: "test", NodeID: node})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if m.NodeID != node {
+			t.Fatalf("manifest node %s, want %s", m.NodeID, node)
+		}
+		return b.Bytes()
+	}
+	dir := filepath.Join(t.TempDir(), "restored")
+	res, err := Restore(ctx, bytes.NewReader(write(workerNode)), dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res.NodeID != workerNode {
+		t.Fatalf("restored node %s, want %s", res.NodeID, workerNode)
+	}
+	st, err := store.Open(ctx, filepath.Join(dir, StoreName))
+	if err != nil {
+		t.Fatal(err)
+	}
+	cl, err := st.GetCluster(ctx)
+	st.Close()
+	if err != nil || cl.NodeID != workerNode {
+		t.Fatalf("the restored cluster record names %q (%v), want %s", cl.NodeID, err, workerNode)
+	}
+
+	removedDir := filepath.Join(t.TempDir(), "removed")
+	_, err = Restore(ctx, bytes.NewReader(write(gone)), removedDir)
+	if !errors.Is(err, ErrRemovedNode) || !strings.Contains(err.Error(), gone) || !strings.Contains(err.Error(), "hivemind backup") {
+		t.Fatalf("restore of a backup whose node was removed: %v", err)
+	}
+	expectNothingLeft(t, removedDir)
+}
