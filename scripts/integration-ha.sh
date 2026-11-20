@@ -437,16 +437,22 @@ GL=$(leader_of 0)
 GI=$(index_of "$GL") || cl_fail "no leader before the leader's stop: $(roles 0 | tr '\n' ';')"
 GF=()
 for i in 0 1 2; do [ "$i" -ne "$GI" ] && GF[${#GF[@]}]=$i; done
-# gwriter I: on server I, 20 registry credentials 0.25 s apart, through its
-# own API, each line "ok N" or "fail N reason".
+# gwriter I: on server I, through its own API, 20 registry credentials 0.25 s
+# apart, each logged out of again, so that the store stays under its 100
+# registries; each write a line "ok login|logout N" or "fail ... reason".
 gwriter() {
 	docker exec -d -e "HIVEMIND_TOKEN=$TOKEN" "${S[$1]}" sh -c "rm -f /tmp/gw.done; i=0
 		while [ \$i -lt 20 ]; do
 			i=\$((i+1))
 			if echo pw | hivemind registry login g$1-\$i.ha.test --username u --password-stdin >/dev/null 2>/tmp/gw.err; then
-				echo \"ok \$i\"
+				echo \"ok login \$i\"
+				if hivemind registry logout g$1-\$i.ha.test >/dev/null 2>/tmp/gw.err; then
+					echo \"ok logout \$i\"
+				else
+					echo \"fail logout \$i \$(head -c 200 /tmp/gw.err | tr '\n' ' ')\"
+				fi
 			else
-				echo \"fail \$i \$(head -c 200 /tmp/gw.err | tr '\n' ' ')\"
+				echo \"fail login \$i \$(head -c 200 /tmp/gw.err | tr '\n' ' ')\"
 			fi
 			sleep 0.25
 		done >/tmp/gw.out 2>&1; touch /tmp/gw.done"
