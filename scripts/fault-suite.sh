@@ -116,54 +116,7 @@ take_snapshot() {
 # check_converged reads state.tsv and prints "converged", or the reasons it is
 # not, and returns 1.
 check_converged() {
-	awk -F'\t' '
-	function bad(msg) { if (nbad < 6) reasons[nbad] = msg; nbad++ }
-	$1 == "N" { name[$2] = $3; next }
-	$1 == "A" { want[$2] = $3; next }
-	$1 == "R" {
-		k = $2 "|" $3
-		rnode[k] = $4; rstate[k] = $5; rcid[k] = $6; rreason[k] = $7; rdes[k] = $9
-		next
-	}
-	$1 == "C" {
-		k = $6 "|" $7
-		cstate[$2 "|" $3] = $4
-		copies[k]++
-		crow[++nc] = $2 "|" $3 "|" k
-		next
-	}
-	END {
-		for (k in rnode) {
-			if (rdes[k] != "running") { bad(k " is desired " rdes[k]); continue }
-			if (rstate[k] == "running") {
-				key = name[rnode[k]] "|" substr(rcid[k], 1, 12)
-				if (cstate[key] != "running") bad(k " is reported running as " substr(rcid[k], 1, 12) " on " rnode[k] ", but the engine does not run it")
-			} else if (rstate[k] == "pending" && rnode[k] == "" && rreason[k] != "") {
-				# expected: no node yet, with a placement reason
-			} else {
-				bad(k " state " rstate[k] " node [" rnode[k] "] reason [" rreason[k] "]")
-			}
-			split(k, p, "|")
-			cnt[p[1]]++
-		}
-		for (a in want) {
-			if (cnt[a] + 0 != want[a] + 0) bad("app " a " has " cnt[a] + 0 " replicas in the server, desired " want[a])
-		}
-		# Every container must be the one the server assigns to its replica on
-		# its node: no stray container, and no replica on two nodes.
-		for (i = 1; i <= nc; i++) {
-			split(crow[i], c, "|")
-			k = c[3] "|" c[4]
-			if (!(k in rnode)) { bad("stray container " c[2] " on " c[1] " for " k); continue }
-			if (name[rnode[k]] != c[1] || substr(rcid[k], 1, 12) != c[2]) bad("container " c[2] " on " c[1] " is not the one assigned to " k)
-		}
-		for (k in copies) {
-			if (copies[k] > 1) bad("duplicate: " k " is on " copies[k] " containers")
-		}
-		if (nbad == 0) { print "converged"; exit 0 }
-		for (i = 0; i < nbad && i < 6; i++) print reasons[i]
-		exit 1
-	}' "$CL_WORK/state.tsv"
+	awk -F'\t' -f "$REPO/scripts/lib/converged.awk" "$CL_WORK/state.tsv"
 }
 
 converged() { take_snapshot && check_converged >/dev/null; }
