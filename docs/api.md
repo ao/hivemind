@@ -70,7 +70,7 @@ Every error is a JSON object with one field:
 | 429 | Too many failed logins from this address, or too many log streams open to one node |
 | 500 | Unexpected failure. The message is `internal error`, and the details go to the server log |
 | 502 | A worker could not read a log, or broke the stream before it started |
-| 503 | The container engine cannot be reached: `the container engine is unavailable`. For logs, also a lost node, the engine on the replica's node, or a server without `--advertise`. In a cluster of several servers, also no leader: `no leader: ...`, with the header `Hivemind-No-Leader: 1` when the server did not act on the request and another server may ([several servers](ha.md#the-api)) |
+| 503 | The container engine cannot be reached: `the container engine is unavailable`. For logs, also a lost node, the engine on the replica's node, or a server without `--advertise`. In a cluster of several servers, also no leader: `no leader: ...`, with the header `Hivemind-No-Leader: 1` when the server did not act on the request and another server may, and `Hivemind-No-Leader-For: <seconds>` when the server knows no leader, how long it has known none ([several servers](ha.md#the-api)) |
 | 504 | A worker did not answer a log request in 10 seconds |
 | 507 | The server's disk is full: `the server's disk is full, so the change was not saved: ...`. Nothing of the change is stored, and reads still work |
 

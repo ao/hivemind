@@ -76,10 +76,13 @@ func TestCLISendsAgainOnlyWhatIsSafe(t *testing.T) {
 }
 
 // TestCLITriesAgainWhileNoServerLeads: while a server answers that no
-// server leads, as during an election, the CLI tries again for a few
-// seconds, and gets the answer of the leader once there is one; it gives
-// up after leaderWait; and a 503 that is not marked, such as a write whose
-// outcome is unknown, is not sent again.
+// server can take the request, as during an election or a handover, the
+// CLI tries again for a few seconds, and gets the answer of the leader
+// once there is one; it gives up after leaderWait; given one server that
+// has known no leader for leaderWait or longer, it gives that answer at
+// once (the fifth acceptance run's eleventh finding), and given a list it
+// tries them for leaderWait; and a 503 that is not marked, such as a write
+// whose outcome is unknown, is not sent again.
 func TestCLITriesAgainWhileNoServerLeads(t *testing.T) {
 	isolate(t)
 	wait := leaderWait
@@ -108,16 +111,47 @@ func TestCLITriesAgainWhileNoServerLeads(t *testing.T) {
 		t.Fatalf("the server was asked %d times", n)
 	}
 
+	// A server that has known no leader for noLeaderFor seconds, or that
+	// does not say, as before 2.4.0, when it is "".
+	var nevers atomic.Int32
+	var noLeaderFor atomic.Value
+	noLeaderFor.Store("")
 	never := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		nevers.Add(1)
 		w.Header().Set(nodeapi.NoLeaderHeader, "1")
+		if v := noLeaderFor.Load().(string); v != "" {
+			w.Header().Set(nodeapi.NoLeaderForHeader, v)
+		}
 		w.WriteHeader(http.StatusServiceUnavailable)
 		_, _ = w.Write([]byte(`{"error":"no leader: this server reaches 1 of the 3 servers, and a write needs 2"}`))
 	}))
 	defer never.Close()
-	start := time.Now()
-	err := testClient(t, never.URL).call(ctx, http.MethodGet, "/v1/status", nil, nil)
-	if d := time.Since(start); err == nil || !strings.Contains(err.Error(), "no leader") || d < leaderWait || d > leaderWait+2*time.Second {
-		t.Fatalf("with no leader at all: %v after %s", err, d)
+	never2 := httptest.NewServer(never.Config.Handler)
+	defer never2.Close()
+	for _, c := range []struct {
+		noLeaderFor string
+		servers     []string
+		atOnce      bool
+	}{
+		{"", []string{never.URL}, false},
+		{"1", []string{never.URL}, false},
+		{"120", []string{never.URL}, true},
+		{"120", []string{never.URL, never2.URL}, false},
+	} {
+		noLeaderFor.Store(c.noLeaderFor)
+		nevers.Store(0)
+		start := time.Now()
+		err := testClient(t, c.servers...).call(ctx, http.MethodGet, "/v1/status", nil, nil)
+		d := time.Since(start)
+		if err == nil || !strings.HasPrefix(err.Error(), "no leader: ") {
+			t.Fatalf("no leader for %q s, %d servers: %v", c.noLeaderFor, len(c.servers), err)
+		}
+		if c.atOnce && (nevers.Load() != 1 || d > time.Second) {
+			t.Fatalf("no leader for %q s, one server: asked %d times in %s; want its answer at once", c.noLeaderFor, nevers.Load(), d)
+		}
+		if !c.atOnce && (d < leaderWait || d > leaderWait+2*time.Second) {
+			t.Fatalf("no leader for %q s, %d servers: gave up after %s, want after %s", c.noLeaderFor, len(c.servers), d, leaderWait)
+		}
 	}
 
 	var unknown atomic.Int32
@@ -128,7 +162,7 @@ func TestCLITriesAgainWhileNoServerLeads(t *testing.T) {
 	}))
 	defer outcome.Close()
 	good, hits := countingServer(t)
-	err = testClient(t, outcome.URL, good.URL).call(ctx, http.MethodPost, "/v1/registries", map[string]string{"host": "x"}, nil)
+	err := testClient(t, outcome.URL, good.URL).call(ctx, http.MethodPost, "/v1/registries", map[string]string{"host": "x"}, nil)
 	if err == nil || unknown.Load() != 1 || hits.Load() != 0 {
 		t.Fatalf("a write whose outcome is unknown: %v, sent %d times and to the next server %d times", err, unknown.Load(), hits.Load())
 	}

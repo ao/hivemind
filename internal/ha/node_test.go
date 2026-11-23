@@ -335,6 +335,17 @@ func TestLeaderLossAndReturn(t *testing.T) {
 	if !errors.As(err, &e) || e.Leader != "" || e.Servers != 3 || !strings.Contains(err.Error(), "a write needs 2") {
 		t.Fatalf("a write with two of three down: %v", err)
 	}
+	// It says how long it has known no leader: since it last heard from
+	// the leader, which is now down.
+	first := e.For
+	if first <= 0 || first > 10*time.Second {
+		t.Fatalf("no leader for %s at the first refused write", first)
+	}
+	time.Sleep(1200 * time.Millisecond)
+	_, err = last.st.PutApp(ctx, spec.App{Name: "nope", Image: "nginx", Replicas: 1})
+	if !errors.As(err, &e) || e.For < first+time.Second {
+		t.Fatalf("no leader for %s 1.2 s after %s: %v", e.For, first, err)
+	}
 	// Reads go on.
 	if got := appNames(t, last.st); got != want {
 		t.Fatalf("reads with two of three down: %s, want %s", got, want)

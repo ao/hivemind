@@ -108,6 +108,11 @@ type Node struct {
 	ready       atomic.Uint64
 	readyTerm   atomic.Uint64 // the Raft term of ready
 	leaderships atomic.Uint64
+	// opened is when this node started, and stoppedLeading, in Unix
+	// nanoseconds, when it last stopped leading: with raft's last contact
+	// with a leader, they say how long it has known no leader.
+	opened         time.Time
+	stoppedLeading atomic.Int64
 
 	stop     chan struct{}
 	stopOnce sync.Once
@@ -139,7 +144,7 @@ func openNode(cfg Config, setReplicator bool) (*Node, error) {
 	if err := os.Chmod(dir, 0o700); err != nil {
 		return nil, err
 	}
-	n := &Node{cfg: cfg, log: log, stop: make(chan struct{})}
+	n := &Node{cfg: cfg, log: log, stop: make(chan struct{}), opened: time.Now()}
 	hl := newHCLogger(log)
 	n.fails = hl.fails
 	logs, err := openLogStore(filepath.Join(dir, logFile))
@@ -368,13 +373,20 @@ func (n *Node) watchLeadership() {
 		case <-n.stop:
 			return
 		case l := <-ch:
-			if !l && cancel != nil {
-				n.log.Info("this server no longer leads the cluster", "id", n.cfg.ID)
+			if !l {
+				n.stoppedLeading.Store(time.Now().UnixNano())
+				if cancel != nil {
+					n.log.Info("this server no longer leads the cluster", "id", n.cfg.ID)
+				}
 			}
 			leading = l
 		case <-time.After(time.Second):
 			// A barrier that failed is tried again while this server leads.
-			leading = n.raft.State() == raft.Leader
+			l := n.raft.State() == raft.Leader
+			if leading && !l {
+				n.stoppedLeading.Store(time.Now().UnixNano())
+			}
+			leading = l
 		}
 	}
 }
@@ -413,7 +425,25 @@ func (n *Node) notLeader() error {
 	if addr, id := n.raft.LeaderWithID(); id != "" && string(id) != n.cfg.ID {
 		return &NotLeaderError{Leader: string(id), Addr: string(addr)}
 	}
-	return &NotLeaderError{Reachable: n.reachable(), Servers: n.voters()}
+	return &NotLeaderError{Reachable: n.reachable(), Servers: n.voters(), For: n.noLeaderFor(time.Now())}
+}
+
+// noLeaderFor is how long this server has known no leader at now: 0 while
+// raft has it lead, as a leader that has not applied the entries before
+// its term yet; otherwise the time since it last heard from a leader,
+// stopped leading, or started, whichever came last.
+func (n *Node) noLeaderFor(now time.Time) time.Duration {
+	if n.raft.State() == raft.Leader {
+		return 0
+	}
+	last := n.opened
+	if t := n.raft.LastContact(); t.After(last) {
+		last = t
+	}
+	if t := time.Unix(0, n.stoppedLeading.Load()); t.After(last) {
+		last = t
+	}
+	return max(now.Sub(last), 0)
 }
 
 // NotLeaderError is a write on a server that does not lead.
@@ -422,9 +452,14 @@ type NotLeaderError struct {
 	Leader, Addr string
 	// Reachable is how many voters, this one included, this server has
 	// heard from lately, and Servers how many there are, when there is no
-	// leader.
+	// leader. For is how long this server has known no leader then.
 	Reachable, Servers int
+	For                time.Duration
 }
+
+// NoLeaderFor is For, and whether this server knows no leader (it names
+// none).
+func (e *NotLeaderError) NoLeaderFor() (time.Duration, bool) { return e.For, e.Leader == "" }
 
 func (e *NotLeaderError) Error() string {
 	if e.Leader != "" {

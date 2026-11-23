@@ -13,6 +13,7 @@ import (
 	"net/http"
 	"net/http/httptrace"
 	"net/http/httputil"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -52,7 +53,31 @@ const (
 	// HeaderNoLeader marks a 503 that says no server leads, or that the
 	// server asked no longer does: a client tries another server.
 	HeaderNoLeader = "Hivemind-No-Leader"
+	// HeaderNoLeaderFor, on such a 503 from a server that knows no
+	// leader, is how long it has known none, in whole seconds: since it
+	// last heard from a leader, stopped leading, or started. A client
+	// given that one server asks it again only while the answer can be an
+	// election's (docs/ha.md#the-api).
+	HeaderNoLeaderFor = "Hivemind-No-Leader-For"
 )
+
+// SetNoLeaderFor sets HeaderNoLeaderFor on h when err, as a
+// *NotLeaderError, says that this server knows no leader.
+func SetNoLeaderFor(h http.Header, err error) {
+	var nl noLeaderFor
+	if !errors.As(err, &nl) {
+		return
+	}
+	if d, ok := nl.NoLeaderFor(); ok {
+		h.Set(HeaderNoLeaderFor, strconv.FormatInt(int64(d/time.Second), 10))
+	}
+}
+
+// noLeaderFor is an error that knows how long its server has known no
+// leader (NotLeaderError).
+type noLeaderFor interface {
+	NoLeaderFor() (time.Duration, bool)
+}
 
 // StripForwardHeaders deletes every forwarding header from h. The API and
 // the cluster listeners call it on every request, so that a caller cannot
@@ -276,6 +301,7 @@ func forwardFailed(w http.ResponseWriter, method, id, addr string, sent bool, er
 // without a leader, marked so that a client tries another server.
 func WriteNotLeader(w http.ResponseWriter, err error) {
 	w.Header().Set(HeaderNoLeader, "1")
+	SetNoLeaderFor(w.Header(), err)
 	w.Header().Set("Retry-After", "1")
 	writeJSONError(w, http.StatusServiceUnavailable, err.Error())
 }

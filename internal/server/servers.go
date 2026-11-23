@@ -10,8 +10,12 @@ import (
 
 // The servers of the cluster (docs/ha.md#membership).
 
-// noLeaderHeader marks a 503 that says no server leads (ha.HeaderNoLeader).
-const noLeaderHeader = "Hivemind-No-Leader"
+// noLeaderHeader marks a 503 that says no server leads (ha.HeaderNoLeader),
+// and noLeaderForHeader says for how long (ha.HeaderNoLeaderFor).
+const (
+	noLeaderHeader    = "Hivemind-No-Leader"
+	noLeaderForHeader = "Hivemind-No-Leader-For"
+)
 
 // ServerEntry is one server in GET /v1/servers.
 type ServerEntry struct {

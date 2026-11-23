@@ -17,6 +17,7 @@ import (
 	"os"
 	"path/filepath"
 	"slices"
+	"strconv"
 	"strings"
 	"sync/atomic"
 	"syscall"
@@ -390,7 +391,13 @@ var (
 // takes the request by then, returns the last such answer, which says why,
 // rather than the error of a server that did not answer. In the ninth
 // soak, with no leader and two servers' processes stopped, the CLI
-// printed the last server's TLS handshake timeout.
+// printed the last server's TLS handshake timeout. Given one server that
+// answers that it has known no leader for leaderWait or longer
+// (nodeapi.NoLeaderForHeader), it returns that answer at once: the fifth
+// acceptance run, with one of two servers stopped, waited 3 s for each
+// call before the same answer. One that has known no leader for less, as
+// during an election, or knows a leader it could not reach, as while the
+// leadership passes on, or does not say, as before 2.4.0, is tried again.
 func (c *apiClient) send(ctx context.Context, method, path string, body any) (*http.Response, error) {
 	var b []byte
 	if body != nil {
@@ -437,6 +444,11 @@ func (c *apiClient) send(ctx context.Context, method, path string, body any) (*h
 			switch {
 			case ctx.Err() != nil:
 				return nil, why()
+			case errors.As(err, &ae) && ae.noLeader && len(c.bases) <= 1 && ae.noLeaderFor >= leaderWait:
+				// One server, which has known no leader for longer
+				// than an election takes: there is no other to try, and
+				// its answer says why.
+				return nil, err
 			case errors.As(err, &ae) && ae.noLeader:
 				noLeader, noLeaderErr = true, err
 				if firstNoLeader.IsZero() {
@@ -557,11 +569,15 @@ func (c *apiClient) sendTo(ctx context.Context, base, method, path string, b []b
 		return nil, fmt.Errorf("the server at %s speaks https: use --server %s", base, "https://"+strings.TrimPrefix(base, "http://"))
 	}
 	v := nodeapi.CleanVersion(resp.Header.Get(nodeapi.VersionHeader))
-	noLeader := resp.StatusCode == http.StatusServiceUnavailable && resp.Header.Get(nodeapi.NoLeaderHeader) != ""
-	if json.Unmarshal(rb, &e) == nil && e.Error != "" {
-		return nil, &apiError{status: resp.StatusCode, msg: termSafe(e.Error), version: v, noLeader: noLeader}
+	ae := &apiError{status: resp.StatusCode, msg: "server returned " + resp.Status, version: v, noLeaderFor: -1}
+	ae.noLeader = resp.StatusCode == http.StatusServiceUnavailable && resp.Header.Get(nodeapi.NoLeaderHeader) != ""
+	if s, err := strconv.ParseInt(resp.Header.Get(nodeapi.NoLeaderForHeader), 10, 64); ae.noLeader && err == nil && s >= 0 && s < 1<<31 {
+		ae.noLeaderFor = time.Duration(s) * time.Second
 	}
-	return nil, &apiError{status: resp.StatusCode, msg: "server returned " + resp.Status, version: v, noLeader: noLeader}
+	if json.Unmarshal(rb, &e) == nil && e.Error != "" {
+		ae.msg = termSafe(e.Error)
+	}
+	return nil, ae
 }
 
 // refused is the error for a 401: the server refused the token. It says
@@ -585,8 +601,11 @@ type apiError struct {
 	status  int
 	msg     string
 	version string
-	// noLeader is a 503 that says no server leads (docs/ha.md).
-	noLeader bool
+	// noLeader is a 503 that says no server leads (docs/ha.md), and
+	// noLeaderFor how long the server had known none, or -1 when it does
+	// not say.
+	noLeader    bool
+	noLeaderFor time.Duration
 }
 
 func (e *apiError) Error() string { return e.msg }
