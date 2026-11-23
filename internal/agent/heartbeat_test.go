@@ -86,7 +86,8 @@ func TestRunRenewsTheLeaseDuringASlowPass(t *testing.T) {
 
 // A report the server took renews the lease, so the heartbeat skips a
 // renewal that would follow one within Heartbeat: with passes that report
-// more often than the heartbeat, it renews nothing on its own
+// more often than the heartbeat, it renews nothing on its own after its
+// first renewal, which finds out whether the server has the route
 // (docs/ha.md#fewer-raft-entries). Once the reports stop going through, it
 // renews again.
 func TestHeartbeatSkipsARenewalAfterAReport(t *testing.T) {
@@ -105,7 +106,8 @@ func TestHeartbeatSkipsARenewalAfterAReport(t *testing.T) {
 		cancel()
 		<-done
 	}()
-	waitFor(t, func() bool { return a.reported.Load() != 0 })
+	// The first tick renews though the passes report.
+	waitFor(t, func() bool { return a.reported.Load() != 0 && src.renewals.Load() >= 1 })
 	before := src.renewals.Load()
 	time.Sleep(450 * time.Millisecond)
 	if n := src.renewals.Load() - before; n != 0 {

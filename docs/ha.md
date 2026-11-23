@@ -332,7 +332,7 @@ The leader could keep the leases in memory alone, and write a node's lease only 
 
 A live node's stored lease is then never older than 13 s (9 + 4), inside the 15 s lease, so no reader sees it lapse; a node that stops reporting is lost 15 s after its last renewal, as before, since the write after that renewal records it. `hivemind nodes`, `/metrics`, the CA rotation's live nodes and the log routes read the leader's own view, the later of the stored lease and the kept one, so their lease ages stay to the second.
 
-An agent also skips its 5 s renewal when a report succeeded within the last 5 s. That takes away the renewals, two in seven of the node API requests of a node whose reports go through; it was the renewal's purpose to cover a pass that takes longer than the lease, which a recent report already did ([leases](concepts.md#leases-and-node-loss)).
+An agent also skips its 5 s renewal when a report succeeded within the last 5 s, after its first renewal, which finds out whether the server has the renewal at all: against a 2.0.0 server, which has none, it says so once, at the start. That takes away the renewals, two in seven of the node API requests of a node whose reports go through; it was the renewal's purpose to cover a pass that takes longer than the lease, which a recent report already did ([leases](concepts.md#leases-and-node-loss)).
 
 A cluster of one has no log, and writes every renewal to the store, as before.
 

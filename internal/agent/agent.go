@@ -355,6 +355,7 @@ func (a *Agent) Run(ctx context.Context) error {
 func (a *Agent) heartbeat(ctx context.Context, lr LeaseRenewer) {
 	t := time.NewTicker(a.cfg.Heartbeat)
 	defer t.Stop()
+	renewed := false
 	for {
 		select {
 		case <-ctx.Done():
@@ -363,10 +364,13 @@ func (a *Agent) heartbeat(ctx context.Context, lr LeaseRenewer) {
 		}
 		// A report the server took within the last Heartbeat renewed the
 		// lease; renewing it again would be one more request, and on a
-		// cluster of several, possibly one more Raft entry.
-		if time.Since(time.Unix(0, a.reported.Load())) < a.cfg.Heartbeat {
+		// cluster of several, possibly one more Raft entry. The first
+		// renewal is never skipped: against a server without the route it
+		// is the one that finds out, and says so once, at the start.
+		if renewed && time.Since(time.Unix(0, a.reported.Load())) < a.cfg.Heartbeat {
 			continue
 		}
+		renewed = true
 		err := lr.RenewLease(ctx, a.cfg.NodeID)
 		switch {
 		case err == nil:
