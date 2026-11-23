@@ -1154,11 +1154,18 @@ hivemind server remove <id> [flags]
 
 List the servers of the cluster (docs/ha.md): ID, the host name of each
 server's node, the address it advertises with its node listener's port,
-its Raft role, and when the leader last heard from it.
+its Raft role, its release, and when the leader last heard from it.
 
 ROLE is leader, follower, or nonvoter for a server that has joined and
 is catching up with the log: it becomes a voter once it has. A cluster of
 one lists its one server, and says so.
+
+VERSION is the release each server runs, as it told the leader, or, marked
+"(node)", the version its node last sent, for a server of a release before
+2.4.0, which does not say. A line after the table gives the store's schema
+version, and, during a rolling upgrade, the servers that do not run the
+next one yet: the leader moves the store to it once every server does
+(docs/ha.md#rolling-upgrades).
 
 LAST CONTACT is how long ago the server that answered last heard from each
 one: the leader hears from every follower at each heartbeat. "-" is never,

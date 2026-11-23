@@ -10,13 +10,13 @@ hivemind ca rotate finish    # the old CA is trusted nowhere, and its key is del
 
 `hivemind ca status` shows where a rotation is and which nodes it waits for. `hivemind ca rotate abort` undoes a rotation before `finish`. Every command needs the admin token and runs against the server's API (`GET /v1/ca`, `POST /v1/ca/rotation/{start,renew,finish,abort}`); a worker has no part in it but to follow what the server says.
 
-A rotation needs a cluster of one server in 2.3.0: `start` is refused while the cluster has more than one, and a server join while a rotation is in progress. To rotate the CA of a cluster of several servers, remove all but one with `hivemind server remove`, rotate, and join the others again ([several servers](ha.md#compatibility)).
+With several servers ([several servers](ha.md)), every server follows the rotation: the leader runs the steps, records the new CA in the store with its key sealed, and every server writes its own copy of the new CA from that record, moves its own certificate with the listener CA and does its own file step at the end ([the CA rotation with several servers](ha.md#the-ca-rotation-with-several-servers)). It needs every server on 2.4.0 or later, with the store at schema version 19: `start` is refused before that, and while a server is a non-voter catching up. A server join is refused while a rotation is in progress. In 2.3.0 a rotation needs a cluster of one: remove all but one server with `hivemind server remove`, rotate, and join the others again.
 
 Two reasons to rotate: the CA is in its last year (the server warns once a day then), or its key may have leaked. See [after a leak](#after-a-leak) for what a rotation does and does not do in the second case.
 
 ## Terms
 
-The old CA is the one in `ca.crt` and `ca.key` when `start` runs. The new CA is the one `start` makes, in `ca-next.crt` and `ca-next.key`, in the server's data directory beside the old one, with the same modes (0644 and 0600). A CA is named by its fingerprint, the SHA-256 of its public key, as join tokens already name it.
+The old CA is the one in `ca.crt` and `ca.key` when `start` runs. The new CA is the one `start` makes, in `ca-next.crt` and `ca-next.key`, in the server's data directory beside the old one, and in every server's with several, with the same modes (0644 and 0600). A CA is named by its fingerprint, the SHA-256 of its public key, as join tokens already name it.
 
 Every node means every row of `hivemind nodes` but the server's own: each worker that has registered and was not removed, whether it is up or not. A live node is one whose lease is current.
 
@@ -24,11 +24,11 @@ The listener CA is the CA that signs the server's own certificate, which the nod
 
 ## Phases
 
-The server keeps the rotation in its store (schema version 17): the fingerprints of the old and the new CA, the phase, the direction (towards the new CA, or back to the old one after an abort), and the listener CA. For each node it keeps three marks, reset when a phase changes direction: the node trusts the CA the rotation goes towards; the node has presented a certificate from it; the node's requests say nothing of what it trusts, so it is a build without rotation. Every step writes the store in one transaction, and every step that changes files records what it is about to do first, so a server that crashes, or is stopped, in any phase starts again in the same phase and finishes a step it was in.
+The server keeps the rotation in its store (schema version 17): the fingerprints of the old and the new CA, from version 19 the new CA itself, its key sealed, the phase, the direction (towards the new CA, or back to the old one after an abort), and the listener CA. For each node it keeps three marks, reset when a phase changes direction: the node trusts the CA the rotation goes towards; the node has presented a certificate from it; the node's requests say nothing of what it trusts, so it is a build without rotation. Every step writes the store in one transaction, and every step that changes files records what it is about to do first, so a server that crashes, or is stopped, in any phase starts again in the same phase and finishes a step it was in.
 
 ### start
 
-`start` makes a new ECDSA P-256 CA, valid for ten years, and writes `ca-next.key` and `ca-next.crt` with `O_EXCL` and syncs them. It then records the rotation in the store, in phase `trust`. Files first: a crash between the two leaves CA files with no rotation, which `serve` removes at its next start (and logs), and `start` removes too before it makes its own. A rotation already in progress is refused.
+`start` makes a new ECDSA P-256 CA, valid for ten years, and records the rotation in the store, in phase `trust`, with the new CA's certificate and its key sealed under a key derived from the old CA's (schema version 19). Then the server, every server with several, writes `ca-next.key` and `ca-next.crt` from the record with `O_EXCL` and syncs them. The record first: a server that stops between the two writes the files at its next start. A rotation already in progress is refused. A store of 2.3.0's version 18 (a cluster of one that has Raft, for the seconds before its leader moves the schema) takes 2.3.0's order: the files first, then the record, and a crash between the two leaves files that `serve` removes at its next start, as `start` does before it makes its own.
 
 In this phase the server:
 
@@ -64,9 +64,9 @@ In this phase the server:
 1. issues the server's certificate from the new CA, if the listener CA was still the old one (only with `--force`);
 2. records in the store that the rotation is ending towards the new CA, and from then on accepts client certificates from the new CA only. The CA set the workers get has the new CA only, and each worker removes the old CA from its `ca.crt`;
 3. renames `ca-next.key` over `ca.key`, then `ca-next.crt` over `ca.crt`, and syncs the directory. The old key's file is gone: renaming over it unlinks it. Most filesystems do not overwrite its blocks, and backups taken before `finish` hold it ([backup](#backup-and-restore));
-4. deletes the rotation from the store.
+4. deletes the rotation from the store, and records the new CA's fingerprint as the cluster CA's, in one transaction. With several servers, every server does 2 and 3 for itself as it follows the record, and one that finds the rotation deleted before it did renames its `ca-next.*` by that fingerprint.
 
-A server that stops between 2 and 4 does the rest of 3 and 4 when it starts: a `ca-next.key` that is still there is renamed over `ca.key`, a `ca-next.crt` over `ca.crt`, and the record is deleted once `ca.crt` has the new CA's fingerprint and `ca.key` matches it.
+A server that stops between 2 and 4 does the rest of 3 and 4 when it starts: a `ca-next.key` that is still there is renamed over `ca.key`, a `ca-next.crt` over `ca.crt`, and the record is deleted once `ca.crt` has the new CA's fingerprint and `ca.key` matches it. With several servers, a leader that stops there leaves the rest to the next leader.
 
 A connection opened before `finish` with a certificate from the old CA was checked when it opened. The server checks again, on every request, that the client certificate is from a CA it trusts now, as it checks the certificate's expiry on every request today, so such a connection is refused at its next request.
 

@@ -1,5 +1,47 @@
 # Upgrading
 
+## From 2.3.0 to 2.4.0
+
+The servers of a cluster of several are upgraded one at a time, and the cluster keeps taking writes meanwhile ([rolling upgrades](ha.md#rolling-upgrades)). `scripts/integration-haops.sh` runs this upgrade in Docker, three servers built from the 2.3.0 tag and two 2.3.0 workers, under writes through every server and requests through the workers' routers. No soak has run it on machines yet.
+
+### A cluster of one
+
+1. Back up the server with the 2.3.0 binary: `sudo hivemind backup /root/hivemind-2.3.0.tar`. This file is the only way back to 2.3.0.
+2. Install the new binary over the old one and run `sudo systemctl restart hivemind`. The server migrates the store on that start, from schema version 18 to 19, and logs `msg="store schema migrated" from=18 to=19 adds="the new CA in the store, for a CA rotation with several servers"`. Version 19 adds two columns to the CA rotation's record and one to the cluster record.
+3. Upgrade the workers in any order.
+
+### A cluster of several servers
+
+1. Back up one server with the 2.3.0 binary, as above. Once the store has moved to 19 (step 5), a restore of this backup, which makes a cluster of one, is the only way back to 2.3.0.
+2. On a follower (`hivemind servers` names the leader), install the new binary and run `sudo systemctl restart hivemind`. It logs `the store keeps its schema version, which the cluster's leader moves ... schema=18 runs=18-19`: a server of several does not migrate its store when it starts. Wait until `hivemind servers` shows it a follower that the leader heard from, and `hivemind nodes` shows the new version for its node, before the next server. With three servers, a second server down stops writes.
+3. The same on the other followers.
+4. The same on the leader. Its stop hands the leadership to the follower furthest along, which runs the new release, and it starts again as a follower: one change of leader for the whole upgrade.
+5. Within 10 s of the last server's start the leader writes the step to schema version 19 to the log, and every server applies it. `hivemind servers` ends with `Store schema 19.`, and the servers log `store schema migrated from=18 to=19`.
+
+Any order works: a 2.3.0 leader with 2.4.0 followers, and a 2.4.0 leader with 2.3.0 followers, apply each other's entries while the store is at 18. Until the step, each server can go back to 2.3.0 the way it came, one at a time. While any server runs 2.3.0, `hivemind servers` ends with `Store schema 18; it moves to 19 once every server runs it:` and the servers that do not. A server that is down holds the step back; bring it up and upgrade it, or remove it with `hivemind server remove`.
+
+Join no server during the upgrade. A 2.3.0 leader refuses a 2.4.0 server's join as an invalid join request; a 2.4.0 leader takes a 2.3.0 server only while the store is at 18. A CA rotation with several servers waits for the store at 19: `hivemind ca rotate start` says so before.
+
+The 2.4.0 CLI works with 2.3.0 servers: against a 2.3.0 leader, `hivemind servers` shows `-` under VERSION and no schema line.
+
+### Workers
+
+A 2.3.0 worker keeps working with 2.4.0 servers, and a 2.4.0 worker with 2.3.0 servers. Upgrade them in any order. A 2.4.0 worker skips its lease renewal of every 5 s when a report went through within the last 5 s.
+
+### What 2.4.0 changes on disk
+
+`hivemind.db` moves to schema version 19, by the migration in a cluster of one and by the step in a cluster of several. Nothing else changes. During a CA rotation, every server of a cluster of several has `ca-next.crt` and `ca-next.key`, which it writes from the rotation's record.
+
+### Going back to 2.3.0
+
+Before the store has moved to 19, install 2.3.0 on a server and restart it; its store is as 2.3.0 left it. After, a 2.3.0 binary refuses the store:
+
+```
+error: opening /var/lib/hivemind/hivemind.db: store schema is newer than this build: the store has schema version 19 and this build knows up to 18; use a newer hivemind
+```
+
+Then restore the backup of step 1 with the 2.3.0 binary into an empty data directory, which makes a cluster of one, and join the other servers again, as after any restore ([backup](backup.md#a-cluster-of-several-servers)). Everything that changed since the backup is lost.
+
 ## From 2.2.0 to 2.3.0
 
 A server upgraded to 2.3.0 changes nothing until a second server joins: it runs no Raft, opens no new listener, and writes go to the store as before. Adding servers is a separate step, after the upgrade ([below](#adding-servers)).
