@@ -179,8 +179,10 @@ func (ln *limitListener) Accept() (net.Conn, error) {
 			ln.limits.track(lc)
 			return lc, nil
 		}
-		_ = c.Close()
+		// Count it before the close, so that a client that sees the
+		// connection end also sees it counted.
 		ln.limits.metrics.connRefused(reason)
+		_ = c.Close()
 		ln.limits.log.Debug("connection refused: over the router's limit", "remote", c.RemoteAddr().String(), "limit", reason)
 	}
 }
