@@ -19,8 +19,8 @@ A cluster of one migrates its store on its first start, from schema version 18 t
 
 ### Changed
 
-- On the leader of a cluster of several, a lease renewal, or a report that changes nothing but the time, from a node whose stored lease is no older than 9 s writes nothing: the leader keeps it in memory and writes what it keeps for every node in one entry every 4 s, and before it hands the leadership on ([docs/ha.md](docs/ha.md#fewer-raft-entries)). A live node's stored lease is never older than 13 s, inside the 15 s lease, and a node that stops is lost 15 s after its last renewal, as before. A cluster of one writes every renewal, as before.
-- An agent skips its lease renewal of every 5 s when a report went through within the last 5 s.
+- On the leader of a cluster of several, a lease renewal, or a report that changes nothing but the time, from a node whose stored lease is no older than 9 s writes nothing: the leader keeps it in memory and writes what it keeps for every node in one entry every 4 s, and before it hands the leadership on ([docs/ha.md](docs/ha.md#fewer-raft-entries)). A live node's stored lease is never older than 13 s, inside the 15 s lease, and a node that stops is lost 15 s after its last renewal, as before. A cluster of one writes every renewal, as before. Three servers and ten nodes, steady, appended 420 entries a minute on 2.3.0 and 15 on 2.4.0 ([docs/ha.md](docs/ha.md#before-and-after)).
+- An agent skips its lease renewal of every 5 s when a report went through within the last 5 s, after its first renewal.
 - `hivemind ca rotate start` with several servers is refused only while the store is below schema version 19, and while a server is a non-voter catching up. In a cluster of one at 19, `start` records the rotation before it writes the new CA's files, which a server that stops in between writes at its next start.
 
 ## [2.3.0] - 2026-11-20

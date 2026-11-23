@@ -338,7 +338,14 @@ A cluster of one has no log, and writes every renewal to the store, as before.
 
 ### Before and after
 
-These are estimates, from the measurements above, until `scripts/raft-rate.sh` measures them on the build host. For three servers and ten nodes (the servers' three and seven workers), steady, with nothing written through the API: before, about 0.7 entries a second for each node, from the 210 a minute of three servers and two workers measured above and the ninth soak's 0.77, so about 420 entries a minute; after, 15 entries a minute for the leases, one every 4 s, and the entries of what changes, which for a steady cluster is close to none. The entries no longer grow with the number of nodes; their size does, by two statements a node.
+Three servers and ten nodes (the servers' three and seven workers), steady, with nothing written through the API, by `WORKERS=7 scripts/raft-rate.sh` as in [measurements](#measurements): 50 apps that no node can take, and the entries each server appended in 300 s after 60 s to settle, read from its `raft.db`. On an Apple M3 Pro, with the containers in OrbStack's Linux VM (12 CPUs, 16 GB) and each capped at one CPU:
+
+| | Entries | Bytes | A minute |
+|---|---|---|---|
+| 2.3.0, built from its tag | 2,102 | 567,540 | 420 entries, 110 KiB |
+| 2.4.0 | 75 | 79,862 | 15 entries, 15 KiB |
+
+The three servers appended the same entries in each run. After, what is left is the batch of kept leases and stamps, one entry every 4 s, and the entries of what changes, which for a steady cluster is none. The entries no longer grow with the number of nodes; their size does, by two statements a node, so the bytes fell by less than the entries. `scripts/integration-haops.sh`, with three servers and two workers and a 120 s window, counted 210 or 211 entries a minute on 2.3.0 and 15 after the upgrade, in each of four runs on the same machine.
 
 With fewer entries, a snapshot (after 8192 entries) is hours apart rather than minutes, and a follower that was down for hours catches up from the log, the 10240 entries the leader keeps after its snapshot, rather than from a snapshot.
 
