@@ -409,6 +409,20 @@ store_has_writes() {
 	done
 	[ "$miss" -eq 0 ]
 }
+# missing_writes I: what store_has_writes finds wrong in server I's store,
+# for a failure's message.
+missing_writes() {
+	local list h i out=""
+	list=$(local_get "$1" /v1/registries 2>&1) || {
+		echo "its store cannot be read: ${list:0:300}"
+		return
+	}
+	for i in 0 1 2; do
+		for h in $(expected "$i"); do grep -q "\"$h\"" <<<"$list" || out="$out missing:$h"; done
+		for h in $(gone "$i"); do grep -q "\"$h\"" <<<"$list" && out="$out logged-out-but-present:$h"; done
+	done
+	echo "${out:0:1500}"
+}
 stores_agree() {
 	local a b c
 	a=$(local_get 0 /v1/registries) && b=$(local_get 1 /v1/registries) && c=$(local_get 2 /v1/registries) || return 1
@@ -417,7 +431,7 @@ stores_agree() {
 check_writes() {
 	local i ok=0 fail=0
 	for i in 0 1 2; do
-		wait_for 30 store_has_writes "$i" || cl_fail "$1: ${S[$i]}'s store lacks acknowledged writes, or has one a logout took out: $(local_get "$i" /v1/registries | head -c 600)"
+		wait_for 30 store_has_writes "$i" || cl_fail "$1: ${S[$i]}'s store lacks acknowledged writes, or has one a logout took out: $(missing_writes "$i")"
 		ok=$((ok + $(docker exec "${S[$i]}" grep -c '^ok ' /tmp/w.out || true)))
 		fail=$((fail + $(docker exec "${S[$i]}" grep -c '^fail ' /tmp/w.out || true)))
 	done
@@ -460,7 +474,7 @@ upgrade() {
 	wait_for 90 voters_are "$(other_than "$i")" 3 || cl_fail "${S[$i]} is not a voter after its start on $2: $(roles "$(other_than "$i")" | tr '\n' ';')"
 	at_version() { [ "$(node_version "${SID[$i]}")" = "$want" ]; }
 	wait_for 60 at_version || cl_fail "${S[$i]}'s node does not report $want: $(node_version "${SID[$i]}")"
-	wait_for 30 store_has_writes "$i" || cl_fail "${S[$i]}, on $2, lacks acknowledged writes"
+	wait_for 30 store_has_writes "$i" || cl_fail "${S[$i]}, on $2, lacks acknowledged writes: $(missing_writes "$i")"
 }
 # other_than I: a server other than I whose serve runs.
 other_than() {
