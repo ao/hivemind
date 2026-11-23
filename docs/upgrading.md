@@ -68,7 +68,7 @@ A 2.2.0 worker keeps working with 2.3.0 servers: it uses the server it joined, w
 
 ### Adding servers
 
-Every server runs the same release: a server will not apply a Raft entry from a leader at another schema version, and a joining server must run the leader's version. So upgrade the first server before you add any: a 2.2.0 server refuses `join-token --role server`, which the 2.3.0 CLI prints as `error: invalid JSON: json: unknown field "server"`, and takes no server joins.
+Every server runs the same release: a server will not apply a Raft entry from a leader at another schema version, and a joining server must run the leader's version. So upgrade the first server before you add any: a 2.2.0 server refuses `join-token --role server`, which the 2.3.0 CLI prints as `error: invalid JSON: json: unknown field "server"` and the 2.4.0 CLI as `error: the server runs v2.2.0, which is older than 2.3.0 and cannot have other servers; upgrade it first (docs/upgrading.md)`, and takes no server joins.
 
 1. Open TCP port 4486 between the server machines, and from nowhere else, and ports 4484 and 4485 from every node to every server ([security](security.md#several-servers)). On EC2, that is a security group rule for TCP 4486 from the servers' own group.
 2. Finish any CA rotation: a server join is refused while one is in progress, and in 2.3.0 `hivemind ca rotate start` is refused while the cluster has more than one server ([compatibility](ha.md#compatibility)).

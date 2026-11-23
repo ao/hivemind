@@ -28,6 +28,7 @@ A cluster of one migrates its store on its first start, from schema version 18 t
 What the fifth acceptance run found that 2.3.0 left:
 
 - A join with a token of the other kind, a worker's token for `join --role server` or a server's for a worker's join, was refused as `the join token is invalid, used or expired`, the message of an unknown or expired token, so neither the user nor the operator could tell the mistake. It now says which kind the token is and which to use, as in `the join token is a worker's: a server joins with a token from hivemind join-token --role server`, and the token stays unused. Every other refused token keeps the one message.
+- `hivemind join-token --role server` against a 2.2.0 server printed `error: invalid JSON: json: unknown field "server"`, the server's refusal of a field it does not know. It now says `the server runs v2.2.0, which is older than 2.3.0 and cannot have other servers; upgrade it first`.
 
 ## [2.3.1] - 2026-11-23
 

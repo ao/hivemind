@@ -2,7 +2,10 @@ package main
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
+	"net/http"
+	"strings"
 	"time"
 
 	"github.com/spf13/cobra"
@@ -50,6 +53,9 @@ standard output as JSON.`,
 			return fmt.Errorf("--role %q must be worker or server", role)
 		}
 		if err := c.call(cmd.Context(), "POST", "/v1/join-tokens", server.JoinTokenRequest{TTL: ttl, Server: role == "server"}, &reply); err != nil {
+			if role == "server" {
+				return noServerTokens(err)
+			}
 			return err
 		}
 		if cf.json {
@@ -68,4 +74,20 @@ standard output as JSON.`,
 		return nil
 	}
 	return cmd
+}
+
+// noServerTokens turns a server's refusal of the server field, as a
+// server before 2.3.0 refuses an unknown field of a request, into what it
+// means: that server cannot have other servers. The fifth acceptance run
+// got `invalid JSON: json: unknown field "server"` from a 2.2.0 server.
+// Any other error is returned as it is.
+func noServerTokens(err error) error {
+	var ae *apiError
+	if !errors.As(err, &ae) || ae.status != http.StatusBadRequest || !strings.Contains(ae.msg, `unknown field "server"`) {
+		return err
+	}
+	if ae.version != "" {
+		return fmt.Errorf("the server runs %s, which is older than 2.3.0 and cannot have other servers; upgrade it first (docs/upgrading.md)", ae.version)
+	}
+	return errors.New("the server is older than 2.3.0 and cannot have other servers; upgrade it first (docs/upgrading.md)")
 }
