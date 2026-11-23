@@ -216,11 +216,13 @@ jobs:
 
   # A cluster of three servers and two workers with routers: formation by
   # join, the leader killed during writes, the old leader back, a partition
-  # that isolates the leader, quorum lost, and a server removed.
+  # that isolates the leader, quorum lost, and a server removed; then
+  # integration-haops.sh, a rolling upgrade from the 2.3.0 tag and a CA
+  # rotation with several servers, which builds 2.3.0 too.
   integration-ha:
     name: Integration (several servers)
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    timeout-minutes: 45
     steps:
       - uses: actions/checkout@v4
       - run: ./scripts/integration-ha.sh

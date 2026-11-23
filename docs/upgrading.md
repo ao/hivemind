@@ -2,7 +2,9 @@
 
 ## From 2.3.0 to 2.4.0
 
-The servers of a cluster of several are upgraded one at a time, and the cluster keeps taking writes meanwhile ([rolling upgrades](ha.md#rolling-upgrades)). `scripts/integration-haops.sh` runs this upgrade in Docker, three servers built from the 2.3.0 tag and two 2.3.0 workers, under writes through every server and requests through the workers' routers. No soak has run it on machines yet.
+2.3.1, the first published release of 2.3, is 2.3.0 with fixes: the same store, entries and node protocol. Everything below that says 2.3.0 holds for 2.3.1 too.
+
+The servers of a cluster of several are upgraded one at a time, and the cluster keeps taking writes meanwhile ([rolling upgrades](ha.md#rolling-upgrades)). `scripts/integration-haops.sh` runs this upgrade in Docker, three servers built from the 2.3.1 tag and two 2.3.1 workers, under writes through every server and requests through the workers' routers. No soak has run it on machines yet.
 
 ### A cluster of one
 

@@ -7,9 +7,10 @@
 #
 # Five docker:dind containers on one private network, with Pebble, its DNS
 # and a curl client, as in scripts/integration-ha.sh: servers s0, s1 and
-# s2 at fixed addresses, workers w1 and w2 with routers. The 2.3.0 binary
-# is built from the tag's source with golang:1.27, as this build is: from
-# HIVEMIND_OLD_SRC, or .scratch/hivemind-v2.3.0-src, or the tag in this
+# s2 at fixed addresses, workers w1 and w2 with routers. The old binary,
+# OLD_TAG (v2.3.1, the published 2.3, unless HIVEMIND_OLD_TAG says
+# otherwise), is built from the tag's source with golang:1.27, as this build is: from
+# HIVEMIND_OLD_SRC, or .scratch/hivemind-$OLD_TAG-src, or the tag in this
 # repository, or the tag's archive on GitHub. Both are built with -tags
 # hivemind_testknobs, and the servers run with HIVEMIND_TEST_LOCAL_READS=1,
 # so that each server's own store can be read.
@@ -68,7 +69,7 @@ PEBBLE_IMAGE=${PEBBLE_IMAGE:-ghcr.io/letsencrypt/pebble:latest}
 CHALL_IMAGE=${CHALL_IMAGE:-ghcr.io/letsencrypt/pebble-challtestsrv:latest}
 CURL_IMAGE=${CURL_IMAGE:-curlimages/curl:8.11.1}
 APP_IMAGE=${APP_IMAGE:-traefik/whoami:v1.10.3}
-OLD_TAG=v2.3.0
+OLD_TAG=${HIVEMIND_OLD_TAG:-v2.3.1}
 NEW_VERSION=v2.4.0-haops-test
 WINDOW=${HAOPS_WINDOW:-120}
 HOST=www.haops.test
