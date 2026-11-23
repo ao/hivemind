@@ -68,23 +68,65 @@ func CreateNextCA(dir string) (*CA, error) {
 	return createCAFiles(dir, NextCACertFile, NextCAKeyFile, true)
 }
 
+// NewNextCA makes the CA a rotation moves to, as CreateNextCA does, in
+// memory only: with several servers, the rotation's record carries it to
+// each server, which writes its own ca-next.key and ca-next.crt from it
+// (WriteNextCAFiles).
+func NewNextCA() (*CA, error) {
+	ca, _, err := makeCA(true)
+	return ca, err
+}
+
 func createCAFiles(dir, certName, keyName string, named bool) (*CA, error) {
 	if err := os.MkdirAll(dir, 0o700); err != nil {
 		return nil, err
 	}
+	ca, keyPEM, err := makeCA(named)
+	if err != nil {
+		return nil, err
+	}
+	keyPath := filepath.Join(dir, keyName)
+	certPath := filepath.Join(dir, certName)
+	if err := writeExclusive(keyPath, keyPEM, 0o600); err != nil {
+		return nil, err
+	}
+	if err := writeExclusive(certPath, ca.CertPEM, 0o644); err != nil {
+		// The key was created by this call. Remove it so the directory
+		// does not hold a key with no certificate.
+		_ = os.Remove(keyPath)
+		return nil, err
+	}
+	// Both files are synced, and so is the directory, so a rotation that
+	// records the new CA after this call finds it after a crash.
+	if err := syncPath(keyPath); err != nil {
+		return nil, err
+	}
+	if err := syncPath(certPath); err != nil {
+		return nil, err
+	}
+	if err := syncPath(dir); err != nil {
+		return nil, err
+	}
+	return ca, nil
+}
+
+// makeCA makes a new self-signed ECDSA P-256 CA valid for ten years, and
+// returns it with its key in the form ca.key holds. A named CA's name
+// carries the first eight hex digits of its fingerprint.
+func makeCA(named bool) (*CA, []byte, error) {
 	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
 	if err != nil {
-		return nil, fmt.Errorf("pki: generate CA key: %w", err)
+		return nil, nil, fmt.Errorf("pki: generate CA key: %w", err)
 	}
 	serial, err := randomSerial()
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	cn := "hivemind cluster CA"
 	if named {
 		spki, err := x509.MarshalPKIXPublicKey(&key.PublicKey)
 		if err != nil {
-			return nil, err
+			return nil, nil, err
 		}
 		fp := sha256.Sum256(spki)
 		cn += " " + hex.EncodeToString(fp[:4])
@@ -103,42 +145,19 @@ func createCAFiles(dir, certName, keyName string, named bool) (*CA, error) {
 	}
 	der, err := x509.CreateCertificate(rand.Reader, tmpl, tmpl, &key.PublicKey, key)
 	if err != nil {
-		return nil, fmt.Errorf("pki: self-sign CA: %w", err)
+		return nil, nil, fmt.Errorf("pki: self-sign CA: %w", err)
 	}
 	cert, err := x509.ParseCertificate(der)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	keyDER, err := x509.MarshalECPrivateKey(key)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	keyPEM := pem.EncodeToMemory(&pem.Block{Type: "EC PRIVATE KEY", Bytes: keyDER})
 	certPEM := pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: der})
-
-	keyPath := filepath.Join(dir, keyName)
-	certPath := filepath.Join(dir, certName)
-	if err := writeExclusive(keyPath, keyPEM, 0o600); err != nil {
-		return nil, err
-	}
-	if err := writeExclusive(certPath, certPEM, 0o644); err != nil {
-		// The key was created by this call. Remove it so the directory
-		// does not hold a key with no certificate.
-		_ = os.Remove(keyPath)
-		return nil, err
-	}
-	// Both files are synced, and so is the directory, so a rotation that
-	// records the new CA after this call finds it after a crash.
-	if err := syncPath(keyPath); err != nil {
-		return nil, err
-	}
-	if err := syncPath(certPath); err != nil {
-		return nil, err
-	}
-	if err := syncPath(dir); err != nil {
-		return nil, err
-	}
-	return &CA{Cert: cert, CertPEM: certPEM, Key: key}, nil
+	return &CA{Cert: cert, CertPEM: certPEM, Key: key}, keyPEM, nil
 }
 
 // syncPath syncs a file or a directory.

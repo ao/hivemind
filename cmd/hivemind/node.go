@@ -540,12 +540,21 @@ func runServe(ctx context.Context, cfg *config.Config, log *slog.Logger, rt runt
 	if several && cfg.Advertise == "" {
 		return fmt.Errorf("%s holds a server of a cluster of several, which needs --advertise: the address the other servers and the workers reach it at", cfg.DataDir)
 	}
-	st, err := store.Open(ctx, filepath.Join(cfg.DataDir, storeFileName), store.WithMinReady(cfg.MinReady),
-		store.WithLogger(log.With("component", "store")))
+	opts := []store.Option{store.WithMinReady(cfg.MinReady), store.WithLogger(log.With("component", "store"))}
+	if several {
+		// The store keeps its schema version: the leader moves it through
+		// the log once every server runs the next one (docs/ha.md#rolling-upgrades).
+		opts = append(opts, store.WithHeldSchema())
+	}
+	st, err := store.Open(ctx, filepath.Join(cfg.DataDir, storeFileName), opts...)
 	if err != nil {
 		return err
 	}
 	defer st.Close()
+	if several {
+		oldest, newest := st.SchemaRange()
+		log.Info("the store keeps its schema version, which the cluster's leader moves", "schema", st.Schema(), "runs", fmt.Sprintf("%d-%d", oldest, newest))
+	}
 	if !several {
 		// A store that lists the servers of a cluster of several, in a data
 		// directory without Raft state, is a server's whose Raft state is
@@ -654,6 +663,12 @@ func runServe(ctx context.Context, cfg *config.Config, log *slog.Logger, rt runt
 	if hs.localReads, err = testLocalReads(); err != nil {
 		return err
 	}
+	if rot != nil {
+		// Set before anything runs that changes or reads the rotation.
+		rot.OnStateChange(hs.caChanged)
+		rot.SetStartCheck(hs.startCheck)
+		rot.SetServers(hs.serversCA)
+	}
 
 	// Every listener is bound before this start is recorded, so a start
 	// that fails to bind, as with a wrong address, records neither the
@@ -737,6 +752,9 @@ func runServe(ctx context.Context, cfg *config.Config, log *slog.Logger, rt runt
 		}
 		nodes = c
 		hs.nodes = c
+		// A change of the listener CA waits for this server's certificate
+		// to move before the CAs it accepts narrow (carotate).
+		rot.SetServerCert(c.CertHolder().Leaf)
 	}
 	if several {
 		// Raft before anything that reads the cluster record: a server that
@@ -755,6 +773,15 @@ func runServe(ctx context.Context, cfg *config.Config, log *slog.Logger, rt runt
 			return err
 		}
 		nodes.SetEpoch(cl.Epoch)
+	}
+	if rot != nil {
+		// Every server follows the CA rotation's record as it applies the
+		// log, a cluster of one too, which may turn Raft on and lose the
+		// leadership (docs/ha.md#the-steps-on-every-server); the leader
+		// runs the steps.
+		fctx, fcancel := context.WithCancel(ctx)
+		defer fcancel()
+		go rot.Follow(fctx)
 	}
 
 	sessions, err := auth.NewSessions(12 * time.Hour)

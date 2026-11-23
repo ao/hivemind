@@ -84,7 +84,8 @@ Some of the store's state is kept in memory, and some of serve's is derived from
 - The registry credential sizes and the placement cache are dropped.
 - The start grace is set again when a server becomes the leader ([leader-only work](#leader-only-work)).
 - The epoch is the store's, the same on every server; a server reads it at start, as today.
-- The CA rotation manager reads the rotation from the store at start. With more than one server, there is no rotation ([compatibility](#compatibility)), so it does not change.
+- The CA rotation manager follows the rotation's record in the store: at start, after each entry another server wrote, and when this server becomes the leader ([the CA rotation with several servers](#the-ca-rotation-with-several-servers)).
+- What the leader keeps in memory of the leases and report stamps is dropped when it stops leading ([fewer Raft entries](#fewer-raft-entries)).
 - The routers' counters, which workers post every few seconds for `/metrics`, and how each router reads the routing table, are held by the server that takes the posts, the leader. A new leader has them again after the workers' next posts.
 
 ## Leader-only work
@@ -94,7 +95,9 @@ Only the leader runs:
 - the sweep: lost nodes, pending replicas, expired join tokens;
 - rollouts and drains, which the sweep and the agent's passes advance;
 - the start grace;
-- the CA rotation manager's run, and the steps of a rotation;
+- the CA rotation manager's run, and the steps of a rotation, which every server then follows;
+- writing the leases and report stamps it keeps in memory, every 4 s ([fewer Raft entries](#fewer-raft-entries));
+- asking every server for its build every 10 s, and the step of the schema ([rolling upgrades](#the-step));
 - issuing node certificates, at join and at renewal, since both arrive through the node and join listeners, which followers pass to the leader;
 - the routers' TLS storage and its locks, which are store writes;
 - backups through the API (`hivemind backup --api`), which a follower passes to the leader like any other request; `hivemind backup` on a server reads its own data directory, which has a copy of everything.
@@ -179,11 +182,182 @@ A cluster of one upgraded from 2.2.0 changes nothing until a second server joins
 
 A worker of 2.2.0 or older knows one server, the one it joined. It goes on working through that server, which passes its requests to the leader, so a second server is not refused for its sake. It cannot fail over: if its server is down, it waits, as it does today. Upgrade the workers to have them fail over.
 
-All servers run the same release. A server will not apply an entry from a leader at another schema version, and a joining server must run the leader's version. To upgrade the servers, stop them all, upgrade them, and start them again; their containers keep running meanwhile. A rolling upgrade of the servers is not done.
+In 2.3.0 all servers run the same release: a server will not apply an entry from a leader at another schema version, and a joining server must run the leader's version, so the servers are upgraded together. From 2.3.0 to 2.4.0 and on, they are upgraded one at a time ([rolling upgrades](#rolling-upgrades)).
 
 Backup: `hivemind backup` on any server copies that server's store and CA files, as on the one server, and `hivemind backup --api` is passed to the leader like any API request. Raft's directory and `server.json` are not in it. Restore makes a cluster of one: the restored data directory has no Raft, restore empties the store's server table and its applied index, and the epoch is one higher than the backup's, so every worker refuses the old servers' copies. The other servers join again, each with an empty data directory and a new server token, and their old node rows are removed with `hivemind node remove` as for any lost node. The restored server runs as the node of the server the backup was taken on, and `restore` refuses a backup whose node was removed ([backup](backup.md#a-cluster-of-several-servers)). `serve` refuses a store that lists servers in a data directory without Raft state, as when `raft/` was deleted: serving it would start a second cluster beside the others ([backup](backup.md#a-cluster-of-several-servers)).
 
-The CA rotation needs a cluster of one in 2.3.0: `hivemind ca rotate start` is refused while the cluster has more than one server, and a server join is refused while a rotation is in progress. Each server keeps the CA files in its own data directory, and a rotation changes them on one machine; carrying the rotation's files and steps to every server is not done. To rotate with several servers, remove all but one, rotate, and join the others again.
+The CA rotation needs a cluster of one in 2.3.0: `hivemind ca rotate start` is refused while the cluster has more than one server, and a server join is refused while a rotation is in progress. In 2.4.0 a cluster of several rotates once its store is at schema version 19, which is once every server runs 2.4.0 ([the CA rotation with several servers](#the-ca-rotation-with-several-servers)); a server join is still refused during a rotation.
+
+## Rolling upgrades
+
+New in 2.4.0: the servers of a cluster are upgraded one at a time, while the others keep the cluster's writes going, and the store's schema moves once every server runs the new release.
+
+### What an entry carries
+
+Every log entry starts with a header of four bytes, `HMB` and a format byte. Format 1 (`HMB1`, the only one 2.3.0 writes or reads) is a batch of write statements, and carries, after the header, the schema version of the store it was recorded against. Format 2 (`HMB2`) is a step of the schema, from one version to the next, and carries the two versions. 2.3.0 refuses an entry whose header is not `HMB1`, and a batch at a schema version other than its own.
+
+What changes is the version a batch is recorded at. In 2.3.0 it is the build's, which is the store's, since a store is always migrated to the build's version when it opens. In 2.4.0 it is the store's, the cluster's schema version, and a server of a cluster of several no longer migrates its store when it opens it ([below](#opening-the-store)). A 2.4.0 leader whose cluster is at version 18, 2.3.0's, records its batches at 18, so a 2.3.0 server applies them.
+
+The statements of a batch ran on the leader's own store, in the transaction the batch records ([replicating the store](#replicating-the-store)), so a batch holds only statements that are valid at the version it carries: a statement on a column the store lacks fails there, before anything goes into the log. What a newer build must also not do at an older version is write a value that the older build reads another way. In 2.4.0, the only new writes at version 18 are the lease and report stamps of [fewer Raft entries](#fewer-raft-entries), which are the same statements 2.3.0 runs, less often; the CA rotation's new records need version 19, and a rotation with several servers waits for it.
+
+### Each build's versions
+
+Each build knows its schema up to a newest version, the length of its list of migrations (19 for 2.4.0), and runs a store at any version from an oldest one up to that one (18 for 2.4.0). Its code checks the store's version before it reads or writes what a later migration added. A release that adds no migration has the versions of the release before it; one that adds a migration raises the oldest version it runs to the newest of the release before, so two releases that each changed the schema are never both in one cluster ([what is refused](#what-is-refused)).
+
+### Opening the store
+
+A cluster of one migrates its store when `serve` opens it, as before: it has no other server to wait for.
+
+A server of a cluster of several, one whose data directory has Raft state or `server.json`, opens its store at the version the store has, if the build runs it, and migrates nothing. A store at a version below the build's oldest is refused, as two releases apart; one above its newest is refused as newer than the build, as 2.3.0 refuses it. A server that joins makes its new store at its oldest version, and moves it on when it loads the leader's snapshot (below).
+
+### Applying entries
+
+A server applies:
+
+- a batch recorded at its store's version, as before;
+- a step from its store's version to the next, if the build knows the next: it runs that migration, its own copy of it, in one transaction with the applied index. Released migrations are never edited, so every build that knows a version runs the same statements to reach it.
+
+It refuses anything else: a batch at another version, a step from another version or to one the build does not know, a format it does not know. A refused entry stops `serve` with the error, as any entry a server cannot apply does, rather than go on with a store that lacks it; unlike a failed write, it is not tried a second time, which could not change the answer. A leader that stops this way hands the leadership on first, as at any stop of `serve`. On its next start Raft gives it the entry again, and it refuses again, until it runs a build that applies it.
+
+A server checks the applied index before the version: on a restart, Raft replays the entries after the last snapshot, and those the store applied before a step are skipped, not refused for their older version. In 2.3.0 the order made no difference.
+
+A snapshot carries the version of the store it copies. A server loads one at its store's version as before, and one at a newer version that the build runs by first migrating its store to that version (the snapshot then replaces every row). It refuses an older snapshot, and one above the build's newest version. A snapshot Raft sends is never older than the store it goes to, since Raft sends one only to a server behind the leader's log, and the log's order puts every step before the batches recorded after it.
+
+So, between releases N and N+1:
+
+- A server of N+1 under a leader of N applies everything the leader writes: batches at N's version, which N+1 runs. Snapshots from that leader are at that version too.
+- A server of N under a leader of N+1 does the same while the cluster is at N's version: the leader records at the store's version, and writes no step while a server of N is in the cluster. If a server of N gets a step anyway, as one that was moved back to N between the leader's last look and the step, it stops, as above, and so steps down if it leads.
+
+### The step
+
+The leader moves the schema, one version at a time, once every server can apply the next one. Every 10 s it asks each server of the Raft configuration, voters and non-voters, for its build, over the server port: a request of a new kind, `build`, on the forward protocol (`hivemind-forward/1`), which a server of 2.4.0 answers whether it leads or not, with its version, the oldest and newest schema version it runs, and its store's version. A server of 2.3.0 answers a kind it does not know with a refusal (as a follower, `503` with no leader), which the leader reads as a build that runs version 18 alone. A server that does not answer is not known. When every server's answer runs the next version, the leader appends the step, as a transaction of its own under the store's write lock, so no batch recorded at the old version can come after it in the log. A server that is down holds the step back: an upgrade ends once every server is up and upgraded, or removed with `hivemind server remove`.
+
+The step takes no command. Until the leader writes it, every server can go back to 2.3.0, one at a time, as it came. Once it is written, a 2.3.0 binary refuses the store (`the store has schema version 19 and this build knows up to 18`), and the way back is a restore of a backup taken before the upgrade, which makes a cluster of one ([compatibility](#compatibility)).
+
+A server join is taken when the joining build runs the cluster's version. The join request carries the joining build's oldest and newest versions; a 2.3.0 request carries only its version, and the leader takes it as 18 alone. So a 2.4.0 leader takes a 2.3.0 server while the cluster is at 18, and not after the step. A 2.3.0 leader takes only its own version, as before, and refuses a 2.4.0 join request before it reads the version, as an invalid join request, for the fields it does not know: join a 2.4.0 server to a cluster whose leader runs 2.4.0.
+
+### The order
+
+Upgrade the followers first, one at a time, and the leader last:
+
+1. On a follower, install the new binary and run `systemctl restart hivemind`. Wait until `hivemind servers` shows it a voter that the leader heard from, with the new release, before the next server: with three servers, a second one down stops writes.
+2. The same on the other followers.
+3. The same on the leader. Its stop hands the leadership to the follower furthest along ([the transport](#the-transport)), which now runs the new release, and it starts again as a follower.
+4. Within 10 s of the last server's start the leader writes the step, every server applies it, and `hivemind servers` shows the store at the new version.
+
+Any order works: each direction is above. Followers first makes the upgrade one change of leader, at the end, and puts the leadership on the new release only once every follower runs it, so a fault of the new release shows on a follower first, while the old leader still takes the writes.
+
+### What `hivemind servers` shows
+
+A VERSION column, each server's release: from its answer to the build request, or, for a server that does not answer it, the version its node last sent with a node API request (`nodes.version`, which a server's own node sends as a worker's does), marked `(node)`; `-` when there is neither. Below the list, the store's schema version, and while the leader's build knows a later one, what the step waits for: `Store schema 18; it moves to 19 once every server runs it: node-1a2b (v2.3.0, which runs schema version 18 alone).` In the JSON, each server has `version`, `version_from` (`build` or `node`), `schema_oldest` and `schema_newest`, and the reply `schema`, `schema_next` and `schema_waits`. Against a 2.3.0 leader, which sends none of them, the CLI shows `-` and no schema line.
+
+### What is refused
+
+- Two releases apart: a server whose store is at a version below the build's oldest refuses to start, and says to upgrade every server to the release between first; a joining server whose versions do not include the cluster's is refused. For 2.4.0, whose oldest version is 2.3.0's, this refuses nothing yet; 2.5.0, if it adds a migration, refuses a store at 18.
+- A downgrade past the step: the older binary refuses the newer store as it does today. Before the step, going back is allowed, and is the way back from an upgrade stopped half way.
+- The step itself while a server is down, does not answer, or runs a build without the next version.
+
+### Testing
+
+Unit tests: opening a store of a cluster of several at each version against a build's oldest and newest, the version of a build being a store option in tests; applying each format at each version, and the applied index checked before the version; a snapshot at a newer version loaded after a local migration, and an older one refused; the step on three servers on loopback, held while one of them answers as 2.3.0 does and taken once it answers as 2.4.0; a 2.3.0 join request.
+
+`scripts/integration-ha.sh` (or a script it runs): three servers and two workers on 2.3.0, built from the tag with `golang:1.27`, under the existing write load and the request streams through the workers' routers. The first follower is upgraded: a 2.3.0 leader with a 2.4.0 server. Then the second, and then the leader, whose stop hands the leadership to an upgraded server. Before its new binary goes in, the old leader is started once more on 2.3.0: a 2.4.0 leader with a 2.3.0 server, which applies what it writes. Then it is upgraded. After each step: every acknowledged write in every server's store, the three stores the same row for row, no replica on two nodes, no failed request through the workers' routers, and the releases in `hivemind servers`. At the end the step to 19 on every server, and a 2.3.0 binary refused on an upgraded data directory.
+
+## The CA rotation with several servers
+
+New in 2.4.0. The three steps and what each side trusts are those of [the rotation](ca-rotation.md); what changes is that every server follows them.
+
+### Where the new CA is kept
+
+The store records the new CA. Schema version 19 adds to `ca_rotation` the new CA's certificate and its private key, sealed, and to `cluster` the fingerprint of the cluster CA, the one in every server's `ca.crt`. The record is what every server follows; each server's `ca-next.crt` and `ca-next.key` are its own copy, which it writes from the record.
+
+The key is sealed with AES-256-GCM, under a key derived with HKDF-SHA256 from the old CA's private key, with the two CAs' fingerprints as the associated data. Every server has the old CA's key, in `ca.key`, and nothing else in the cluster does, so the new key cannot be read from the store, the Raft log, its snapshots, or a copy of `hivemind.db` taken without `ca.key`. At `finish` every server's `ca.key` is replaced by the new CA's, and what is left of the sealed copy in older log entries and snapshots can no longer be opened, but with the old key from a backup taken before `finish`, which then gives the new key too: delete those backups once the rotation has finished ([security](security.md#several-servers)). Unsealed, the cluster's new CA key would stay readable in `raft.db` for as long as the log keeps those entries: 10240 entries after a snapshot, which with [fewer Raft entries](#fewer-raft-entries) is most of a day. A backup holds `ca.key` and the store, so it can open the sealed key, as a backup taken during a rotation holds both keys today.
+
+The other way considered: each server fetches the new key from the leader over the server port when it sees the rotation in its store. That keeps the key out of the log, but needs a leader that holds the files when the server asks, which a server that comes back after a change of leader cannot count on. The record in the store is there for every server that applies the log.
+
+### The steps on every server
+
+The API's steps run on the leader, which writes each one to the store in one transaction, as the one server does. Every server, the leader included, follows the record: at its start, and after it applies an entry that changed `ca_rotation` or `cluster`:
+
+- `start`: the leader makes the new CA in memory and records the rotation, with the certificate and the sealed key. Each server then opens the key with its `ca.key`, checks that it matches the certificate and the recorded fingerprint, writes `ca-next.key` and `ca-next.crt` with `O_EXCL`, syncs them and the directory, and only then accepts certificates from both CAs. The record first and the files second, the reverse of 2.3.0's order, since the record now holds all that the files hold: a server that stops in between writes the files at its next start. The step's reply waits for the leader's own files.
+- `renew`: nothing on disk; each server's accepted CAs and the CA set follow the record.
+- The listener: the leader records the move to the new CA once every node trusts it, the node of every server included: a server's own node now sends what its server accepts (`Hivemind-CA-Trust`), and a server's node that is down holds the move as a worker's does. Each server then issues itself a certificate from the new CA, and presents it from its next handshake, before it acts on anything after the move in the record. A server's own node presents its server's certificate, so it renews when that moves.
+- `finish` and the end of an abort: each server does the file step for itself, renaming `ca-next.key` and `ca-next.crt` over `ca.key` and `ca.crt`, or removing them when the rotation went back to the old CA, and accepts the kept CA alone. The leader then deletes the rotation and records the kept CA's fingerprint in `cluster` in one transaction. A server that applies both entries before it looks does the file step from that fingerprint: a `ca-next.crt` with it is renamed over `ca.crt`, one without it is removed. In 2.3.0 a `ca-next.crt` with no rotation in the store was always from a `start` that had not recorded its rotation, and was removed; with the record first that cannot happen, and removing the file could drop the CA the cluster moved to, so the fingerprint decides. A server whose `ca.crt` is neither the recorded CA nor its `ca-next.crt` refuses to start, and says that it holds another CA than the cluster's.
+- A leader that stops in the middle of `finish`, after the ending was recorded and before the rotation was deleted: the next leader finishes it when it starts to lead.
+
+Connections on the server port that were opened before the end keep the certificates their handshakes checked; every new one is checked against the kept CA alone. The design had each server close, at the end, those whose peer certificate is from the CA that was dropped; that is not done, since neither Raft's transport nor the forward client lets a connection be closed by its certificate, and every peer on them is a server of the Raft configuration that was not removed.
+
+The order keeps the servers connected. A server presents a certificate from the new CA only once every server accepts it: the listener moves only once every server's node trusts the new CA, and a server's node trusts it only once its server accepts it. A server stops accepting the old CA only once its own certificate is from the new one: the end comes after the move in the log, and a server's certificate moves before it acts on what comes after.
+
+Workers follow the rotation as with the one server. A follower passes their requests to the leader, which records what each trusts and holds and sends the CA set; every server's node listener accepts what its record says.
+
+### Joins and backups during a rotation
+
+A worker joins during a rotation as with one server: any server's join listener passes the join to the leader, which issues the certificate from the CA the token names.
+
+A server join stays refused while a rotation is in progress, and `start` is refused while a server is a non-voter catching up. A server that joined mid-rotation would get `ca.key` in its join reply and the sealed key from the store, and could follow; but its first certificate, before the snapshot reaches it, would be from the old CA whatever the listener, and a rotation is a few minutes of an operator's time. Join it after `finish`, when the join reply has the new CA.
+
+`hivemind backup` on any server copies its store and its CA files, and checks them against the rotation the copied store records, as with one server. On a server that has applied a step and not yet written or renamed its files, the check fails and asks to run it again. `hivemind backup --api` goes to the leader, which holds its steps off meanwhile. A restore makes a cluster of one in the phase the backup was taken in, with both keys, as before.
+
+### A server that is down
+
+A server that is down for part of a rotation opens its store as it was when it stopped, applies the log or loads a snapshot, and follows the record as above: it writes its `ca-next.*` from the sealed key, takes each phase, issues itself a certificate from the new CA if the listener has moved, and does the file step if the rotation has ended. Until it is back, its node holds the listener move (unless it trusted the new CA before it stopped) and `finish` (unless it had renewed), as a worker's does, so the rotation does not leave it behind without `--force`. The others accept both CAs until `finish`, so it reaches them with the certificate its stale record gives it.
+
+A server cut off by `finish --force` comes back with a certificate the others no longer accept, or trusting a CA they no longer present, and cannot reach the log, as a worker cut off cannot reach the server; raft's lines on it name the failed certificate check (`x509: certificate signed by unknown authority`). Remove it (`hivemind server remove`, then `hivemind node remove`) and join the machine again with an empty data directory.
+
+### What is refused
+
+`hivemind ca rotate start` with several servers is refused while the store is below version 19, which is while a server runs 2.3.0 or the step has not been written: the refusal says so and points to `hivemind servers`. A cluster of one is at 19 from its first start on 2.4.0. A rotation that a cluster of one had in progress when it was upgraded from 2.3.0 has no certificate or sealed key in its record; the server writes them from its `ca-next.*` at that start.
+
+`hivemind ca status` adds a table of the servers, `SERVER`, `CA.CRT`, `CA-NEXT.CRT` and `CERTIFICATE FROM`, by the first 16 hex digits of each fingerprint, from each server's answer to the build request (at most 10 s old), so a server that has not followed a step shows.
+
+### Testing
+
+Unit tests: sealing and opening the key, refused with another CA's key and with other fingerprints; a server following the record from each phase, and from each pair of entries applied before it looks; the end decided by the recorded fingerprint; three servers on loopback through `start`, `renew` and `finish`, with one stopped through the listener move, and an abort in each phase.
+
+`scripts/integration-ha.sh` (or a script it runs): three servers and a worker with a router, under writes and requests through the router. `start`; a follower stopped once its node trusts the new CA; `renew`; the worker renews and the listener moves without the stopped server; the stopped server started again, which writes its files, issues itself a certificate from the new CA and renews; the leader restarted once, so the next leader carries the rotation; `finish`. At the end every server's `ca.crt` and `ca.key` are the new CA, no `ca-next.*` is left, the worker's `ca.crt` holds the new CA alone, and no acknowledged write was lost and no request through the router failed.
+
+## Fewer Raft entries
+
+New in 2.4.0. In the ninth soak's steady state, 89 % of the log's entries were a node's lease: each agent reports every 2 s, which renews its lease and stamps its container rows, and renews the lease every 5 s besides, and each is an entry, written and fsynced on every server ([ninth soak](soak.md#steady-state-7)). Only the leader reads them: the sweep, the routing table, placement and the start grace all run on it.
+
+### Batched, not kept out of the log
+
+The leader could keep the leases in memory alone, and write a node's lease only when the node registers or comes back. Then every reader would have to read the leader's memory: the routing table, placement, the sweep, the start grace and node removal read `last_lease` in their SQL, and a follower's store, its backup and a new leader would hold leases as old as each node's registration. Batching keeps the leases in the store, close enough to the truth that no reader changes:
+
+- On the leader of a cluster of several, a lease renewal, or a report that changes nothing but the time, from a node whose stored lease is no older than 9 s and which was not removed, writes nothing: the leader keeps the time in memory, for the lease and for the container rows' stamps.
+- Every 4 s the leader writes every lease and stamp it keeps, for every node, in one transaction: one entry for the whole cluster.
+- A renewal of a node whose stored lease is older than 9 s, or has lapsed, a node's registration, and a report that changes anything, are written at once, as before. So is the stamp of a report whose node's rows were deleted since, as by a removal.
+- A leader that hands the leadership on at its stop writes what it keeps first.
+
+A live node's stored lease is then never older than 13 s (9 + 4), inside the 15 s lease, so no reader sees it lapse; a node that stops reporting is lost 15 s after its last renewal, as before, since the write after that renewal records it. `hivemind nodes`, `/metrics`, the CA rotation's live nodes and the log routes read the leader's own view, the later of the stored lease and the kept one, so their lease ages stay to the second.
+
+An agent also skips its 5 s renewal when a report succeeded within the last 5 s, after its first renewal, which finds out whether the server has the renewal at all: against a 2.0.0 server, which has none, it says so once, at the start. That takes away the renewals, two in seven of the node API requests of a node whose reports go through; it was the renewal's purpose to cover a pass that takes longer than the lease, which a recent report already did ([leases](concepts.md#leases-and-node-loss)).
+
+A cluster of one has no log, and writes every renewal to the store, as before.
+
+### Before and after
+
+Three servers and ten nodes (the servers' three and seven workers), steady, with nothing written through the API, by `WORKERS=7 scripts/raft-rate.sh` as in [measurements](#measurements): 50 apps that no node can take, and the entries each server appended in 300 s after 60 s to settle, read from its `raft.db`. On an Apple M3 Pro, with the containers in OrbStack's Linux VM (12 CPUs, 16 GB) and each capped at one CPU:
+
+| | Entries | Bytes | A minute |
+|---|---|---|---|
+| 2.3.0, built from its tag | 2,102 | 567,540 | 420 entries, 110 KiB |
+| 2.4.0 | 75 | 79,862 | 15 entries, 15 KiB |
+
+The three servers appended the same entries in each run. After, what is left is the batch of kept leases and stamps, one entry every 4 s, and the entries of what changes, which for a steady cluster is none. The entries no longer grow with the number of nodes; their size does, by two statements a node, so the bytes fell by less than the entries. `scripts/integration-haops.sh`, with three servers and two workers and a 120 s window, counted 210 or 211 entries a minute on 2.3.0 and 15 after the upgrade, in each of four runs on the same machine.
+
+With fewer entries, a snapshot (after 8192 entries) is hours apart rather than minutes, and a follower that was down for hours catches up from the log, the 10240 entries the leader keeps after its snapshot, rather than from a snapshot.
+
+### What failover costs
+
+The same as in 2.3.0. A new leader sets the start grace ([leader-only work](#leader-only-work)): every node whose lease was current when the leader changed waits for its first report to the new leader, and is not lost meanwhile. The new leader finds the stored leases at most 13 s old, so every node that was live is inside the grace's window, as in 2.3.0; what the old leader kept and had not written, at most 4 s of renewals, is lost and not needed. A node that died with the old leader has its replicas placed again when the grace ends, as in 2.3.0.
+
+A leader of 2.3.0 writes every renewal, and one of 2.4.0 batches them, in the same statements: a cluster in the middle of its upgrade may change leaders between the two at any time.
+
+### Testing
+
+Unit tests: a renewal and an unchanged report kept in memory and written in the next batch; one written at once when the stored lease is older than 9 s, has lapsed, or the node's rows were deleted; a node that stops reporting lost 15 s after its last renewal; a removal while a renewal is kept; the batch written at a handover; a new leader's start grace with the leases as the batch left them; the agent's skipped renewal. `scripts/raft-rate.sh` takes the number of workers, and measures 2.3.0, built from the tag, against this build for three servers and seven workers; the rolling upgrade's script counts the entries a minute before and after the upgrade.
 
 ## Security
 
@@ -193,6 +367,8 @@ What changes:
 - The CA's private key is on every server, not one. A server that is compromised can issue any certificate, as the one server could. Each server is as sensitive as the one server was.
 - The store, with every app's environment values, the registry passwords and the routers' TLS keys, is on every server, and so is the Raft log, which holds the same values in its entries' statements. `raft/` is mode 0700, and `raft.db` and the snapshots 0600.
 - The admin token's hash is on every server. The token itself stays where `init` wrote it.
+- During a CA rotation, the new CA's key is in the store and in the Raft log's entries and snapshots, sealed under a key derived from the current CA's, which every server has in `ca.key` ([where the new CA is kept](#where-the-new-ca-is-kept)). A copy of the store or of `raft.db` without `ca.key` does not give it, and once `finish` has replaced `ca.key` on every server, the sealed copies left in older entries cannot be opened.
+- The build request on the server port, which a server answers to any peer with the server role, whether it leads or not: its version, the schema versions it runs, its store's, and the fingerprints of its CA files and of its certificate's CA. None of it is secret.
 
 What does not: the API still needs the admin token on every route but `GET /healthz`, checked by the leader; the node listener still needs a worker's certificate, checked by the follower at the handshake and by the leader again; the join listener still needs a token, redeemed by the leader.
 
@@ -200,8 +376,8 @@ The forwarding headers, the caller's address, whether it came over TLS, and a wo
 
 ## What is not done
 
-- Rolling upgrades of the servers.
-- The CA rotation with more than one server.
+- A server join during a CA rotation, which stays refused ([joins and backups during a rotation](#joins-and-backups-during-a-rotation)), and closing, at a rotation's end, the server port connections opened with a certificate from the CA it dropped.
+- A downgrade once the store's schema has moved: the way back is a backup restored as a cluster of one ([the step](#the-step)).
 - Reads on followers. Every request goes to the leader, so the leader carries the whole load of the API and the node API.
 - Removing a dead server by itself. Raft keeps it in the configuration until `hivemind server remove`, and a cluster of 3 with one dead server tolerates no further loss.
 - Sessions. A browser session lives in the leader's memory and ends when the leader changes; the CLI's token is not affected.
@@ -217,7 +393,7 @@ The forwarding headers, the caller's address, whether it came over TLS, and a wo
 
 Unit tests: the store's replication (a workload over every table applied on a leader, a follower and a store that applies the entries afterwards and again, compared row by row, and against a store without replication; refused writes on a follower; caches after a change of leader; snapshots), the log store, three servers on loopback (formation from a cluster of one, a leader stopped, two of three down, forwarding with forged headers), the cluster listeners (forwarding, forged headers on the node listener, server join refusals, the servers header), the node API client's failover, and the CLI.
 
-`scripts/integration-ha.sh`, CI's `ha` step, runs three servers and two workers with routers in Docker, and checks formation by join, deploys through every server, the leader killed during writes, the old leader back, a partition that isolates the leader, quorum lost, and `server remove` of the first server, refused while its node runs a replica and taken after a drain. To read each server's own copy of the store, it uses a test-only setting, `HIVEMIND_TEST_LOCAL_READS=1`, which only a binary built with `-tags hivemind_testknobs` reads: a server then answers a GET that carries `Hivemind-Test-Local-Read: 1` from its own store. A release binary refuses to start with it set.
+`scripts/integration-ha.sh`, CI's `ha` step, runs three servers and two workers with routers in Docker, and checks formation by join, deploys through every server, the leader killed during writes, the old leader back, a partition that isolates the leader, quorum lost, and `server remove` of the first server, refused while its node runs a replica and taken after a drain. It then runs `scripts/integration-haops.sh`, which builds 2.3.0 from its tag and upgrades three servers from it one at a time, measures the Raft entries a minute before and after, and rotates the CA of the upgraded cluster with a server stopped during the rotation ([rolling upgrades](#testing), [the CA rotation](#testing-1), [fewer entries](#testing-2)). To read each server's own copy of the store, it uses a test-only setting, `HIVEMIND_TEST_LOCAL_READS=1`, which only a binary built with `-tags hivemind_testknobs` reads: a server then answers a GET that carries `Hivemind-Test-Local-Read: 1` from its own store. A release binary refuses to start with it set.
 
 ## Measurements
 

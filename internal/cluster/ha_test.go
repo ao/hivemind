@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/base64"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"strings"
 	"testing"
@@ -118,7 +119,8 @@ func (fx *fixture) joinServer(req nodeapi.JoinServerRequest) (int, string) {
 
 // TestServerJoinChecks: a server's join takes a server's token only, and
 // refuses a worker's; a worker's join refuses a server's token; a joining
-// server at another version, or with an address no other machine can
+// server whose build does not run the store's schema version (here a
+// request of 2.3.0, which runs 18 alone), or with an address no other machine can
 // reach, is refused before the token is used.
 func TestServerJoinChecks(t *testing.T) {
 	fx, tokens, admitted := joinServerFixture(t, "v2.3.0")
@@ -127,17 +129,17 @@ func TestServerJoinChecks(t *testing.T) {
 		t.Fatal(err)
 	}
 	workerTok := fx.issue(time.Hour)
-	if code, msg := fx.joinServer(nodeapi.JoinServerRequest{Token: workerTok, Advertise: "10.0.0.6", NodePort: 4484, Version: "v2.3.0"}); code != http.StatusUnauthorized {
+	if code, msg := fx.joinServer(nodeapi.JoinServerRequest{Token: workerTok, Advertise: "10.0.0.6", NodePort: 4484, Version: "v2.4.0", SchemaOldest: store.SchemaOldest, SchemaNewest: store.SchemaVersion}); code != http.StatusUnauthorized {
 		t.Fatalf("a server join with a worker's token: %d %s", code, msg)
 	}
 	if _, _, code, _ := fx.tryJoin(serverTok); code != http.StatusUnauthorized {
 		t.Fatalf("a worker join with a server's token: %d", code)
 	}
-	if code, msg := fx.joinServer(nodeapi.JoinServerRequest{Token: serverTok, Advertise: "10.0.0.6", NodePort: 4484, Version: "v2.2.0"}); code != http.StatusConflict ||
-		!strings.Contains(msg, "same hivemind") {
+	if code, msg := fx.joinServer(nodeapi.JoinServerRequest{Token: serverTok, Advertise: "10.0.0.6", NodePort: 4484, Version: "v2.3.0"}); code != http.StatusConflict ||
+		!strings.Contains(msg, fmt.Sprintf("store is at schema version %d", store.SchemaVersion)) {
 		t.Fatalf("a server join at another version: %d %s", code, msg)
 	}
-	if code, msg := fx.joinServer(nodeapi.JoinServerRequest{Token: serverTok, Advertise: "127.0.0.1", NodePort: 4484, Version: "v2.3.0"}); code != http.StatusBadRequest {
+	if code, msg := fx.joinServer(nodeapi.JoinServerRequest{Token: serverTok, Advertise: "127.0.0.1", NodePort: 4484, Version: "v2.4.0", SchemaOldest: store.SchemaOldest, SchemaNewest: store.SchemaVersion}); code != http.StatusBadRequest {
 		t.Fatalf("a server join advertising loopback: %d %s", code, msg)
 	}
 	if len(*admitted) != 0 {
@@ -145,13 +147,13 @@ func TestServerJoinChecks(t *testing.T) {
 	}
 	// The worker's join that was refused did not use the server token, and
 	// none of the refusals did.
-	if code, msg := fx.joinServer(nodeapi.JoinServerRequest{Token: serverTok, Advertise: "10.0.0.6", NodePort: 4484, Version: "v2.3.0"}); code != http.StatusOK {
+	if code, msg := fx.joinServer(nodeapi.JoinServerRequest{Token: serverTok, Advertise: "10.0.0.6", NodePort: 4484, Version: "v2.4.0", SchemaOldest: store.SchemaOldest, SchemaNewest: store.SchemaVersion}); code != http.StatusOK {
 		t.Fatalf("a valid server join: %d %s", code, msg)
 	}
 	if len(*admitted) != 1 {
 		t.Fatalf("admitted %v", *admitted)
 	}
-	if code, _ := fx.joinServer(nodeapi.JoinServerRequest{Token: serverTok, Advertise: "10.0.0.7", NodePort: 4484, Version: "v2.3.0"}); code != http.StatusUnauthorized {
+	if code, _ := fx.joinServer(nodeapi.JoinServerRequest{Token: serverTok, Advertise: "10.0.0.7", NodePort: 4484, Version: "v2.4.0", SchemaOldest: store.SchemaOldest, SchemaNewest: store.SchemaVersion}); code != http.StatusUnauthorized {
 		t.Fatalf("a server token used twice: %d", code)
 	}
 	if removed, _ := fx.st.IsNodeRemoved(context.Background(), (*admitted)[0]); removed {

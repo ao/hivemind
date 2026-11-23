@@ -37,6 +37,70 @@ type Statement struct {
 // batchMagic starts every encoded batch; the last byte is the format.
 var batchMagic = []byte("HMB1")
 
+// stepMagic starts an encoded step of the schema, the log's second format
+// (docs/ha.md#what-an-entry-carries). 2.3.0 knows only batchMagic, and
+// refuses it.
+var stepMagic = []byte("HMB2")
+
+// Entry formats.
+const (
+	formatBatch = 1
+	formatStep  = 2
+)
+
+// entryFormat is the format of an encoded log entry: its header's last
+// byte. An entry without the header is malformed.
+func entryFormat(data []byte) (int, error) {
+	if len(data) < len(batchMagic) || string(data[:len(batchMagic)-1]) != string(batchMagic[:len(batchMagic)-1]) {
+		return 0, fmt.Errorf("%w: no header", errBadBatch)
+	}
+	c := data[len(batchMagic)-1]
+	if c < '1' || c > '9' {
+		return 0, fmt.Errorf("%w: entry format %q", errBadBatch, c)
+	}
+	return int(c - '0'), nil
+}
+
+// Step is a step of the schema from one version to the next, which the
+// leader appends to the log once every server can apply it (StepSchema).
+type Step struct {
+	From, To int
+	// Origin and Seq are a batch's: the leader that wrote the step knows
+	// it when it applies it.
+	Origin string
+	Seq    uint64
+}
+
+// EncodeStep encodes st.
+func EncodeStep(st Step) []byte {
+	out := append([]byte{}, stepMagic...)
+	out = binary.AppendUvarint(out, uint64(st.From))
+	out = binary.AppendUvarint(out, uint64(st.To))
+	out = appendString(out, st.Origin)
+	return binary.AppendUvarint(out, st.Seq)
+}
+
+// DecodeStep decodes what EncodeStep made.
+func DecodeStep(data []byte) (Step, error) {
+	if len(data) < len(stepMagic) || string(data[:len(stepMagic)]) != string(stepMagic) {
+		return Step{}, fmt.Errorf("%w: not a step", errBadBatch)
+	}
+	d := batchDecoder{b: data[len(stepMagic):]}
+	from, to := d.uvarint(), d.uvarint()
+	st := Step{Origin: d.str(), Seq: d.uvarint()}
+	if d.err != nil {
+		return Step{}, d.err
+	}
+	if len(d.b) != 0 {
+		return Step{}, fmt.Errorf("%w: %d bytes after the end", errBadBatch, len(d.b))
+	}
+	if from > maxBatchCount || to != from+1 {
+		return Step{}, fmt.Errorf("%w: a step from version %d to %d", errBadBatch, from, to)
+	}
+	st.From, st.To = int(from), int(to)
+	return st, nil
+}
+
 // Argument types in an encoded batch.
 const (
 	argNil byte = iota

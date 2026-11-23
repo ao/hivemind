@@ -12,6 +12,7 @@ package carotate
 
 import (
 	"context"
+	"crypto/x509"
 	"encoding/pem"
 	"errors"
 	"fmt"
@@ -43,8 +44,14 @@ var (
 	// directory.
 	ErrFixed = errors.New("this server cannot rotate its CA")
 	// ErrSeveralServers is a rotation started in a cluster of several
-	// servers, which 2.3.0 does not do (docs/ha.md#compatibility).
-	ErrSeveralServers = errors.New("the cluster has more than one server, and a CA rotation needs a cluster of one: remove the other servers (hivemind server remove), rotate, and join them again")
+	// servers whose store is below store.CAStoreSchemaVersion: a server
+	// runs 2.3.0, or the step to that version has not been written yet
+	// (docs/ha.md#the-ca-rotation-with-several-servers).
+	ErrSeveralServers = errors.New("the cluster has more than one server, and its store is below schema version 19, which a CA rotation with several servers needs: " +
+		"every server must run 2.4.0 or later, and the leader moves the store to 19 once they do (hivemind servers shows both)")
+	// ErrServerJoining is a rotation started while a server is catching up
+	// with the log as a non-voter.
+	ErrServerJoining = errors.New("a server is joining the cluster, and a CA rotation waits until it is a voter (hivemind servers)")
 )
 
 // RefusedError is a step refused while nodes are not where it needs them.
@@ -106,6 +113,33 @@ type Manager struct {
 	// Guarded by mu.
 	forced   []Waiting
 	forcedAt time.Time
+
+	// changed is kicked when the store's record may have changed under
+	// this server, as when it applied another server's entry: Follow
+	// looks at the record again.
+	changed chan struct{}
+	// hooks, set before serve runs anything: serverCert is the server's
+	// own certificate now, which a change of the listener CA waits for
+	// before the accepted CAs narrow; onState runs after each change of
+	// the state; startCheck refuses a start, as while a server joins; and
+	// servers lists each server's CA files, for Status.
+	serverCert func() *x509.Certificate
+	onState    []func()
+	startCheck func(ctx context.Context) error
+	servers    func(ctx context.Context) []ServerCA
+}
+
+// ServerCA is one server's CA files and certificate, as it said in its
+// answer to the leader's build request, by fingerprint in hex: "" for a
+// file it does not have.
+type ServerCA struct {
+	ID       string `json:"id"`
+	Current  string `json:"current,omitempty"`
+	Next     string `json:"next,omitempty"`
+	Listener string `json:"listener,omitempty"`
+	// Err says why the server's files are not known, as when it did not
+	// answer.
+	Err string `json:"error,omitempty"`
 }
 
 // state is the CAs and the rotation at one moment. It is not changed once
@@ -150,39 +184,347 @@ func Open(ctx context.Context, o Options) (*Manager, error) {
 		return nil, errors.New("carotate: Dir and Store are required")
 	}
 	m := &Manager{dir: o.Dir, st: o.Store, log: o.Logger, now: o.Now, localNode: o.LocalNode,
-		kick: make(chan struct{}, 1), listener: make(chan struct{}, 1)}
+		kick: make(chan struct{}, 1), listener: make(chan struct{}, 1), changed: make(chan struct{}, 1)}
 	if m.log == nil {
 		m.log = slog.Default()
 	}
 	if m.now == nil {
 		m.now = time.Now
 	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if err := m.followLocked(ctx); err != nil {
+		return nil, err
+	}
+	// A store that takes writes, a cluster of one's, records what a
+	// rotation's record or the cluster record lacks; on a server of
+	// several, the leader does (Run).
+	if err := m.recordGaps(ctx); err != nil && !errors.Is(err, store.ErrNotLeader) {
+		return nil, err
+	}
+	// The record's changes under this server, as when it applies another
+	// server's entries, are followed by Follow.
+	m.st.OnForeignChange(func() {
+		select {
+		case m.changed <- struct{}{}:
+		default:
+		}
+	})
+	return m, nil
+}
+
+// followLocked makes this server's CA files and state those of the store's
+// record (docs/ha.md#the-steps-on-every-server): every server, the leader
+// included, at Open and each time the record may have changed. The caller
+// holds mu.
+func (m *Manager) followLocked(ctx context.Context) error {
+	var rp *store.CARotation
 	rot, err := m.st.GetCARotation(ctx)
 	switch {
 	case errors.Is(err, store.ErrNotFound):
-		if err := m.removeOrphan(); err != nil {
-			return nil, err
-		}
 	case err != nil:
-		return nil, err
-	case rot.Phase == store.CAPhaseEnding:
-		m.log.Info("finishing the end of a CA rotation that a stop interrupted", "toward", rot.Toward)
-		if err := m.completeEnding(ctx, rot); err != nil {
-			return nil, err
+		return err
+	default:
+		rp = &rot
+	}
+	caFP, known, err := m.st.ClusterCA(ctx)
+	if err != nil {
+		return err
+	}
+	var s *state
+	switch {
+	case rp == nil:
+		if err := m.settleFiles(caFP, known); err != nil {
+			return err
+		}
+		cur, err := pki.LoadCA(m.dir)
+		if err != nil {
+			return fmt.Errorf("cluster CA in %s: %w", m.dir, err)
+		}
+		if known && cur.Fingerprint() != caFP {
+			return fmt.Errorf("this server's %s in %s is the CA %s, and the cluster's is %s: it holds another CA than the cluster's, as a server "+
+				"that was cut off by hivemind ca rotate finish --force does. Remove it (hivemind server remove, then hivemind node remove) and join "+
+				"the machine again with an empty data directory", pki.CACertFile, m.dir, short(cur.Fingerprint()), short(caFP))
+		}
+		s = derive(cur, nil, nil, nil)
+	case rp.Phase == store.CAPhaseEnding:
+		if cur := m.cur.Load(); cur == nil || cur.rot == nil || cur.rot.Phase != store.CAPhaseEnding {
+			m.log.Info("the CA rotation ends; this server does its file step", "toward", rp.Toward)
+		}
+		if err := m.endingFiles(*rp); err != nil {
+			return err
+		}
+		cur, err := pki.LoadCA(m.dir)
+		if err != nil {
+			return fmt.Errorf("the cluster CA after the rotation's end: %w", err)
+		}
+		// The record's end is the leader's to write, and a cluster of
+		// one's: a follower's store refuses it, and follows the leader's.
+		if err := m.st.EndCARotationKeeping(ctx, cur.Fingerprint()); err != nil && !errors.Is(err, store.ErrNotLeader) {
+			return err
+		}
+		s = derive(cur, nil, nil, nil)
+	default:
+		cur, err := pki.LoadCA(m.dir)
+		if err != nil {
+			return fmt.Errorf("cluster CA in %s: %w", m.dir, err)
+		}
+		if cur.Fingerprint() != rp.CurrentFP {
+			return fmt.Errorf("the CA files in %s are not the CAs of the rotation the store records (%s is %s, the store has %s); "+
+				"restore the data directory from a backup", m.dir, pki.CACertFile, short(cur.Fingerprint()), short(rp.CurrentFP))
+		}
+		next, err := m.nextFiles(ctx, cur, rp)
+		if err != nil {
+			return err
+		}
+		cross, err := crossFor(cur, next, rp)
+		if err != nil {
+			return err
+		}
+		s = derive(cur, next, rp, cross)
+	}
+	m.adopt(ctx, s)
+	return nil
+}
+
+// settleFiles deals with ca-next.key and ca-next.crt when the store records
+// no rotation. With the cluster CA recorded, a ca-next.crt that is that CA
+// is from a rotation that ended while this server was behind, and is
+// renamed over ca.crt; any other is from a rotation that ended back on the
+// CA in ca.crt, and is removed. Without it, as in 2.3.0, the files are from
+// a start that never recorded its rotation, and are removed.
+func (m *Manager) settleFiles(caFP [32]byte, known bool) error {
+	present := false
+	for _, name := range []string{pki.NextCAKeyFile, pki.NextCACertFile} {
+		if _, err := os.Lstat(filepath.Join(m.dir, name)); err == nil {
+			present = true
+		} else if !errors.Is(err, fs.ErrNotExist) {
+			return err
 		}
 	}
-	s, err := m.load(ctx)
-	if err != nil {
-		return nil, err
+	if !present {
+		return nil
 	}
-	m.accept = pki.NewTrustHolder(s.accept)
-	m.cur.Store(s)
-	nodes, err := m.st.CARotationNodes(ctx)
-	if err != nil {
-		return nil, err
+	if known {
+		next, err := pki.LoadNextCA(m.dir)
+		if err == nil && next.Fingerprint() == caFP {
+			if cur, err := pki.LoadCA(m.dir); err != nil || cur.Fingerprint() != caFP {
+				m.log.Info("the CA rotation ended while this server was behind: its ca-next.key and ca-next.crt are the cluster CA, and replace ca.key and ca.crt",
+					"ca", short(caFP))
+				return m.renameNext()
+			}
+		}
 	}
-	m.nodes = nodes
-	return m, nil
+	return m.removeOrphan()
+}
+
+// nextFiles returns the new CA of the rotation rp from ca-next.key and
+// ca-next.crt, which it writes from the record's sealed copy first when
+// they are not there. Files of another CA than the record's are an error.
+func (m *Manager) nextFiles(ctx context.Context, cur *pki.CA, rp *store.CARotation) (*pki.CA, error) {
+	_, kerr := os.Lstat(filepath.Join(m.dir, pki.NextCAKeyFile))
+	_, cerr := os.Lstat(filepath.Join(m.dir, pki.NextCACertFile))
+	if errors.Is(kerr, fs.ErrNotExist) && errors.Is(cerr, fs.ErrNotExist) {
+		rc, err := m.st.GetCARotationCA(ctx)
+		if err != nil {
+			return nil, err
+		}
+		if rc.Empty() {
+			return nil, fmt.Errorf("the store records a CA rotation, and %s has neither the new CA's files nor the record a copy of it; "+
+				"restore the data directory from a backup", m.dir)
+		}
+		keyPEM, err := openNextKey(cur, rp.NextFP, rc.SealedKey)
+		if err != nil {
+			return nil, err
+		}
+		next, err := pki.ParseCAPair([]byte(rc.CertPEM), keyPEM)
+		if err != nil {
+			return nil, fmt.Errorf("the new CA in the CA rotation's record: %w", err)
+		}
+		if next.Fingerprint() != rp.NextFP {
+			return nil, fmt.Errorf("the new CA in the CA rotation's record is %s, and the record names %s", short(next.Fingerprint()), short(rp.NextFP))
+		}
+		if _, err := pki.WriteNextCAFiles(m.dir, []byte(rc.CertPEM), keyPEM); err != nil {
+			return nil, fmt.Errorf("writing the new CA's files from the CA rotation's record: %w", err)
+		}
+		m.log.Info("wrote this server's copy of the new CA from the CA rotation's record", "ca", short(rp.NextFP))
+	}
+	next, err := pki.LoadNextCA(m.dir)
+	if err != nil {
+		return nil, fmt.Errorf("the store records a CA rotation, and the new CA in %s cannot be read: %w; restore the data directory from a backup", m.dir, err)
+	}
+	if next.Fingerprint() != rp.NextFP {
+		return nil, fmt.Errorf("the CA files in %s are not the CAs of the rotation the store records (%s is %s, the store has %s); "+
+			"restore the data directory from a backup", m.dir, pki.NextCACertFile, short(next.Fingerprint()), short(rp.NextFP))
+	}
+	return next, nil
+}
+
+// recordGaps records in the store what its records lack and this server's
+// files have: the cluster CA's fingerprint, and the new CA of a rotation
+// recorded by 2.3.0. A follower's store refuses it with ErrNotLeader. The
+// caller holds mu.
+func (m *Manager) recordGaps(ctx context.Context) error {
+	if m.st.Schema() < store.CAStoreSchemaVersion {
+		return nil
+	}
+	s := m.cur.Load()
+	if s.rot == nil {
+		if _, known, err := m.st.ClusterCA(ctx); err != nil || known {
+			return err
+		}
+		return m.st.SetClusterCA(ctx, s.current.Fingerprint())
+	}
+	if s.next == nil || s.rot.Phase == store.CAPhaseEnding {
+		return nil
+	}
+	if _, known, err := m.st.ClusterCA(ctx); err != nil {
+		return err
+	} else if !known {
+		if err := m.st.SetClusterCA(ctx, s.current.Fingerprint()); err != nil {
+			return err
+		}
+	}
+	rc, err := m.st.GetCARotationCA(ctx)
+	if err != nil || !rc.Empty() {
+		return err
+	}
+	keyPEM, err := s.next.KeyPEM()
+	if err != nil {
+		return err
+	}
+	sealed, err := sealNextKey(s.current, s.next.Fingerprint(), keyPEM)
+	if err != nil {
+		return err
+	}
+	if err := m.st.FillCARotationCA(ctx, s.next.Fingerprint(), store.CARotationCA{CertPEM: string(s.next.CertPEM), SealedKey: sealed}); err != nil {
+		return err
+	}
+	m.log.Info("recorded the new CA in the CA rotation's record, which a rotation started by 2.3.0 lacks", "ca", short(s.next.Fingerprint()))
+	return nil
+}
+
+// adopt makes s the state, unless it is the state there is already. When
+// the CA of the server's own certificate changes and the CAs it accepts
+// narrow at once, as when one look at the record finds both the
+// listener's move and the rotation's end, the server's certificate moves
+// first: the accepted CAs narrow once it is from the new listener CA, or
+// after 5 s. The caller holds mu.
+func (m *Manager) adopt(ctx context.Context, s *state) {
+	old := m.cur.Load()
+	if old == nil {
+		// Open's first look.
+		nodes, err := m.st.CARotationNodes(ctx)
+		if err != nil {
+			nodes = map[string]store.CARotationNode{}
+		}
+		m.nodes = nodes
+		s.gen = m.gen.Add(1)
+		m.accept = pki.NewTrustHolder(s.accept)
+		m.cur.Store(s)
+		return
+	}
+	if sameState(old, s) {
+		return
+	}
+	m.nmu.Lock()
+	if pki.Fingerprint(old.listener.Cert) != pki.Fingerprint(s.listener.Cert) && narrower(old, s) {
+		mid := *s
+		mid.accept = old.accept
+		m.setState(&mid)
+		m.nmu.Unlock()
+		m.awaitServerCert(ctx, s.listener)
+		m.nmu.Lock()
+	}
+	if nodes, err := m.st.CARotationNodes(ctx); err == nil {
+		m.nodes = nodes
+	}
+	m.setState(s)
+	m.nmu.Unlock()
+}
+
+// sameState reports whether two states are of the same CAs and rotation.
+func sameState(a, b *state) bool {
+	key := func(s *state) string {
+		k := pki.FingerprintHex(s.current.Fingerprint()) + "/" + pki.FingerprintHex(s.listener.Fingerprint())
+		if s.next != nil {
+			k += "/" + pki.FingerprintHex(s.next.Fingerprint())
+		}
+		if s.rot != nil {
+			k += "/" + s.rot.Phase + "/" + s.rot.Toward + "/" + s.rot.Listener
+		}
+		return k
+	}
+	return key(a) == key(b)
+}
+
+// narrower reports whether b accepts a CA that a does not, or the other
+// way: whether a accepts a CA that b does not.
+func narrower(a, b *state) bool {
+	for _, fp := range a.accept.Fingerprints() {
+		if !b.accept.Contains(fp) {
+			return true
+		}
+	}
+	return false
+}
+
+// awaitServerCert waits, up to 5 s, until the server's own certificate is
+// from ca.
+func (m *Manager) awaitServerCert(ctx context.Context, ca *pki.CA) {
+	if m.serverCert == nil {
+		return
+	}
+	end := time.Now().Add(5 * time.Second)
+	for time.Now().Before(end) && ctx.Err() == nil {
+		if c := m.serverCert(); c != nil && c.CheckSignatureFrom(ca.Cert) == nil {
+			return
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	m.log.Warn("the server's certificate did not move to the listener CA within 5 s; the accepted CAs narrow anyway", "ca", short(ca.Fingerprint()))
+}
+
+// SetServerCert gives the Manager the server's own certificate, which a
+// change of the listener CA waits for (adopt). serve sets it before it
+// runs anything.
+func (m *Manager) SetServerCert(f func() *x509.Certificate) { m.serverCert = f }
+
+// OnStateChange adds f to what runs after each change of the CAs or the
+// rotation, as the server's own node's client, which takes the accepted
+// CAs again. serve adds it before it runs anything. f must not block.
+func (m *Manager) OnStateChange(f func()) { m.onState = append(m.onState, f) }
+
+// SetStartCheck makes Start ask f first, which refuses a start by its
+// error, as while a server joins the cluster.
+func (m *Manager) SetStartCheck(f func(ctx context.Context) error) { m.startCheck = f }
+
+// SetServers gives Status each server's CA files.
+func (m *Manager) SetServers(f func(ctx context.Context) []ServerCA) { m.servers = f }
+
+// Follow follows the store's record on this server, every server of a
+// cluster of several, until ctx ends: after each change under it, and
+// every 10 s.
+func (m *Manager) Follow(ctx context.Context) {
+	if m.st == nil {
+		return
+	}
+	t := time.NewTicker(10 * time.Second)
+	defer t.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-m.changed:
+		case <-t.C:
+		}
+		m.mu.Lock()
+		err := m.followLocked(ctx)
+		m.mu.Unlock()
+		if err != nil && ctx.Err() == nil {
+			m.log.Warn("following the CA rotation's record", "err", err)
+		}
+	}
 }
 
 // Fixed returns a Manager for ca alone, with no data directory and no
@@ -195,37 +537,6 @@ func Fixed(ca *pki.CA) *Manager {
 	m.accept = pki.NewTrustHolder(s.accept)
 	m.cur.Store(s)
 	return m
-}
-
-// load reads the CA files and the rotation, and builds the state.
-func (m *Manager) load(ctx context.Context) (*state, error) {
-	cur, err := pki.LoadCA(m.dir)
-	if err != nil {
-		return nil, fmt.Errorf("cluster CA in %s: %w", m.dir, err)
-	}
-	rot, err := m.st.GetCARotation(ctx)
-	if errors.Is(err, store.ErrNotFound) {
-		return derive(cur, nil, nil, nil), nil
-	}
-	if err != nil {
-		return nil, err
-	}
-	next, err := pki.LoadNextCA(m.dir)
-	if err != nil {
-		return nil, fmt.Errorf("the store records a CA rotation, and the new CA in %s cannot be read: %w; "+
-			"restore the data directory from a backup", m.dir, err)
-	}
-	if cur.Fingerprint() != rot.CurrentFP || next.Fingerprint() != rot.NextFP {
-		return nil, fmt.Errorf("the CA files in %s are not the CAs of the rotation the store records "+
-			"(%s is %s, the store has %s; %s is %s, the store has %s); restore the data directory from a backup",
-			m.dir, pki.CACertFile, short(cur.Fingerprint()), short(rot.CurrentFP), pki.NextCACertFile,
-			short(next.Fingerprint()), short(rot.NextFP))
-	}
-	cross, err := crossFor(cur, next, &rot)
-	if err != nil {
-		return nil, err
-	}
-	return derive(cur, next, &rot, cross), nil
 }
 
 // crossFor signs the CA the rotation goes to with the one it comes from.
@@ -286,10 +597,16 @@ func (m *Manager) setState(s *state) {
 		default:
 		}
 	}
+	for _, f := range m.onState {
+		f()
+	}
 }
 
 // Current is the CA in ca.crt.
 func (m *Manager) Current() *pki.CA { return m.cur.Load().current }
+
+// Next is the CA in ca-next.crt while a rotation runs, or nil.
+func (m *Manager) Next() *pki.CA { return m.cur.Load().next }
 
 // Listener is the CA that signs the server's own certificate, which both
 // cluster listeners present. Join tokens name it.
@@ -420,6 +737,18 @@ func (m *Manager) Run(ctx context.Context) {
 	if m.st == nil {
 		return
 	}
+	// A new leader follows the record first, and so finishes a rotation's
+	// end that the leader before it left half done, and records what the
+	// records lack.
+	m.mu.Lock()
+	err := m.followLocked(ctx)
+	if err == nil {
+		err = m.recordGaps(ctx)
+	}
+	m.mu.Unlock()
+	if err != nil && ctx.Err() == nil {
+		m.log.Warn("following the CA rotation's record as the leader", "err", err)
+	}
 	t := time.NewTicker(10 * time.Second)
 	defer t.Stop()
 	for {
@@ -427,6 +756,15 @@ func (m *Manager) Run(ctx context.Context) {
 		m.recheckForced(ctx)
 		if err := m.moveListener(ctx); err != nil && ctx.Err() == nil {
 			m.log.Warn("checking whether the server's certificate can move to the CA the rotation goes to", "err", err)
+		}
+		// The store may have moved to schema version 19 since this server
+		// began to lead, as at the end of a rolling upgrade: what 19 adds is
+		// recorded then. It writes nothing once it is recorded.
+		m.mu.Lock()
+		err := m.recordGaps(ctx)
+		m.mu.Unlock()
+		if err != nil && ctx.Err() == nil && !errors.Is(err, store.ErrNotLeader) {
+			m.log.Warn("recording the cluster CA in the store", "err", err)
 		}
 		select {
 		case <-ctx.Done():
@@ -537,20 +875,17 @@ func (m *Manager) removeOrphan() error {
 	return nil
 }
 
-// completeEnding does the file step of an ending rotation and deletes the
-// rotation: towards the next CA, ca-next.key and ca-next.crt are renamed
-// over ca.key and ca.crt; towards the current CA, they are removed. Each
-// part is done only if it is still to do, so a second run after a crash
-// finishes the first.
-func (m *Manager) completeEnding(ctx context.Context, rot store.CARotation) error {
+// endingFiles does this server's file step of an ending rotation: towards
+// the next CA, ca-next.key and ca-next.crt are renamed over ca.key and
+// ca.crt; towards the current CA, they are removed. Each part is done only
+// if it is still to do, so a second run after a crash finishes the first.
+// The record's end is the caller's.
+func (m *Manager) endingFiles(rot store.CARotation) error {
 	keep := rot.CurrentFP
 	if rot.Toward == store.CANext {
 		keep = rot.NextFP
-		for _, p := range [][2]string{{pki.NextCAKeyFile, pki.CAKeyFile}, {pki.NextCACertFile, pki.CACertFile}} {
-			err := os.Rename(filepath.Join(m.dir, p[0]), filepath.Join(m.dir, p[1]))
-			if err != nil && !errors.Is(err, fs.ErrNotExist) {
-				return err
-			}
+		if err := m.renameNext(); err != nil {
+			return err
 		}
 	} else {
 		for _, name := range []string{pki.NextCAKeyFile, pki.NextCACertFile} {
@@ -558,9 +893,9 @@ func (m *Manager) completeEnding(ctx context.Context, rot store.CARotation) erro
 				return err
 			}
 		}
-	}
-	if err := syncDir(m.dir); err != nil {
-		return err
+		if err := syncDir(m.dir); err != nil {
+			return err
+		}
 	}
 	ca, err := pki.LoadCA(m.dir)
 	if err != nil {
@@ -570,7 +905,19 @@ func (m *Manager) completeEnding(ctx context.Context, rot store.CARotation) erro
 		return fmt.Errorf("the cluster CA in %s is %s after the rotation's end, and the rotation was to keep %s; restore the data directory from a backup",
 			m.dir, short(ca.Fingerprint()), short(keep))
 	}
-	return m.st.EndCARotation(ctx)
+	return nil
+}
+
+// renameNext renames ca-next.key over ca.key, then ca-next.crt over
+// ca.crt, each if it is still there, and syncs the directory.
+func (m *Manager) renameNext() error {
+	for _, p := range [][2]string{{pki.NextCAKeyFile, pki.CAKeyFile}, {pki.NextCACertFile, pki.CACertFile}} {
+		err := os.Rename(filepath.Join(m.dir, p[0]), filepath.Join(m.dir, p[1]))
+		if err != nil && !errors.Is(err, fs.ErrNotExist) {
+			return err
+		}
+	}
+	return syncDir(m.dir)
 }
 
 func syncDir(dir string) error {

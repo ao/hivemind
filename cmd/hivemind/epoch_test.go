@@ -287,7 +287,7 @@ func TestServeGivesAStoreRestoredFromBeforeEpochsItsEpoch(t *testing.T) {
 	}
 	for _, q := range []string{`DROP TABLE servers`, `DROP TABLE raft_applied`, `ALTER TABLE join_tokens DROP COLUMN role`,
 		`DROP TABLE ca_rotation_nodes`, `DROP TABLE ca_rotation`,
-		`ALTER TABLE cluster DROP COLUMN epoch`, `ALTER TABLE nodes DROP COLUMN dials`, `UPDATE schema_version SET version = 15`} {
+		`ALTER TABLE cluster DROP COLUMN ca_fp`, `ALTER TABLE cluster DROP COLUMN epoch`, `ALTER TABLE nodes DROP COLUMN dials`, `UPDATE schema_version SET version = 15`} {
 		if _, err := db.Exec(q); err != nil {
 			t.Fatal(err)
 		}

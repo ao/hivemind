@@ -59,6 +59,17 @@ func ParseCAPair(certPEM, keyPEM []byte) (*CA, error) {
 // O_EXCL, key first, and syncs them, as CreateCA does with a CA it makes.
 // The pair must belong together. On failure nothing is left.
 func WriteCAFiles(dir string, certPEM, keyPEM []byte) (*CA, error) {
+	return writeCAPair(dir, CACertFile, CAKeyFile, certPEM, keyPEM)
+}
+
+// WriteNextCAFiles writes ca-next.key and ca-next.crt as WriteCAFiles
+// writes ca.key and ca.crt: a server of a cluster of several writes its own
+// copy of the CA a rotation moves to from the rotation's record.
+func WriteNextCAFiles(dir string, certPEM, keyPEM []byte) (*CA, error) {
+	return writeCAPair(dir, NextCACertFile, NextCAKeyFile, certPEM, keyPEM)
+}
+
+func writeCAPair(dir, certName, keyName string, certPEM, keyPEM []byte) (*CA, error) {
 	ca, err := ParseCAPair(certPEM, keyPEM)
 	if err != nil {
 		return nil, err
@@ -66,8 +77,8 @@ func WriteCAFiles(dir string, certPEM, keyPEM []byte) (*CA, error) {
 	if err := os.MkdirAll(dir, 0o700); err != nil {
 		return nil, err
 	}
-	keyPath := filepath.Join(dir, CAKeyFile)
-	certPath := filepath.Join(dir, CACertFile)
+	keyPath := filepath.Join(dir, keyName)
+	certPath := filepath.Join(dir, certName)
 	if err := writeExclusive(keyPath, keyPEM, 0o600); err != nil {
 		return nil, err
 	}

@@ -166,6 +166,7 @@ func printCAStatus(out io.Writer, st carotate.Status) {
 		which = "the cluster CA in ca.crt"
 	}
 	fmt.Fprintf(out, "The server's certificate is from %s; join tokens name it.\n", which)
+	printServerCAs(out, st.Servers)
 	r := st.Rotation
 	if r == nil {
 		fmt.Fprintln(out, "No rotation is in progress.")
@@ -216,6 +217,41 @@ func printCAStatus(out io.Writer, st carotate.Status) {
 	}
 	fmt.Fprintf(out, "Next: hivemind ca rotate %s, which waits for:\n", r.NextStep)
 	printWaiting(out, r.Waiting)
+}
+
+// printServerCAs lists, for a cluster of several servers, each server's CA
+// files and the CA of its own certificate, by the first 16 hex digits of
+// each fingerprint, as each told the leader: a server that has not
+// followed a step of a rotation shows (docs/ha.md#the-steps-on-every-server).
+func printServerCAs(out io.Writer, servers []carotate.ServerCA) {
+	if len(servers) < 2 {
+		return
+	}
+	short := func(fp string) string {
+		if fp == "" {
+			return "-"
+		}
+		return fp[:min(16, len(fp))]
+	}
+	fmt.Fprintln(out)
+	tw := tabwriter.NewWriter(out, 0, 4, 2, ' ', 0)
+	fmt.Fprintln(tw, "SERVER\tCA.CRT\tCA-NEXT.CRT\tCERTIFICATE FROM")
+	for _, s := range servers {
+		if s.Err != "" {
+			fmt.Fprintf(tw, "%s\t-\t-\t- (%s)\n", termSafe(s.ID), termSafe(s.Err))
+			continue
+		}
+		from := short(s.Listener)
+		switch {
+		case s.Listener != "" && s.Listener == s.Current:
+			from = pki.CACertFile
+		case s.Listener != "" && s.Listener == s.Next:
+			from = pki.NextCACertFile
+		}
+		fmt.Fprintf(tw, "%s\t%s\t%s\t%s\n", termSafe(s.ID), termSafe(short(s.Current)), termSafe(short(s.Next)), termSafe(from))
+	}
+	tw.Flush()
+	fmt.Fprintln(out)
 }
 
 // endedMessage says what the end of a rotation means for the backups. An

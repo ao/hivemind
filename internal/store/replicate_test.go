@@ -106,6 +106,11 @@ func workload(t *testing.T, s *Store, clock *fakeClock) {
 	if _, err := s.PutApp(ctx, vol); err != nil {
 		t.Fatal(err)
 	}
+	writeKept := func() {
+		t.Helper()
+		_, err := s.WriteKept(ctx)
+		must(err)
+	}
 	report := func(ids ...string) {
 		t.Helper()
 		if len(ids) == 0 {
@@ -131,6 +136,10 @@ func workload(t *testing.T, s *Store, clock *fakeClock) {
 			}
 			must(s.ReportStatus(ctx, id, st))
 		}
+		// A leader of several writes the leases it keeps every 4 s; the
+		// workload writes them after each round, so that every store has
+		// the leases a store without replication has.
+		writeKept()
 	}
 	report()
 	clock.Advance(2 * time.Second)
@@ -198,6 +207,7 @@ func workload(t *testing.T, s *Store, clock *fakeClock) {
 		for _, id := range []string{"node-s", "node-a", "node-c"} {
 			must(s.RenewLease(ctx, id))
 		}
+		writeKept()
 		if _, err := s.ReconcileNodes(ctx); err != nil {
 			t.Fatal(err)
 		}

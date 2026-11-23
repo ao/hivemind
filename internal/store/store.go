@@ -38,6 +38,10 @@ var (
 	ErrInvalid = errors.New("invalid")
 	// ErrNewerSchema means the file was written by a newer hivemind.
 	ErrNewerSchema = errors.New("store schema is newer than this build")
+	// ErrOlderSchema means a store of a cluster of several is at a schema
+	// version older than this build runs without migrating it: the
+	// cluster's servers run a release two or more before this one.
+	ErrOlderSchema = errors.New("store schema is older than this build runs in a cluster of several servers")
 	// ErrConflict means the request is refused in the current state, such
 	// as removing a node that still renews its lease.
 	ErrConflict = errors.New("conflict")
@@ -240,6 +244,25 @@ func WithMinReady(d time.Duration) Option {
 // to an existing store. The default logs nothing.
 func WithLogger(log *slog.Logger) Option { return func(s *Store) { s.log = log } }
 
+// WithHeldSchema opens the store of a server of a cluster of several
+// (docs/ha.md#opening-the-store): an existing store keeps its schema
+// version, which the cluster's leader moves through the log (StepSchema),
+// and a new one is made at the oldest version this build runs. A store at
+// a version below that is ErrOlderSchema.
+func WithHeldSchema() Option { return func(s *Store) { s.held = true } }
+
+// WithSchemaRange makes the store the store of a build that knows the
+// schema up to newest and runs a store at oldest or later, in place of
+// this build's SchemaOldest and SchemaVersion. Tests use it to play other
+// releases.
+func WithSchemaRange(oldest, newest int) Option {
+	return func(s *Store) {
+		newest = min(max(newest, 1), len(migrations))
+		s.oldest = min(max(oldest, 1), newest)
+		s.migs = migrations[:newest]
+	}
+}
+
 // Store is the desired-state database. It is safe for concurrent use.
 type Store struct {
 	// db is the one connection every write and every transaction uses.
@@ -331,6 +354,30 @@ type Store struct {
 	// localNode is the node of the server this process runs, when it is
 	// not the cluster record's (SetLocalNode).
 	localNode atomic.Pointer[string]
+
+	// migs is the list of migrations this build knows, and oldest the
+	// oldest schema version it runs a store at (WithSchemaRange). held is
+	// WithHeldSchema. schema is the store's schema version: what Open left
+	// it at, then what each step of the log (StepSchema) and each snapshot
+	// moved it to.
+	migs   []string
+	oldest int
+	held   bool
+	schema atomic.Int64
+
+	// onForeign, if set, runs after rows may have changed that this
+	// process did not write: the CA rotation manager follows the store's
+	// record then (OnForeignChange).
+	onForeign atomic.Pointer[func()]
+
+	// kept is, on the leader of a cluster of several, the lease each node
+	// renewed last that the leader keeps in memory and has not written
+	// yet, and stamp the time of each node's last report that changed
+	// nothing, which stamps its container rows when it is written
+	// (lease.go). keptMu guards both.
+	keptMu sync.Mutex
+	kept   map[string]int64
+	stamp  map[string]int64
 }
 
 // readConns is the size of the read-only pool.
@@ -356,7 +403,8 @@ func Open(ctx context.Context, path string, opts ...Option) (*Store, error) {
 	// One connection for writes: they are serialised in the process. Other
 	// processes are kept out by SQLite's locks and wait up to busy_timeout.
 	db.SetMaxOpenConns(1)
-	s := &Store{db: db, now: time.Now, reported: map[string][sha256.Size]byte{}, rewrote: map[string]int64{}, origin: newOrigin()}
+	s := &Store{db: db, now: time.Now, reported: map[string][sha256.Size]byte{}, rewrote: map[string]int64{}, origin: newOrigin(),
+		migs: migrations, oldest: SchemaOldest}
 	for _, o := range opts {
 		o(s)
 	}
@@ -429,7 +477,26 @@ func (s *Store) init(ctx context.Context) error {
 	if fk != 1 {
 		return errors.New("foreign keys are off")
 	}
-	return migrateLogged(ctx, s.db, migrations, s.log)
+	target := func(have int, isNew bool) (int, error) { return len(s.migs), nil }
+	if s.held {
+		target = func(have int, isNew bool) (int, error) {
+			switch {
+			case isNew || have == 0:
+				return s.oldest, nil
+			case have < s.oldest:
+				return 0, fmt.Errorf("%w: the store has schema version %d, and this hivemind runs %d to %d in a cluster of several servers. "+
+					"Its servers run a release two or more before this one: upgrade every server to the release between first, and wait until "+
+					"hivemind servers shows the store at %d (docs/ha.md#rolling-upgrades)", ErrOlderSchema, have, s.oldest, len(s.migs), s.oldest)
+			}
+			return have, nil
+		}
+	}
+	v, err := migrateWith(ctx, s.db, s.migs, target, s.log)
+	if err != nil {
+		return err
+	}
+	s.schema.Store(int64(v))
+	return nil
 }
 
 // Close closes the database.
@@ -1091,7 +1158,7 @@ func (s *Store) UpsertNode(ctx context.Context, n Node) error {
 
 // GetNode returns one node.
 func (s *Store) GetNode(ctx context.Context, id string) (Node, error) {
-	nodes, err := listNodes(ctx, s.rdb)
+	nodes, err := s.ListNodes(ctx)
 	if err != nil {
 		return Node{}, err
 	}
@@ -1104,7 +1171,15 @@ func (s *Store) GetNode(ctx context.Context, id string) (Node, error) {
 }
 
 // ListNodes returns every node, sorted by ID.
-func (s *Store) ListNodes(ctx context.Context) ([]Node, error) { return listNodes(ctx, s.rdb) }
+// The leases are the leader's own view: those it keeps in memory are
+// newer than the stored ones (lease.go).
+func (s *Store) ListNodes(ctx context.Context) ([]Node, error) {
+	nodes, err := listNodes(ctx, s.rdb)
+	if err != nil {
+		return nil, err
+	}
+	return s.withKept(nodes), nil
+}
 
 func listNodes(ctx context.Context, q querier) ([]Node, error) {
 	rows, err := q.QueryContext(ctx, `SELECT n.id, n.name, n.cpu, n.memory, n.last_lease, n.ready_since, coalesce(c.not_after, 0), coalesce(c.issued_at, 0), n.eligible, n.address, n.version, n.dials
@@ -1177,6 +1252,15 @@ func checkNodeDials(d string) error {
 // lost. A node that was removed gets ErrNodeRemoved, and one that is not
 // registered ErrNotFound.
 func (s *Store) RenewLease(ctx context.Context, nodeID string) error {
+	// On the leader of a cluster of several, the renewal of a node whose
+	// stored lease is recent is kept in memory (lease.go).
+	if s.Replicated() {
+		if now := s.now().UnixNano(); s.keepable(ctx, s.rdb, nodeID, now) {
+			s.noteReport(nodeID, now)
+			s.keep(nodeID, now, false)
+			return nil
+		}
+	}
 	return s.tx(ctx, func(tx *sql.Tx) error {
 		now := s.now().UnixNano()
 		// The routing table counts a node with a current lease; renewing it
@@ -1248,11 +1332,26 @@ func (s *Store) ReportStatus(ctx context.Context, nodeID string, st []Status) er
 	err := s.tx(ctx, func(tx *sql.Tx) error {
 		now := s.now().UnixNano()
 		current := s.leaseCurrent(nodeID, now)
-		if err := s.renewLease(ctx, tx, nodeID, now); err != nil {
-			return err
-		}
 		rewrite := true
-		if same {
+		// On the leader of a cluster of several, a report the same as the
+		// last, from a node whose stored lease is recent, whose rows are
+		// all still there, keeps the lease and the stamps in memory
+		// (lease.go).
+		kept := false
+		if same && s.Replicated() && s.keepable(ctx, tx, nodeID, now) {
+			var n int64
+			if err := tx.QueryRowContext(ctx, `SELECT count(*) FROM container_status WHERE node_id = ?`, nodeID).Scan(&n); err == nil && n == int64(len(st)) {
+				kept, rewrite = true, false
+				s.noteReport(nodeID, now)
+				onCommit(tx, func() { s.keep(nodeID, now, true) })
+			}
+		}
+		if !kept {
+			if err := s.renewLease(ctx, tx, nodeID, now); err != nil {
+				return err
+			}
+		}
+		if same && !kept {
 			res, err := tx.ExecContext(ctx, `UPDATE container_status SET updated_at = ? WHERE node_id = ?`, now, nodeID)
 			if err != nil {
 				return err
@@ -1396,13 +1495,15 @@ func (s *Store) ListStatus(ctx context.Context, app string) ([]Status, error) {
 	if app != "" {
 		where, args = `app = ?`, []any{app}
 	}
-	return queryStatus(ctx, s.rdb, where+` ORDER BY app, idx, name`, args...)
+	st, err := queryStatus(ctx, s.rdb, where+` ORDER BY app, idx, name`, args...)
+	return s.statusWithKept(st), err
 }
 
 // StatusForNode returns what one node last reported, sorted by app, replica
 // and name. An agent reads it at start-up to recover its restart counts.
 func (s *Store) StatusForNode(ctx context.Context, nodeID string) ([]Status, error) {
-	return queryStatus(ctx, s.rdb, `node_id = ? ORDER BY app, idx, name`, nodeID)
+	st, err := queryStatus(ctx, s.rdb, `node_id = ? ORDER BY app, idx, name`, nodeID)
+	return s.statusWithKept(st), err
 }
 
 func queryStatus(ctx context.Context, q querier, where string, args ...any) ([]Status, error) {

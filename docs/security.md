@@ -42,7 +42,7 @@ The server's data directory is created with mode 0700.
 | `admin.token` | 0600 | The admin token, in plain text. This is the only copy |
 | `ca.key` | 0600 | The cluster CA's private key. It can sign any node certificate. In a cluster of several servers, every server has it ([several servers](#several-servers)) |
 | `ca.crt` | 0644 | The cluster CA certificate. Public |
-| `ca-next.key`, `ca-next.crt` | 0600, 0644 | Only during a [CA rotation](ca-rotation.md): the new CA's key and certificate. `finish` renames them over `ca.key` and `ca.crt`; `abort` deletes them |
+| `ca-next.key`, `ca-next.crt` | 0600, 0644 | Only during a [CA rotation](ca-rotation.md): the new CA's key and certificate, on every server of a cluster of several, each written from the rotation's record. `finish` renames them over `ca.key` and `ca.crt`; `abort` deletes them |
 | `hivemind.yaml` | 0600 when `init` writes it; as you create it otherwise | Optional settings for `serve`. `init` writes the serve flags it was given here; nothing else writes it. A `token` key in it is refused |
 | `hivemind.lock` | 0600 | The pid of the `serve` that holds it locked |
 | `restored-epoch` | 0600 | Only after `restore` of a store from before epochs, until `serve` first opens it: the epoch to give the restored cluster ([backup](backup.md#restoring)) |
@@ -71,6 +71,8 @@ A backup file (`hivemind backup`) is written with mode 0600. It holds `hivemind.
 ## Several servers
 
 In a cluster of several servers ([several servers](ha.md)), every server holds what the one server held: `ca.key`, which signs any certificate, the store, with every environment value and registry password, the admin token's hash, and the Raft log, which holds the same values. A server that is compromised can do what the one server could, so each needs the care the one server needed, and the cluster has as many to secure as it has servers. A server that joins gets the CA's key in the join reply, over the join listener's TLS 1.3 connection, whose CA it pinned by the fingerprint in its server join token before it sent the token. A server join token works once, lasts an hour by default and 24 hours at most, and is refused for a worker's join, as a worker's token is for a server's. The admin token itself is never sent: a joined server checks the token against the hash in the store.
+
+During a CA rotation the store's record holds the new CA's key, and so does the Raft log, in the entry that started the rotation and in the snapshots taken while it ran. It is sealed with AES-256-GCM under a key derived with HKDF-SHA256 from the current CA's private key, with both CAs' fingerprints as associated data ([where the new CA is kept](ha.md#where-the-new-ca-is-kept)): a copy of `hivemind.db`, `raft.db` or a snapshot does not give it without `ca.key`. A backup holds `ca.key`, so a backup taken during a rotation gives both keys, as with one server. After `finish`, every server's `ca.key` is the new CA's and the old key is gone, so the sealed copies left in older log entries cannot be opened; after an `abort`, they open to the dropped CA's key, which no node trusts. What does open them after `finish` is the old CA's key from a backup taken before it: with a copy of `raft.db` from during the rotation, such a backup gives the new CA's key too. Delete the backups from before `finish`, as [the rotation](ca-rotation.md#backup-and-restore) says for the old key.
 
 The servers talk to each other on the server port, 4486 by default ([listeners](#listeners)). Who needs to reach what:
 

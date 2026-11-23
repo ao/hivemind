@@ -3,6 +3,7 @@ package cluster
 import (
 	"context"
 	"errors"
+	"fmt"
 	"log/slog"
 	"net/http"
 	"strconv"
@@ -190,9 +191,21 @@ func joinServer(cfg Config, limiter *ratelimit.FailLimiter, log *slog.Logger, w 
 		fail(http.StatusBadRequest, "the node port must be in 1-65533: the join port and the server port are above it", "node port")
 		return
 	}
-	if v, mine := nodeapi.CleanVersion(req.Version), nodeapi.CleanVersion(cfg.Version); v != mine {
-		writeError(w, http.StatusConflict, "every server of a cluster runs the same hivemind: this server runs "+orUnknown(mine)+
-			", and the joining one "+orUnknown(v))
+	// A server joins a cluster whose store is at a schema version its
+	// build runs (docs/ha.md#the-step). A join request of 2.3.0 says only
+	// its version, and 2.3.0 runs HASchemaVersion alone.
+	oldest, newest := req.SchemaOldest, req.SchemaNewest
+	if newest == 0 {
+		oldest, newest = store.HASchemaVersion, store.HASchemaVersion
+	}
+	have := store.SchemaVersion
+	if cfg.Store != nil {
+		have = cfg.Store.Schema()
+	}
+	if have < oldest || have > newest {
+		v := nodeapi.CleanVersion(req.Version)
+		writeError(w, http.StatusConflict, fmt.Sprintf("this cluster's store is at schema version %d, and the joining server's hivemind, %s, runs "+
+			"versions %d to %d: join it with the release the cluster's servers run (hivemind servers)", have, orUnknown(v), oldest, newest))
 		return
 	}
 	if _, err := cfg.ServerTokens.Redeem(req.Token); err != nil {

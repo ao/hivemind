@@ -48,7 +48,8 @@
 #     serve stops with the removal message, and the two left take writes
 #
 # On exit it removes the containers, the network and the volumes it
-# created, also after a failure or Ctrl-C. The Go build cache volume
+# created, also after a failure or Ctrl-C, and then runs
+# scripts/integration-haops.sh, unless HA_OPS=0. The Go build cache volume
 # (hivemind-cache) is kept. Needs Docker, and the docker:dind, golang,
 # Pebble, pebble-challtestsrv, curl, nginx and traefik/whoami images.
 set -euo pipefail
@@ -670,3 +671,11 @@ wait_for 60 restored_serves ||
 cl_note "with ${SID[$TI]}, the first server, removed, a backup taken on ${S[$K]} restores and serves as ${SID[$K]}, a cluster of one"
 cl_note "ha: election ${ELECTION_MS} ms after the kill, API writes again at ${API_MS} ms; a leader ${HANDOVER_MS} ms after the leader's SIGTERM; election ${PARTITION_MS} ms after the cut; writes acknowledged ${ACKED_BEFORE} before and ${ACKED_AFTER} after the kill, all kept on every server; ${FAILED} refused; ${ROUTER_TOTAL} router requests, all 200"
 cl_note "ha: all checks passed"
+
+# What 2.4.0 adds, the rolling upgrade from 2.3.0 and the CA rotation of
+# several servers, runs in a cluster of its own, once this one is gone.
+if [ "${HA_OPS:-1}" != 0 ]; then
+	(ha_cleanup)
+	trap - EXIT INT TERM HUP
+	exec "$REPO/scripts/integration-haops.sh"
+fi

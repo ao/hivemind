@@ -2,6 +2,27 @@
 
 Notable changes to hivemind, newest first. Versions follow [Semantic Versioning](https://semver.org). A release is cut by pushing a `v*` tag; its notes are the matching section below.
 
+## [2.4.0] - Unreleased
+
+The servers of a cluster of several can be upgraded one at a time, the cluster CA rotated with several servers, and the leases of a steady cluster no longer make most of the Raft log ([docs/ha.md](docs/ha.md)).
+
+### Upgrading from 2.3.0
+
+A cluster of one migrates its store on its first start, from schema version 18 to 19, which adds three columns; a 2.3.0 binary cannot open it after that, so take a backup with `hivemind backup` first. A cluster of several is upgraded one server at a time, followers first and the leader last, while it takes writes: a server of several keeps its store at 18 when it starts, and the leader moves every server's store to 19 through the log once every server runs 2.4.0. Until then each server can go back to 2.3.0. Join no server during the upgrade. See [docs/upgrading.md](docs/upgrading.md#from-230-to-240).
+
+### Added
+
+- Rolling upgrades of the servers ([docs/ha.md](docs/ha.md#rolling-upgrades)). A log entry carries its format and the schema version of the store it was recorded at, the cluster's, not the build's: a 2.4.0 leader of a cluster at 18 records at 18, which 2.3.0 applies, and a 2.4.0 server applies a 2.3.0 leader's entries. Each build runs a range of schema versions, 18 to 19 for 2.4.0, and a server of several opens its store at the version it has, refusing one older than its range as two releases apart. The step of the schema is a log entry of its own format, which the leader appends once every server of the Raft configuration runs the next version; it asks each one every 10 s over the server port, and a 2.3.0 server's refusal of that request reads as a build that runs 18 alone. A server join takes a build that runs the cluster's version.
+- `hivemind servers` shows each server's release, and the store's schema version with what its next step waits for.
+- The CA rotation with several servers ([docs/ha.md](docs/ha.md#the-ca-rotation-with-several-servers)). The leader records the new CA in the rotation's record, its key sealed with AES-256-GCM under a key derived (HKDF-SHA256) from the current CA's private key, which every server has in `ca.key`. Every server follows the record at its start and after each entry from another server: it writes its own `ca-next.key` and `ca-next.crt`, takes each phase, moves its own certificate with the listener CA before the CAs it accepts narrow, and does its own file step at the end, which records the kept CA's fingerprint, so a server that missed the end renames its files by it. A server's own node now says which CAs its server accepts, so the listener's move and `finish` wait for every server's node, a stopped server's too. `hivemind ca status` lists each server's CA files. Schema version 19 adds the new CA to the rotation's record and the CA's fingerprint to the cluster record.
+- `scripts/integration-haops.sh`, run by `scripts/integration-ha.sh` (CI's `ha` step): three servers and two workers built from the 2.3.0 tag, upgraded one server at a time to this build under writes through every server and requests through the workers' routers, with the Raft entries a minute measured before and after; then a CA rotation of the upgraded cluster with a server stopped through part of it. `scripts/raft-rate.sh` takes `WORKERS`.
+
+### Changed
+
+- On the leader of a cluster of several, a lease renewal, or a report that changes nothing but the time, from a node whose stored lease is no older than 9 s writes nothing: the leader keeps it in memory and writes what it keeps for every node in one entry every 4 s, and before it hands the leadership on ([docs/ha.md](docs/ha.md#fewer-raft-entries)). A live node's stored lease is never older than 13 s, inside the 15 s lease, and a node that stops is lost 15 s after its last renewal, as before. A cluster of one writes every renewal, as before. Three servers and ten nodes, steady, appended 420 entries a minute on 2.3.0 and 15 on 2.4.0 ([docs/ha.md](docs/ha.md#before-and-after)).
+- An agent skips its lease renewal of every 5 s when a report went through within the last 5 s, after its first renewal.
+- `hivemind ca rotate start` with several servers is refused only while the store is below schema version 19, and while a server is a non-voter catching up. In a cluster of one at 19, `start` records the rotation before it writes the new CA's files, which a server that stops in between writes at its next start.
+
 ## [2.3.1] - 2026-11-23
 
 The first published release of the 2.2 and 2.3 work. The `v2.2.0` and `v2.3.0` tags exist, but their release workflows failed in GitHub Actions on tests that depended on the speed of the machine and on running as root, so neither was published. 2.3.1 is 2.3.0 with those fixed. Everything in 2.3.0 and 2.2.0 is in it ([the changelog](https://github.com/ao/hivemind/blob/v2.3.1/CHANGELOG.md) has both), and the upgrade notes there apply: from 2.0.0, see 2.2.0's; from a cluster of one server, see 2.3.0's.

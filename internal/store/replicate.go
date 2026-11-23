@@ -87,6 +87,9 @@ func (s *Store) EnableReplication(handover func() (Replicator, error)) error {
 // started, so that what it read is the state its batch is applied to.
 func (s *Store) replicatedTx(ctx context.Context, r *replicator, fn func(*sql.Tx) error) error {
 	term, werr := r.CanWrite()
+	// The batch is recorded at the store's version, the cluster's, which a
+	// step moves only under writeMu (StepSchema).
+	schema := s.Schema()
 	rec, c, err := s.dryRun(ctx, fn)
 	if err != nil {
 		return err
@@ -98,7 +101,7 @@ func (s *Store) replicatedTx(ctx context.Context, r *replicator, fn func(*sql.Tx
 	// no Raft round (recorder).
 	if len(rec.stmts) > 0 {
 		seq := s.seq.Add(1)
-		data, err := EncodeBatch(Batch{Schema: SchemaVersion, Origin: s.origin, Seq: seq, Stmts: rec.stmts})
+		data, err := EncodeBatch(Batch{Schema: schema, Origin: s.origin, Seq: seq, Stmts: rec.stmts})
 		if err != nil {
 			return err
 		}
@@ -167,20 +170,32 @@ func newOrigin() string {
 	return hex.EncodeToString(b[:])
 }
 
-// ApplyEntry applies the batch of the log entry at index: its statements,
-// in one transaction with the store's applied index. An entry at or below
-// the applied index was applied before, as on a restart, which replays the
-// entries after the last snapshot, and is skipped. A batch from another
-// schema version is ErrOtherSchema, and nothing is applied. Only the Raft
-// FSM calls it, one entry at a time.
+// ApplyEntry applies the log entry at index, in one transaction with the
+// store's applied index: a batch's statements, or a step's migration
+// (docs/ha.md#applying-entries). An entry at or below the applied index was
+// applied before, as on a restart, which replays the entries after the last
+// snapshot, and is skipped, whatever its version. A batch recorded at
+// another schema version than the store's, a step from another version or
+// to one this build does not know, and a format it does not know are
+// ErrOtherSchema, and nothing is applied. Only the Raft FSM calls it, one
+// entry at a time.
 func (s *Store) ApplyEntry(ctx context.Context, index uint64, data []byte) error {
-	b, err := DecodeBatch(data)
+	format, err := entryFormat(data)
 	if err != nil {
 		return err
 	}
-	if b.Schema != SchemaVersion {
-		return fmt.Errorf("%w: entry %d was written at schema version %d, and this build is at %d; run the same hivemind on every server",
-			ErrOtherSchema, index, b.Schema, SchemaVersion)
+	var b Batch
+	var step Step
+	switch format {
+	case formatBatch:
+		b, err = DecodeBatch(data)
+	case formatStep:
+		step, err = DecodeStep(data)
+	default:
+		return fmt.Errorf("%w: entry %d is of format %d, which this build does not know: upgrade this server's hivemind", ErrOtherSchema, index, format)
+	}
+	if err != nil {
+		return err
 	}
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
@@ -194,9 +209,28 @@ func (s *Store) ApplyEntry(ctx context.Context, index uint64, data []byte) error
 	if index <= uint64(applied) {
 		return nil
 	}
-	for i, st := range b.Stmts {
-		if _, err := tx.ExecContext(ctx, st.SQL, st.Args...); err != nil {
-			return fmt.Errorf("entry %d, statement %d of %d (%s): %w", index, i+1, len(b.Stmts), firstSQLLine(st.SQL), err)
+	have := s.Schema()
+	switch format {
+	case formatBatch:
+		if b.Schema != have {
+			return fmt.Errorf("%w: entry %d was recorded at schema version %d, and this server's store is at %d, of the versions %d to %d this hivemind runs (docs/ha.md#rolling-upgrades)",
+				ErrOtherSchema, index, b.Schema, have, s.oldest, len(s.migs))
+		}
+		for i, st := range b.Stmts {
+			if _, err := tx.ExecContext(ctx, st.SQL, st.Args...); err != nil {
+				return fmt.Errorf("entry %d, statement %d of %d (%s): %w", index, i+1, len(b.Stmts), firstSQLLine(st.SQL), err)
+			}
+		}
+	case formatStep:
+		switch {
+		case step.From != have:
+			return fmt.Errorf("%w: entry %d moves the schema from version %d, and this server's store is at %d", ErrOtherSchema, index, step.From, have)
+		case step.To > len(s.migs):
+			return fmt.Errorf("%w: entry %d moves the schema to version %d, and this hivemind knows up to %d: upgrade this server's hivemind (docs/ha.md#rolling-upgrades)",
+				ErrOtherSchema, index, step.To, len(s.migs))
+		}
+		if err := runMigrations(ctx, tx, s.migs, step.From, step.To); err != nil {
+			return fmt.Errorf("entry %d: %w", index, err)
 		}
 	}
 	if _, err := tx.ExecContext(ctx, `UPDATE raft_applied SET idx = ? WHERE id = 1`, int64(index)); err != nil {
@@ -205,10 +239,54 @@ func (s *Store) ApplyEntry(ctx context.Context, index uint64, data []byte) error
 	if err := tx.Commit(); err != nil {
 		return err
 	}
+	if format == formatStep {
+		s.schema.Store(int64(step.To))
+		if s.log != nil {
+			logMigrated(s.log, step.From, step.To)
+		}
+		// Every cache is read again under the new schema.
+		s.dropCaches()
+		return nil
+	}
 	if b.Origin != s.origin || b.Seq == 0 || b.Seq != s.awaiting.Load() {
 		s.dropCaches()
 	}
 	return nil
+}
+
+// StepSchema appends to the log the step of the schema from the store's
+// version to the next (docs/ha.md#the-step), and returns once this store has
+// applied it, with the version the store is at then. The caller has made
+// sure that every server can apply it. It runs under the write lock, as a
+// transaction of its own, so no batch recorded at the old version comes
+// after it in the log. A store at the newest version this build knows
+// does nothing.
+func (s *Store) StepSchema(ctx context.Context) (int, error) {
+	s.writeMu.Lock()
+	defer s.writeMu.Unlock()
+	r := s.repl.Load()
+	if r == nil {
+		return s.Schema(), errors.New("store: the schema of a store that does not replicate moves when it opens")
+	}
+	have := s.Schema()
+	if have >= len(s.migs) {
+		return have, nil
+	}
+	term, err := r.CanWrite()
+	if err != nil {
+		return have, err
+	}
+	seq := s.seq.Add(1)
+	s.awaiting.Store(seq)
+	err = r.Replicate(ctx, term, EncodeStep(Step{From: have, To: have + 1, Origin: s.origin, Seq: seq}))
+	s.awaiting.Store(0)
+	if err != nil {
+		if !errors.Is(err, ErrNotLeader) {
+			s.dropCaches()
+		}
+		return s.Schema(), err
+	}
+	return s.Schema(), nil
 }
 
 // AppliedIndex is the index of the last log entry the store applied.
@@ -249,21 +327,36 @@ func (s *Store) RaiseAppliedIndex(ctx context.Context, idx uint64) error {
 
 // LoadSnapshot replaces every row of the store with those of the store
 // file at path, a snapshot SnapshotTo wrote, in one transaction: the Raft
-// FSM's restore. The file must be at this build's schema version.
+// FSM's restore. The file must be at the store's schema version, or at a
+// later one that this build runs, which the store is migrated to first
+// (docs/ha.md#applying-entries): a snapshot replaces every row, so the
+// migration's own changes to them do not matter.
 func (s *Store) LoadSnapshot(ctx context.Context, path string) error {
 	info, err := InspectFile(ctx, path)
 	if err != nil {
 		return err
 	}
-	if info.SchemaVersion != SchemaVersion {
-		return fmt.Errorf("%w: the snapshot is at schema version %d, and this build is at %d; run the same hivemind on every server",
-			ErrOtherSchema, info.SchemaVersion, SchemaVersion)
+	have := s.Schema()
+	switch {
+	case info.SchemaVersion < have:
+		return fmt.Errorf("%w: the snapshot is at schema version %d, older than this server's store at %d", ErrOtherSchema, info.SchemaVersion, have)
+	case info.SchemaVersion > len(s.migs):
+		return fmt.Errorf("%w: the snapshot is at schema version %d, and this hivemind knows up to %d: upgrade this server's hivemind (docs/ha.md#rolling-upgrades)",
+			ErrOtherSchema, info.SchemaVersion, len(s.migs))
 	}
 	if strings.ContainsAny(path, "?#") {
 		return fmt.Errorf("%w: snapshot path %q has ? or #", ErrInvalid, path)
 	}
 	if _, err := os.Stat(path); err != nil {
 		return err
+	}
+	if info.SchemaVersion > have {
+		to := info.SchemaVersion
+		v, err := migrateWith(ctx, s.db, s.migs, func(int, bool) (int, error) { return to, nil }, s.log)
+		if err != nil {
+			return fmt.Errorf("migrating the store to the snapshot's schema version %d: %w", to, err)
+		}
+		s.schema.Store(int64(v))
 	}
 	conn, err := s.db.Conn(ctx)
 	if err != nil {
@@ -396,7 +489,20 @@ func (s *Store) dropCaches() {
 	if err := s.reloadRemoved(context.Background()); err != nil && s.log != nil {
 		s.log.Warn("reading the removed nodes again", "err", err)
 	}
+	// What the leader kept in memory is its own: a server that takes the
+	// leadership, or loses it, starts from the stored leases (lease.go).
+	s.forgetKept()
+	if f := s.onForeign.Load(); f != nil {
+		(*f)()
+	}
 }
+
+// OnForeignChange makes f run each time rows may have changed that this
+// process did not write: after an entry from another server, a snapshot,
+// a write whose outcome is not known, and when this server takes the
+// leadership. f must not block; the CA rotation manager uses it to look at
+// the store's record again. A later call replaces f.
+func (s *Store) OnForeignChange(f func()) { s.onForeign.Store(&f) }
 
 // reloadRemoved reads the denylist from the read pool, which sees every
 // commit.

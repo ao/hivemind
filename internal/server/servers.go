@@ -29,6 +29,15 @@ type ServerEntry struct {
 	// LastContact is when the server that answered last heard from this
 	// one; none for one it has not heard from, or cannot tell.
 	LastContact *time.Time `json:"last_contact,omitempty"`
+	// Version is the server's release (docs/ha.md, rolling upgrades):
+	// from its answer to the leader's build request, or, when
+	// VersionFrom is "node", the version its node last sent, for a build
+	// that does not answer it. SchemaOldest and SchemaNewest are the schema
+	// versions its build runs, when it said.
+	Version      string `json:"version,omitempty"`
+	VersionFrom  string `json:"version_from,omitempty"`
+	SchemaOldest int    `json:"schema_oldest,omitempty"`
+	SchemaNewest int    `json:"schema_newest,omitempty"`
 }
 
 // ServersReply is the reply to GET /v1/servers.
@@ -40,6 +49,13 @@ type ServersReply struct {
 	Servers    []ServerEntry `json:"servers"`
 	// Note says what the list cannot, such as that there is no leader.
 	Note string `json:"note,omitempty"`
+	// Schema is the store's schema version on the server that answered.
+	// SchemaNext is the next version, when the leader's build knows one,
+	// and SchemaWaits names the servers that do not run it yet, with why:
+	// the leader moves the store to it once every server does.
+	Schema      int    `json:"schema,omitempty"`
+	SchemaNext  int    `json:"schema_next,omitempty"`
+	SchemaWaits string `json:"schema_waits,omitempty"`
 }
 
 // ServerRemoval is the reply to DELETE /v1/servers/{id}.

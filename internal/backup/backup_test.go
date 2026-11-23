@@ -439,7 +439,7 @@ func TestRestoreMigratesOlderSchema(t *testing.T) {
 	// migration 9 made, with app_routes.
 	snap := editSnapshot(s.st, `DROP TABLE servers`, `DROP TABLE raft_applied`, `ALTER TABLE join_tokens DROP COLUMN role`,
 		`DROP TABLE ca_rotation_nodes`, `DROP TABLE ca_rotation`,
-		`ALTER TABLE cluster DROP COLUMN epoch`, `ALTER TABLE nodes DROP COLUMN dials`,
+		`ALTER TABLE cluster DROP COLUMN ca_fp`, `ALTER TABLE cluster DROP COLUMN epoch`, `ALTER TABLE nodes DROP COLUMN dials`,
 		`ALTER TABLE rollouts DROP COLUMN step_seen`, `ALTER TABLE nodes DROP COLUMN version`, `ALTER TABLE apps DROP COLUMN origin`,
 		`DROP TABLE registries`, `DROP TABLE tls_locks`, `DROP TABLE tls_storage`, `DROP TABLE app_routes`,
 		`ALTER TABLE container_status DROP COLUMN route_ports`, `ALTER TABLE nodes DROP COLUMN address`,

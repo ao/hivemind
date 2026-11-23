@@ -127,6 +127,10 @@ type Agent struct {
 	// server until the next pass starts, while Run waits out the backoff,
 	// so ServerAnswered knows to end the wait.
 	backingOff atomic.Bool
+	// reported is when the last report the server took was sent, in Unix
+	// nanoseconds: the heartbeat skips a renewal that follows one within
+	// Heartbeat, as the report renewed the lease (docs/ha.md#fewer-raft-entries).
+	reported atomic.Int64
 
 	// mu makes one pass at a time, and guards the fields below.
 	mu       sync.Mutex
@@ -351,12 +355,22 @@ func (a *Agent) Run(ctx context.Context) error {
 func (a *Agent) heartbeat(ctx context.Context, lr LeaseRenewer) {
 	t := time.NewTicker(a.cfg.Heartbeat)
 	defer t.Stop()
+	renewed := false
 	for {
 		select {
 		case <-ctx.Done():
 			return
 		case <-t.C:
 		}
+		// A report the server took within the last Heartbeat renewed the
+		// lease; renewing it again would be one more request, and on a
+		// cluster of several, possibly one more Raft entry. The first
+		// renewal is never skipped: against a server without the route it
+		// is the one that finds out, and says so once, at the start.
+		if renewed && time.Since(time.Unix(0, a.reported.Load())) < a.cfg.Heartbeat {
+			continue
+		}
+		renewed = true
 		err := lr.RenewLease(ctx, a.cfg.NodeID)
 		switch {
 		case err == nil:
@@ -632,9 +646,11 @@ func (a *Agent) Reconcile(ctx context.Context) error {
 }
 
 func (a *Agent) report(ctx context.Context, st []store.Status) error {
+	sent := time.Now()
 	if err := a.cfg.Source.ReportStatus(ctx, a.cfg.NodeID, st); err != nil {
 		return fmt.Errorf("reporting status: %w", err)
 	}
+	a.reported.Store(sent.UnixNano())
 	return nil
 }
 

@@ -1,6 +1,8 @@
 #!/usr/bin/env bash
 # raft-rate.sh REPO [SECONDS [LABEL]]: the Raft entries a steady cluster of three
-# servers and two workers appends, built from the tree at REPO. 50 apps of
+# servers and WORKERS workers (2 by default) appends, built from the tree at
+# REPO, which may be another release's source, as .scratch/hivemind-v2.3.0-src
+# (scripts/integration-haops.sh). 50 apps of
 # 2 replicas that no node can take (64 CPUs each) wait as pending, as the
 # eighth soak's write-load's did; nothing writes through the API in the
 # window. Prints, for each server, the entries and bytes appended in the
@@ -14,7 +16,8 @@ LABEL=${3:-$(basename "$REPO")}
 # shellcheck source=/dev/null
 . "$REPO/scripts/lib/cluster.sh"
 cl_init raftrate
-for _ in 1 2 3 4 5; do cl_add_node; done
+WORKERS=${WORKERS:-2}
+for _ in $(seq 1 $((3 + WORKERS))); do cl_add_node; done
 cl_trap_cleanup
 S=("${CL_NAMES[0]}" "${CL_NAMES[1]}" "${CL_NAMES[2]}")
 cl_start_nodes
@@ -37,7 +40,7 @@ for c in "${CL_NAMES[@]:3}"; do
 	tok=$(hm 0 join-token --ttl 1h 2>/dev/null)
 	docker exec -d -e "HM_TOKEN=$tok" "$c" sh -c "exec hivemind join ${IP[0]}:4484 --token \"\$HM_TOKEN\" >>/var/log/hivemind.log 2>&1"
 done
-nodes_ready() { [ "$(hm 0 nodes | grep -c ' ready ')" -eq 5 ]; }
+nodes_ready() { [ "$(hm 0 nodes | grep -c ' ready ')" -eq $((3 + WORKERS)) ]; }
 wait_for 120 nodes_ready || cl_fail "not every node is ready: $(hm 0 nodes)"
 for n in $(seq 1 50); do
 	printf 'name: big%d\nimage: nginx:alpine\nreplicas: 2\nresources:\n  cpu: 64\n' "$n" | hm 0 deploy -f - >/dev/null
