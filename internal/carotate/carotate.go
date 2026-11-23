@@ -314,22 +314,43 @@ func (m *Manager) settleFiles(caFP [32]byte, known bool) error {
 				return m.renameNext()
 			}
 		}
+		// A server that stopped between renameNext's two renames has the
+		// cluster CA's key in ca.key already, and its certificate still in
+		// ca-next.crt: the second rename is what is left to do.
+		if _, kerr := os.Lstat(filepath.Join(m.dir, pki.NextCAKeyFile)); errors.Is(kerr, fs.ErrNotExist) {
+			half, err := pki.LoadCAFiles(m.dir, pki.NextCACertFile, pki.CAKeyFile)
+			if err == nil && half.Fingerprint() == caFP {
+				m.log.Info("the end of a CA rotation stopped between its two renames: ca-next.crt is the cluster CA, the key already in ca.key, and replaces ca.crt",
+					"ca", short(caFP))
+				return m.renameNext()
+			}
+		}
 	}
 	return m.removeOrphan()
 }
 
 // nextFiles returns the new CA of the rotation rp from ca-next.key and
 // ca-next.crt, which it writes from the record's sealed copy first when
-// they are not there. Files of another CA than the record's are an error.
+// they are not there, or do not load as a pair: a write of them that
+// stopped between the two files, or before they were synced, leaves one of
+// them, or part of one. Files of another CA than the record's are an error.
 func (m *Manager) nextFiles(ctx context.Context, cur *pki.CA, rp *store.CARotation) (*pki.CA, error) {
 	_, kerr := os.Lstat(filepath.Join(m.dir, pki.NextCAKeyFile))
 	_, cerr := os.Lstat(filepath.Join(m.dir, pki.NextCACertFile))
-	if errors.Is(kerr, fs.ErrNotExist) && errors.Is(cerr, fs.ErrNotExist) {
+	none := errors.Is(kerr, fs.ErrNotExist) && errors.Is(cerr, fs.ErrNotExist)
+	var loadErr error
+	if !none {
+		_, loadErr = pki.LoadNextCA(m.dir)
+	}
+	if none || loadErr != nil {
 		rc, err := m.st.GetCARotationCA(ctx)
 		if err != nil {
 			return nil, err
 		}
 		if rc.Empty() {
+			if !none {
+				return nil, fmt.Errorf("the store records a CA rotation, and the new CA in %s cannot be read: %w; restore the data directory from a backup", m.dir, loadErr)
+			}
 			return nil, fmt.Errorf("the store records a CA rotation, and %s has neither the new CA's files nor the record a copy of it; "+
 				"restore the data directory from a backup", m.dir)
 		}
@@ -343,6 +364,14 @@ func (m *Manager) nextFiles(ctx context.Context, cur *pki.CA, rp *store.CARotati
 		}
 		if next.Fingerprint() != rp.NextFP {
 			return nil, fmt.Errorf("the new CA in the CA rotation's record is %s, and the record names %s", short(next.Fingerprint()), short(rp.NextFP))
+		}
+		if !none {
+			m.log.Warn("the new CA's files do not load, and are written again from the CA rotation's record", "error", loadErr.Error())
+			for _, name := range []string{pki.NextCAKeyFile, pki.NextCACertFile} {
+				if err := os.Remove(filepath.Join(m.dir, name)); err != nil && !errors.Is(err, fs.ErrNotExist) {
+					return nil, err
+				}
+			}
 		}
 		if _, err := pki.WriteNextCAFiles(m.dir, []byte(rc.CertPEM), keyPEM); err != nil {
 			return nil, fmt.Errorf("writing the new CA's files from the CA rotation's record: %w", err)
@@ -709,6 +738,9 @@ func (m *Manager) Observe(ctx context.Context, node string, trusts [][32]byte, s
 			"certificate and hivemind ca rotate finish, and must be upgraded, removed, or cut off with finish --force", "node", node)
 	case n.Trusts && !old.Trusts:
 		m.log.Info("a node trusts "+towardCA(s.rot), "node", node, "ca", short(toFP), "leaving", short(fromFP))
+	case seen && old.Trusts && !n.Trusts:
+		m.log.Warn("a node that trusted "+towardCA(s.rot)+" sent a request that does not list it", "node", node, "ca", short(toFP),
+			"lists", len(trusts))
 	}
 	if n.Renewed && !old.Renewed {
 		m.log.Info("a node presents a certificate from "+towardCA(s.rot), "node", node, "ca", short(toFP), "leaving", short(fromFP))

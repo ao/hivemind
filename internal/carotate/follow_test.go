@@ -458,3 +458,88 @@ func TestStartRefusals(t *testing.T) {
 		t.Fatalf("start with several servers at schema version %d: %v", st.Schema(), err)
 	}
 }
+
+// TestNextFilesHalfWritten: a server that stopped while it wrote its copy of
+// the new CA, with one file of the pair left or a key cut short, writes the
+// pair again from the rotation's record at its next start.
+func TestNextFilesHalfWritten(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		cut  func(t *testing.T, dir string)
+	}{
+		{"the key alone", func(t *testing.T, dir string) {
+			if err := os.Remove(filepath.Join(dir, pki.NextCACertFile)); err != nil {
+				t.Fatal(err)
+			}
+		}},
+		{"the certificate alone", func(t *testing.T, dir string) {
+			if err := os.Remove(filepath.Join(dir, pki.NextCAKeyFile)); err != nil {
+				t.Fatal(err)
+			}
+		}},
+		{"a key cut short", func(t *testing.T, dir string) {
+			if err := os.Truncate(filepath.Join(dir, pki.NextCAKeyFile), 0); err != nil {
+				t.Fatal(err)
+			}
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			c := newCluster(t, 2)
+			ctx := context.Background()
+			l, f := c.servers[0], c.servers[1]
+			if _, err := l.m.Start(ctx); err != nil {
+				t.Fatal(err)
+			}
+			next := l.m.Next().Fingerprint()
+			if err := c.follow(f); err != nil {
+				t.Fatal(err)
+			}
+			tc.cut(t, f.dir)
+			m, err := Open(ctx, Options{Dir: f.dir, Store: f.st, LocalNode: f.id, Logger: slog.New(slog.NewTextHandler(c.logs, nil))})
+			if err != nil {
+				t.Fatalf("the server's next start: %v", err)
+			}
+			if _, n := files(t, f); n != next || m.Next() == nil || m.Next().Fingerprint() != next {
+				t.Fatalf("ca-next after the start: %x", n[:4])
+			}
+		})
+	}
+}
+
+// TestEndBetweenRenames: a server that stopped between the two renames of a
+// rotation's end, with the new key in ca.key and the new certificate still
+// in ca-next.crt, does the second rename when it follows a store whose
+// rotation has ended.
+func TestEndBetweenRenames(t *testing.T) {
+	c := newCluster(t, 2)
+	ctx := context.Background()
+	l, f := c.servers[0], c.servers[1]
+	if _, err := l.m.Start(ctx); err != nil {
+		t.Fatal(err)
+	}
+	next := l.m.Next().Fingerprint()
+	if err := c.follow(f); err != nil {
+		t.Fatal(err)
+	}
+	for _, id := range []string{f.id, "node-w"} {
+		if err := l.m.Observe(ctx, id, [][32]byte{l.m.Current().Fingerprint(), next}, true, next); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if _, err := l.m.Renew(ctx, false); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := l.m.Finish(ctx, false); err != nil {
+		t.Fatal(err)
+	}
+	// The follower's first rename, and no second.
+	if err := os.Rename(filepath.Join(f.dir, pki.NextCAKeyFile), filepath.Join(f.dir, pki.CAKeyFile)); err != nil {
+		t.Fatal(err)
+	}
+	if err := c.follow(f); err != nil {
+		t.Fatalf("follows after a stop between the renames: %v", err)
+	}
+	if cur, n := files(t, f); cur != next || n != ([32]byte{}) {
+		t.Fatalf("the files after: %x %x", cur[:4], n[:4])
+	}
+}
