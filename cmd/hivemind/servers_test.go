@@ -179,6 +179,41 @@ func TestCLITakesAListOfServers(t *testing.T) {
 	}
 }
 
+// TestServersWithoutALeaderExitsNonZero: hivemind servers, answered by a
+// server that knows no leader, prints the list it has and then fails,
+// saying why, so that a script can tell; with --json too. With a leader
+// it succeeds. The fifth acceptance run found it exited 0.
+func TestServersWithoutALeaderExitsNonZero(t *testing.T) {
+	isolate(t)
+	var leads atomic.Bool
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		leader, note := "", `"no leader: this server reaches 1 of the 3 servers, and a write needs 2; running containers are not affected"`
+		if leads.Load() {
+			leader, note = "node-a", `""`
+		}
+		_, _ = fmt.Fprintf(w, `{"leader":%q,"answered_by":"node-c","note":%s,"servers":[{"id":"node-a","advertise":"10.0.0.5","node_port":4484,"role":"follower"},`+
+			`{"id":"node-c","advertise":"10.0.0.7","node_port":4484,"role":"follower"}]}`, leader, note)
+	}))
+	defer ts.Close()
+	const want = "no leader, as node-c sees it: this server reaches 1 of the 3 servers, and a write needs 2; running containers are not affected"
+	out, _, err := run(t, "", "servers", "--server", ts.URL, "--token", "tok")
+	if err == nil || err.Error() != want || exitCode(err) != 1 {
+		t.Fatalf("servers without a leader: %v, want %q and exit status 1", err, want)
+	}
+	if !strings.Contains(out, "node-a") || !strings.Contains(out, "10.0.0.7:4484") || strings.Contains(out, "No leader") {
+		t.Fatalf("servers without a leader printed:\n%s", out)
+	}
+	out, _, err = run(t, "", "servers", "--json", "--server", ts.URL, "--token", "tok")
+	if err == nil || err.Error() != want || !strings.Contains(out, `"leader": ""`) || !strings.Contains(out, `"answered_by": "node-c"`) {
+		t.Fatalf("servers --json without a leader: %v\n%s", err, out)
+	}
+	leads.Store(true)
+	if out, _, err := run(t, "", "servers", "--server", ts.URL, "--token", "tok"); err != nil || !strings.Contains(out, "node-c") {
+		t.Fatalf("servers with a leader: %v\n%s", err, out)
+	}
+}
+
 // TestServeRefusesAServerWithoutItsRaftState: a store that lists the
 // servers of a cluster of several, in a data directory without Raft
 // state, is refused, rather than served as a second cluster.

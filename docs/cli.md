@@ -1172,7 +1172,9 @@ LAST CONTACT is how long ago the server that answered last heard from each
 one: the leader hears from every follower at each heartbeat. "-" is never,
 or another follower, which a follower cannot tell. When no server leads, as
 while a majority is down, the server asked answers from its own copy of the
-configuration, and a line after the table says there is no leader and why.
+configuration: the command prints it, then an error that says there is no
+leader and why, and exits with status 1. With --json it prints the JSON,
+whose "leader" is empty and whose "note" says why, and exits with status 1.
 
 ```
 hivemind servers [flags]

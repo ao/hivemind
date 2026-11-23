@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"io"
 	"net/url"
+	"strings"
 	"text/tabwriter"
 	"time"
 
@@ -35,7 +36,9 @@ LAST CONTACT is how long ago the server that answered last heard from each
 one: the leader hears from every follower at each heartbeat. "-" is never,
 or another follower, which a follower cannot tell. When no server leads, as
 while a majority is down, the server asked answers from its own copy of the
-configuration, and a line after the table says there is no leader and why.`,
+configuration: the command prints it, then an error that says there is no
+leader and why, and exits with status 1. With --json it prints the JSON,
+whose "leader" is empty and whose "note" says why, and exits with status 1.`,
 		Args: cobra.NoArgs,
 	}
 	cf := addClientFlags(cmd)
@@ -49,12 +52,29 @@ configuration, and a line after the table says there is no leader and why.`,
 			return olderServer(err, "servers command", "2.3.0")
 		}
 		if cf.json {
-			return printJSON(cmd.OutOrStdout(), rep)
+			if err := printJSON(cmd.OutOrStdout(), rep); err != nil {
+				return err
+			}
+		} else {
+			printServers(cmd.OutOrStdout(), rep, time.Now())
 		}
-		printServers(cmd.OutOrStdout(), rep, time.Now())
-		return nil
+		return noLeaderIn(rep)
 	}
 	return cmd
+}
+
+// noLeaderIn is the error of servers when the server that answered knows
+// no leader, so that a script can tell: the fifth acceptance run found
+// that servers exited 0 then, with a line after the table.
+func noLeaderIn(rep server.ServersReply) error {
+	if rep.Leader != "" {
+		return nil
+	}
+	why := strings.TrimPrefix(strings.TrimPrefix(rep.Note, "no leader"), ": ")
+	if why == "" {
+		return fmt.Errorf("no leader, as %s sees it", termSafe(rep.AnsweredBy))
+	}
+	return fmt.Errorf("no leader, as %s sees it: %s", termSafe(rep.AnsweredBy), termSafe(why))
 }
 
 func printServers(out io.Writer, rep server.ServersReply, now time.Time) {
@@ -79,10 +99,8 @@ func printServers(out io.Writer, rep server.ServersReply, now time.Time) {
 			termSafe(s.Role), termSafe(ver), contact)
 	}
 	tw.Flush()
-	switch {
-	case rep.Leader == "":
-		fmt.Fprintf(out, "\nNo leader, as %s sees it: %s\n", termSafe(rep.AnsweredBy), termSafe(firstNonEmpty(rep.Note, "no server leads")))
-	case rep.Note != "":
+	// Without a leader, the note is the command's error (noLeaderIn).
+	if rep.Leader != "" && rep.Note != "" {
 		fmt.Fprintf(out, "\n%s.\n", termSafe(rep.Note))
 	}
 	switch {
