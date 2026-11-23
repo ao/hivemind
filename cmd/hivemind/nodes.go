@@ -392,7 +392,11 @@ no node can take it. A replica with a volume keeps running on the node.
 If the node is lost during the drain, because its lease went 15 s without a
 renewal, its replicas without a volume are placed again at once, as on any
 node loss. The result counts them apart from those moved and stopped, and
-says when the node was lost.
+says when the node was lost. A lost node's drain is done once only
+replicas with a volume are left on it, without waiting for the containers
+it last reported, which no agent stops while it is away: a drain of a node
+that is lost already, as one whose server was removed while it was down,
+is done at once.
 
 The command waits, and prints progress, until the drain is done. Ctrl-C stops
 the waiting, not the drain. --no-wait returns at once. drain on a node that is
@@ -538,7 +542,13 @@ func (p *drainPrinter) finish(d server.DrainView) {
 			fmt.Fprintf(p.out, "  %s/%d: %s\n", termSafe(b.App), b.Index, termSafe(b.Reason))
 		}
 	}
-	if d.OldContainers > 0 {
+	switch {
+	case d.OldContainers > 0 && d.LostAt != nil:
+		// A lost node's drain ends without them: they are what it last
+		// reported, and no agent stops them while it is away.
+		fmt.Fprintf(p.out, "  the node last reported %d old %s: its agent removes them if the node comes back, and until then they may still run on its machine\n",
+			d.OldContainers, plural(d.OldContainers, "container", "containers"))
+	case d.OldContainers > 0:
 		fmt.Fprintf(p.out, "  the node's agent is stopping %d old %s\n", d.OldContainers, plural(d.OldContainers, "container", "containers"))
 	}
 }
