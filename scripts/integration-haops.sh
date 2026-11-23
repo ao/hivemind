@@ -371,13 +371,15 @@ writer() {
 # expected I: the hosts writer I's logins put in the store and its
 # logouts did not take out, by acknowledged writes; gone I: those an
 # acknowledged logout took out. A write that failed may or may not have
-# been applied, and is in neither.
+# been applied, and is in neither: a login that failed may even be applied
+# after the logout that came after it, so its host is not in gone either.
 expected() {
 	docker exec "${S[$1]}" awk -v w="$WPREFIX$1" '$1 == "ok" && $2 == "login" { in_[$3] = 1 } $2 == "logout" { out[$3] = 1 }
 		END { for (k in in_) if (!(k in out)) print w "-" k ".haops.test" }' /tmp/w.out
 }
 gone() {
-	docker exec "${S[$1]}" awk -v w="$WPREFIX$1" '$1 == "ok" && $2 == "logout" { print w "-" $3 ".haops.test" }' /tmp/w.out
+	docker exec "${S[$1]}" awk -v w="$WPREFIX$1" '$1 == "fail" && $2 == "login" { failed[$3] = 1 } $1 == "ok" && $2 == "logout" { out[$3] = 1 }
+		END { for (k in out) if (!(k in failed)) print w "-" k ".haops.test" }' /tmp/w.out
 }
 start_load() {
 	local i
