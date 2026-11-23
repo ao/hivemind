@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -244,6 +245,52 @@ func TestServeRefusesAServerWithoutItsRaftState(t *testing.T) {
 	err = runServe(ctx, cfg, log, newMemRuntime())
 	if err == nil || !strings.Contains(err.Error(), "has no Raft state") || !strings.Contains(err.Error(), "hivemind restore") {
 		t.Fatalf("serve of a server's store without its Raft state: %v", err)
+	}
+}
+
+// TestServeOfAStoreWithoutACluster: serve on a data directory with no
+// store says to run init or join, and makes no store, which a server join
+// would then refuse; on one whose store has no cluster record, as serve
+// made one before, it says to empty the directory to join, or to run init
+// for a new cluster. The fifth acceptance run stopped a server join early;
+// the unit's serve then made a store and said to run init, and the next
+// join refused the directory.
+func TestServeOfAStoreWithoutACluster(t *testing.T) {
+	isolate(t)
+	data := filepath.Join(t.TempDir(), "data")
+	if err := os.MkdirAll(data, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	ctx := context.Background()
+	env := map[string]string{"HIVEMIND_DATA_DIR": data, "HIVEMIND_API_ADDR": "127.0.0.1:" + strconv.Itoa(unusedPort(t))}
+	cfg, err := config.Load(nil, config.Options{Lookup: func(k string) (string, bool) { v, ok := env[k]; return v, ok }})
+	if err != nil {
+		t.Fatal(err)
+	}
+	log, err := newLogger(cfg, io.Discard)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := runServe(ctx, cfg, log, newMemRuntime()); err == nil ||
+		err.Error() != "no cluster in "+data+": run `hivemind init` first, or hivemind join to join this machine to a cluster" {
+		t.Fatalf("serve of an empty data directory: %v", err)
+	}
+	if _, err := os.Lstat(filepath.Join(data, storeFileName)); !errors.Is(err, fs.ErrNotExist) {
+		t.Fatalf("serve of an empty data directory made a store: %v", err)
+	}
+	if err := checkEmptyForServer(data); err != nil {
+		t.Fatalf("a server join refuses the directory serve left: %v", err)
+	}
+	// What serve made before: a store, and nothing else.
+	st, err := store.Open(ctx, filepath.Join(data, storeFileName))
+	if err != nil {
+		t.Fatal(err)
+	}
+	st.Close()
+	err = runServe(ctx, cfg, log, newMemRuntime())
+	if err == nil || err.Error() != "the store in "+data+" holds no cluster: run `hivemind init` for a new cluster, or, to join this machine to a cluster, empty "+
+		data+" and run hivemind join" {
+		t.Fatalf("serve of a store without a cluster: %v", err)
 	}
 }
 

@@ -546,6 +546,17 @@ func runServe(ctx context.Context, cfg *config.Config, log *slog.Logger, rt runt
 		// the log once every server runs the next one (docs/ha.md#rolling-upgrades).
 		opts = append(opts, store.WithHeldSchema())
 	}
+	if !several {
+		// serve makes no store where there is none: the store it made in
+		// an empty data directory then refused a server join there, as
+		// a cluster's (the fifth acceptance run's eighth finding: a join
+		// stopped early, then the unit's serve).
+		if _, err := os.Lstat(filepath.Join(cfg.DataDir, storeFileName)); errors.Is(err, fs.ErrNotExist) {
+			return fmt.Errorf("no cluster in %s: run `hivemind init` first, or hivemind join to join this machine to a cluster", cfg.DataDir)
+		} else if err != nil {
+			return err
+		}
+	}
 	st, err := store.Open(ctx, filepath.Join(cfg.DataDir, storeFileName), opts...)
 	if err != nil {
 		return err
@@ -583,7 +594,10 @@ func runServe(ctx context.Context, cfg *config.Config, log *slog.Logger, rt runt
 	if !isJoined {
 		cl, err = st.GetCluster(ctx)
 		if errors.Is(err, store.ErrNotFound) {
-			return fmt.Errorf("no cluster in %s: run `hivemind init` first", cfg.DataDir)
+			// As the serve of a build before 2.4.0 left in an empty data
+			// directory, which join refuses.
+			return fmt.Errorf("the store in %s holds no cluster: run `hivemind init` for a new cluster, or, to join this machine to a cluster, "+
+				"empty %s and run hivemind join", cfg.DataDir, cfg.DataDir)
 		}
 		if err != nil {
 			return err
