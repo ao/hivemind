@@ -343,7 +343,10 @@ if out=$(docker exec "$S" hivemind logs spread "$IDX_W2" 2>&1); then
 fi
 grep -qF "worker $W2_ID runs a hivemind older than 2.1, which cannot stream logs; upgrade it" <<<"$out" ||
 	cl_fail "logs of the replica on $W2_ID: $out"
-docker exec "$S" hivemind logs spread "$IDX_W1" --tail 3 | grep -q tick || cl_fail "logs of the replica on $W1_ID did not read"
+w1_logs() { docker exec "$S" hivemind logs spread "$IDX_W1" --tail 3 2>/dev/null | grep -q tick; }
+# The relay and the replica's next line can take a while on a slow machine.
+wait_for 30 w1_logs ||
+	cl_fail "logs of the replica on $W1_ID did not read: $(docker exec "$S" hivemind logs spread "$IDX_W1" --tail 3 2>&1)"
 for p in "has no log streaming; upgrade the server" "has no lease renewal between status reports; upgrade the server"; do
 	[ "$(count "$W1" "$p")" -eq 1 ] || cl_fail "$W1 logged \"$p\" again after the upgrade"
 done
