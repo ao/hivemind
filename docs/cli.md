@@ -27,7 +27,7 @@ hivemind
 | `delete` | Delete an app and stop its containers |
 | `deploy` | Create or update an app |
 | `init` | Create a cluster on this machine |
-| `join` | Join a cluster as a worker, then run its agent |
+| `join` | Join a cluster as a worker, or as a server with --role server, and run it |
 | `join-token` | Print a token that lets another machine join this cluster |
 | `logs` | Print a replica's container log |
 | `node` | Manage one node |
@@ -469,7 +469,9 @@ hivemind init [flags]
 
 ### hivemind join
 
-Join a cluster as a worker node and run its agent in the foreground.
+Join a cluster as a worker node and run its agent in the foreground, or,
+with --role server, as another server of the cluster and run the server
+(below).
 
   hivemind join 10.0.0.5 --token-file <file>
 
