@@ -184,11 +184,13 @@ SERVE_ENV=(-e HIVEMIND_TEST_LOCAL_READS=1 -e HIVEMIND_MIN_READY=0s -e HIVEMIND_S
 serve_server() {
 	docker exec -d "${SERVE_ENV[@]}" "${S[$1]}" sh -c "exec ${BIN[$1]} serve --advertise ${SIP[$1]} >>/var/log/hivemind.log 2>&1"
 }
-serving() { docker exec "${S[$1]}" sh -c 'pgrep -x hivemind || pgrep -x hm-old' >/dev/null; }
+# serving I: server I runs serve, or the join of a server; not the CLI the
+# writers run there. The brackets keep pgrep from matching its own shell.
+serving() { docker exec "${S[$1]}" sh -c "pgrep -f '[s]erve --advertise' || pgrep -f '[-]-role server'" >/dev/null; }
 # stop_server I: SIGTERM to server I's serve, as systemctl stop sends, and
 # wait for it to exit.
 stop_server() {
-	docker exec "${S[$1]}" sh -c 'pkill -TERM -x hivemind; pkill -TERM -x hm-old; true'
+	docker exec "${S[$1]}" sh -c "pkill -TERM -f '[s]erve --advertise'; pkill -TERM -f '[-]-role server'; true"
 	local end=$(($(date +%s) + 30))
 	while serving "$1"; do
 		[ "$(date +%s)" -lt "$end" ] || cl_fail "${S[$1]}'s serve did not stop within 30 s of SIGTERM"
