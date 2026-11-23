@@ -433,8 +433,10 @@ func TestRestoreRefusesNewerSchema(t *testing.T) {
 func TestRestoreMigratesOlderSchema(t *testing.T) {
 	s := newServer(t)
 	var b bytes.Buffer
-	// Undo migrations 8 and 7.
-	snap := editSnapshot(s.st, `DROP TABLE drain_blocked`, `DROP TABLE drain_moves`, `DROP TABLE drains`,
+	// Undo migrations 9, 8 and 7.
+	snap := editSnapshot(s.st, `DROP TABLE tls_locks`, `DROP TABLE tls_storage`, `DROP TABLE app_hosts`,
+		`ALTER TABLE container_status DROP COLUMN route_ports`, `ALTER TABLE nodes DROP COLUMN address`,
+		`DROP TABLE drain_blocked`, `DROP TABLE drain_moves`, `DROP TABLE drains`,
 		`ALTER TABLE nodes DROP COLUMN eligible`, `DROP TABLE node_certs`, `UPDATE schema_version SET version = 6`)
 	if _, err := Write(context.Background(), &b, Options{DataDir: s.dir, Snapshot: snap}); err != nil {
 		t.Fatal(err)
@@ -451,6 +453,36 @@ func TestRestoreMigratesOlderSchema(t *testing.T) {
 	defer r.Close()
 	if err := r.RecordNodeCert(context.Background(), workerNode, time.Now()); err != nil {
 		t.Fatalf("the migrated store has no version 7 table: %v", err)
+	}
+	if err := r.TLSStore(context.Background(), "acme/ca/users/a@example.com/a.json", []byte("{}")); err != nil {
+		t.Fatalf("the migrated store has no version 9 table: %v", err)
+	}
+}
+
+// ACME state and certificates are in the store, so a backup carries them
+// and a restore brings them back.
+func TestBackupCarriesTLSStorage(t *testing.T) {
+	s := newServer(t)
+	ctx := context.Background()
+	const key = "certificates/ca/www.example.com/www.example.com.key"
+	if err := s.st.TLSStore(ctx, key, []byte("private key")); err != nil {
+		t.Fatal(err)
+	}
+	var b bytes.Buffer
+	if _, err := Write(ctx, &b, Options{DataDir: s.dir, Snapshot: s.st.SnapshotTo}); err != nil {
+		t.Fatal(err)
+	}
+	dir := filepath.Join(t.TempDir(), "r")
+	if _, err := Restore(ctx, &b, dir); err != nil {
+		t.Fatal(err)
+	}
+	r, err := store.Open(ctx, filepath.Join(dir, StoreName))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer r.Close()
+	if v, err := r.TLSLoad(ctx, key); err != nil || string(v) != "private key" {
+		t.Fatalf("restored TLS key: %q, %v", v, err)
 	}
 }
 

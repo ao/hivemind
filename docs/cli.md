@@ -221,6 +221,8 @@ hivemind init [flags]
 
 | Flag | Type | Default | Environment | Description |
 |---|---|---|---|---|
+| `--acme-ca` | string | `https://acme-v02.api.letsencrypt.org/directory` | `HIVEMIND_ACME_CA` | ACME directory URL the routers get certificates from |
+| `--acme-email` | string | - | `HIVEMIND_ACME_EMAIL` | contact email of the ACME account; required with --route-addr, and setting it accepts the CA's terms |
 | `--advertise` | string | - | `HIVEMIND_ADVERTISE` | IP or host name other nodes use to reach this server; serve opens the cluster listeners on it |
 | `--api-addr` | string | `127.0.0.1:4483` | `HIVEMIND_API_ADDR` | address of the API, host:port |
 | `--api-tls-cert` | string | - | `HIVEMIND_API_TLS_CERT` | TLS certificate for the API (PEM) |
@@ -233,8 +235,11 @@ hivemind init [flags]
 | `--log-format` | string | `text` | `HIVEMIND_LOG_FORMAT` | log format: text or json |
 | `--log-level` | string | `info` | `HIVEMIND_LOG_LEVEL` | log level: debug, info, warn or error |
 | `--metrics-addr` | string | - | `HIVEMIND_METRICS_ADDR` | separate loopback address for /metrics, host:port; empty means API only |
-| `--min-ready` | string | `30s` | - | how long a node must be ready before it gets new replicas; 0s means no wait |
+| `--min-ready` | string | `30s` | `HIVEMIND_MIN_READY` | how long a node must be ready before it gets new replicas; 0s means no wait |
 | `--reconcile-interval` | string | `2s` | `HIVEMIND_RECONCILE_INTERVAL` | how often the agent reconciles containers and renews its lease (at most 5s) |
+| `--route-addr` | string | - | `HIVEMIND_ROUTE_ADDR` | IP address the HTTPS router listens on, such as 0.0.0.0 for every interface; empty means no router on this node |
+| `--route-http-port` | string | `80` | `HIVEMIND_ROUTE_HTTP_PORT` | port of the router's HTTP listener, for ACME HTTP-01 challenges and redirects to https |
+| `--route-https-port` | string | `443` | `HIVEMIND_ROUTE_HTTPS_PORT` | port of the router's HTTPS listener |
 
 ### hivemind join
 
@@ -257,12 +262,20 @@ A joined machine keeps its state. After a restart, run
 "hivemind serve --role worker" with the same data directory. A worker has no
 API listener, so --advertise does not apply to it.
 
+The worker registers the local address of its connection to the server as
+its private address; its routed replicas publish their ports there.
+--route-addr <ip> also runs the HTTPS router on this machine, with
+--acme-email, as on serve. It reads the routing table and keeps its
+certificates through the server.
+
 ```
 hivemind join <server> [flags]
 ```
 
 | Flag | Type | Default | Environment | Description |
 |---|---|---|---|---|
+| `--acme-ca` | string | `https://acme-v02.api.letsencrypt.org/directory` | `HIVEMIND_ACME_CA` | ACME directory URL the routers get certificates from |
+| `--acme-email` | string | - | `HIVEMIND_ACME_EMAIL` | contact email of the ACME account; required with --route-addr, and setting it accepts the CA's terms |
 | `--api-addr` | string | `127.0.0.1:4483` | `HIVEMIND_API_ADDR` | address of the API, host:port |
 | `--api-tls-cert` | string | - | `HIVEMIND_API_TLS_CERT` | TLS certificate for the API (PEM) |
 | `--api-tls-key` | string | - | `HIVEMIND_API_TLS_KEY` | TLS private key for the API (PEM) |
@@ -273,8 +286,11 @@ hivemind join <server> [flags]
 | `--log-format` | string | `text` | `HIVEMIND_LOG_FORMAT` | log format: text or json |
 | `--log-level` | string | `info` | `HIVEMIND_LOG_LEVEL` | log level: debug, info, warn or error |
 | `--metrics-addr` | string | - | `HIVEMIND_METRICS_ADDR` | separate loopback address for /metrics, host:port; empty means API only |
-| `--min-ready` | string | `30s` | - | how long a node must be ready before it gets new replicas; 0s means no wait |
+| `--min-ready` | string | `30s` | `HIVEMIND_MIN_READY` | how long a node must be ready before it gets new replicas; 0s means no wait |
 | `--reconcile-interval` | string | `2s` | `HIVEMIND_RECONCILE_INTERVAL` | how often the agent reconciles containers and renews its lease (at most 5s) |
+| `--route-addr` | string | - | `HIVEMIND_ROUTE_ADDR` | IP address the HTTPS router listens on, such as 0.0.0.0 for every interface; empty means no router on this node |
+| `--route-http-port` | string | `80` | `HIVEMIND_ROUTE_HTTP_PORT` | port of the router's HTTP listener, for ACME HTTP-01 challenges and redirects to https |
+| `--route-https-port` | string | `443` | `HIVEMIND_ROUTE_HTTPS_PORT` | port of the router's HTTPS listener |
 | `--token` | string | - | - | join token from hivemind join-token on the server |
 
 ### hivemind join-token
@@ -541,6 +557,14 @@ it. Other machines join with hivemind join.
 --role worker runs only the agent, for a machine that joined with hivemind
 join. It has no API listener. --role server is the default.
 
+--route-addr <ip> runs the HTTPS router on this node, on that address:
+--route-http-port (80) for ACME HTTP-01 challenges and redirects, and
+--route-https-port (443) for the apps' routes. It may be 0.0.0.0, and it is
+the only listener that may: it serves the apps' public traffic, without
+authentication. It needs --acme-email; --acme-ca chooses the CA (Let's
+Encrypt by default). Without --route-addr there is no router. See
+docs/routing.md.
+
 GET /metrics on the API serves Prometheus metrics and needs the admin token.
 --metrics-addr also serves it, and nothing else, on a separate loopback
 address; that listener needs the token too. Logs go to stderr at
@@ -553,6 +577,8 @@ hivemind serve [flags]
 
 | Flag | Type | Default | Environment | Description |
 |---|---|---|---|---|
+| `--acme-ca` | string | `https://acme-v02.api.letsencrypt.org/directory` | `HIVEMIND_ACME_CA` | ACME directory URL the routers get certificates from |
+| `--acme-email` | string | - | `HIVEMIND_ACME_EMAIL` | contact email of the ACME account; required with --route-addr, and setting it accepts the CA's terms |
 | `--advertise` | string | - | `HIVEMIND_ADVERTISE` | IP or host name other nodes use to reach this server; serve opens the cluster listeners on it |
 | `--api-addr` | string | `127.0.0.1:4483` | `HIVEMIND_API_ADDR` | address of the API, host:port |
 | `--api-tls-cert` | string | - | `HIVEMIND_API_TLS_CERT` | TLS certificate for the API (PEM) |
@@ -564,9 +590,12 @@ hivemind serve [flags]
 | `--log-format` | string | `text` | `HIVEMIND_LOG_FORMAT` | log format: text or json |
 | `--log-level` | string | `info` | `HIVEMIND_LOG_LEVEL` | log level: debug, info, warn or error |
 | `--metrics-addr` | string | - | `HIVEMIND_METRICS_ADDR` | separate loopback address for /metrics, host:port; empty means API only |
-| `--min-ready` | string | `30s` | - | how long a node must be ready before it gets new replicas; 0s means no wait |
+| `--min-ready` | string | `30s` | `HIVEMIND_MIN_READY` | how long a node must be ready before it gets new replicas; 0s means no wait |
 | `--reconcile-interval` | string | `2s` | `HIVEMIND_RECONCILE_INTERVAL` | how often the agent reconciles containers and renews its lease (at most 5s) |
 | `--role` | string | `server` | - | server (API, scheduler and agent) or worker (agent only, after hivemind join) |
+| `--route-addr` | string | - | `HIVEMIND_ROUTE_ADDR` | IP address the HTTPS router listens on, such as 0.0.0.0 for every interface; empty means no router on this node |
+| `--route-http-port` | string | `80` | `HIVEMIND_ROUTE_HTTP_PORT` | port of the router's HTTP listener, for ACME HTTP-01 challenges and redirects to https |
+| `--route-https-port` | string | `443` | `HIVEMIND_ROUTE_HTTPS_PORT` | port of the router's HTTPS listener |
 
 ### hivemind status
 

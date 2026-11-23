@@ -196,5 +196,8 @@ func (s *Server) writeMetrics(r *http.Request, b *bytes.Buffer) error {
 
 	w.Family("hivemind_http_requests_total", "HTTP requests by method, route pattern and status code.", metrics.TypeCounter)
 	s.metrics.requests.Write(w, "hivemind_http_requests_total")
+	if s.cfg.RouterMetrics != nil {
+		s.cfg.RouterMetrics(w)
+	}
 	return w.Flush()
 }

@@ -17,6 +17,9 @@ func validConfig() *Config {
 		LogLevel:          "info",
 		LogFormat:         "text",
 		ReconcileInterval: 2 * time.Second,
+		RouteHTTPPort:     80,
+		RouteHTTPSPort:    443,
+		ACMECA:            DefaultACMECA,
 		Server:            "http://127.0.0.1:4483",
 	}
 }
@@ -122,6 +125,24 @@ func TestValidate(t *testing.T) {
 		{"server ftp rejected", func(c *Config) { c.Server = "ftp://x" }, "must be an http or https URL"},
 		{"server no scheme rejected", func(c *Config) { c.Server = "127.0.0.1:4483" }, "must be an http or https URL"},
 		{"data dir empty rejected", func(c *Config) { c.DataDir = "" }, "data-dir is empty"},
+
+		// the router: the one listener that may bind a wildcard
+		{"no router by default", func(c *Config) {}, ""},
+		{"router on every address", func(c *Config) { c.RouteAddr, c.ACMEEmail = "0.0.0.0", "ops@example.com" }, ""},
+		{"router on ::", func(c *Config) { c.RouteAddr, c.ACMEEmail = "::", "ops@example.com" }, ""},
+		{"router on one address", func(c *Config) { c.RouteAddr, c.ACMEEmail = "10.0.0.5", "ops@example.com" }, ""},
+		{"router needs an email", func(c *Config) { c.RouteAddr = "0.0.0.0" }, "needs --acme-email"},
+		{"router host name rejected", func(c *Config) { c.RouteAddr, c.ACMEEmail = "node1.example.com", "ops@example.com" }, "must be an IP address"},
+		{"router with port rejected", func(c *Config) { c.RouteAddr, c.ACMEEmail = "10.0.0.5:443", "ops@example.com" }, "must be an IP address"},
+		{"email without at", func(c *Config) { c.ACMEEmail = "ops.example.com" }, "not an email address"},
+		{"email with space", func(c *Config) { c.ACMEEmail = "ops @example.com" }, "not an email address"},
+		{"email without domain dot", func(c *Config) { c.ACMEEmail = "ops@localhost" }, "not an email address"},
+		{"acme ca http rejected", func(c *Config) { c.ACMECA = "http://acme.example.com/dir" }, "must be an https URL"},
+		{"acme ca empty rejected", func(c *Config) { c.ACMECA = "" }, "must be an https URL"},
+		{"acme ca pebble ok", func(c *Config) { c.ACMECA = "https://pebble:14000/dir" }, ""},
+		{"route port zero", func(c *Config) { c.RouteHTTPPort = 0 }, "--route-http-port 0"},
+		{"route port high", func(c *Config) { c.RouteHTTPSPort = 70000 }, "--route-https-port 70000"},
+		{"route ports equal", func(c *Config) { c.RouteHTTPPort, c.RouteHTTPSPort = 8443, 8443 }, "must differ"},
 	}
 	for _, tc := range cases {
 		tc := tc

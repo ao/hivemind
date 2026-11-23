@@ -32,6 +32,8 @@ var envFlags = map[string]bool{
 	"config": true, "data-dir": true, "api-addr": true, "advertise": true, "cluster-port": true,
 	"api-tls-cert": true, "api-tls-key": true, "docker-host": true, "log-level": true, "log-format": true,
 	"metrics-addr": true, "reconcile-interval": true, "server": true, "token": true, "client-config": true,
+	"min-ready": true, "route-addr": true, "route-http-port": true, "route-https-port": true, "acme-email": true,
+	"acme-ca": true,
 }
 
 // noEnvAnnotation marks a flag that is read from the command line only,

@@ -153,6 +153,8 @@ jobs:
           - { pkg: ./internal/nodeapi, target: FuzzDecodeStatus }
           - { pkg: ./internal/nodeapi, target: FuzzDecodeAssignments }
           - { pkg: ./internal/nodeapi, target: FuzzDecodeRegister }
+          - { pkg: ./internal/nodeapi, target: FuzzDecodeRoutes }
+          - { pkg: ./internal/nodeapi, target: FuzzDecodeTLSRequest }
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-go@v5
@@ -188,6 +190,16 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - run: ./scripts/integration-cluster.sh
+
+  # HTTPS routing on three nodes with a router each, against Pebble, a test
+  # ACME CA, on the runner's private Docker network.
+  integration-routing:
+    name: Integration (routing)
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - run: ./scripts/integration-routing.sh
 
   # The fault suite on three nodes: kill, partition, slow and flap. It takes
   # about 20 minutes, and its timings are the ones reported in the docs, so it

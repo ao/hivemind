@@ -25,11 +25,14 @@ import (
 	"github.com/ao/hivemind/internal/config"
 	"github.com/ao/hivemind/internal/logging"
 	"github.com/ao/hivemind/internal/logrelay"
+	"github.com/ao/hivemind/internal/metrics"
 	"github.com/ao/hivemind/internal/pki"
+	"github.com/ao/hivemind/internal/router"
 	"github.com/ao/hivemind/internal/runtime"
 	"github.com/ao/hivemind/internal/runtime/docker"
 	"github.com/ao/hivemind/internal/server"
 	"github.com/ao/hivemind/internal/store"
+	"github.com/ao/hivemind/internal/tlsstore"
 	"github.com/ao/hivemind/internal/upgrade"
 )
 
@@ -288,6 +291,14 @@ it. Other machines join with hivemind join.
 --role worker runs only the agent, for a machine that joined with hivemind
 join. It has no API listener. --role server is the default.
 
+--route-addr <ip> runs the HTTPS router on this node, on that address:
+--route-http-port (80) for ACME HTTP-01 challenges and redirects, and
+--route-https-port (443) for the apps' routes. It may be 0.0.0.0, and it is
+the only listener that may: it serves the apps' public traffic, without
+authentication. It needs --acme-email; --acme-ca chooses the CA (Let's
+Encrypt by default). Without --route-addr there is no router. See
+docs/routing.md.
+
 GET /metrics on the API serves Prometheus metrics and needs the admin token.
 --metrics-addr also serves it, and nothing else, on a separate loopback
 address; that listener needs the token too. Logs go to stderr at
@@ -381,8 +392,14 @@ func runServe(ctx context.Context, cfg *config.Config, log *slog.Logger, rt runt
 	if err != nil {
 		return fmt.Errorf("cannot reach Docker at %s: %w", cfg.DockerHost, err)
 	}
+	// The node's private address, where its routed replicas publish their
+	// ports: the cluster listener's address, or loopback without one.
+	nodeAddr, err := serverNodeAddress(ctx, cfg.Advertise)
+	if err != nil {
+		return err
+	}
 	hostname, _ := os.Hostname()
-	if err := st.UpsertNode(ctx, store.Node{ID: cl.NodeID, Name: hostname, CPU: info.NCPU, Memory: info.MemTotal}); err != nil {
+	if err := st.UpsertNode(ctx, store.Node{ID: cl.NodeID, Name: hostname, CPU: info.NCPU, Memory: info.MemTotal, Address: nodeAddr}); err != nil {
 		return err
 	}
 
@@ -409,7 +426,7 @@ func runServe(ctx context.Context, cfg *config.Config, log *slog.Logger, rt runt
 		advanceDrains(context.Background(), st, agentLog, started)
 	}
 	ag, err := agent.New(agent.Config{NodeID: cl.NodeID, Runtime: rt, Source: st,
-		Interval: cfg.ReconcileInterval, Logger: agentLog, OnPass: onPass})
+		Interval: cfg.ReconcileInterval, Logger: agentLog, OnPass: onPass, RouteBind: nodeAddr})
 	if err != nil {
 		return err
 	}
@@ -434,15 +451,32 @@ func runServe(ctx context.Context, cfg *config.Config, log *slog.Logger, rt runt
 	if cfg.Advertise != "" {
 		logs = logrelay.New(logrelay.Options{})
 	}
+	// The router opens only with --route-addr. It is the one listener that
+	// may bind every address: it serves the apps' public traffic.
+	var rtr *router.Router
+	var routerMetrics func(*metrics.Writer)
+	if cfg.RouteAddr != "" {
+		if rtr, err = newRouter(cfg, log, storeRoutes(st), tlsstore.StoreBackend{St: st, NodeID: cl.NodeID}); err != nil {
+			return err
+		}
+		routerMetrics = rtr.WriteMetrics
+	}
+	closeRouter := func() {
+		if rtr != nil {
+			_ = rtr.Shutdown()
+		}
+	}
 	api, err := server.New(server.Config{Store: st, Runtime: rt, NodeID: cl.NodeID, Auth: authn,
 		Trigger: ag.Trigger, Logger: log.With("component", "api"), Metrics: m, IssueJoinToken: issue,
-		Backup: writeBackup, Logs: logs})
+		Backup: writeBackup, Logs: logs, RouterMetrics: routerMetrics})
 	if err != nil {
+		closeRouter()
 		return err
 	}
 
 	ln, err := net.Listen("tcp", cfg.APIAddr)
 	if err != nil {
+		closeRouter()
 		return fmt.Errorf("listen on %s: %w", cfg.APIAddr, err)
 	}
 	hs := server.NewHTTPServer(api.Handler(), log)
@@ -455,6 +489,7 @@ func runServe(ctx context.Context, cfg *config.Config, log *slog.Logger, rt runt
 	if cfg.MetricsAddr != "" {
 		if mln, err = listenMetrics(cfg.MetricsAddr); err != nil {
 			ln.Close()
+			closeRouter()
 			return err
 		}
 		mhs = server.NewHTTPServer(api.MetricsHandler(), log)
@@ -469,6 +504,7 @@ func runServe(ctx context.Context, cfg *config.Config, log *slog.Logger, rt runt
 			if mln != nil {
 				mln.Close()
 			}
+			closeRouter()
 			return err
 		}
 		if lifetime != 0 {
@@ -477,11 +513,17 @@ func runServe(ctx context.Context, cfg *config.Config, log *slog.Logger, rt runt
 		c, err := cluster.Listen(cluster.Config{Store: st, CA: ca, Tokens: pki.NewTokens(st.JoinTokens()),
 			Advertise: cfg.Advertise, Port: cfg.ClusterPort, LocalNodeID: cl.NodeID,
 			Logger: log.With("component", "cluster"), NodeCertLifetime: lifetime, Logs: logs})
+		if err == nil {
+			if err = checkBoundAddress(c.NodeAddr(), nodeAddr); err != nil {
+				_ = c.Shutdown()
+			}
+		}
 		if err != nil {
 			ln.Close()
 			if mln != nil {
 				mln.Close()
 			}
+			closeRouter()
 			return err
 		}
 		nodes = c
@@ -499,7 +541,14 @@ func runServe(ctx context.Context, cfg *config.Config, log *slog.Logger, rt runt
 		sweep(agentCtx, st, log.With("component", "sweep"), sweepInterval, started)
 	}()
 
-	serveErr := make(chan error, 3)
+	serveErr := make(chan error, 4)
+	if rtr != nil {
+		go func() {
+			if err := rtr.Serve(); err != nil {
+				serveErr <- fmt.Errorf("router: %w", err)
+			}
+		}()
+	}
 	if nodes != nil {
 		log.Info("cluster listening", "node_addr", nodes.NodeAddr(), "join_addr", nodes.JoinAddr())
 		go func() {
@@ -535,6 +584,11 @@ func runServe(ctx context.Context, cfg *config.Config, log *slog.Logger, rt runt
 	defer cancel()
 	if err := hs.Shutdown(sctx); err != nil && !errors.Is(err, http.ErrServerClosed) {
 		log.Warn("API shutdown", "err", err)
+	}
+	if rtr != nil {
+		if err := rtr.Shutdown(); err != nil {
+			log.Warn("router shutdown", "err", err)
+		}
 	}
 	if nodes != nil {
 		if err := nodes.Shutdown(); err != nil {

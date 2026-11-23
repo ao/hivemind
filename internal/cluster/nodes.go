@@ -44,6 +44,8 @@ func nodeRoutes(cfg Config, log *slog.Logger) http.Handler {
 	mux.HandleFunc("POST "+nodeapi.Prefix+"/nodes/{id}/renew", a.renew)
 	mux.HandleFunc("GET "+nodeapi.Prefix+"/nodes/{id}/logs/requests", a.logRequests)
 	mux.HandleFunc("POST "+nodeapi.Prefix+"/nodes/{id}/logs/streams/{req}", a.logStream)
+	mux.HandleFunc("GET "+nodeapi.Prefix+"/nodes/{id}/routes", a.routes)
+	mux.HandleFunc("POST "+nodeapi.Prefix+"/nodes/{id}/tls/{op}", a.tls)
 	return a.denyRemoved(a.requireCurrentCert(mux))
 }
 
@@ -108,7 +110,7 @@ func (a *nodeAPI) register(w http.ResponseWriter, r *http.Request) {
 		writeDecodeError(w, err)
 		return
 	}
-	if err := a.st.UpsertNode(r.Context(), store.Node{ID: id, Name: g.Name, CPU: g.CPU, Memory: g.Memory}); err != nil {
+	if err := a.st.UpsertNode(r.Context(), store.Node{ID: id, Name: g.Name, CPU: g.CPU, Memory: g.Memory, Address: g.Address}); err != nil {
 		a.fail(w, r, err)
 		return
 	}

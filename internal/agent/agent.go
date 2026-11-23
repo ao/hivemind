@@ -29,6 +29,13 @@ const (
 	// DefaultHeartbeat is how often Run renews the lease on its own, when
 	// the Source can (LeaseRenewer). Three renewals fit in the 15 s lease.
 	DefaultHeartbeat = 5 * time.Second
+	// DefaultRouteDrain is how long a routed container that is no longer
+	// assigned keeps running before the agent stops it. The routing table
+	// drops it as soon as it is not assigned, and routers read the table
+	// every second, so by then no router sends it new requests, and the
+	// ones in flight have had time to finish. Load balancers call this a
+	// deregistration delay.
+	DefaultRouteDrain = 5 * time.Second
 )
 
 // LeaseRenewer is a Source that can renew the node's lease without a status
@@ -71,6 +78,14 @@ type Config struct {
 	// Heartbeat is how often Run renews the lease when Source is a
 	// LeaseRenewer. Zero means DefaultHeartbeat.
 	Heartbeat time.Duration
+	// RouteBind is the node's private address. A routed app's containers
+	// publish each route port on an ephemeral host port there. Empty means
+	// the node runs no routed replica: one assigned to it fails to start.
+	RouteBind string
+	// RouteDrain is how long a routed container that is no longer assigned
+	// keeps running before it is stopped. Zero means DefaultRouteDrain; a
+	// negative value means no wait.
+	RouteDrain time.Duration
 }
 
 // Agent reconciles one node.
@@ -84,7 +99,8 @@ type Agent struct {
 	restarts map[string]*restartState // by container name
 	probes   map[string]*probe        // by container name, for running containers with a health check
 	seeded   bool                     // restart counts have been read from the store
-	wakeAt   time.Time                // when the next scheduled restart is due, or zero
+	wakeAt   time.Time                // when the next scheduled restart or route drain is due, or zero
+	unrouted map[string]time.Time     // by container name: when a routed container was first seen unassigned
 }
 
 // New returns an agent. It does nothing until Run or Reconcile is called.
@@ -101,6 +117,12 @@ func New(cfg Config) (*Agent, error) {
 	if cfg.Heartbeat <= 0 {
 		cfg.Heartbeat = DefaultHeartbeat
 	}
+	switch {
+	case cfg.RouteDrain == 0:
+		cfg.RouteDrain = DefaultRouteDrain
+	case cfg.RouteDrain < 0:
+		cfg.RouteDrain = 0
+	}
 	if cfg.Clock == nil {
 		cfg.Clock = time.Now
 	}
@@ -114,6 +136,7 @@ func New(cfg Config) (*Agent, error) {
 		trigger:  make(chan struct{}, 1),
 		restarts: map[string]*restartState{},
 		probes:   map[string]*probe{},
+		unrouted: map[string]time.Time{},
 	}, nil
 }
 
@@ -203,9 +226,13 @@ func (a *Agent) heartbeat(ctx context.Context, lr LeaseRenewer) {
 	}
 }
 
+// replicaKey is one copy of a replica: an app, a replica index and a
+// generation. A replica and its rollout surge can be on one node at two
+// generations, for a routed app, and are two keys.
 type replicaKey struct {
 	app   string
 	index int
+	gen   int
 }
 
 // Reconcile makes one pass. It returns every error it met, joined; the pass
@@ -223,7 +250,7 @@ func (a *Agent) Reconcile(ctx context.Context) error {
 	want := map[replicaKey]store.Assignment{}
 	for _, as := range assigned {
 		if as.Desired == store.Running && as.NodeID == a.cfg.NodeID {
-			want[replicaKey{as.App, as.Index}] = as
+			want[replicaKey{as.App, as.Index, as.Generation}] = as
 		}
 	}
 	wantKeys := sortedKeys(want)
@@ -255,9 +282,9 @@ func (a *Agent) Reconcile(ctx context.Context) error {
 	keep := map[replicaKey]runtime.Container{}
 	var extra []runtime.Container
 	for _, c := range containers {
-		k, gen, ok := parseLabels(c.Labels)
+		k, ok := parseLabels(c.Labels)
 		as, wanted := want[k]
-		if !ok || !wanted || gen != as.Generation || c.State == "dead" || c.State == "removing" {
+		if !ok || !wanted || c.State == "dead" || c.State == "removing" {
 			extra = append(extra, c)
 			continue
 		}
@@ -276,23 +303,43 @@ func (a *Agent) Reconcile(ctx context.Context) error {
 	var errs []error
 	var status []store.Status
 
-	// Remove extras first, so their host ports are free for replacements.
+	// Remove extras first, so their host ports are free for replacements. A
+	// routed container that is still running waits out RouteDrain first,
+	// and is reported, not Ready, meanwhile.
+	now := a.cfg.Clock()
+	draining := map[string]bool{}
 	for _, c := range extra {
+		k, _ := parseLabels(c.Labels)
+		if c.Running() && c.Labels[runtime.LabelRouted] == "true" && a.cfg.RouteDrain > 0 {
+			first, seen := a.unrouted[c.Name]
+			if !seen {
+				first = now
+				a.unrouted[c.Name] = now
+				a.log.Info("routed container left the routing table; stopping it after the drain delay",
+					"container", shortID(c.ID), "name", c.Name, "delay", a.cfg.RouteDrain)
+			}
+			if now.Sub(first) < a.cfg.RouteDrain {
+				draining[c.Name] = true
+				status = append(status, store.Status{Name: c.Name, ContainerID: c.ID, App: c.Labels[runtime.LabelApp],
+					Replica: k.index, Generation: k.gen, State: c.State})
+				continue
+			}
+		}
 		if err := a.remove(ctx, c); err != nil {
 			errs = append(errs, err)
 			// The container still exists: report it, so the server keeps a
 			// replica marked for removal until it is really gone.
-			k, gen, _ := parseLabels(c.Labels)
 			status = append(status, store.Status{Name: c.Name, ContainerID: c.ID, App: c.Labels[runtime.LabelApp],
-				Replica: k.index, Generation: gen, State: c.State, Error: err.Error()})
+				Replica: k.index, Generation: k.gen, State: c.State, Error: err.Error()})
 		}
 	}
 
 	for _, k := range wantKeys {
 		as := want[k]
 		st := store.Status{Name: ContainerName(as.App, as.Index, as.Generation), App: as.App, Replica: as.Index, Generation: as.Generation}
-		if c, ok := keep[k]; ok {
-			if err := a.supervise(ctx, as, c, &st); err != nil {
+		listed, ok := keep[k]
+		if ok {
+			if err := a.supervise(ctx, as, listed, &st); err != nil {
 				errs = append(errs, err)
 			}
 		} else {
@@ -306,12 +353,22 @@ func (a *Agent) Reconcile(ctx context.Context) error {
 				st.Error = err.Error()
 			}
 		}
+		if len(as.Spec.Routes) > 0 && st.State == "running" && st.ContainerID != "" {
+			if err := a.routePorts(ctx, as, listed, ok && listed.Running(), &st); err != nil {
+				errs = append(errs, err)
+			}
+		}
 		status = append(status, st)
 	}
 
 	kept := make(map[string]bool, len(keep))
 	for _, c := range keep {
 		kept[c.Name] = true
+	}
+	for name := range a.unrouted {
+		if !draining[name] {
+			delete(a.unrouted, name)
+		}
 	}
 	a.forget(kept)
 
@@ -333,8 +390,11 @@ func (a *Agent) report(ctx context.Context, st []store.Status) error {
 // It returns the container ID, the state the container is left in, and any
 // error.
 func (a *Agent) create(ctx context.Context, as store.Assignment) (string, string, error) {
-	cfg := containerConfig(as)
+	cfg := containerConfig(as, a.cfg.RouteBind)
 	log := a.log.With("app", as.App, "replica", as.Index, "generation", as.Generation)
+	if cfg.Routed && a.cfg.RouteBind == "" {
+		return "", "pending", fmt.Errorf("%s: %w", cfg.Name, errNoRouteBind)
+	}
 
 	id, err := a.cfg.Runtime.Create(ctx, cfg)
 	if errors.Is(err, runtime.ErrNotFound) {
@@ -348,7 +408,7 @@ func (a *Agent) create(ctx context.Context, as store.Assignment) (string, string
 		// The name is taken. If the container there is this replica (it was
 		// created after the list was read), use it.
 		if c, ierr := a.cfg.Runtime.Inspect(ctx, cfg.Name); ierr == nil {
-			if k, gen, ok := parseLabels(c.Labels); ok && k == (replicaKey{as.App, as.Index}) && gen == as.Generation {
+			if k, ok := parseLabels(c.Labels); ok && k == (replicaKey{as.App, as.Index, as.Generation}) {
 				id, err = c.ID, nil
 			}
 		}
@@ -403,7 +463,14 @@ func (a *Agent) remove(ctx context.Context, c runtime.Container) error {
 	return nil
 }
 
-func containerConfig(as store.Assignment) runtime.ContainerConfig {
+// errNoRouteBind is the error of a routed replica on a node that has no
+// private address to publish its route ports on.
+var errNoRouteBind = errors.New("this node has no private address, so it cannot run a routed replica")
+
+// containerConfig is the container for one assignment. A routed app's route
+// ports are published on ephemeral host ports on routeBind, beside any
+// fixed host ports of the spec.
+func containerConfig(as store.Assignment, routeBind string) runtime.ContainerConfig {
 	cfg := runtime.ContainerConfig{
 		Name:       ContainerName(as.App, as.Index, as.Generation),
 		Image:      as.Spec.Image,
@@ -414,9 +481,13 @@ func containerConfig(as store.Assignment) runtime.ContainerConfig {
 		App:        as.App,
 		Replica:    as.Index,
 		Generation: as.Generation,
+		Routed:     len(as.Spec.Routes) > 0,
 	}
 	for _, p := range as.Spec.Ports {
 		cfg.Ports = append(cfg.Ports, runtime.PortBinding{HostIP: p.Bind, HostPort: p.Host, ContainerPort: p.Container, Protocol: p.Protocol})
+	}
+	for _, p := range as.Spec.RoutePorts() {
+		cfg.Ports = append(cfg.Ports, runtime.PortBinding{HostIP: routeBind, ContainerPort: p, Protocol: "tcp", Ephemeral: true})
 	}
 	for _, v := range as.Spec.Volumes {
 		cfg.Volumes = append(cfg.Volumes, runtime.VolumeMount{Name: v.Name, Path: v.Path})
@@ -424,16 +495,38 @@ func containerConfig(as store.Assignment) runtime.ContainerConfig {
 	return cfg
 }
 
+// routePorts fills in the host port of each route port of a running routed
+// container. The ports come from the list when the container was running
+// there already, and from an inspect when this pass started it, because the
+// engine picks a new ephemeral port at each start.
+func (a *Agent) routePorts(ctx context.Context, as store.Assignment, listed runtime.Container, useListed bool, st *store.Status) error {
+	c := listed
+	if !useListed {
+		ci, err := a.cfg.Runtime.Inspect(ctx, st.ContainerID)
+		if err != nil {
+			return a.fail(st, st.Name, fmt.Errorf("reading its published ports: %w", err))
+		}
+		c = ci
+	}
+	st.RoutePorts = nil
+	for _, p := range as.Spec.RoutePorts() {
+		if hp := c.PublishedPort(a.cfg.RouteBind, p, "tcp"); hp > 0 {
+			st.RoutePorts = append(st.RoutePorts, store.RoutePort{Port: p, HostPort: hp})
+		}
+	}
+	return nil
+}
+
 // parseLabels reads a container's hivemind labels. ok is false when any of
 // them is missing or malformed.
-func parseLabels(l map[string]string) (k replicaKey, gen int, ok bool) {
+func parseLabels(l map[string]string) (k replicaKey, ok bool) {
 	app := l[runtime.LabelApp]
 	idx, err1 := strconv.Atoi(l[runtime.LabelReplica])
 	gen, err2 := strconv.Atoi(l[runtime.LabelGeneration])
 	if app == "" || err1 != nil || err2 != nil || idx < 0 || gen < 1 {
-		return replicaKey{}, 0, false
+		return replicaKey{}, false
 	}
-	return replicaKey{app, idx}, gen, true
+	return replicaKey{app, idx, gen}, true
 }
 
 // better reports whether c should be kept over prev, of two containers for
@@ -452,7 +545,7 @@ func sortedKeys(m map[replicaKey]store.Assignment) []replicaKey {
 		keys = append(keys, k)
 	}
 	slices.SortFunc(keys, func(x, y replicaKey) int {
-		return cmp.Or(cmp.Compare(x.app, y.app), cmp.Compare(x.index, y.index))
+		return cmp.Or(cmp.Compare(x.app, y.app), cmp.Compare(x.index, y.index), cmp.Compare(x.gen, y.gen))
 	})
 	return keys
 }

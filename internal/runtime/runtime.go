@@ -20,6 +20,10 @@ const (
 	LabelApp        = "hivemind.app"
 	LabelReplica    = "hivemind.replica"
 	LabelGeneration = "hivemind.generation"
+	// LabelRouted is "true" on the container of a routed app. The agent
+	// keeps such a container running for a short drain after it leaves the
+	// routing table, before it stops it.
+	LabelRouted = "hivemind.routed"
 )
 
 // Sentinel errors. Errors returned by a Runtime match these with errors.Is.
@@ -88,6 +92,10 @@ type PortBinding struct {
 	ContainerPort int
 	// Protocol is "tcp" or "udp". Empty means tcp.
 	Protocol string
+	// Ephemeral asks the engine for a free host port. HostPort must then be
+	// 0; Container.Ports reports the port the engine chose. Routed apps
+	// publish their route ports this way.
+	Ephemeral bool
 }
 
 // VolumeMount mounts one of the app's volumes into the container. Name is
@@ -138,15 +146,21 @@ type ContainerConfig struct {
 	App        string
 	Replica    int
 	Generation int
+	// Routed sets LabelRouted.
+	Routed bool
 }
 
 // Labels returns the hivemind labels for the replica.
 func (c ContainerConfig) Labels() map[string]string {
-	return map[string]string{
+	l := map[string]string{
 		LabelApp:        c.App,
 		LabelReplica:    fmt.Sprint(c.Replica),
 		LabelGeneration: fmt.Sprint(c.Generation),
 	}
+	if c.Routed {
+		l[LabelRouted] = "true"
+	}
+	return l
 }
 
 // Container is the engine's view of one container. List fills only the
@@ -168,6 +182,21 @@ type Container struct {
 	// or has not stopped. Inspect fills them; List does not.
 	StartedAt  time.Time
 	FinishedAt time.Time
+	// Ports are the host ports the engine has published for the container,
+	// with the port it chose for an ephemeral binding. A container that is
+	// not running has none. List and Inspect fill them.
+	Ports []PortBinding
+}
+
+// PublishedPort returns the host port that publishes containerPort/proto on
+// hostIP, or 0 when there is none.
+func (c Container) PublishedPort(hostIP string, containerPort int, proto string) int {
+	for _, p := range c.Ports {
+		if p.ContainerPort == containerPort && p.Protocol == proto && p.HostIP == hostIP && p.HostPort > 0 {
+			return p.HostPort
+		}
+	}
+	return 0
 }
 
 // Running reports whether the container is running.
@@ -244,7 +273,19 @@ func Prepare(cfg ContainerConfig) (ContainerConfig, error) {
 
 	a := spec.App{Name: cfg.App, Image: cfg.Image, Replicas: 1, Command: cfg.Command, Env: cfg.Env,
 		Resources: spec.Resources{CPU: cfg.CPU, Memory: spec.ByteSize(cfg.Memory)}}
-	for _, p := range cfg.Ports {
+	// Fixed host ports follow the spec's rules. An ephemeral binding has no
+	// host port, so its address and protocol are checked on their own: a
+	// spec port with host port 1 stands in for it.
+	var fixed, ephemeral []int // indexes into cfg.Ports
+	for i, p := range cfg.Ports {
+		if p.Ephemeral {
+			if p.HostPort != 0 {
+				return cfg, fmt.Errorf("%w: ports[%d]: an ephemeral binding has no host port, got %d", ErrInvalid, i, p.HostPort)
+			}
+			ephemeral = append(ephemeral, i)
+			continue
+		}
+		fixed = append(fixed, i)
 		a.Ports = append(a.Ports, spec.Port{Bind: p.HostIP, Host: p.HostPort, Container: p.ContainerPort, Protocol: p.Protocol})
 	}
 	for _, v := range cfg.Volumes {
@@ -254,12 +295,26 @@ func Prepare(cfg ContainerConfig) (ContainerConfig, error) {
 	if err := a.Validate(); err != nil {
 		return cfg, fmt.Errorf("%w: %v", ErrInvalid, err)
 	}
+	eph := make([]spec.Port, 0, len(ephemeral))
+	for _, i := range ephemeral {
+		p := cfg.Ports[i]
+		one := spec.App{Name: "x", Image: "x", Ports: []spec.Port{{Bind: p.HostIP, Host: 1, Container: p.ContainerPort, Protocol: p.Protocol}}}
+		one.Normalize()
+		if err := one.Validate(); err != nil {
+			return cfg, fmt.Errorf("%w: ports[%d]: %v", ErrInvalid, i, err)
+		}
+		eph = append(eph, one.Ports[0])
+	}
 
 	// Copy the slices before writing defaults back, so the caller's are untouched.
 	cfg.Ports = slices.Clone(cfg.Ports)
-	for i := range cfg.Ports {
-		cfg.Ports[i].HostIP = a.Ports[i].Bind
-		cfg.Ports[i].Protocol = a.Ports[i].Protocol
+	for j, i := range fixed {
+		cfg.Ports[i].HostIP = a.Ports[j].Bind
+		cfg.Ports[i].Protocol = a.Ports[j].Protocol
+	}
+	for j, i := range ephemeral {
+		cfg.Ports[i].HostIP = eph[j].Bind
+		cfg.Ports[i].Protocol = eph[j].Protocol
 	}
 	cfg.Volumes = slices.Clone(cfg.Volumes)
 	cfg.Command = slices.Clone(cfg.Command)
