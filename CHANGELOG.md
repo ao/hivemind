@@ -2,7 +2,7 @@
 
 Notable changes to hivemind, newest first. Versions follow [Semantic Versioning](https://semver.org). A release is cut by pushing a `v*` tag; its notes are the matching section below.
 
-## [2.4.0] - Unreleased
+## [2.4.0] - 2026-11-24
 
 The servers of a cluster of several can be upgraded one at a time, the cluster CA rotated with several servers, and the leases of a steady cluster no longer make most of the Raft log ([docs/ha.md](docs/ha.md)).
 

@@ -8,7 +8,7 @@
 
 hivemind runs containers on a few Linux machines, using Docker Engine on each one. You describe an app with flags or a YAML file. hivemind keeps the requested number of replicas running, and starts a replacement when a container exits or fails its health check.
 
-Version 2 is a rewrite of version 1, and 2.3.0 is the current release. A cluster has one server, or three or five that keep it working while a majority of them is up ([several servers](docs/ha.md)), and any number of workers. A worker joins with a token, and the servers and the workers then talk over TLS with certificates from the cluster's own CA.
+Version 2 is a rewrite of version 1, and 2.4.0 is the current release. A cluster has one server, or three or five that keep it working while a majority of them is up ([several servers](docs/ha.md)), and any number of workers. A worker joins with a token, and the servers and the workers then talk over TLS with certificates from the cluster's own CA.
 
 Any node can run an HTTPS router that gets certificates from Let's Encrypt or another ACME CA, routes requests by host and path prefix, and speaks HTTP/2 without TLS to gRPC servers. `hivemind compose` deploys a Docker Compose file, `node drain` moves the replicas off a machine before it leaves, `registry login` lets the nodes pull from private registries, `backup` and `restore` bring a lost server back on a new machine, at a new address too, and `ca rotate` replaces the cluster CA without joining the machines again.
 
@@ -147,7 +147,7 @@ An app can name `routes: [{host: www.example.com, port: 80}]`, and a node starte
 - [Scale test on ten machines](docs/scale.md): 100 apps, 500 replicas
 - [CLI reference](docs/cli.md)
 - [HTTP API](docs/api.md)
-- [Upgrading from 2.2.0, 2.0.0 or v1](docs/upgrading.md)
+- [Upgrading from 2.3, 2.2.0, 2.0.0 or v1](docs/upgrading.md)
 - [Roadmap](ROADMAP.md)
 - [Assessment of v1](docs/ASSESSMENT.md) and [the v2 plan](docs/PLAN.md)
 
