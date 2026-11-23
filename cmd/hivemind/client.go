@@ -248,6 +248,9 @@ func (f *clientFlags) client() (*apiClient, error) {
 		if err := workerHereError(config.DataDir(), "it has no API token"); err != nil {
 			return nil, err
 		}
+		if err := joinedServerNoToken(config.DataDir()); err != nil {
+			return nil, err
+		}
 		// Without a token, init is the advice only when no one else set
 		// up hivemind here: on a server that root set up, init would make
 		// a second cluster beside it.
