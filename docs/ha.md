@@ -217,7 +217,7 @@ A server applies:
 - a batch recorded at its store's version, as before;
 - a step from its store's version to the next, if the build knows the next: it runs that migration, its own copy of it, in one transaction with the applied index. Released migrations are never edited, so every build that knows a version runs the same statements to reach it.
 
-It refuses anything else: a batch at another version, a step from another version or to one the build does not know, a format it does not know. A refused entry is handled as any entry a server cannot apply: it tries once more, then stops `serve` with the error, rather than go on with a store that lacks the entry. A leader that stops this way hands the leadership on first, as at any stop of `serve`. On its next start Raft gives it the entry again, and it refuses again, until it runs a build that applies it.
+It refuses anything else: a batch at another version, a step from another version or to one the build does not know, a format it does not know. A refused entry stops `serve` with the error, as any entry a server cannot apply does, rather than go on with a store that lacks it; unlike a failed write, it is not tried a second time, which could not change the answer. A leader that stops this way hands the leadership on first, as at any stop of `serve`. On its next start Raft gives it the entry again, and it refuses again, until it runs a build that applies it.
 
 A server checks the applied index before the version: on a restart, Raft replays the entries after the last snapshot, and those the store applied before a step are skipped, not refused for their older version. In 2.3.0 the order made no difference.
 
