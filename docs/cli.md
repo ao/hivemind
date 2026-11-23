@@ -48,9 +48,11 @@ Write a backup of the server's state to <file>, with mode 0600. The file must
 not exist.
 
 The backup holds the cluster CA's private key, which can sign a certificate for
-any node, and the admin token. Anyone who has the file can join machines to the
-cluster and call the API. Keep it as private as the data directory: mode 0600,
-on a disk only you can read, and encrypted if it leaves the machine.
+any node, and the admin token when the data directory has one: a server that
+joined a cluster has none, and neither has the reply of --api while such a
+server leads. Anyone who has the file can join machines to the cluster, and
+with the token call the API. Keep it as private as the data directory: mode
+0600, on a disk only you can read, and encrypted if it leaves the machine.
 
 By default backup reads the data directory (--data-dir) on this machine. It
 works whether serve is running or not: the store is copied with SQLite's
@@ -62,8 +64,9 @@ that runs serve.
 admin token. The server sends it only over TLS, or to a client on loopback.
 
 The file is a tar archive: manifest.json, with a format version and the
-SHA-256 of each file, then hivemind.db, ca.key, ca.crt and admin.token, and
-during a rotation of the cluster CA also ca-next.key and ca-next.crt. backup
+SHA-256 of each file, then hivemind.db, ca.key, ca.crt and admin.token, when
+there is one, and during a rotation of the cluster CA also ca-next.key and
+ca-next.crt. backup
 checks that the CA files are the ones the copied store names, and reads the
 file back and checks every digest before it keeps it. Restore it with
 hivemind restore.
@@ -960,8 +963,8 @@ version 16) is left as it is, so the release that wrote it can still serve
 it, and gets its epoch from <data-dir>/restored-epoch when this build's
 serve first opens it.
 
-The backup holds the cluster CA's private key and the admin token. Delete
-copies you no longer need.
+The backup holds the cluster CA's private key, and the admin token when it
+was taken where there is one. Delete copies you no longer need.
 
 Like init, restore writes a client config that points the CLI at this server
 and at the restored token file, unless one exists.
