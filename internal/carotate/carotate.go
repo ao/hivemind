@@ -757,6 +757,15 @@ func (m *Manager) Run(ctx context.Context) {
 		if err := m.moveListener(ctx); err != nil && ctx.Err() == nil {
 			m.log.Warn("checking whether the server's certificate can move to the CA the rotation goes to", "err", err)
 		}
+		// The store may have moved to schema version 19 since this server
+		// began to lead, as at the end of a rolling upgrade: what 19 adds is
+		// recorded then. It writes nothing once it is recorded.
+		m.mu.Lock()
+		err := m.recordGaps(ctx)
+		m.mu.Unlock()
+		if err != nil && ctx.Err() == nil && !errors.Is(err, store.ErrNotLeader) {
+			m.log.Warn("recording the cluster CA in the store", "err", err)
+		}
 		select {
 		case <-ctx.Done():
 			return
