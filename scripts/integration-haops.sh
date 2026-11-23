@@ -612,9 +612,11 @@ ended() {
 }
 wait_for 30 ended || cl_fail "the servers' CA files after finish: $(for i in 0 1 2; do echo "${S[$i]} $(docker exec "${S[$i]}" ls /var/lib/hivemind)"; done | tr '\n' ';')"
 [ "$(ca_status | jq -r '.current.fingerprint')" = "$NEXT" ] || cl_fail "the cluster CA after finish is not the new one: $(hm "$LI" ca status)"
+# A worker drops the old CA from its ca.crt at its next look at the
+# server's set, within a few seconds of finish.
+one_ca() { [ "$(docker exec "$1" grep -c 'BEGIN CERTIFICATE' /var/lib/hivemind/ca.crt)" -eq 1 ]; }
 for c in "$W1" "$W2"; do
-	n=$(docker exec "$c" grep -c 'BEGIN CERTIFICATE' /var/lib/hivemind/ca.crt)
-	[ "$n" -eq 1 ] || cl_fail "$c's ca.crt holds $n CAs after finish"
+	wait_for 30 one_ca "$c" || cl_fail "$c's ca.crt holds $(docker exec "$c" grep -c 'BEGIN CERTIFICATE' /var/lib/hivemind/ca.crt) CAs 30 s after finish"
 done
 stop_load
 check_writes "the CA rotation"
