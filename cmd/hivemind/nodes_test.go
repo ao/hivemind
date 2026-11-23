@@ -456,6 +456,16 @@ func TestDrainSummarySaysTheNodeWasLost(t *testing.T) {
 	if want := "node-w: drained; 1 moved, 1 stopped at the deadline and placed again, 0 left on the node\n"; b.String() != want {
 		t.Fatalf("drain output without a loss: %q, want %q", b.String(), want)
 	}
+
+	// A lost node's drain ends without the containers it last reported,
+	// which its agent is not there to stop.
+	b.Reset()
+	p = &drainPrinter{out: &b, seen: map[string]bool{}}
+	p.finish(server.DrainView{NodeID: "node-w", State: "done", LostAt: &at, OldContainers: 2})
+	if want := "node-w: drained; 0 moved, 0 stopped at the deadline and placed again, 0 placed again after the node was lost, 0 left on the node\n" + lost +
+		"  the node last reported 2 old containers: its agent removes them if the node comes back, and until then they may still run on its machine\n"; b.String() != want {
+		t.Fatalf("drain output of a lost node:\n%s\nwant:\n%s", b.String(), want)
+	}
 }
 
 func TestLeaseAge(t *testing.T) {

@@ -664,6 +664,14 @@ func (s *Server) fail(w http.ResponseWriter, r *http.Request, err error) {
 		// The leader changed, or none leads (docs/ha.md#the-api): nothing
 		// was written, and a client may try again, here or elsewhere.
 		w.Header().Set(noLeaderHeader, "1")
+		var nl interface {
+			NoLeaderFor() (time.Duration, bool)
+		}
+		if errors.As(err, &nl) {
+			if d, ok := nl.NoLeaderFor(); ok {
+				w.Header().Set(noLeaderForHeader, strconv.FormatInt(int64(d/time.Second), 10))
+			}
+		}
 		w.Header().Set("Retry-After", "1")
 		writeError(w, http.StatusServiceUnavailable, err.Error())
 	case errors.Is(err, store.ErrOutcomeUnknown):

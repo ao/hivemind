@@ -225,6 +225,31 @@ func TestNoToken(t *testing.T) {
 	}
 }
 
+// On a server that joined a cluster, which has no admin.token, a command
+// without a token says so and to give the cluster's token, not to run
+// init, which is refused there (the fifth acceptance run's twelfth
+// finding).
+func TestNoTokenOnAJoinedServer(t *testing.T) {
+	home := isolate(t)
+	dir := filepath.Join(home, "data")
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := writeServerState(dir, serverState{NodeID: "node-3d9020d56ae2", Joined: time.Now()}); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("HIVEMIND_DATA_DIR", dir)
+	_, _, err := run(t, "", "status")
+	if err == nil || !strings.Contains(err.Error(), "holds server node-3d9020d56ae2, which joined the cluster") ||
+		!strings.Contains(err.Error(), "with "+envToken+" or --token") || strings.Contains(err.Error(), "init` on this machine") {
+		t.Fatalf("status on a joined server without a token: %v", err)
+	}
+	// With a token it goes to the server as any command does.
+	if _, _, err := run(t, "", "status", "--token", "hm_x", "--server", "http://127.0.0.1:1"); err == nil || strings.Contains(err.Error(), "no API token") {
+		t.Fatalf("status with a token on a joined server: %v", err)
+	}
+}
+
 func TestParsePort(t *testing.T) {
 	cases := map[string]spec.Port{
 		"8080:80":           {Host: 8080, Container: 80},

@@ -50,6 +50,36 @@ func TestJoinTokenExpired(t *testing.T) {
 	}
 }
 
+// A token of the other role is refused with a TokenRoleError, which is an
+// ErrInvalidToken, and stays usable for its own role.
+func TestJoinTokenOfTheOtherRole(t *testing.T) {
+	s := openT(t, filepath.Join(t.TempDir(), "hivemind.db"))
+	t0 := time.Unix(1_700_000_000, 0)
+	w, sv := hashOf("worker"), hashOf("server")
+	if err := s.JoinTokens().Add(w, t0.Add(time.Hour)); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.ServerJoinTokens().Add(sv, t0.Add(time.Hour)); err != nil {
+		t.Fatal(err)
+	}
+	var re *TokenRoleError
+	if err := s.ServerJoinTokens().Consume(w, t0); !errors.As(err, &re) || re.Server || !errors.Is(err, pki.ErrInvalidToken) {
+		t.Fatalf("a worker's token in a server's join: %v", err)
+	}
+	if err := s.JoinTokens().Consume(sv, t0); !errors.As(err, &re) || !re.Server || !errors.Is(err, pki.ErrInvalidToken) {
+		t.Fatalf("a server's token in a worker's join: %v", err)
+	}
+	if err := s.JoinTokens().Consume(w, t0); err != nil {
+		t.Fatalf("the worker's token after a server's join refused it: %v", err)
+	}
+	if err := s.ServerJoinTokens().Consume(sv, t0); err != nil {
+		t.Fatalf("the server's token after a worker's join refused it: %v", err)
+	}
+	if err := s.JoinTokens().Consume(hashOf("never issued"), t0); errors.As(err, &re) || !errors.Is(err, pki.ErrInvalidToken) {
+		t.Fatalf("an unknown token: %v", err)
+	}
+}
+
 func TestJoinTokenUnknown(t *testing.T) {
 	s := openT(t, filepath.Join(t.TempDir(), "hivemind.db"))
 	if err := s.JoinTokens().Consume(hashOf("never issued"), time.Now()); !errors.Is(err, pki.ErrInvalidToken) {

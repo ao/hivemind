@@ -27,7 +27,7 @@ hivemind
 | `delete` | Delete an app and stop its containers |
 | `deploy` | Create or update an app |
 | `init` | Create a cluster on this machine |
-| `join` | Join a cluster as a worker, then run its agent |
+| `join` | Join a cluster as a worker, or as a server with --role server, and run it |
 | `join-token` | Print a token that lets another machine join this cluster |
 | `logs` | Print a replica's container log |
 | `node` | Manage one node |
@@ -48,9 +48,11 @@ Write a backup of the server's state to <file>, with mode 0600. The file must
 not exist.
 
 The backup holds the cluster CA's private key, which can sign a certificate for
-any node, and the admin token. Anyone who has the file can join machines to the
-cluster and call the API. Keep it as private as the data directory: mode 0600,
-on a disk only you can read, and encrypted if it leaves the machine.
+any node, and the admin token when the data directory has one: a server that
+joined a cluster has none, and neither has the reply of --api while such a
+server leads. Anyone who has the file can join machines to the cluster, and
+with the token call the API. Keep it as private as the data directory: mode
+0600, on a disk only you can read, and encrypted if it leaves the machine.
 
 By default backup reads the data directory (--data-dir) on this machine. It
 works whether serve is running or not: the store is copied with SQLite's
@@ -62,8 +64,9 @@ that runs serve.
 admin token. The server sends it only over TLS, or to a client on loopback.
 
 The file is a tar archive: manifest.json, with a format version and the
-SHA-256 of each file, then hivemind.db, ca.key, ca.crt and admin.token, and
-during a rotation of the cluster CA also ca-next.key and ca-next.crt. backup
+SHA-256 of each file, then hivemind.db, ca.key, ca.crt and admin.token, when
+there is one, and during a rotation of the cluster CA also ca-next.key and
+ca-next.crt. backup
 checks that the CA files are the ones the copied store names, and reads the
 file back and checks every digest before it keeps it. Restore it with
 hivemind restore.
@@ -466,7 +469,9 @@ hivemind init [flags]
 
 ### hivemind join
 
-Join a cluster as a worker node and run its agent in the foreground.
+Join a cluster as a worker node and run its agent in the foreground, or,
+with --role server, as another server of the cluster and run the server
+(below).
 
   hivemind join 10.0.0.5 --token-file <file>
 
@@ -551,7 +556,8 @@ the joining machine only trusts this cluster's CA.
 on a machine that is to be another server of the cluster (docs/ha.md). It
 expires after 1h by default, at most 24h: the joining server receives the
 cluster CA's private key. A worker's join refuses it, and a server's join
-refuses a worker's token. A cluster of two servers needs both for a write,
+refuses a worker's token, each saying which kind the token is and leaving
+it unused. A cluster of two servers needs both for a write,
 so the command warns when the token would make two; use three or five.
 
 The token goes to standard output alone, so scripts can capture it. The
@@ -636,7 +642,11 @@ no node can take it. A replica with a volume keeps running on the node.
 If the node is lost during the drain, because its lease went 15 s without a
 renewal, its replicas without a volume are placed again at once, as on any
 node loss. The result counts them apart from those moved and stopped, and
-says when the node was lost.
+says when the node was lost. A lost node's drain is done once only
+replicas with a volume are left on it, without waiting for the containers
+it last reported, which no agent stops while it is away: a drain of a node
+that is lost already, as one whose server was removed while it was down,
+is done at once.
 
 The command waits, and prints progress, until the drain is done. Ctrl-C stops
 the waiting, not the drain. --no-wait returns at once. drain on a node that is
@@ -959,8 +969,8 @@ version 16) is left as it is, so the release that wrote it can still serve
 it, and gets its epoch from <data-dir>/restored-epoch when this build's
 serve first opens it.
 
-The backup holds the cluster CA's private key and the admin token. Delete
-copies you no longer need.
+The backup holds the cluster CA's private key, and the admin token when it
+was taken where there is one. Delete copies you no longer need.
 
 Like init, restore writes a client config that points the CLI at this server
 and at the restored token file, unless one exists.
@@ -1171,7 +1181,9 @@ LAST CONTACT is how long ago the server that answered last heard from each
 one: the leader hears from every follower at each heartbeat. "-" is never,
 or another follower, which a follower cannot tell. When no server leads, as
 while a majority is down, the server asked answers from its own copy of the
-configuration, and a line after the table says there is no leader and why.
+configuration: the command prints it, then an error that says there is no
+leader and why, and exits with status 1. With --json it prints the JSON,
+whose "leader" is empty and whose "note" says why, and exits with status 1.
 
 ```
 hivemind servers [flags]

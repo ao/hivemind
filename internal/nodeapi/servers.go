@@ -30,8 +30,13 @@ const JoinServerPath = "/join-server"
 const ServersHeader = "Hivemind-Servers"
 
 // NoLeaderHeader marks a 503 that says no server leads, or that the server
-// asked no longer does. It is ha.HeaderNoLeader.
-const NoLeaderHeader = "Hivemind-No-Leader"
+// asked no longer does. It is ha.HeaderNoLeader. NoLeaderForHeader, from a
+// server that knows no leader, is how long it has known none, in whole
+// seconds (ha.HeaderNoLeaderFor).
+const (
+	NoLeaderHeader    = "Hivemind-No-Leader"
+	NoLeaderForHeader = "Hivemind-No-Leader-For"
+)
 
 // MaxServers bounds the servers a list holds.
 const MaxServers = 7

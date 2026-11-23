@@ -103,6 +103,30 @@ func saveJoined(t *testing.T, dir string, ca *pki.CA, id string) {
 	}
 }
 
+// join's one-line help, which hivemind --help lists, and the first line of
+// its long help name --role server too: before, both said a worker only
+// (the fifth acceptance run's twelfth finding).
+func TestJoinHelpNamesTheServerRole(t *testing.T) {
+	isolate(t)
+	out, _, err := run(t, "", "--help")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var line string
+	for _, l := range strings.Split(out, "\n") {
+		if f := strings.Fields(l); len(f) > 0 && f[0] == "join" {
+			line = l
+		}
+	}
+	if !strings.Contains(line, "--role server") {
+		t.Fatalf("hivemind --help lists join as %q", line)
+	}
+	out, _, err = run(t, "", "join", "--help")
+	if first, _, _ := strings.Cut(out, "\n\n"); err != nil || !strings.Contains(first, "--role server") {
+		t.Fatalf("join --help begins %q, %v", first, err)
+	}
+}
+
 func TestWorkerStateRoundTrip(t *testing.T) {
 	dir := filepath.Join(t.TempDir(), "worker")
 	ca := newCA(t)

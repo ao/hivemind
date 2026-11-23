@@ -209,7 +209,7 @@ func joinServer(cfg Config, limiter *ratelimit.FailLimiter, log *slog.Logger, w 
 		return
 	}
 	if _, err := cfg.ServerTokens.Redeem(req.Token); err != nil {
-		fail(http.StatusUnauthorized, errJoinRefused, err.Error())
+		fail(http.StatusUnauthorized, refusedToken(err), err.Error())
 		return
 	}
 	id, err := freshNodeID(r, cfg)

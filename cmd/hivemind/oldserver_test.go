@@ -1,6 +1,7 @@
 package main
 
 import (
+	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
@@ -82,5 +83,56 @@ func TestCLIAgainstAnOlderServer(t *testing.T) {
 	if _, _, err := run(t, "", "node", "drain", "node-acc3d9097247"); err == nil ||
 		err.Error() != "the server runs v2.9.0, which has no node drain; upgrade the server" {
 		t.Errorf("a server with a version but no drain: %v", err)
+	}
+}
+
+// join-token --role server against a server before 2.3.0, which refuses
+// the request's server field as an unknown field, says that the server is
+// too old to have other servers, not "invalid JSON" (the fifth acceptance
+// run's ninth finding). A worker's token from it is unchanged, and so is
+// another 400.
+func TestServerTokenFromAnOlderServer(t *testing.T) {
+	for _, c := range []struct {
+		version, want string
+	}{
+		{"v2.2.0", "the server runs v2.2.0, which is older than 2.3.0 and cannot have other servers; upgrade it first (docs/upgrading.md)"},
+		{"", "the server is older than 2.3.0 and cannot have other servers; upgrade it first (docs/upgrading.md)"},
+	} {
+		isolate(t)
+		ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if c.version != "" {
+				w.Header().Set("Hivemind-Version", c.version)
+			}
+			w.Header().Set("Content-Type", "application/json")
+			var body map[string]any
+			_ = json.NewDecoder(r.Body).Decode(&body)
+			switch _, server := body["server"]; {
+			case r.URL.Path != "/v1/join-tokens":
+				w.WriteHeader(http.StatusNotFound)
+				_, _ = w.Write([]byte(`{"error":"not found"}`))
+			case server:
+				// 2.2.0's strict decoder.
+				w.WriteHeader(http.StatusBadRequest)
+				_, _ = w.Write([]byte(`{"error":"invalid JSON: json: unknown field \"server\""}`))
+			case body["ttl"] == "bad":
+				w.WriteHeader(http.StatusBadRequest)
+				_, _ = w.Write([]byte(`{"error":"ttl must be a duration such as 1h"}`))
+			default:
+				w.WriteHeader(http.StatusCreated)
+				_, _ = w.Write([]byte(`{"token":"hivemind-join-v1.x.y","expires_at":"2026-11-24T00:00:00Z"}`))
+			}
+		}))
+		t.Setenv(envServer, ts.URL)
+		t.Setenv(envToken, "hm_test")
+		if _, _, err := run(t, "", "join-token", "--role", "server"); err == nil || err.Error() != c.want {
+			t.Errorf("server %q: join-token --role server: %v, want %q", c.version, err, c.want)
+		}
+		if out, _, err := run(t, "", "join-token"); err != nil || strings.TrimSpace(out) != "hivemind-join-v1.x.y" {
+			t.Errorf("server %q: a worker's token: %q, %v", c.version, out, err)
+		}
+		if _, _, err := run(t, "", "join-token", "--ttl", "bad"); err == nil || err.Error() != "ttl must be a duration such as 1h" {
+			t.Errorf("server %q: another 400: %v", c.version, err)
+		}
+		ts.Close()
 	}
 }

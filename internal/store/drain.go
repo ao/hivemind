@@ -6,6 +6,8 @@ import (
 	"errors"
 	"fmt"
 	"time"
+
+	"github.com/ao/hivemind/internal/scheduler"
 )
 
 // Eligibility and drains.
@@ -43,7 +45,11 @@ import (
 // A node that is lost during its drain gives up its replicas as on any node
 // loss (releaseNode): the ones without a volume are placed again at once. The
 // drain counts them as lost, apart from those it moved or stopped, and
-// records when the node was lost.
+// records when the node was lost. Once a lost node has only replicas with a
+// volume left, its drain is done, whatever containers it last reported:
+// nothing clears those until it reports again. A drain started on a node
+// that is lost already is done at its first step, or at the sweep that
+// places its replicas again.
 //
 // A finished drain's record stays, and the node stays ineligible, until it is
 // made eligible again or removed. The server advances drains with
@@ -317,11 +323,38 @@ func (s *Store) advanceDrain(ctx context.Context, tx *sql.Tx, node string, since
 	if err := s.startDrainMoves(ctx, tx, node); err != nil {
 		return false, err
 	}
-	done, err := drainEmptied(ctx, tx, node)
+	lost, err := s.drainNodeLost(ctx, tx, node)
+	if err != nil {
+		return false, err
+	}
+	done, err := drainEmptied(ctx, tx, node, lost)
 	if err != nil || !done {
 		return false, err
 	}
+	if lost {
+		// As the sweep records it for a node lost during its drain.
+		now := s.now().UnixNano()
+		if _, err := tx.ExecContext(ctx, `UPDATE drains SET lost_at = ?, updated_at = ? WHERE node_id = ? AND lost_at = 0`, now, now, node); err != nil {
+			return false, err
+		}
+	}
 	return true, s.finishDrain(ctx, tx, node)
+}
+
+// drainNodeLost reports whether the drained node is lost now, as the sweep
+// finds it (ReconcileNodes): its lease is older than the lease timeout, and
+// it is not waiting for its first report since the server started.
+func (s *Store) drainNodeLost(ctx context.Context, tx *sql.Tx, node string) (bool, error) {
+	var lease int64
+	err := tx.QueryRowContext(ctx, `SELECT last_lease FROM nodes WHERE id = ?`, node).Scan(&lease)
+	if errors.Is(err, sql.ErrNoRows) {
+		return false, nil
+	}
+	if err != nil {
+		return false, err
+	}
+	now, n := s.now(), Node{ID: node, LastLease: time.Unix(0, lease)}
+	return !s.Waiting(n, now) && now.Sub(n.LastLease) > scheduler.DefaultLeaseTimeout, nil
 }
 
 // liveDrainMove reports whether a move still belongs to the drain of node:
@@ -569,9 +602,13 @@ func (s *Store) finishDrain(ctx context.Context, tx *sql.Tx, node string) error 
 }
 
 // drainEmptied reports whether the drain of node has nothing left to do: no
-// move in flight, no replica without a volume on the node, and no container
-// on the node that no replica there should run.
-func drainEmptied(ctx context.Context, tx *sql.Tx, node string) (bool, error) {
+// move in flight, no replica without a volume on the node, and, unless the
+// node is lost, no container on the node that no replica there should run.
+// A lost node's containers are the ones it last reported, which nothing
+// clears until it reports again, and its agent removes them then; a drain
+// of a lost node waited for them until its deadline (the fifth acceptance
+// run's second finding).
+func drainEmptied(ctx context.Context, tx *sql.Tx, node string, lost bool) (bool, error) {
 	var n int
 	if err := tx.QueryRowContext(ctx, `SELECT count(*) FROM drain_moves WHERE node_id = ?`, node).Scan(&n); err != nil || n > 0 {
 		return false, err
@@ -584,6 +621,9 @@ func drainEmptied(ctx context.Context, tx *sql.Tx, node string) (bool, error) {
 		if len(r.Spec.Volumes) == 0 {
 			return false, nil
 		}
+	}
+	if lost {
+		return true, nil
 	}
 	old, err := oldContainers(ctx, tx, node)
 	return old == 0, err

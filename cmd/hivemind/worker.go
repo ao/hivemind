@@ -75,8 +75,10 @@ type joinedWorker struct {
 func joinCmd() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "join <server>",
-		Short: "Join a cluster as a worker, then run its agent",
-		Long: `Join a cluster as a worker node and run its agent in the foreground.
+		Short: "Join a cluster as a worker, or as a server with --role server, and run it",
+		Long: `Join a cluster as a worker node and run its agent in the foreground, or,
+with --role server, as another server of the cluster and run the server
+(below).
 
   hivemind join 10.0.0.5 --token-file <file>
 

@@ -34,9 +34,29 @@ func (j joinTokens) Add(hash [32]byte, expires time.Time) error {
 	})
 }
 
+// TokenRoleError is a join token that the cluster issued for the other
+// role: a server's token given to a worker's join, or a worker's given to
+// a server's. The token is left as it was. It is a pki.ErrInvalidToken, so
+// that what refuses an unknown token refuses it too. Saying which role the
+// token has tells its holder nothing they could not learn by using it.
+type TokenRoleError struct {
+	// Server is true for a server's token.
+	Server bool
+}
+
+func (e *TokenRoleError) Error() string {
+	if e.Server {
+		return "pki: invalid join token: it is a server's join token"
+	}
+	return "pki: invalid join token: it is a worker's join token"
+}
+
+func (e *TokenRoleError) Unwrap() error { return pki.ErrInvalidToken }
+
 // Consume marks the hash used. It returns pki.ErrInvalidToken for an unknown
-// hash, pki.ErrTokenExpired at or after expiry, and pki.ErrTokenUsed when it
-// was used before. The expiry is checked first, as pki.MemoryStore does.
+// hash, a *TokenRoleError for a hash of the other role, pki.ErrTokenExpired
+// at or after expiry, and pki.ErrTokenUsed when it was used before. The
+// expiry is checked first, as pki.MemoryStore does.
 func (j joinTokens) Consume(hash [32]byte, now time.Time) error {
 	ctx, cancel := context.WithTimeout(context.Background(), tokenTimeout)
 	defer cancel()
@@ -45,6 +65,13 @@ func (j joinTokens) Consume(hash [32]byte, now time.Time) error {
 		err := tx.QueryRowContext(ctx, `SELECT expires, used_at FROM join_tokens WHERE hash = ? AND role = ?`, hash[:], j.role).
 			Scan(&expires, &usedAt)
 		if errors.Is(err, sql.ErrNoRows) {
+			var role string
+			switch err := tx.QueryRowContext(ctx, `SELECT role FROM join_tokens WHERE hash = ?`, hash[:]).Scan(&role); {
+			case err == nil:
+				return &TokenRoleError{Server: role == roleServer}
+			case !errors.Is(err, sql.ErrNoRows):
+				return err
+			}
 			return pki.ErrInvalidToken
 		}
 		if err != nil {

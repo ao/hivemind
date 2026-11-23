@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/ao/hivemind/internal/carotate"
+	"github.com/ao/hivemind/internal/ha"
 	"github.com/ao/hivemind/internal/logrelay"
 	"github.com/ao/hivemind/internal/nodeapi"
 	"github.com/ao/hivemind/internal/pki"
@@ -309,6 +310,7 @@ func (a *nodeAPI) fail(w http.ResponseWriter, r *http.Request, err error) {
 	case errors.Is(err, store.ErrNotLeader):
 		a.log.Warn("a node's request was refused: this server does not lead now", "path", r.URL.Path, "err", err)
 		w.Header().Set(nodeapi.NoLeaderHeader, "1")
+		ha.SetNoLeaderFor(w.Header(), err)
 		w.Header().Set("Retry-After", "1")
 		writeError(w, http.StatusServiceUnavailable, err.Error())
 	case errors.Is(err, store.ErrOutcomeUnknown):

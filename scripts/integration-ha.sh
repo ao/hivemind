@@ -563,8 +563,11 @@ if out=$(echo pw | hmi $LAST registry login quorum.ha.test --username u --passwo
 fi
 grep -q "no leader" <<<"$out" && grep -q "a write needs 2" <<<"$out" || cl_fail "the refusal without a quorum is not clear: $out"
 cl_note "with two of three servers down, a write gets: $out"
-servers_out=$(hm $LAST servers 2>&1) || cl_fail "hivemind servers without a leader: $servers_out"
-grep -q "^No leader" <<<"$servers_out" || cl_fail "hivemind servers does not say there is no leader: $servers_out"
+if servers_out=$(hm $LAST servers 2>&1); then
+	cl_fail "hivemind servers exited 0 without a leader: $servers_out"
+fi
+grep -q "^error: no leader, as ${SID[$LAST]} sees it: " <<<"$servers_out" && grep -q "^${SID[$LAST]} " <<<"$servers_out" ||
+	cl_fail "hivemind servers does not list the servers and say there is no leader: $servers_out"
 sleep 20
 AFTER=$(running_total)
 [ "$AFTER" -eq "$BEFORE" ] || cl_fail "containers stopped without a quorum: $BEFORE before, $AFTER after 20 s"

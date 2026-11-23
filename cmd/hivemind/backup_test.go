@@ -96,6 +96,28 @@ func TestBackupAndRestoreCommands(t *testing.T) {
 	}
 }
 
+// A backup of a data directory without admin.token, as a server that
+// joined a cluster has, does not say it holds the admin token; one with it
+// does (the fifth acceptance run's twelfth finding).
+func TestBackupNoteNamesTheTokenOnlyWhenItIsThere(t *testing.T) {
+	home := isolate(t)
+	dir := filepath.Join(home, "server")
+	if _, _, err := run(t, "", "init", "--data-dir", dir); err != nil {
+		t.Fatal(err)
+	}
+	_, stderr, err := run(t, "", "backup", filepath.Join(home, "with.tar"), "--data-dir", dir)
+	if err != nil || !strings.Contains(stderr, "and the admin token") {
+		t.Fatalf("backup with admin.token: %v, %q", err, stderr)
+	}
+	if err := os.Remove(filepath.Join(dir, auth.TokenFileName)); err != nil {
+		t.Fatal(err)
+	}
+	stdout, stderr, err := run(t, "", "backup", filepath.Join(home, "without.tar"), "--data-dir", dir)
+	if err != nil || strings.Contains(stdout, auth.TokenFileName) || strings.Contains(stderr, "admin token") || !strings.Contains(stderr, "private key") {
+		t.Fatalf("backup without admin.token: %v, %q, %q", err, stdout, stderr)
+	}
+}
+
 func TestBackupHelpSaysItHoldsTheCAKey(t *testing.T) {
 	isolate(t)
 	for _, cmd := range []string{"backup", "restore"} {

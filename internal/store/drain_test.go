@@ -612,7 +612,10 @@ func TestDrainNodeArguments(t *testing.T) {
 // A node lost during its drain gives up its replicas as on any node loss.
 // The drain counts them as lost, not as moved or stopped, records when the
 // node was lost, and counts each replica once, however many sweeps find the
-// node lost. At the deadline nothing is left to stop.
+// node lost. With nothing left to move, it is done at the step after the
+// sweep, though the node's last report still lists the containers: before,
+// it waited for them until its deadline (the fifth acceptance run's second
+// finding).
 func TestDrainCountsTheReplicasANodeLossTook(t *testing.T) {
 	e := newDrainEnv(t, nil, nodeA, nodeB)
 	webApp := spec.App{Name: "web", Image: "nginx:alpine", Replicas: 2, Ports: []spec.Port{{Host: 8080, Container: 80}}}
@@ -646,7 +649,9 @@ func TestDrainCountsTheReplicasANodeLossTook(t *testing.T) {
 	if lost, err := e.s.ReconcileNodes(e.ctx); err != nil || len(lost) != 1 || lost[0] != nodeB {
 		t.Fatalf("sweep: lost %v, %v; want node-b", lost, err)
 	}
-	e.step()
+	if done := e.step(); len(done) != 1 {
+		t.Fatalf("the drain of a lost node with nothing left to move did not finish: %+v", e.getDrain(nodeB))
+	}
 	for range 3 {
 		e.clock.Advance(5 * time.Second)
 		e.renew(nodeA)
@@ -656,20 +661,9 @@ func TestDrainCountsTheReplicasANodeLossTook(t *testing.T) {
 		e.step()
 	}
 	d = e.getDrain(nodeB)
-	if d.State != DrainDraining || d.Lost != 2 || !d.LostAt.Equal(lostAt) || d.Moved != 0 || d.Stopped != 0 || d.Remaining != 0 {
-		t.Fatalf("drain after the loss: %+v; want 2 lost at %s, none moved or stopped, none left", d, lostAt)
-	}
-
-	// The node never comes back. At the deadline the drain ends with
-	// nothing to stop, and its result still says what the loss took.
-	e.clock.Advance(2 * time.Minute)
-	e.renew(nodeA)
-	if done := e.step(); len(done) != 1 {
-		t.Fatalf("the drain did not finish at its deadline: %+v", e.getDrain(nodeB))
-	}
-	d = e.getDrain(nodeB)
-	if d.State != DrainDone || d.Lost != 2 || !d.LostAt.Equal(lostAt) || d.Moved != 0 || d.Stopped != 0 {
-		t.Fatalf("finished drain: %+v; want 2 lost, none moved or stopped", d)
+	if d.State != DrainDone || d.Lost != 2 || !d.LostAt.Equal(lostAt) || d.Moved != 0 || d.Stopped != 0 || d.Remaining != 0 ||
+		d.OldContainers != 2 || !d.FinishedAt.Equal(lostAt) {
+		t.Fatalf("drain after the loss: %+v; want done at %s, 2 lost then, none moved or stopped, none left, the 2 containers node-b last reported", d, lostAt)
 	}
 
 	// A drain whose node is not lost records no loss.
@@ -680,6 +674,50 @@ func TestDrainCountsTheReplicasANodeLossTook(t *testing.T) {
 	e2.step()
 	if d := e2.getDrain(nodeB); d.Lost != 0 || !d.LostAt.IsZero() {
 		t.Fatalf("drain of a node that stayed: %+v; want no loss", d)
+	}
+}
+
+// A drain started on a node that is lost already, as after hivemind server
+// remove of a server whose machine is down, has nothing to move, and is
+// done in the reply of DrainNode, with the time the drain found the node
+// lost; a replica with a volume stays, as on any drain. A drain of a node
+// that is not lost still waits for its agent to remove the old containers
+// it reports.
+func TestDrainOfALostNodeEndsAtOnce(t *testing.T) {
+	// Every replica goes to node-b while its lease is current.
+	toB := func(nodes []Node, placed []Assignment, a spec.App, idx int, now time.Time) (string, error) {
+		for _, n := range nodes {
+			if n.ID == nodeB && now.Sub(n.LastLease) <= 15*time.Second {
+				return n.ID, nil
+			}
+		}
+		return FirstNode(nodes, placed, a, idx, now)
+	}
+	e := newDrainEnv(t, toB, nodeA, nodeB, nodeC)
+	mustPut(t, e.s, app("calm", 2))
+	mustPut(t, e.s, dbApp())
+	e.report(nodeB, container("calm", 0, 1), container("calm", 1, 1), container("db", 0, 1))
+	// node-b stops; the sweep places calm's replicas again on node-a, and
+	// db's waits for node-b, where its volume is.
+	e.clock.Advance(16 * time.Second)
+	e.renew(nodeA)
+	e.renew(nodeC)
+	if lost, err := e.s.ReconcileNodes(e.ctx); err != nil || len(lost) != 1 || lost[0] != nodeB {
+		t.Fatalf("sweep: lost %v, %v; want node-b", lost, err)
+	}
+	e.clock.Advance(time.Minute)
+	e.renew(nodeA)
+	e.renew(nodeC)
+	d := e.drain(nodeB, 0)
+	if d.State != DrainDone || !d.LostAt.Equal(e.clock.Now()) || !d.FinishedAt.Equal(e.clock.Now()) || d.Remaining != 1 || d.OldContainers != 2 {
+		t.Fatalf("drain of a node lost a minute ago: %+v; want done at once, db's replica left, calm's two containers that it last reported", d)
+	}
+
+	// node-c, which renews its lease, with an old container its agent has
+	// not removed yet: its drain waits for it.
+	e.report(nodeC, container("gone", 0, 1))
+	if d := e.drain(nodeC, 0); d.State != DrainDraining || d.OldContainers != 1 || d.Remaining != 0 {
+		t.Fatalf("drain of a live node with an old container: %+v; want it draining", d)
 	}
 }
 

@@ -335,8 +335,15 @@ name_of_ip() {
 
 # servers_json NAME: hivemind servers --json as NAME's API answers it: a
 # follower passes it to the leader, and without a leader answers it from its
-# own copy of the configuration (docs/ha.md#membership).
-servers_json() { SSH_CT=${SSH_CT:-1} SSH_TIMEOUT=${SSH_TIMEOUT:-5} hm "$1" "servers --json" 2>/dev/null </dev/null; }
+# own copy of the configuration (docs/ha.md#membership). Without a leader
+# the CLI exits with status 1 after the JSON, whose leader is empty: that
+# reply is the answer too.
+servers_json() {
+	local j rc=0
+	j=$(SSH_CT=${SSH_CT:-1} SSH_TIMEOUT=${SSH_TIMEOUT:-5} hm "$1" "servers --json" 2>/dev/null </dev/null) || rc=$?
+	[ "$rc" -eq 0 ] || jq -e '.leader == "" and has("answered_by")' <<<"$j" >/dev/null 2>&1 || return "$rc"
+	printf '%s\n' "$j"
+}
 # The fields of GET /v1/servers that the harness reads: leader (an ID, or
 # "" without one), answered_by, note, and for each server id, advertise and
 # role (leader, follower or nonvoter). JQ_SRV_NAME maps an advertise

@@ -1211,6 +1211,23 @@ func serverHereError(dir, doing string) error {
 		filepath.Join(dir, serverStateFile), strings.TrimSpace(doing))
 }
 
+// joinedServerNoToken is what a client command without a token says on a
+// machine whose data directory holds a server that joined a cluster, and
+// no admin.token: only init writes that file, on the first server, and
+// init is refused here. The fifth acceptance run got the advice to run
+// init. It is nil for any other directory.
+func joinedServerNoToken(dir string) error {
+	st, err := readServerState(dir)
+	if err != nil {
+		return nil
+	}
+	if _, err := os.Lstat(filepath.Join(dir, auth.TokenFileName)); err == nil {
+		return nil
+	}
+	return fmt.Errorf("no API token: %s holds server %s, which joined the cluster, and a server that joined has no %s, which only init writes on the first server; "+
+		"give this CLI the cluster's admin token with %s or --token", dir, st.NodeID, auth.TokenFileName, envToken)
+}
+
 // runJoinServer is join --role server: it joins this machine as another
 // server of the cluster at arg, writes what the reply holds to the data
 // directory, and runs the server.

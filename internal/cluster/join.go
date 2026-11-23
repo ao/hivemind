@@ -13,9 +13,34 @@ import (
 	"github.com/ao/hivemind/internal/store"
 )
 
-// errJoinRefused is the one message for every token failure. It does not say
-// whether the token was malformed, unknown, used or expired.
+// errJoinRefused is the one message for every token failure but one of the
+// other role. It does not say whether the token was malformed, unknown,
+// used or expired.
 const errJoinRefused = "the join token is invalid, used or expired"
+
+// Tokens of the other role (store.TokenRoleError): a worker's token given to
+// a server's join, and a server's to a worker's. The cluster issued them, so
+// saying what they are tells their holder nothing new, and the fifth
+// acceptance run found that errJoinRefused left the user and the operator
+// unable to tell this mistake from an expired token.
+const (
+	errWorkerToken = "the join token is a worker's: a server joins with a token from hivemind join-token --role server"
+	errServerToken = "the join token is a server's: join this machine as a server with hivemind join --role server, " +
+		"or as a worker with a token from hivemind join-token"
+)
+
+// refusedToken is the message for a token that Redeem refused with err.
+func refusedToken(err error) string {
+	var re *store.TokenRoleError
+	switch {
+	case !errors.As(err, &re):
+		return errJoinRefused
+	case re.Server:
+		return errServerToken
+	default:
+		return errWorkerToken
+	}
+}
 
 // joinRoutes returns the handler of the join listener. It serves POST /join
 // and POST /join-server, and nothing else.
@@ -88,7 +113,7 @@ func join(cfg Config, limiter *ratelimit.FailLimiter, log *slog.Logger, w http.R
 		return
 	}
 	if _, err := cfg.Tokens.Redeem(req.Token); err != nil {
-		fail(http.StatusUnauthorized, errJoinRefused, err.Error())
+		fail(http.StatusUnauthorized, refusedToken(err), err.Error())
 		return
 	}
 
