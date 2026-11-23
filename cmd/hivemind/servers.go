@@ -581,11 +581,14 @@ func (h *haServe) schemaLoop(ctx context.Context, n *ha.Node) {
 			continue
 		}
 		lastWait = ""
-		v, err := h.st.StepSchema(ctx)
+		v, waits, err := h.stepSchema(ctx, n)
 		if err != nil {
 			if ctx.Err() == nil {
 				h.log.Warn("moving the store's schema to the next version", "schema", have, "err", err)
 			}
+			continue
+		}
+		if waits != "" {
 			continue
 		}
 		h.log.Info("every server runs the next schema version, and the store moved to it through the log", "from", have, "to", v)
@@ -593,6 +596,28 @@ func (h *haServe) schemaLoop(ctx context.Context, n *ha.Node) {
 		// build may know a further step.
 		t.Reset(time.Second)
 	}
+}
+
+// stepSchema appends the step to the store's next schema version, under
+// h.mu, which server joins hold too, once it has asked every server of the
+// Raft configuration again: a server that joined after schemaLoop's poll is
+// in this answer, and one that joins after the step finds the store at the
+// new version (joinServer). It returns what the step waits for instead,
+// when a server's build does not run that version.
+func (h *haServe) stepSchema(ctx context.Context, n *ha.Node) (int, string, error) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	have := h.st.Schema()
+	builds := n.Builds(ctx)
+	if err := ctx.Err(); err != nil {
+		return have, "", err
+	}
+	h.builds.Store(&builds)
+	if waits := schemaWaits(builds, have+1, h.nodeVersions(ctx)); waits != "" {
+		return have, waits, nil
+	}
+	v, err := h.st.StepSchema(ctx)
+	return v, "", err
 }
 
 // schemaWaits names the servers whose builds do not run schema version
@@ -665,6 +690,18 @@ func (h *haServe) joinServer(ctx context.Context, id string, req nodeapi.JoinSer
 	}
 	if !n.IsLeader() {
 		return nodeapi.JoinServerReply{}, store.ErrNotLeader
+	}
+	// The join handler checked the joining build against the store's schema
+	// version before this lock; a step (stepSchema, which holds it too) may
+	// have moved the store since. A request of 2.3.0 says no range, and
+	// 2.3.0 runs HASchemaVersion alone.
+	oldest, newest := req.SchemaOldest, req.SchemaNewest
+	if newest == 0 {
+		oldest, newest = store.HASchemaVersion, store.HASchemaVersion
+	}
+	if have := h.st.Schema(); have < oldest || have > newest {
+		return nodeapi.JoinServerReply{}, fmt.Errorf("%w: the cluster's store moved to schema version %d during the join, and the joining server's build runs "+
+			"versions %d to %d: join it with the release the cluster's servers run (hivemind servers), with a new token", store.ErrConflict, have, oldest, newest)
 	}
 	servers, err := h.st.ListServers(ctx)
 	if err != nil {
