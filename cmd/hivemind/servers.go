@@ -395,7 +395,64 @@ func (h *haServe) ownClient() (*nodeapi.Client, error) {
 		n := h.node.Load()
 		return n != nil && n.HasLeader()
 	}
-	return nodeapi.NewClient("https://"+self, tlsCfg, nodeapi.WithVersion(version), nodeapi.WithServers(list), nodeapi.WithHome(home))
+	// The node says what its server accepts, as a worker says what it
+	// trusts, so that a CA rotation counts it (docs/ha.md#the-steps-on-every-server).
+	trust := func() string { return nodeapi.FormatCATrust(h.rot.Accept().Load().Fingerprints()) }
+	return nodeapi.NewClient("https://"+self, tlsCfg, nodeapi.WithVersion(version), nodeapi.WithServers(list), nodeapi.WithHome(home),
+		nodeapi.WithCATrust(trust))
+}
+
+// caChanged gives this server's own node's client the CAs the server
+// accepts now, after a change of the CA rotation's state, as a worker
+// takes a new CA set: on new connections.
+func (h *haServe) caChanged() {
+	c := h.remote.Load()
+	if c == nil || h.nodes == nil {
+		return
+	}
+	tlsCfg, err := pki.ClientTLSConfigTrust(h.rot.Accept().Load(), h.nodes.CertHolder(), h.cfg.Advertise)
+	if err != nil {
+		h.log.Warn("this server's own node cannot take the CAs the server accepts now", "err", err)
+		return
+	}
+	c.SetTLSConfig(tlsCfg)
+}
+
+// startCheck refuses a CA rotation while a server is a non-voter that
+// catches up with the log (docs/ha.md#joins-and-backups-during-a-rotation).
+func (h *haServe) startCheck(context.Context) error {
+	n := h.node.Load()
+	if n == nil {
+		return nil
+	}
+	for _, m := range n.Members() {
+		if !m.Voter {
+			return fmt.Errorf("%w: %s is a non-voter", carotate.ErrServerJoining, m.ID)
+		}
+	}
+	return nil
+}
+
+// serversCA is each server's CA files, from what the leader last learnt
+// of their builds, for hivemind ca status; nil in a cluster of one, and on
+// a server that has not asked.
+func (h *haServe) serversCA(context.Context) []carotate.ServerCA {
+	p := h.builds.Load()
+	if p == nil || h.node.Load() == nil {
+		return nil
+	}
+	out := make([]carotate.ServerCA, 0, len(*p))
+	for _, b := range *p {
+		sc := carotate.ServerCA{ID: b.ID, Current: b.Build.CACurrent, Next: b.Build.CANext, Listener: b.Build.CAListener}
+		switch {
+		case !b.Answered:
+			sc.Err = "no answer: " + b.Err
+		case b.Legacy:
+			sc.Err = "a build before 2.4.0, which does not say"
+		}
+		out = append(out, sc)
+	}
+	return out
 }
 
 // onLeader runs while this server leads a cluster of several. A new leader
@@ -435,7 +492,24 @@ func (h *haServe) onLeader(ctx context.Context) {
 // buildInfo is this server's answer to the leader's build request.
 func (h *haServe) buildInfo() ha.BuildInfo {
 	oldest, newest := h.st.SchemaRange()
-	return ha.BuildInfo{Version: nodeapi.CleanVersion(version), SchemaOldest: oldest, SchemaNewest: newest, Schema: h.st.Schema()}
+	b := ha.BuildInfo{Version: nodeapi.CleanVersion(version), SchemaOldest: oldest, SchemaNewest: newest, Schema: h.st.Schema()}
+	if h.rot != nil {
+		cur, next := h.rot.Current(), h.rot.Next()
+		b.CACurrent = pki.FingerprintHex(cur.Fingerprint())
+		if next != nil {
+			b.CANext = pki.FingerprintHex(next.Fingerprint())
+		}
+		if h.nodes != nil {
+			if leaf := h.nodes.CertHolder().Leaf(); leaf != nil {
+				for _, ca := range []*pki.CA{cur, next} {
+					if ca != nil && leaf.CheckSignatureFrom(ca.Cert) == nil {
+						b.CAListener = pki.FingerprintHex(ca.Fingerprint())
+					}
+				}
+			}
+		}
+	}
+	return b
 }
 
 // schemaEvery is how often the leader asks every server which build it

@@ -315,6 +315,12 @@ type BuildInfo struct {
 	SchemaOldest int `json:"schema_oldest"`
 	SchemaNewest int `json:"schema_newest"`
 	Schema       int `json:"schema"`
+	// CACurrent and CANext are the fingerprints, in hex, of the CA in the
+	// server's ca.crt and, while a CA rotation runs, in its ca-next.crt;
+	// CAListener is that of the CA of the certificate it presents.
+	CACurrent  string `json:"ca_current,omitempty"`
+	CANext     string `json:"ca_next,omitempty"`
+	CAListener string `json:"ca_listener,omitempty"`
 }
 
 // ServerBuild is what the leader learnt of one server's build.

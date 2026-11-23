@@ -489,7 +489,17 @@ func (s *Store) dropCaches() {
 	if err := s.reloadRemoved(context.Background()); err != nil && s.log != nil {
 		s.log.Warn("reading the removed nodes again", "err", err)
 	}
+	if f := s.onForeign.Load(); f != nil {
+		(*f)()
+	}
 }
+
+// OnForeignChange makes f run each time rows may have changed that this
+// process did not write: after an entry from another server, a snapshot,
+// a write whose outcome is not known, and when this server takes the
+// leadership. f must not block; the CA rotation manager uses it to look at
+// the store's record again. A later call replaces f.
+func (s *Store) OnForeignChange(f func()) { s.onForeign.Store(&f) }
 
 // reloadRemoved reads the denylist from the read pool, which sees every
 // commit.

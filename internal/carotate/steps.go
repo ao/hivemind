@@ -27,6 +27,9 @@ type Status struct {
 	// Ended is set in the reply of the step that ended a rotation, and
 	// says how it ended.
 	Ended *Ended `json:"ended,omitempty"`
+	// Servers is, in a cluster of several servers, each server's CA
+	// files and certificate, as it said to the leader.
+	Servers []ServerCA `json:"servers,omitempty"`
 }
 
 // Ended is how a rotation ended, in the reply of the step that ended it.
@@ -238,6 +241,9 @@ func back(rot *store.CARotation) bool { return rot != nil && rot.Toward == store
 func (m *Manager) Status(ctx context.Context) (Status, error) {
 	s := m.cur.Load()
 	st := Status{Current: caInfo(s.current), Next: caInfo(s.next), Listener: pki.FingerprintHex(s.listener.Fingerprint())}
+	if m.servers != nil {
+		st.Servers = m.servers(ctx)
+	}
 	if !s.rotating() || m.st == nil {
 		return st, nil
 	}
@@ -271,38 +277,75 @@ func (m *Manager) Start(ctx context.Context) (Status, error) {
 	if s.rot != nil {
 		return Status{}, ErrInProgress
 	}
-	// Each server keeps the CA files in its own data directory, and a
-	// rotation changes them on this machine only.
-	if servers, err := m.st.ListServers(ctx); err != nil {
+	// With several servers, every server writes its copy of the new CA
+	// from the rotation's record, which holds it from schema version 19
+	// on (docs/ha.md#the-ca-rotation-with-several-servers).
+	servers, err := m.st.ListServers(ctx)
+	if err != nil {
 		return Status{}, err
-	} else if len(servers) > 1 {
+	}
+	recorded := m.st.Schema() >= store.CAStoreSchemaVersion
+	if len(servers) > 1 && !recorded {
 		return Status{}, ErrSeveralServers
+	}
+	if m.startCheck != nil {
+		if err := m.startCheck(ctx); err != nil {
+			return Status{}, err
+		}
 	}
 	if err := m.removeOrphan(); err != nil {
 		return Status{}, err
 	}
-	next, err := pki.CreateNextCA(m.dir)
-	if err != nil {
-		return Status{}, fmt.Errorf("making the new CA: %w", err)
-	}
-	m.nmu.Lock()
-	rot, err := m.st.StartCARotation(ctx, s.current.Fingerprint(), next.Fingerprint())
-	if err == nil {
-		var cross []byte
-		if cross, err = crossFor(s.current, next, &rot); err == nil {
-			m.nodes = map[string]store.CARotationNode{}
-			m.setState(derive(s.current, next, &rot, cross))
+	var next *pki.CA
+	if recorded {
+		// The record first, with the new CA sealed in it, and the files
+		// second: every server, this one included, writes its own from the
+		// record, and one that stops in between writes them at its next
+		// start.
+		if next, err = pki.NewNextCA(); err != nil {
+			return Status{}, fmt.Errorf("making the new CA: %w", err)
+		}
+		keyPEM, err := next.KeyPEM()
+		if err != nil {
+			return Status{}, err
+		}
+		sealed, err := sealNextKey(s.current, next.Fingerprint(), keyPEM)
+		if err != nil {
+			return Status{}, fmt.Errorf("sealing the new CA's key: %w", err)
+		}
+		if _, err := m.st.StartCARotationWith(ctx, s.current.Fingerprint(), next.Fingerprint(),
+			store.CARotationCA{CertPEM: string(next.CertPEM), SealedKey: sealed}); err != nil {
+			return Status{}, err
+		}
+		if err := m.followLocked(ctx); err != nil {
+			return Status{}, fmt.Errorf("the CA rotation is recorded, and this server could not write its copy of the new CA, which serve "+
+				"writes at its next start: %w", err)
+		}
+	} else {
+		// A store of 2.3.0's schema version: the files first, then the
+		// record, as 2.3.0 does.
+		if next, err = pki.CreateNextCA(m.dir); err != nil {
+			return Status{}, fmt.Errorf("making the new CA: %w", err)
+		}
+		m.nmu.Lock()
+		rot, err := m.st.StartCARotation(ctx, s.current.Fingerprint(), next.Fingerprint())
+		if err == nil {
+			var cross []byte
+			if cross, err = crossFor(s.current, next, &rot); err == nil {
+				m.nodes = map[string]store.CARotationNode{}
+				m.setState(derive(s.current, next, &rot, cross))
+			}
+		}
+		m.nmu.Unlock()
+		if err != nil {
+			// The files of a start the store did not record are removed
+			// here, or by the next Open.
+			_ = m.removeOrphan()
+			return Status{}, err
 		}
 	}
-	m.nmu.Unlock()
-	if err != nil {
-		// The files of a start the store did not record are removed here,
-		// or by the next Open.
-		_ = m.removeOrphan()
-		return Status{}, err
-	}
 	m.log.Info("CA rotation started: a new CA is made, and every node is to trust both; then run hivemind ca rotate renew",
-		"from", short(s.current.Fingerprint()), "to", short(next.Fingerprint()))
+		"from", short(s.current.Fingerprint()), "to", short(next.Fingerprint()), "servers", max(len(servers), 1))
 	return m.Status(ctx)
 }
 
@@ -393,6 +436,9 @@ func (m *Manager) Finish(ctx context.Context, force bool) (Status, error) {
 		}
 		s = m.cur.Load()
 	}
+	// The other servers accept the kept CA alone once the end is in the
+	// log: this server's own certificate moves first.
+	m.awaitServerCert(ctx, s.to)
 	ended := &Ended{Back: s.rot.Toward == store.CACurrent, Kept: pki.FingerprintHex(s.to.Fingerprint()),
 		Dropped: pki.FingerprintHex(s.from.Fingerprint()), WentWithout: w}
 	if err := m.endLocked(ctx, s); err != nil {
@@ -436,12 +482,15 @@ func (m *Manager) endLocked(ctx context.Context, s *state) error {
 	if err != nil {
 		return err
 	}
-	if err := m.completeEnding(ctx, rot); err != nil {
+	if err := m.endingFiles(rot); err != nil {
 		return fmt.Errorf("ending the CA rotation (serve finishes it at its next start): %w", err)
 	}
 	cur, err := pki.LoadCA(m.dir)
 	if err != nil {
 		return err
+	}
+	if err := m.st.EndCARotationKeeping(ctx, cur.Fingerprint()); err != nil {
+		return fmt.Errorf("ending the CA rotation (the leader, or serve at its next start, finishes it): %w", err)
 	}
 	m.nmu.Lock()
 	m.nodes = map[string]store.CARotationNode{}
@@ -521,5 +570,5 @@ func nodeIDs(w []Waiting) string {
 func IsRefusal(err error) bool {
 	var r *RefusedError
 	return errors.As(err, &r) || errors.Is(err, ErrInProgress) || errors.Is(err, ErrNoRotation) || errors.Is(err, ErrWrongPhase) ||
-		errors.Is(err, ErrSeveralServers)
+		errors.Is(err, ErrSeveralServers) || errors.Is(err, ErrServerJoining)
 }

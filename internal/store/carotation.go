@@ -107,6 +107,30 @@ func getCARotation(ctx context.Context, q rowQuerier) (CARotation, error) {
 // certificate from the current CA, and forgets what was seen of the nodes
 // in any earlier rotation. A rotation in progress is ErrCARotationExists.
 func (s *Store) StartCARotation(ctx context.Context, current, next [32]byte) (CARotation, error) {
+	return s.StartCARotationWith(ctx, current, next, CARotationCA{})
+}
+
+// CARotationCA is the new CA that a rotation's record holds from schema
+// version CAStoreSchemaVersion on: its certificate, PEM, and its private
+// key sealed under a key derived from the current CA's (carotate). Every
+// server of a cluster of several writes its ca-next.crt and ca-next.key
+// from them (docs/ha.md#the-ca-rotation-with-several-servers). Both are
+// empty for a rotation recorded before that version.
+type CARotationCA struct {
+	CertPEM   string
+	SealedKey []byte
+}
+
+// Empty reports whether the record holds no CA.
+func (c CARotationCA) Empty() bool { return c.CertPEM == "" || len(c.SealedKey) == 0 }
+
+// StartCARotationWith is StartCARotation, and records the new CA in the
+// rotation, on a store at CAStoreSchemaVersion or later. Below it, ca must
+// be empty.
+func (s *Store) StartCARotationWith(ctx context.Context, current, next [32]byte, ca CARotationCA) (CARotation, error) {
+	if !ca.Empty() && s.Schema() < CAStoreSchemaVersion {
+		return CARotation{}, fmt.Errorf("%w: a store at schema version %d cannot record the new CA; it needs %d", ErrInvalid, s.Schema(), CAStoreSchemaVersion)
+	}
 	now := s.now()
 	r := CARotation{CurrentFP: current, NextFP: next, Phase: CAPhaseTrust, Toward: CANext, Listener: CACurrent,
 		StartedAt: now, UpdatedAt: now}
@@ -122,6 +146,12 @@ func (s *Store) StartCARotation(ctx context.Context, current, next [32]byte) (CA
 			return ErrCARotationExists
 		}
 		if _, err := tx.ExecContext(ctx, `DELETE FROM ca_rotation_nodes`); err != nil {
+			return err
+		}
+		if !ca.Empty() {
+			_, err := tx.ExecContext(ctx, `INSERT INTO ca_rotation (id, current_fp, next_fp, phase, toward, listener, started_at, updated_at, next_cert, next_key)
+				VALUES (1, ?, ?, ?, ?, ?, ?, ?, ?, ?)`, current[:], next[:], r.Phase, r.Toward, r.Listener, now.UnixNano(), now.UnixNano(),
+				ca.CertPEM, ca.SealedKey)
 			return err
 		}
 		_, err := tx.ExecContext(ctx, `INSERT INTO ca_rotation (id, current_fp, next_fp, phase, toward, listener, started_at, updated_at)
@@ -163,11 +193,94 @@ func (s *Store) SetCARotation(ctx context.Context, r CARotation, resetNodes bool
 // EndCARotation deletes the rotation and what was seen of the nodes. No
 // rotation is not an error.
 func (s *Store) EndCARotation(ctx context.Context) error {
+	return s.EndCARotationKeeping(ctx, [32]byte{})
+}
+
+// EndCARotationKeeping is EndCARotation, and records, in the same
+// transaction, that the cluster CA is now the one with fingerprint kept,
+// on a store at CAStoreSchemaVersion or later: a server that applies the
+// end before it has done its own file step does it by that fingerprint
+// (docs/ha.md#the-steps-on-every-server). A zero kept records nothing.
+func (s *Store) EndCARotationKeeping(ctx context.Context, kept [32]byte) error {
+	record := kept != [32]byte{} && s.Schema() >= CAStoreSchemaVersion
 	return s.tx(ctx, func(tx *sql.Tx) error {
 		if _, err := tx.ExecContext(ctx, `DELETE FROM ca_rotation`); err != nil {
 			return err
 		}
-		_, err := tx.ExecContext(ctx, `DELETE FROM ca_rotation_nodes`)
+		if _, err := tx.ExecContext(ctx, `DELETE FROM ca_rotation_nodes`); err != nil {
+			return err
+		}
+		if record {
+			if _, err := tx.ExecContext(ctx, `UPDATE cluster SET ca_fp = ? WHERE id = 1 AND ca_fp != ?`, kept[:], kept[:]); err != nil {
+				return err
+			}
+		}
+		return nil
+	})
+}
+
+// GetCARotationCA returns the new CA the rotation's record holds. It is
+// empty on a store below CAStoreSchemaVersion, and for a rotation recorded
+// before it. No rotation is ErrNotFound.
+func (s *Store) GetCARotationCA(ctx context.Context) (CARotationCA, error) {
+	if s.Schema() < CAStoreSchemaVersion {
+		if _, err := s.GetCARotation(ctx); err != nil {
+			return CARotationCA{}, err
+		}
+		return CARotationCA{}, nil
+	}
+	var c CARotationCA
+	err := s.rdb.QueryRowContext(ctx, `SELECT next_cert, next_key FROM ca_rotation WHERE id = 1`).Scan(&c.CertPEM, &c.SealedKey)
+	if errors.Is(err, sql.ErrNoRows) {
+		return CARotationCA{}, fmt.Errorf("CA rotation: %w", ErrNotFound)
+	}
+	return c, err
+}
+
+// FillCARotationCA records the new CA in a rotation whose record has none,
+// as one recorded by 2.3.0 that this build continues. A record that has
+// one is left as it is.
+func (s *Store) FillCARotationCA(ctx context.Context, next [32]byte, ca CARotationCA) error {
+	if ca.Empty() || s.Schema() < CAStoreSchemaVersion {
+		return fmt.Errorf("%w: no CA to record, or a store below schema version %d", ErrInvalid, CAStoreSchemaVersion)
+	}
+	return s.tx(ctx, func(tx *sql.Tx) error {
+		keepsRoutes(tx)
+		_, err := tx.ExecContext(ctx, `UPDATE ca_rotation SET next_cert = ?, next_key = ? WHERE id = 1 AND next_fp = ? AND next_cert = ''`,
+			ca.CertPEM, ca.SealedKey, next[:])
+		return err
+	})
+}
+
+// ClusterCA returns the fingerprint of the cluster CA the store records,
+// the one in every server's ca.crt. ok is false when it records none: a
+// store below CAStoreSchemaVersion, or one where it was not recorded yet.
+func (s *Store) ClusterCA(ctx context.Context) (fp [32]byte, ok bool, err error) {
+	if s.Schema() < CAStoreSchemaVersion {
+		return fp, false, nil
+	}
+	var b []byte
+	err = s.rdb.QueryRowContext(ctx, `SELECT ca_fp FROM cluster WHERE id = 1`).Scan(&b)
+	if errors.Is(err, sql.ErrNoRows) {
+		return fp, false, nil
+	}
+	if err != nil || len(b) != len(fp) {
+		return fp, false, err
+	}
+	copy(fp[:], b)
+	return fp, true, nil
+}
+
+// SetClusterCA records the fingerprint of the cluster CA, on a store at
+// CAStoreSchemaVersion or later; below it, it does nothing. A store that
+// records it already changes nothing, and appends no entry.
+func (s *Store) SetClusterCA(ctx context.Context, fp [32]byte) error {
+	if s.Schema() < CAStoreSchemaVersion {
+		return nil
+	}
+	return s.tx(ctx, func(tx *sql.Tx) error {
+		keepsRoutes(tx)
+		_, err := tx.ExecContext(ctx, `UPDATE cluster SET ca_fp = ? WHERE id = 1 AND ca_fp != ?`, fp[:], fp[:])
 		return err
 	})
 }

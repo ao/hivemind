@@ -364,6 +364,11 @@ type Store struct {
 	oldest int
 	held   bool
 	schema atomic.Int64
+
+	// onForeign, if set, runs after rows may have changed that this
+	// process did not write: the CA rotation manager follows the store's
+	// record then (OnForeignChange).
+	onForeign atomic.Pointer[func()]
 }
 
 // readConns is the size of the read-only pool.

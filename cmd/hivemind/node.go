@@ -663,6 +663,12 @@ func runServe(ctx context.Context, cfg *config.Config, log *slog.Logger, rt runt
 	if hs.localReads, err = testLocalReads(); err != nil {
 		return err
 	}
+	if rot != nil {
+		// Set before anything runs that changes or reads the rotation.
+		rot.OnStateChange(hs.caChanged)
+		rot.SetStartCheck(hs.startCheck)
+		rot.SetServers(hs.serversCA)
+	}
 
 	// Every listener is bound before this start is recorded, so a start
 	// that fails to bind, as with a wrong address, records neither the
@@ -746,6 +752,9 @@ func runServe(ctx context.Context, cfg *config.Config, log *slog.Logger, rt runt
 		}
 		nodes = c
 		hs.nodes = c
+		// A change of the listener CA waits for this server's certificate
+		// to move before the CAs it accepts narrow (carotate).
+		rot.SetServerCert(c.CertHolder().Leaf)
 	}
 	if several {
 		// Raft before anything that reads the cluster record: a server that
@@ -764,6 +773,15 @@ func runServe(ctx context.Context, cfg *config.Config, log *slog.Logger, rt runt
 			return err
 		}
 		nodes.SetEpoch(cl.Epoch)
+	}
+	if rot != nil {
+		// Every server follows the CA rotation's record as it applies the
+		// log, a cluster of one too, which may turn Raft on and lose the
+		// leadership (docs/ha.md#the-steps-on-every-server); the leader
+		// runs the steps.
+		fctx, fcancel := context.WithCancel(ctx)
+		defer fcancel()
+		go rot.Follow(fctx)
 	}
 
 	sessions, err := auth.NewSessions(12 * time.Hour)
