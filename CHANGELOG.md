@@ -2,6 +2,15 @@
 
 Notable changes to hivemind, newest first. Versions follow [Semantic Versioning](https://semver.org). A release is cut by pushing a `v*` tag; its notes are the matching section below.
 
+## [2.3.1] - 2026-11-23
+
+The first published release of the 2.2 and 2.3 work. The `v2.2.0` and `v2.3.0` tags exist, but their release workflows failed in GitHub Actions on tests that depended on the speed of the machine and on running as root, so neither was published. 2.3.1 is 2.3.0 with those fixed. Everything in 2.3.0 and 2.2.0 is in it ([the changelog](https://github.com/ao/hivemind/blob/v2.3.1/CHANGELOG.md) has both), and the upgrade notes there apply: from 2.0.0, see 2.2.0's; from a cluster of one server, see 2.3.0's.
+
+### Fixed
+
+- The router counts a connection it refuses for a cap before it closes it. Before, a client that saw the connection end and read `/metrics` at once could miss the count in `hivemind_router_connections_refused_total`.
+- Tests that failed on GitHub's 4-CPU runners as a non-root user: a test that assumed root's default data directory, two router tests that read a count or reused an HTTP/2 connection too early, and two integration scripts that read the server's `/metrics` and its log before the line they wanted was there. Each was reproduced in Docker with 4 CPUs and the race detector before it was fixed.
+
 ## [2.3.0] - 2026-11-20
 
 A cluster can now have three or five servers instead of one ([docs/ha.md](docs/ha.md)).
