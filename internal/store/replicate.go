@@ -489,6 +489,9 @@ func (s *Store) dropCaches() {
 	if err := s.reloadRemoved(context.Background()); err != nil && s.log != nil {
 		s.log.Warn("reading the removed nodes again", "err", err)
 	}
+	// What the leader kept in memory is its own: a server that takes the
+	// leadership, or loses it, starts from the stored leases (lease.go).
+	s.forgetKept()
 	if f := s.onForeign.Load(); f != nil {
 		(*f)()
 	}

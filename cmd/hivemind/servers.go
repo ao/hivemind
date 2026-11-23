@@ -214,6 +214,13 @@ func (h *haServe) handover() {
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), handoverTimeout)
 	defer cancel()
+	// The leases this leader keeps in memory go into the log first, so the
+	// next leader finds them stored (docs/ha.md#fewer-raft-entries).
+	if n.IsLeader() {
+		if _, err := h.st.WriteKept(ctx); err != nil {
+			h.log.Debug("writing the leases this leader keeps before it hands the leadership on", "err", err)
+		}
+	}
 	if err := n.Handover(ctx); err != nil {
 		h.log.Warn("this server leads and stops, and could not hand the leadership on; the others elect a leader once it has stopped", "err", err)
 	}
@@ -470,6 +477,12 @@ func (h *haServe) onLeader(ctx context.Context) {
 		noteWaiting(ctx, h.st, h.cfg.StartGrace, h.log)
 		h.work.start(started)
 	}
+	kept := make(chan struct{})
+	go func() {
+		defer close(kept)
+		h.writeKeptLoop(ctx)
+	}()
+	defer func() { <-kept }()
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
@@ -487,6 +500,24 @@ func (h *haServe) onLeader(ctx context.Context) {
 	<-done
 	h.builds.Store(nil)
 	h.work.stop()
+}
+
+// writeKeptLoop writes the leases and report stamps the leader keeps in
+// memory every store.WriteKeptEvery, in one entry, while this server leads
+// (docs/ha.md#fewer-raft-entries).
+func (h *haServe) writeKeptLoop(ctx context.Context) {
+	t := time.NewTicker(store.WriteKeptEvery)
+	defer t.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-t.C:
+		}
+		if _, err := h.st.WriteKept(ctx); err != nil && ctx.Err() == nil && !errors.Is(err, store.ErrNotLeader) {
+			h.log.Warn("writing the leases this leader keeps in memory", "err", err)
+		}
+	}
 }
 
 // buildInfo is this server's answer to the leader's build request.

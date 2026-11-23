@@ -369,6 +369,15 @@ type Store struct {
 	// process did not write: the CA rotation manager follows the store's
 	// record then (OnForeignChange).
 	onForeign atomic.Pointer[func()]
+
+	// kept is, on the leader of a cluster of several, the lease each node
+	// renewed last that the leader keeps in memory and has not written
+	// yet, and stamp the time of each node's last report that changed
+	// nothing, which stamps its container rows when it is written
+	// (lease.go). keptMu guards both.
+	keptMu sync.Mutex
+	kept   map[string]int64
+	stamp  map[string]int64
 }
 
 // readConns is the size of the read-only pool.
@@ -1149,7 +1158,7 @@ func (s *Store) UpsertNode(ctx context.Context, n Node) error {
 
 // GetNode returns one node.
 func (s *Store) GetNode(ctx context.Context, id string) (Node, error) {
-	nodes, err := listNodes(ctx, s.rdb)
+	nodes, err := s.ListNodes(ctx)
 	if err != nil {
 		return Node{}, err
 	}
@@ -1162,7 +1171,15 @@ func (s *Store) GetNode(ctx context.Context, id string) (Node, error) {
 }
 
 // ListNodes returns every node, sorted by ID.
-func (s *Store) ListNodes(ctx context.Context) ([]Node, error) { return listNodes(ctx, s.rdb) }
+// The leases are the leader's own view: those it keeps in memory are
+// newer than the stored ones (lease.go).
+func (s *Store) ListNodes(ctx context.Context) ([]Node, error) {
+	nodes, err := listNodes(ctx, s.rdb)
+	if err != nil {
+		return nil, err
+	}
+	return s.withKept(nodes), nil
+}
 
 func listNodes(ctx context.Context, q querier) ([]Node, error) {
 	rows, err := q.QueryContext(ctx, `SELECT n.id, n.name, n.cpu, n.memory, n.last_lease, n.ready_since, coalesce(c.not_after, 0), coalesce(c.issued_at, 0), n.eligible, n.address, n.version, n.dials
@@ -1235,6 +1252,15 @@ func checkNodeDials(d string) error {
 // lost. A node that was removed gets ErrNodeRemoved, and one that is not
 // registered ErrNotFound.
 func (s *Store) RenewLease(ctx context.Context, nodeID string) error {
+	// On the leader of a cluster of several, the renewal of a node whose
+	// stored lease is recent is kept in memory (lease.go).
+	if s.Replicated() {
+		if now := s.now().UnixNano(); s.keepable(ctx, s.rdb, nodeID, now) {
+			s.noteReport(nodeID, now)
+			s.keep(nodeID, now, false)
+			return nil
+		}
+	}
 	return s.tx(ctx, func(tx *sql.Tx) error {
 		now := s.now().UnixNano()
 		// The routing table counts a node with a current lease; renewing it
@@ -1306,11 +1332,26 @@ func (s *Store) ReportStatus(ctx context.Context, nodeID string, st []Status) er
 	err := s.tx(ctx, func(tx *sql.Tx) error {
 		now := s.now().UnixNano()
 		current := s.leaseCurrent(nodeID, now)
-		if err := s.renewLease(ctx, tx, nodeID, now); err != nil {
-			return err
-		}
 		rewrite := true
-		if same {
+		// On the leader of a cluster of several, a report the same as the
+		// last, from a node whose stored lease is recent, whose rows are
+		// all still there, keeps the lease and the stamps in memory
+		// (lease.go).
+		kept := false
+		if same && s.Replicated() && s.keepable(ctx, tx, nodeID, now) {
+			var n int64
+			if err := tx.QueryRowContext(ctx, `SELECT count(*) FROM container_status WHERE node_id = ?`, nodeID).Scan(&n); err == nil && n == int64(len(st)) {
+				kept, rewrite = true, false
+				s.noteReport(nodeID, now)
+				onCommit(tx, func() { s.keep(nodeID, now, true) })
+			}
+		}
+		if !kept {
+			if err := s.renewLease(ctx, tx, nodeID, now); err != nil {
+				return err
+			}
+		}
+		if same && !kept {
 			res, err := tx.ExecContext(ctx, `UPDATE container_status SET updated_at = ? WHERE node_id = ?`, now, nodeID)
 			if err != nil {
 				return err
@@ -1454,13 +1495,15 @@ func (s *Store) ListStatus(ctx context.Context, app string) ([]Status, error) {
 	if app != "" {
 		where, args = `app = ?`, []any{app}
 	}
-	return queryStatus(ctx, s.rdb, where+` ORDER BY app, idx, name`, args...)
+	st, err := queryStatus(ctx, s.rdb, where+` ORDER BY app, idx, name`, args...)
+	return s.statusWithKept(st), err
 }
 
 // StatusForNode returns what one node last reported, sorted by app, replica
 // and name. An agent reads it at start-up to recover its restart counts.
 func (s *Store) StatusForNode(ctx context.Context, nodeID string) ([]Status, error) {
-	return queryStatus(ctx, s.rdb, `node_id = ? ORDER BY app, idx, name`, nodeID)
+	st, err := queryStatus(ctx, s.rdb, `node_id = ? ORDER BY app, idx, name`, nodeID)
+	return s.statusWithKept(st), err
 }
 
 func queryStatus(ctx context.Context, q querier, where string, args ...any) ([]Status, error) {

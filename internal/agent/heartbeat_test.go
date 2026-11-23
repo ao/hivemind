@@ -2,6 +2,7 @@ package agent
 
 import (
 	"context"
+	"errors"
 	"log/slog"
 	"sync"
 	"sync/atomic"
@@ -81,4 +82,38 @@ func TestRunRenewsTheLeaseDuringASlowPass(t *testing.T) {
 	if n := src.renewals.Load(); n != after {
 		t.Fatalf("%d lease renewals after Run returned", n-after)
 	}
+}
+
+// A report the server took renews the lease, so the heartbeat skips a
+// renewal that would follow one within Heartbeat: with passes that report
+// more often than the heartbeat, it renews nothing on its own
+// (docs/ha.md#fewer-raft-entries). Once the reports stop going through, it
+// renews again.
+func TestHeartbeatSkipsARenewalAfterAReport(t *testing.T) {
+	e := newEnv(t)
+	src := &countingSource{failingSource: e.src}
+	a, err := New(Config{NodeID: nodeID, Runtime: e.rt, Source: src, Interval: 20 * time.Millisecond,
+		Heartbeat: 100 * time.Millisecond, Logger: slog.New(slog.NewTextHandler(e.logs, nil))})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	done := make(chan error, 1)
+	go func() { done <- a.Run(ctx) }()
+	defer func() {
+		cancel()
+		<-done
+	}()
+	waitFor(t, func() bool { return a.reported.Load() != 0 })
+	before := src.renewals.Load()
+	time.Sleep(450 * time.Millisecond)
+	if n := src.renewals.Load() - before; n != 0 {
+		t.Fatalf("%d lease renewals in 450 ms while every 20 ms pass reported, want none", n)
+	}
+	// The reports stop: the heartbeat renews on its own again.
+	a.reported.Store(time.Now().Add(-time.Hour).UnixNano())
+	// A pass that cannot read its assignments does not report.
+	e.src.setFail(errors.New("the server is away"))
+	waitFor(t, func() bool { return src.renewals.Load() > before })
 }
