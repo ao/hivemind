@@ -36,6 +36,8 @@ type testServer struct {
 	st   *store.Store
 	node *Node
 	cert *pki.CertHolder
+	// build, if set, is what the server answers the build request with.
+	build func() BuildInfo
 	// logs, if set, takes the server's log at info.
 	logs *lockedBuffer
 }
@@ -48,7 +50,7 @@ type testCluster struct {
 	leading sync.Map // id -> bool, from OnLeader
 }
 
-func newTestCluster(t *testing.T, n int) *testCluster {
+func newTestCluster(t *testing.T, n int, opts ...store.Option) *testCluster {
 	t.Helper()
 	ca, err := pki.CreateCA(t.TempDir())
 	if err != nil {
@@ -58,7 +60,7 @@ func newTestCluster(t *testing.T, n int) *testCluster {
 	for i := 0; i < n; i++ {
 		id := fmt.Sprintf("node-s%d", i)
 		dir := filepath.Join(t.TempDir(), id)
-		st, err := store.Open(context.Background(), filepath.Join(dir, "hivemind.db"), store.WithMinReady(0))
+		st, err := store.Open(context.Background(), filepath.Join(dir, "hivemind.db"), append([]store.Option{store.WithMinReady(0)}, opts...)...)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -96,7 +98,7 @@ func (c *testCluster) config(s *testServer, seeds ...string) Config {
 		Cert: s.cert, Trust: c.trust, Seeds: seeds, Timing: testTiming,
 		Logger:   s.logger(),
 		OnLeader: func(ctx context.Context) { c.leading.Store(s.id, true); <-ctx.Done(); c.leading.Store(s.id, false) },
-		Fatal:    func(err error) { c.t.Errorf("%s: fatal: %v", s.id, err) }}
+		Fatal:    func(err error) { c.t.Errorf("%s: fatal: %v", s.id, err) }, Build: s.build}
 }
 
 // start forms the cluster: server 0 turns Raft on in its cluster of one,

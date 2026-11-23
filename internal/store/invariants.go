@@ -16,9 +16,9 @@ import (
 // that its running replicas match its replica count and generation. It
 // returns the first violation. The tests run it after every change; the
 // crash and concurrency tests run it after the fact.
-func (s *Store) CheckInvariants(ctx context.Context) error { return invariants(ctx, s.db) }
+func (s *Store) CheckInvariants(ctx context.Context) error { return invariants(ctx, s.db, s.Schema()) }
 
-func invariants(ctx context.Context, db *sql.DB) error {
+func invariants(ctx context.Context, db *sql.DB, want int) error {
 	var ic string
 	if err := db.QueryRowContext(ctx, `PRAGMA integrity_check`).Scan(&ic); err != nil {
 		return err
@@ -39,8 +39,8 @@ func invariants(ctx context.Context, db *sql.DB) error {
 	if err := db.QueryRowContext(ctx, `SELECT version FROM schema_version`).Scan(&v); err != nil {
 		return err
 	}
-	if v != SchemaVersion {
-		return fmt.Errorf("schema version %d, want %d", v, SchemaVersion)
+	if v != want {
+		return fmt.Errorf("schema version %d, want %d", v, want)
 	}
 
 	type app struct {

@@ -540,12 +540,21 @@ func runServe(ctx context.Context, cfg *config.Config, log *slog.Logger, rt runt
 	if several && cfg.Advertise == "" {
 		return fmt.Errorf("%s holds a server of a cluster of several, which needs --advertise: the address the other servers and the workers reach it at", cfg.DataDir)
 	}
-	st, err := store.Open(ctx, filepath.Join(cfg.DataDir, storeFileName), store.WithMinReady(cfg.MinReady),
-		store.WithLogger(log.With("component", "store")))
+	opts := []store.Option{store.WithMinReady(cfg.MinReady), store.WithLogger(log.With("component", "store"))}
+	if several {
+		// The store keeps its schema version: the leader moves it through
+		// the log once every server runs the next one (docs/ha.md#rolling-upgrades).
+		opts = append(opts, store.WithHeldSchema())
+	}
+	st, err := store.Open(ctx, filepath.Join(cfg.DataDir, storeFileName), opts...)
 	if err != nil {
 		return err
 	}
 	defer st.Close()
+	if several {
+		oldest, newest := st.SchemaRange()
+		log.Info("the store keeps its schema version, which the cluster's leader moves", "schema", st.Schema(), "runs", fmt.Sprintf("%d-%d", oldest, newest))
+	}
 	if !several {
 		// A store that lists the servers of a cluster of several, in a data
 		// directory without Raft state, is a server's whose Raft state is

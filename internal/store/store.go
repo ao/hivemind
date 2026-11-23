@@ -38,6 +38,10 @@ var (
 	ErrInvalid = errors.New("invalid")
 	// ErrNewerSchema means the file was written by a newer hivemind.
 	ErrNewerSchema = errors.New("store schema is newer than this build")
+	// ErrOlderSchema means a store of a cluster of several is at a schema
+	// version older than this build runs without migrating it: the
+	// cluster's servers run a release two or more before this one.
+	ErrOlderSchema = errors.New("store schema is older than this build runs in a cluster of several servers")
 	// ErrConflict means the request is refused in the current state, such
 	// as removing a node that still renews its lease.
 	ErrConflict = errors.New("conflict")
@@ -240,6 +244,25 @@ func WithMinReady(d time.Duration) Option {
 // to an existing store. The default logs nothing.
 func WithLogger(log *slog.Logger) Option { return func(s *Store) { s.log = log } }
 
+// WithHeldSchema opens the store of a server of a cluster of several
+// (docs/ha.md#opening-the-store): an existing store keeps its schema
+// version, which the cluster's leader moves through the log (StepSchema),
+// and a new one is made at the oldest version this build runs. A store at
+// a version below that is ErrOlderSchema.
+func WithHeldSchema() Option { return func(s *Store) { s.held = true } }
+
+// WithSchemaRange makes the store the store of a build that knows the
+// schema up to newest and runs a store at oldest or later, in place of
+// this build's SchemaOldest and SchemaVersion. Tests use it to play other
+// releases.
+func WithSchemaRange(oldest, newest int) Option {
+	return func(s *Store) {
+		newest = min(max(newest, 1), len(migrations))
+		s.oldest = min(max(oldest, 1), newest)
+		s.migs = migrations[:newest]
+	}
+}
+
 // Store is the desired-state database. It is safe for concurrent use.
 type Store struct {
 	// db is the one connection every write and every transaction uses.
@@ -331,6 +354,16 @@ type Store struct {
 	// localNode is the node of the server this process runs, when it is
 	// not the cluster record's (SetLocalNode).
 	localNode atomic.Pointer[string]
+
+	// migs is the list of migrations this build knows, and oldest the
+	// oldest schema version it runs a store at (WithSchemaRange). held is
+	// WithHeldSchema. schema is the store's schema version: what Open left
+	// it at, then what each step of the log (StepSchema) and each snapshot
+	// moved it to.
+	migs   []string
+	oldest int
+	held   bool
+	schema atomic.Int64
 }
 
 // readConns is the size of the read-only pool.
@@ -356,7 +389,8 @@ func Open(ctx context.Context, path string, opts ...Option) (*Store, error) {
 	// One connection for writes: they are serialised in the process. Other
 	// processes are kept out by SQLite's locks and wait up to busy_timeout.
 	db.SetMaxOpenConns(1)
-	s := &Store{db: db, now: time.Now, reported: map[string][sha256.Size]byte{}, rewrote: map[string]int64{}, origin: newOrigin()}
+	s := &Store{db: db, now: time.Now, reported: map[string][sha256.Size]byte{}, rewrote: map[string]int64{}, origin: newOrigin(),
+		migs: migrations, oldest: SchemaOldest}
 	for _, o := range opts {
 		o(s)
 	}
@@ -429,7 +463,26 @@ func (s *Store) init(ctx context.Context) error {
 	if fk != 1 {
 		return errors.New("foreign keys are off")
 	}
-	return migrateLogged(ctx, s.db, migrations, s.log)
+	target := func(have int, isNew bool) (int, error) { return len(s.migs), nil }
+	if s.held {
+		target = func(have int, isNew bool) (int, error) {
+			switch {
+			case isNew || have == 0:
+				return s.oldest, nil
+			case have < s.oldest:
+				return 0, fmt.Errorf("%w: the store has schema version %d, and this hivemind runs %d to %d in a cluster of several servers. "+
+					"Its servers run a release two or more before this one: upgrade every server to the release between first, and wait until "+
+					"hivemind servers shows the store at %d (docs/ha.md#rolling-upgrades)", ErrOlderSchema, have, s.oldest, len(s.migs), s.oldest)
+			}
+			return have, nil
+		}
+	}
+	v, err := migrateWith(ctx, s.db, s.migs, target, s.log)
+	if err != nil {
+		return err
+	}
+	s.schema.Store(int64(v))
+	return nil
 }
 
 // Close closes the database.

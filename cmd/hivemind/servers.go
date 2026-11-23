@@ -194,6 +194,9 @@ type haServe struct {
 	// removed while it was down learns it (watchRemoved).
 	listed      atomic.Pointer[[]string]
 	nodeRemoved atomic.Bool
+	// builds is what the leader last learnt of each server's build
+	// (schemaLoop), for hivemind servers; nil until it has asked.
+	builds atomic.Pointer[[]ha.ServerBuild]
 }
 
 // handoverTimeout bounds the handover of the leadership as serve stops.
@@ -232,6 +235,7 @@ func (h *haServe) haConfig() ha.Config {
 			return err == nil && removed
 		},
 		OnLeader: h.onLeader,
+		Build:    h.buildInfo,
 		Fatal: func(err error) {
 			select {
 			case h.fatal <- err:
@@ -409,8 +413,116 @@ func (h *haServe) onLeader(ctx context.Context) {
 		noteWaiting(ctx, h.st, h.cfg.StartGrace, h.log)
 		h.work.start(started)
 	}
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		// Raft can make this server the leader before serve has its node.
+		for h.node.Load() == nil {
+			select {
+			case <-ctx.Done():
+				return
+			case <-time.After(100 * time.Millisecond):
+			}
+		}
+		h.schemaLoop(ctx, h.node.Load())
+	}()
 	<-ctx.Done()
+	<-done
+	h.builds.Store(nil)
 	h.work.stop()
+}
+
+// buildInfo is this server's answer to the leader's build request.
+func (h *haServe) buildInfo() ha.BuildInfo {
+	oldest, newest := h.st.SchemaRange()
+	return ha.BuildInfo{Version: nodeapi.CleanVersion(version), SchemaOldest: oldest, SchemaNewest: newest, Schema: h.st.Schema()}
+}
+
+// schemaEvery is how often the leader asks every server which build it
+// runs (docs/ha.md#the-step).
+const schemaEvery = 10 * time.Second
+
+// schemaLoop runs while this server leads: every schemaEvery it asks each
+// server of the Raft configuration which build it runs, keeps the answers
+// for hivemind servers, and, once every server runs the store's next
+// schema version, appends the step to it to the log.
+func (h *haServe) schemaLoop(ctx context.Context, n *ha.Node) {
+	t := time.NewTimer(time.Second)
+	defer t.Stop()
+	lastWait := ""
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-t.C:
+		}
+		t.Reset(schemaEvery)
+		builds := n.Builds(ctx)
+		if ctx.Err() != nil {
+			return
+		}
+		h.builds.Store(&builds)
+		have := h.st.Schema()
+		if _, newest := h.st.SchemaRange(); have >= newest {
+			continue
+		}
+		waits := schemaWaits(builds, have+1, h.nodeVersions(ctx))
+		if waits != "" {
+			if waits != lastWait {
+				h.log.Info("the store's schema moves to the next version once every server runs it", "schema", have, "next", have+1,
+					"waiting_for", waits)
+				lastWait = waits
+			}
+			continue
+		}
+		lastWait = ""
+		v, err := h.st.StepSchema(ctx)
+		if err != nil {
+			if ctx.Err() == nil {
+				h.log.Warn("moving the store's schema to the next version", "schema", have, "err", err)
+			}
+			continue
+		}
+		h.log.Info("every server runs the next schema version, and the store moved to it through the log", "from", have, "to", v)
+		// Ask again soon: the servers' answers name the new version, and a
+		// build may know a further step.
+		t.Reset(time.Second)
+	}
+}
+
+// schemaWaits names the servers whose builds do not run schema version
+// next, with why, or returns "" when every server runs it. versions is
+// the version each node last sent, for a build that does not say.
+func schemaWaits(builds []ha.ServerBuild, next int, versions map[string]string) string {
+	var out []string
+	for _, b := range builds {
+		switch {
+		case b.RunsSchema(next):
+			continue
+		case !b.Answered:
+			out = append(out, b.ID+" (no answer: "+b.Err+")")
+		case b.Legacy:
+			out = append(out, fmt.Sprintf("%s (%s, which runs schema version %d alone)", b.ID, firstNonEmpty(versions[b.ID], "-"), b.Build.SchemaNewest))
+		default:
+			out = append(out, fmt.Sprintf("%s (%s, which runs schema versions %d to %d)", b.ID, firstNonEmpty(b.Build.Version, "-"), b.Build.SchemaOldest, b.Build.SchemaNewest))
+		}
+	}
+	if len(builds) == 0 {
+		return "the Raft configuration, which this server cannot read"
+	}
+	return strings.Join(out, ", ")
+}
+
+// nodeVersions is the version each node last sent with a request, by node
+// ID.
+func (h *haServe) nodeVersions(ctx context.Context) map[string]string {
+	out := map[string]string{}
+	if nodes, err := h.st.ListNodes(ctx); err == nil {
+		for _, n := range nodes {
+			out[n.ID] = n.Version
+		}
+	}
+	return out
 }
 
 // upsertOwnNode registers this server's node in the store, as serve does
@@ -521,18 +633,35 @@ func (h *haServe) issueServerToken(ttl time.Duration) (string, time.Time, string
 
 // servers answers GET /v1/servers.
 func (h *haServe) servers(ctx context.Context) (server.ServersReply, error) {
-	names := map[string]string{}
+	names, versions := map[string]string{}, map[string]string{}
 	if nodes, err := h.st.ListNodes(ctx); err == nil {
 		for _, n := range nodes {
-			names[n.ID] = n.Name
+			names[n.ID], versions[n.ID] = n.Name, n.Version
 		}
 	}
+	oldest, newest := h.st.SchemaRange()
 	n := h.node.Load()
 	if n == nil {
 		now := time.Now().UTC()
-		return server.ServersReply{Leader: h.selfID, AnsweredBy: h.selfID, Note: "a cluster of one server",
+		return server.ServersReply{Leader: h.selfID, AnsweredBy: h.selfID, Note: "a cluster of one server", Schema: h.st.Schema(),
 			Servers: []server.ServerEntry{{ID: h.selfID, Name: names[h.selfID], Advertise: h.cfg.Advertise, NodePort: h.cfg.ClusterPort,
-				Role: "leader", LastContact: &now}}}, nil
+				Role: "leader", LastContact: &now, Version: nodeapi.CleanVersion(version), VersionFrom: "build",
+				SchemaOldest: oldest, SchemaNewest: newest}}}, nil
+	}
+	// The leader keeps what it last learnt of each build; a follower that
+	// answers, while no server leads, or a leader that has not asked yet,
+	// asks now.
+	var builds []ha.ServerBuild
+	if p := h.builds.Load(); p != nil {
+		builds = *p
+	} else {
+		bctx, cancel := context.WithTimeout(ctx, 3*time.Second)
+		builds = n.Builds(bctx)
+		cancel()
+	}
+	byBuild := map[string]ha.ServerBuild{}
+	for _, b := range builds {
+		byBuild[b.ID] = b
 	}
 	rows, err := h.st.ListServers(ctx)
 	if err != nil {
@@ -561,6 +690,13 @@ func (h *haServe) servers(ctx context.Context) (server.ServersReply, error) {
 			t := m.LastContact.UTC()
 			e.LastContact = &t
 		}
+		switch b, ok := byBuild[m.ID]; {
+		case ok && b.Answered && !b.Legacy:
+			e.Version, e.VersionFrom = b.Build.Version, "build"
+			e.SchemaOldest, e.SchemaNewest = b.Build.SchemaOldest, b.Build.SchemaNewest
+		case versions[m.ID] != "":
+			e.Version, e.VersionFrom = versions[m.ID], "node"
+		}
 		rep.Servers = append(rep.Servers, e)
 	}
 	if leader == "" {
@@ -568,6 +704,11 @@ func (h *haServe) servers(ctx context.Context) (server.ServersReply, error) {
 		if _, err := n.CanWrite(); err != nil {
 			rep.Note = err.Error()
 		}
+	}
+	rep.Schema = h.st.Schema()
+	if rep.Schema < newest {
+		rep.SchemaNext = rep.Schema + 1
+		rep.SchemaWaits = schemaWaits(builds, rep.SchemaNext, versions)
 	}
 	return rep, nil
 }
@@ -973,7 +1114,7 @@ func runJoinServer(cmd *cobra.Command, cfg *config.Config, arg string) error {
 	}
 	joinAddr := net.JoinHostPort(host, strconv.Itoa(port+1))
 	reply, err := nodeapi.JoinServer(ctx, joinAddr, nodeapi.JoinServerRequest{Token: token, Advertise: cfg.Advertise,
-		NodePort: cfg.ClusterPort, Version: nodeapi.CleanVersion(version)})
+		NodePort: cfg.ClusterPort, Version: nodeapi.CleanVersion(version), SchemaOldest: store.SchemaOldest, SchemaNewest: store.SchemaVersion})
 	if err != nil {
 		release()
 		return err

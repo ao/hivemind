@@ -63,7 +63,10 @@ type Config struct {
 	OnLeader func(ctx context.Context)
 	// Fatal is called once when an entry cannot be applied: the server
 	// must stop. Nil only logs.
-	Fatal  func(error)
+	Fatal func(error)
+	// Build is what this server answers the leader's build request with
+	// (docs/ha.md#the-step). Nil answers with the store's versions alone.
+	Build  func() BuildInfo
 	Logger *slog.Logger
 	Timing Timing
 }

@@ -355,6 +355,19 @@ CREATE TABLE servers (
 
 ALTER TABLE join_tokens ADD COLUMN role TEXT NOT NULL DEFAULT 'worker' CHECK (role IN ('worker', 'server'));
 `,
+	// 19: the CA rotation with several servers (docs/ha.md).
+	// ca_rotation.next_cert is the new CA's certificate, PEM, and next_key
+	// its private key sealed under a key derived from the current CA's
+	// (carotate): every server writes its ca-next.crt and ca-next.key from
+	// them. Both are empty for a rotation recorded before this version,
+	// until the server fills them from its files. cluster.ca_fp is the
+	// fingerprint of the cluster CA, the one in every server's ca.crt, or
+	// empty until it is recorded.
+	`
+ALTER TABLE ca_rotation ADD COLUMN next_cert TEXT NOT NULL DEFAULT '';
+ALTER TABLE ca_rotation ADD COLUMN next_key BLOB NOT NULL DEFAULT x'';
+ALTER TABLE cluster ADD COLUMN ca_fp BLOB NOT NULL DEFAULT x'' CHECK (length(ca_fp) IN (0, 32));
+`,
 }
 
 // migrationNotes says in a few words what each migration adds, for the log:
@@ -378,10 +391,30 @@ var migrationNotes = []string{
 	"the cluster epoch and the server address each node dials",
 	"cluster CA rotation",
 	"several servers",
+	"the new CA in the store, for a CA rotation with several servers",
 }
 
-// SchemaVersion is the schema version this build writes.
+// SchemaVersion is the newest schema version this build knows.
 var SchemaVersion = len(migrations)
+
+// SchemaOldest is the oldest schema version this build runs a store at
+// without migrating it, as a server of a cluster of several does: the
+// newest of 2.3.0, the release before (docs/ha.md#each-builds-versions). A
+// release that adds a migration raises it to the newest of the release
+// before it; one that adds none keeps it.
+const SchemaOldest = 18
+
+// CAStoreSchemaVersion is the first schema version whose CA rotation
+// record holds the new CA, and whose cluster record holds the CA's
+// fingerprint.
+const CAStoreSchemaVersion = 19
+
+// Schema is the store's schema version now.
+func (s *Store) Schema() int { return int(s.schema.Load()) }
+
+// SchemaRange is the oldest schema version this build runs a store at,
+// and the newest it knows.
+func (s *Store) SchemaRange() (oldest, newest int) { return s.oldest, len(s.migs) }
 
 // migrate brings the schema up to len(list), in one transaction. A database
 // whose version is newer than list is refused, because this build does not
@@ -394,54 +427,89 @@ func migrate(ctx context.Context, db *sql.DB, list []string) error {
 // line to log for each step it took, unless the store was new. Nil logs
 // nothing.
 func migrateLogged(ctx context.Context, db *sql.DB, list []string, log *slog.Logger) error {
+	_, err := migrateWith(ctx, db, list, func(int, bool) (int, error) { return len(list), nil }, log)
+	return err
+}
+
+// migrateWith brings the schema to the version target gives for the
+// version the store has (and whether it is new), in one transaction, and
+// returns it. A store newer than list is ErrNewerSchema before target is
+// asked. Once the transaction commits it logs one line to log for each
+// step it took, unless the store was new; nil logs nothing.
+func migrateWith(ctx context.Context, db *sql.DB, list []string, target func(have int, isNew bool) (int, error), log *slog.Logger) (int, error) {
 	tx, err := db.BeginTx(ctx, nil)
 	if err != nil {
-		return err
+		return 0, err
 	}
 	defer tx.Rollback()
 
 	if _, err := tx.ExecContext(ctx, `CREATE TABLE IF NOT EXISTS schema_version (version INTEGER NOT NULL) STRICT`); err != nil {
-		return fmt.Errorf("creating schema_version: %w", err)
+		return 0, fmt.Errorf("creating schema_version: %w", err)
 	}
 	var n int
 	if err := tx.QueryRowContext(ctx, `SELECT count(*) FROM schema_version`).Scan(&n); err != nil {
-		return err
+		return 0, err
 	}
 	version := 0
 	switch n {
 	case 0:
 		if _, err := tx.ExecContext(ctx, `INSERT INTO schema_version (version) VALUES (0)`); err != nil {
-			return err
+			return 0, err
 		}
 	case 1:
 		if err := tx.QueryRowContext(ctx, `SELECT version FROM schema_version`).Scan(&version); err != nil {
-			return err
+			return 0, err
 		}
 	default:
-		return fmt.Errorf("schema_version has %d rows, want 1", n)
+		return 0, fmt.Errorf("schema_version has %d rows, want 1", n)
 	}
 	if version > len(list) {
-		return fmt.Errorf("%w: the store has schema version %d and this build knows up to %d; use a newer hivemind", ErrNewerSchema, version, len(list))
+		return 0, fmt.Errorf("%w: the store has schema version %d and this build knows up to %d; use a newer hivemind", ErrNewerSchema, version, len(list))
 	}
-	for v := version; v < len(list); v++ {
+	to, err := target(version, n == 0)
+	if err != nil {
+		return 0, err
+	}
+	if to < version || to > len(list) {
+		return 0, fmt.Errorf("store: cannot move the schema from version %d to %d", version, to)
+	}
+	// A store that keeps its version is not written.
+	if to == version && n == 1 {
+		return version, nil
+	}
+	if err := runMigrations(ctx, tx, list, version, to); err != nil {
+		return 0, err
+	}
+	if err := tx.Commit(); err != nil {
+		return 0, err
+	}
+	if log != nil && n == 1 {
+		logMigrated(log, version, to)
+	}
+	return to, nil
+}
+
+// runMigrations runs list[from:to] in tx, and sets the schema version to
+// to.
+func runMigrations(ctx context.Context, tx *sql.Tx, list []string, from, to int) error {
+	for v := from; v < to; v++ {
 		if _, err := tx.ExecContext(ctx, list[v]); err != nil {
 			return fmt.Errorf("migration %d: %w", v+1, err)
 		}
 	}
-	if _, err := tx.ExecContext(ctx, `UPDATE schema_version SET version = ?`, len(list)); err != nil {
+	if _, err := tx.ExecContext(ctx, `UPDATE schema_version SET version = ?`, to); err != nil {
 		return err
-	}
-	if err := tx.Commit(); err != nil {
-		return err
-	}
-	if log != nil && n == 1 {
-		for v := version + 1; v <= len(list); v++ {
-			note := ""
-			if v <= len(migrationNotes) {
-				note = migrationNotes[v-1]
-			}
-			log.Info("store schema migrated", "from", v-1, "to", v, "adds", note)
-		}
 	}
 	return nil
+}
+
+// logMigrated logs one line for each step from version from to version to.
+func logMigrated(log *slog.Logger, from, to int) {
+	for v := from + 1; v <= to; v++ {
+		note := ""
+		if v <= len(migrationNotes) {
+			note = migrationNotes[v-1]
+		}
+		log.Info("store schema migrated", "from", v-1, "to", v, "adds", note)
+	}
 }

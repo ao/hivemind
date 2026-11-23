@@ -18,11 +18,18 @@ func serversCmd() *cobra.Command {
 		Short: "List the servers of the cluster",
 		Long: `List the servers of the cluster (docs/ha.md): ID, the host name of each
 server's node, the address it advertises with its node listener's port,
-its Raft role, and when the leader last heard from it.
+its Raft role, its release, and when the leader last heard from it.
 
 ROLE is leader, follower, or nonvoter for a server that has joined and
 is catching up with the log: it becomes a voter once it has. A cluster of
 one lists its one server, and says so.
+
+VERSION is the release each server runs, as it told the leader, or, marked
+"(node)", the version its node last sent, for a server of a release before
+2.4.0, which does not say. A line after the table gives the store's schema
+version, and, during a rolling upgrade, the servers that do not run the
+next one yet: the leader moves the store to it once every server does
+(docs/ha.md#rolling-upgrades).
 
 LAST CONTACT is how long ago the server that answered last heard from each
 one: the leader hears from every follower at each heartbeat. "-" is never,
@@ -52,7 +59,7 @@ configuration, and a line after the table says there is no leader and why.`,
 
 func printServers(out io.Writer, rep server.ServersReply, now time.Time) {
 	tw := tabwriter.NewWriter(out, 0, 4, 2, ' ', 0)
-	fmt.Fprintln(tw, "ID\tNAME\tADDRESS\tROLE\tLAST CONTACT")
+	fmt.Fprintln(tw, "ID\tNAME\tADDRESS\tROLE\tVERSION\tLAST CONTACT")
 	for _, s := range rep.Servers {
 		addr := s.Advertise
 		if s.NodePort != 0 {
@@ -62,8 +69,14 @@ func printServers(out io.Writer, rep server.ServersReply, now time.Time) {
 		if s.LastContact != nil {
 			contact = max(now.Sub(*s.LastContact), 0).Round(100*time.Millisecond).String() + " ago"
 		}
-		fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%s\n", termSafe(s.ID), termSafe(firstNonEmpty(s.Name, "-")), termSafe(firstNonEmpty(addr, "-")),
-			termSafe(s.Role), contact)
+		ver := firstNonEmpty(s.Version, "-")
+		if s.Version != "" && s.VersionFrom == "node" {
+			// A build that does not answer the leader's build request: the
+			// version is what its node last sent.
+			ver += " (node)"
+		}
+		fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%s\t%s\n", termSafe(s.ID), termSafe(firstNonEmpty(s.Name, "-")), termSafe(firstNonEmpty(addr, "-")),
+			termSafe(s.Role), termSafe(ver), contact)
 	}
 	tw.Flush()
 	switch {
@@ -71,6 +84,16 @@ func printServers(out io.Writer, rep server.ServersReply, now time.Time) {
 		fmt.Fprintf(out, "\nNo leader, as %s sees it: %s\n", termSafe(rep.AnsweredBy), termSafe(firstNonEmpty(rep.Note, "no server leads")))
 	case rep.Note != "":
 		fmt.Fprintf(out, "\n%s.\n", termSafe(rep.Note))
+	}
+	switch {
+	case rep.Schema == 0:
+		// A server before 2.4.0 does not say.
+	case rep.SchemaNext != 0 && rep.SchemaWaits != "":
+		fmt.Fprintf(out, "\nStore schema %d; it moves to %d once every server runs it: %s.\n", rep.Schema, rep.SchemaNext, termSafe(rep.SchemaWaits))
+	case rep.SchemaNext != 0:
+		fmt.Fprintf(out, "\nStore schema %d; every server runs %d, and the leader moves the store to it within 10 s.\n", rep.Schema, rep.SchemaNext)
+	default:
+		fmt.Fprintf(out, "\nStore schema %d.\n", rep.Schema)
 	}
 }
 

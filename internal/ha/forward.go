@@ -14,10 +14,12 @@ import (
 	"net/http/httptrace"
 	"net/http/httputil"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"time"
 
 	"github.com/ao/hivemind/internal/pki"
+	"github.com/ao/hivemind/internal/store"
 )
 
 // What a follower passes to the leader (docs/ha.md#clients). The follower
@@ -35,6 +37,9 @@ const (
 	KindNode    = "node"
 	KindJoin    = "join"
 	kindPromote = "promote"
+	// kindBuild is the leader's question to each server: which build it
+	// runs (docs/ha.md#the-step). Every server answers it, leading or not.
+	kindBuild = "build"
 )
 
 // Forwarding headers.
@@ -88,8 +93,12 @@ func (n *Node) receiver() http.Handler {
 			return
 		}
 		kind := r.Header.Get(HeaderKind)
-		if kind == kindPromote {
+		switch kind {
+		case kindPromote:
 			n.servePromote(w, r, peer)
+			return
+		case kindBuild:
+			n.serveBuild(w, r)
 			return
 		}
 		// A request is passed on once at most: a server that does not
@@ -295,6 +304,128 @@ func (n *Node) servePromote(w http.ResponseWriter, r *http.Request, peer string)
 	}
 	n.log.Info("a server that caught up is a voter now", "server", peer)
 	w.WriteHeader(http.StatusNoContent)
+}
+
+// BuildInfo is a server's answer to the leader's build request.
+type BuildInfo struct {
+	// Version is the server's hivemind version, such as v2.4.0.
+	Version string `json:"version"`
+	// SchemaOldest and SchemaNewest are the schema versions its build
+	// runs, and Schema its store's.
+	SchemaOldest int `json:"schema_oldest"`
+	SchemaNewest int `json:"schema_newest"`
+	Schema       int `json:"schema"`
+}
+
+// ServerBuild is what the leader learnt of one server's build.
+type ServerBuild struct {
+	ID string
+	// Answered is true when the server answered the request. Legacy is
+	// true when it answered it as a request it does not know, as 2.3.0
+	// does: its build runs store.HASchemaVersion alone, and Build is that.
+	Answered, Legacy bool
+	Build            BuildInfo
+	// Err is why a server did not answer.
+	Err string
+	At  time.Time
+}
+
+// RunsSchema reports whether the server's build is known to run the
+// store at version v.
+func (b ServerBuild) RunsSchema(v int) bool {
+	return b.Answered && b.Build.SchemaOldest <= v && v <= b.Build.SchemaNewest
+}
+
+// maxBuildReply bounds the answer to a build request.
+const maxBuildReply = 4096
+
+// buildTimeout bounds one build request.
+const buildTimeout = 2 * time.Second
+
+// serveBuild answers the build request, whether or not this server leads.
+func (n *Node) serveBuild(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		writeJSONError(w, http.StatusMethodNotAllowed, "method not allowed")
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.Header().Set("Cache-Control", "no-store")
+	_ = json.NewEncoder(w).Encode(n.localBuild())
+}
+
+// localBuild is this server's own BuildInfo.
+func (n *Node) localBuild() BuildInfo {
+	if n.cfg.Build != nil {
+		return n.cfg.Build()
+	}
+	oldest, newest := n.cfg.Store.SchemaRange()
+	return BuildInfo{SchemaOldest: oldest, SchemaNewest: newest, Schema: n.cfg.Store.Schema()}
+}
+
+// Builds asks every server of the Raft configuration, voters and
+// non-voters, which build it runs, at once, and returns their answers
+// sorted by ID; this server answers for itself.
+func (n *Node) Builds(ctx context.Context) []ServerBuild {
+	members := n.Members()
+	out := make([]ServerBuild, len(members))
+	var wg sync.WaitGroup
+	for i, m := range members {
+		if m.ID == n.cfg.ID {
+			out[i] = ServerBuild{ID: m.ID, Answered: true, Build: n.localBuild(), At: time.Now()}
+			continue
+		}
+		wg.Add(1)
+		go func(i int, m Member) {
+			defer wg.Done()
+			out[i] = n.askBuild(ctx, m.ID, m.Addr)
+		}(i, m)
+	}
+	wg.Wait()
+	return out
+}
+
+// askBuild asks the server id at addr which build it runs.
+func (n *Node) askBuild(ctx context.Context, id, addr string) ServerBuild {
+	ctx, cancel := context.WithTimeout(ctx, buildTimeout)
+	defer cancel()
+	sb := ServerBuild{ID: id}
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, "https://"+addr+"/build", nil)
+	if err != nil {
+		sb.Err = err.Error()
+		return sb
+	}
+	req.Header.Set(HeaderKind, kindBuild)
+	resp, err := n.fwdClient.Do(req)
+	if err != nil {
+		sb.Err = err.Error()
+		return sb
+	}
+	defer resp.Body.Close()
+	body, err := io.ReadAll(io.LimitReader(resp.Body, maxBuildReply))
+	if err != nil {
+		sb.Err = err.Error()
+		return sb
+	}
+	return buildAnswer(id, resp.StatusCode, body, time.Now())
+}
+
+// buildAnswer reads a server's answer to the build request.
+func buildAnswer(id string, status int, body []byte, at time.Time) ServerBuild {
+	sb := ServerBuild{ID: id, At: at}
+	if status != http.StatusOK {
+		// A build without the request, 2.3.0, refuses a kind it does not
+		// know: a follower with no leader, a leader as a bad request.
+		sb.Answered, sb.Legacy = true, true
+		sb.Build = BuildInfo{SchemaOldest: store.HASchemaVersion, SchemaNewest: store.HASchemaVersion, Schema: store.HASchemaVersion}
+		return sb
+	}
+	var b BuildInfo
+	if err := json.Unmarshal(body, &b); err != nil || b.SchemaOldest < 1 || b.SchemaNewest < b.SchemaOldest {
+		sb.Err = fmt.Sprintf("the server's answer is not a build: %v", err)
+		return sb
+	}
+	sb.Answered, sb.Build = true, b
+	return sb
 }
 
 // promoteEvery is how often a non-voter checks whether it has caught up.

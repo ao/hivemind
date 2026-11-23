@@ -146,7 +146,7 @@ func TestSnapshotDuringConcurrentWrites(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		if err := invariants(ctx, db); err != nil {
+		if err := invariants(ctx, db, SchemaVersion); err != nil {
 			t.Errorf("snapshot %d is not consistent: %v", i, err)
 		}
 		db.Close()

@@ -71,7 +71,7 @@ func replicasOf(t *testing.T, s *Store, app string) []Replica {
 // checkInvariants checks what must hold after any committed change.
 func checkInvariants(t *testing.T, s *Store) {
 	t.Helper()
-	if err := invariants(context.Background(), s.db); err != nil {
+	if err := invariants(context.Background(), s.db, s.Schema()); err != nil {
 		t.Fatal(err)
 	}
 }

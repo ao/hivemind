@@ -68,9 +68,13 @@ type JoinServerRequest struct {
 	Token     string `json:"token"`
 	Advertise string `json:"advertise"`
 	NodePort  int    `json:"node_port"`
-	// Version is the joining server's hivemind version, which must be the
-	// leader's.
+	// Version is the joining server's hivemind version.
 	Version string `json:"version"`
+	// SchemaOldest and SchemaNewest are the schema versions its build
+	// runs; the cluster's store must be at one of them. A request of 2.3.0
+	// has neither, and 2.3.0 runs version 18 alone.
+	SchemaOldest int `json:"schema_oldest,omitempty"`
+	SchemaNewest int `json:"schema_newest,omitempty"`
 }
 
 // ServerInfo is one server of the cluster, as a join reply names it.

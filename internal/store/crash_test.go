@@ -132,7 +132,7 @@ func TestCrashConsistency(t *testing.T) {
 		if err != nil {
 			t.Fatalf("round %d: reopen after kill: %v", round, err)
 		}
-		if err := invariants(ctxT(t), s.db); err != nil {
+		if err := invariants(ctxT(t), s.db, s.Schema()); err != nil {
 			s.Close()
 			t.Fatalf("round %d: %v", round, err)
 		}
