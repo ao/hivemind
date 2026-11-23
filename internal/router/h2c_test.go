@@ -218,7 +218,14 @@ func TestH2CUnaryAndTrailers(t *testing.T) {
 			t.Errorf("the h2c replica got %s %q", k, v)
 		}
 	}
-	if m := tr.metrics(t); !strings.Contains(m, `hivemind_router_requests_total{host="api.example.com",code="200"} 3`) {
+	// A request is counted when its handler returns, which can be just after
+	// the client has read the reply.
+	const want = `hivemind_router_requests_total{host="api.example.com",code="200"} 3`
+	deadline := time.Now().Add(5 * time.Second)
+	for !strings.Contains(tr.metrics(t), want) && time.Now().Before(deadline) {
+		time.Sleep(20 * time.Millisecond)
+	}
+	if m := tr.metrics(t); !strings.Contains(m, want) {
 		t.Fatalf("requests:\n%s", m)
 	}
 }
@@ -475,11 +482,14 @@ func TestH2CCancellationBothWays(t *testing.T) {
 		<-r.Context().Done()
 		gone <- r.URL.Path
 	}
-	tr := newTestRouter(t, Table{"api.example.com": h2c(h2cServer(t, h))})
 	for _, h1 := range []bool{false, true} {
-		c := tr.client(h1)
-		c.Timeout = 0
 		for _, method := range []string{"Server", "Bidi"} {
+			// A router and replica of its own for each case: a cancelled
+			// stream may end the HTTP/2 connection it was on, and the next
+			// case must not start on that connection.
+			tr := newTestRouter(t, Table{"api.example.com": h2c(h2cServer(t, h))})
+			c := tr.client(h1)
+			c.Timeout = 0
 			ctx, cancel := context.WithCancel(context.Background())
 			var body io.Reader = bytes.NewReader(grpcFrame("1"))
 			var pw *io.PipeWriter
@@ -516,6 +526,9 @@ func TestH2CCancellationBothWays(t *testing.T) {
 			}
 		}
 
+		tr := newTestRouter(t, Table{"api.example.com": h2c(h2cServer(t, h))})
+		c := tr.client(h1)
+		c.Timeout = 0
 		resp, err := c.Do(grpcRequest(context.Background(), "api.example.com", "Abort", bytes.NewReader(grpcFrame("x"))))
 		if err != nil {
 			t.Fatalf("h1=%v: %v", h1, err)

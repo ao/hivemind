@@ -472,9 +472,19 @@ func (l *lockedWriter) Write(p []byte) (int, error) {
 // it do nothing: it says so once, with where each came from. Defaults, and
 // a node with a router, say nothing.
 func TestRouterSettingsWithoutARouter(t *testing.T) {
+	dataDir := t.TempDir()
 	note := func(env map[string]string) string {
 		t.Helper()
-		cfg, err := config.Load(nil, config.Options{Lookup: func(k string) (string, bool) { v, ok := env[k]; return v, ok }})
+		// A non-root user has no default data directory without HOME, which
+		// this lookup does not give, so name one (CI runs tests as non-root).
+		lookup := func(k string) (string, bool) {
+			if k == "HIVEMIND_DATA_DIR" {
+				return dataDir, true
+			}
+			v, ok := env[k]
+			return v, ok
+		}
+		cfg, err := config.Load(nil, config.Options{Lookup: lookup})
 		if err != nil {
 			t.Fatal(err)
 		}

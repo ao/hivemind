@@ -265,7 +265,8 @@ grep -qF '"host":"www.mixed.test","path":"/api"' <<<"$new_table" || cl_fail "a r
 # The read without paths again, and the warnings it causes: the server's
 # log, hivemind routes and the status of each app on the host.
 node_routes "" >/dev/null || cl_fail "GET routes as W1"
-warned() { [ "$(count "$S" "is of a build before path routes")" -ge 1 ]; }
+# Other routers before paths may warn first: wait for the line that names W1.
+warned() { docker exec "$S" grep -F "is of a build before path routes" /var/log/hivemind.log | grep -qF "node=$W1_ID"; }
 wait_for 10 warned || cl_fail "the server did not log a warning about the router before paths"
 docker exec "$S" grep -F "is of a build before path routes" /var/log/hivemind.log | grep -qF "node=$W1_ID" ||
 	cl_fail "the server's warning does not name $W1_ID: $(docker exec "$S" grep -F 'before path routes' /var/log/hivemind.log)"
@@ -313,9 +314,9 @@ for want in '"host":"grpc.mixed.test","protocol":"h2c"' '"host":"www.mixed.test"
 	grep -qF "$want" <<<"$new_table" || cl_fail "a router of this build did not get $want: $new_table"
 done
 node_routes "?paths=1" "$before" >/dev/null || cl_fail "GET routes?paths=1 as W1"
-warned() { [ "$(count "$S" "is of a build before route protocols")" -ge 1 ]; }
+warned() { docker exec "$S" grep -F "is of a build before route protocols" /var/log/hivemind.log | grep -F "node=$W1_ID" | grep -qF "version=$before"; }
 wait_for 10 warned || cl_fail "the server did not log a warning about the router before protocols"
-docker exec "$S" grep -F "is of a build before route protocols" /var/log/hivemind.log | tail -n 1 | grep -F "node=$W1_ID" | grep -qF "version=$before" ||
+docker exec "$S" grep -F "is of a build before route protocols" /var/log/hivemind.log | grep -F "node=$W1_ID" | grep -qF "version=$before" ||
 	cl_fail "the server's warning does not name $W1_ID and $before: $(docker exec "$S" grep -F 'before route protocols' /var/log/hivemind.log)"
 routes_err=$(docker exec "$S" hivemind routes 2>&1 >/dev/null)
 grep -qF "warning: the router on node $W1_ID ($before) is of a build before route protocols, and answers 503 for the h2c routes grpc.mixed.test, www.mixed.test/echo.Echo; upgrade the node" <<<"$routes_err" ||

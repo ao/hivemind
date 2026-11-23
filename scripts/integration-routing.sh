@@ -373,6 +373,9 @@ for i in 0 1 2; do
 	wait_for 45 router_reported "${CL_IDS[$i]}" ||
 		cl_fail "/metrics has no requests from ${CL_IDS[$i]}'s router: $(server_metrics | grep '^hivemind_router_requests_total' | tr '\n' ';')"
 done
+# The worker posts its counters every 15 s: wait for the post that carries the 404.
+unknown404() { server_metrics | grep -qE "^hivemind_router_requests_total\{node=\"${CL_IDS[2]}\",host=\"unknown\",code=\"404\"\} [1-9]"; }
+wait_for 45 unknown404 || true
 m=$(server_metrics)
 grep -qE "^hivemind_router_requests_total\{node=\"${CL_IDS[2]}\",host=\"unknown\",code=\"404\"\} [1-9]" <<<"$m" ||
 	cl_fail "/metrics does not have ${CL_IDS[2]}'s 404 for an unknown host: $(grep '^hivemind_router_requests_total' <<<"$m" | tr '\n' ';')"
