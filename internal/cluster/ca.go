@@ -42,7 +42,9 @@ func (a *nodeAPI) checkCA(next http.Handler) http.Handler {
 			return
 		}
 		trusts, sent := nodeapi.ParseCATrust(r.Header.Get(nodeapi.CATrustHeader))
-		if err := a.rot.Observe(r.Context(), id, trusts, sent, pki.Fingerprint(root)); errors.Is(err, carotate.ErrSuperseded) {
+		octx := carotate.WithRequestInfo(r.Context(), carotate.RequestInfo{Remote: r.RemoteAddr, Path: r.URL.Path,
+			Version: r.Header.Get(nodeapi.VersionHeader)})
+		if err := a.rot.Observe(octx, id, trusts, sent, pki.Fingerprint(root)); errors.Is(err, carotate.ErrSuperseded) {
 			a.log.Warn("node request with a certificate from the CA the rotation leaves refused: the node has presented one from the CA it goes to, "+
 				"so this one is not the node's own, or is from a connection opened before it renewed", "node", id, "remote", r.RemoteAddr)
 			writeError(w, http.StatusForbidden, nodeapi.CASupersededMessage)

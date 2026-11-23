@@ -594,7 +594,7 @@ for id in "${WID[@]}"; do
 	wait_for 60 trusts "$id" || cl_fail "worker $id does not trust the new CA: $(hm "$LI" ca status)"
 done
 out=$(hm "$LI" ca rotate renew 2>&1) ||
-	cl_fail "ca rotate renew: $out; ca status: $(ca_status 2>&1 | jq -c '.nodes' 2>&1); the leader's lines on what nodes trust: $(docker exec "${S[$LI]}" grep -E 'trusts the CA|without CA rotation|recording what a node|presents a certificate' /var/log/hivemind.log | tail -n 20 | tr '\n' ';')"
+	cl_fail "ca rotate renew: $out; ca status: $(ca_status 2>&1 | jq -c '.nodes' 2>&1); the leader's lines on what nodes trust: $(docker exec "${S[$LI]}" grep -E 'trusts the CA|does not list it|without CA rotation|recording what a node|presents a certificate' /var/log/hivemind.log | tail -n 20 | tr '\n' ';')"
 moved() { ca_status | jq -e '.rotation.listener_moved' >/dev/null; }
 wait_for 60 moved || cl_fail "the leader's certificate did not move with ${S[$DOWN]} down: $(hm "$LI" ca status)"
 for id in "${WID[@]}"; do

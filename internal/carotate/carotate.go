@@ -21,6 +21,7 @@ import (
 	"os"
 	"path/filepath"
 	"slices"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -697,6 +698,17 @@ func (m *Manager) Bundle() (nodeapi.CABundle, string) {
 	return s.bundle, s.digest
 }
 
+// RequestInfo is what Observe logs of the request it is given, when the
+// context carries it (WithRequestInfo).
+type RequestInfo struct{ Remote, Path, Version string }
+
+type fromKey struct{}
+
+// WithRequestInfo gives Observe what to log of the request ctx is for.
+func WithRequestInfo(ctx context.Context, ri RequestInfo) context.Context {
+	return context.WithValue(ctx, fromKey{}, ri)
+}
+
 // Observe records what a request from node shows: the CAs it says it
 // trusts (sent false: it said nothing, as a build without rotation) and
 // the CA its certificate is from. It returns ErrSuperseded for a
@@ -739,8 +751,15 @@ func (m *Manager) Observe(ctx context.Context, node string, trusts [][32]byte, s
 	case n.Trusts && !old.Trusts:
 		m.log.Info("a node trusts "+towardCA(s.rot), "node", node, "ca", short(toFP), "leaving", short(fromFP))
 	case seen && old.Trusts && !n.Trusts:
-		m.log.Warn("a node that trusted "+towardCA(s.rot)+" sent a request that does not list it", "node", node, "ca", short(toFP),
-			"lists", len(trusts))
+		listed := make([]string, len(trusts))
+		for i, fp := range trusts {
+			listed[i] = short(fp)
+		}
+		attrs := []any{"node", node, "ca", short(toFP), "listed", strings.Join(listed, ","), "root", short(root)}
+		if from, ok := ctx.Value(fromKey{}).(RequestInfo); ok {
+			attrs = append(attrs, "remote", from.Remote, "path", from.Path, "version", from.Version)
+		}
+		m.log.Warn("a node that trusted "+towardCA(s.rot)+" sent a request that does not list it", attrs...)
 	}
 	if n.Renewed && !old.Renewed {
 		m.log.Info("a node presents a certificate from "+towardCA(s.rot), "node", node, "ca", short(toFP), "leaving", short(fromFP))
