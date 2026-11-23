@@ -543,3 +543,61 @@ func TestEndBetweenRenames(t *testing.T) {
 		t.Fatalf("the files after: %x %x", cur[:4], n[:4])
 	}
 }
+
+// TestTrustDoubt: a node that trusts the new CA and sends a request that
+// does not list it, as one it sent before it took the CA and that came
+// late, still trusts it; a second such request trustDoubt or more later,
+// with none that lists it between, counts.
+func TestTrustDoubt(t *testing.T) {
+	c := newCluster(t, 1)
+	ctx := context.Background()
+	l := c.servers[0]
+	if _, err := l.m.Start(ctx); err != nil {
+		t.Fatal(err)
+	}
+	clk := time.Now()
+	l.m.now = func() time.Time { return clk }
+	cur, next := l.m.Current().Fingerprint(), l.m.Next().Fingerprint()
+	trusts := func() bool {
+		l.m.nmu.Lock()
+		defer l.m.nmu.Unlock()
+		return l.m.nodes["node-w"].Trusts
+	}
+	stored := func() bool {
+		marks, err := l.st.CARotationNodes(ctx)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return marks["node-w"].Trusts
+	}
+	observe := func(fps ...[32]byte) {
+		t.Helper()
+		if err := l.m.Observe(ctx, "node-w", fps, true, cur); err != nil {
+			t.Fatal(err)
+		}
+	}
+	observe(cur, next)
+	if !trusts() || !stored() {
+		t.Fatal("the node does not trust the new CA")
+	}
+	observe(cur)
+	if !trusts() || !stored() {
+		t.Fatal("one late request without the new CA counted")
+	}
+	clk = clk.Add(trustDoubt + time.Second)
+	observe(cur, next)
+	observe(cur)
+	clk = clk.Add(time.Second)
+	observe(cur)
+	if !trusts() {
+		t.Fatal("a request that listed the CA did not clear the doubt, or a second without it within trustDoubt counted")
+	}
+	clk = clk.Add(trustDoubt)
+	observe(cur)
+	if trusts() || stored() {
+		t.Fatal("a second request without the new CA, trustDoubt after the first, did not count")
+	}
+	if !strings.Contains(c.logs.String(), "sent a request that does not list it") {
+		t.Fatalf("no line for it:\n%s", c.logs.String())
+	}
+}

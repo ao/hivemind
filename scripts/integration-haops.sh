@@ -587,12 +587,15 @@ cl_note "start: every server wrote the same ca-next.crt and ca-next.key from the
 trusts() { ca_status | jq -e --arg id "$1" '.nodes[] | select(.id == $id) | .trusts' >/dev/null; }
 renewed() { ca_status | jq -e --arg id "$1" '.nodes[] | select(.id == $id) | .renewed' >/dev/null; }
 DOWN=${F[0]}
-wait_for 60 trusts "${SID[$DOWN]}" || cl_fail "${SID[$DOWN]}, a server's node, does not trust the new CA: $(hm "$LI" ca status)"
-stop_server "$DOWN"
-cl_note "${S[$DOWN]} stopped once its node trusts the new CA"
-for id in "${WID[@]}"; do
-	wait_for 60 trusts "$id" || cl_fail "worker $id does not trust the new CA: $(hm "$LI" ca status)"
+# Every node but the leader's, which the leader does not count, trusts the
+# new CA before a server stops: renew then goes ahead with that server
+# down, and a request its node sent with the old CA alone before it took
+# the new one, which can come late as the server stops, does not count.
+for id in "${SID[${F[0]}]}" "${SID[${F[1]}]}" "${WID[@]}"; do
+	wait_for 60 trusts "$id" || cl_fail "$id does not trust the new CA: $(hm "$LI" ca status)"
 done
+stop_server "$DOWN"
+cl_note "${S[$DOWN]} stopped once every node trusts the new CA"
 out=$(hm "$LI" ca rotate renew 2>&1) ||
 	cl_fail "ca rotate renew: $out; ca status: $(ca_status 2>&1 | jq -c '.nodes' 2>&1); the leader's lines on what nodes trust: $(docker exec "${S[$LI]}" grep -E 'trusts the CA|does not list it|without CA rotation|recording what a node|presents a certificate' /var/log/hivemind.log | tail -n 20 | tr '\n' ';')"
 moved() { ca_status | jq -e '.rotation.listener_moved' >/dev/null; }

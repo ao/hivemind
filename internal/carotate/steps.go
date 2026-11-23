@@ -57,6 +57,13 @@ type Ended struct {
 // backs off to one pass every 30 s.
 const cutOffRecheck = 30 * time.Second
 
+// trustDoubt is how long after a request from a node that trusts the CA
+// the rotation goes to did not list it a second one without it counts
+// (Observe): a node sends a request every 5 s at least, a lease renewal or
+// a report, so a node that no longer trusts the CA counts as such within
+// about 5 s.
+const trustDoubt = 2 * time.Second
+
 // recheckForced logs, once cutOffRecheck has passed since a forced finish,
 // which of the nodes it went ahead without have reached the server since,
 // and which have not. A request after the finish passed the node
@@ -333,6 +340,7 @@ func (m *Manager) Start(ctx context.Context) (Status, error) {
 			var cross []byte
 			if cross, err = crossFor(s.current, next, &rot); err == nil {
 				m.nodes = map[string]store.CARotationNode{}
+				m.doubt = nil
 				m.setState(derive(s.current, next, &rot, cross))
 			}
 		}
@@ -494,6 +502,7 @@ func (m *Manager) endLocked(ctx context.Context, s *state) error {
 	}
 	m.nmu.Lock()
 	m.nodes = map[string]store.CARotationNode{}
+	m.doubt = nil
 	m.setState(derive(cur, nil, nil, nil))
 	m.nmu.Unlock()
 	return nil
@@ -541,6 +550,7 @@ func (m *Manager) Abort(ctx context.Context) (Status, error) {
 		var cross []byte
 		if cross, err = crossFor(s.current, s.next, &rot); err == nil {
 			m.nodes = map[string]store.CARotationNode{}
+			m.doubt = nil
 			m.setState(derive(s.current, s.next, &rot, cross))
 		}
 	}

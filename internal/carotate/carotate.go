@@ -102,6 +102,9 @@ type Manager struct {
 	// state.
 	nmu   sync.Mutex
 	nodes map[string]store.CARotationNode
+	// doubt holds, for a node that trusts the CA the rotation goes to, when
+	// a request from it first did not list it (Observe). nmu guards it.
+	doubt map[string]time.Time
 	cur   atomic.Pointer[state]
 	gen   atomic.Uint64
 
@@ -449,6 +452,7 @@ func (m *Manager) adopt(ctx context.Context, s *state) {
 			nodes = map[string]store.CARotationNode{}
 		}
 		m.nodes = nodes
+		m.doubt = nil
 		s.gen = m.gen.Add(1)
 		m.accept = pki.NewTrustHolder(s.accept)
 		m.cur.Store(s)
@@ -468,6 +472,7 @@ func (m *Manager) adopt(ctx context.Context, s *state) {
 	}
 	if nodes, err := m.st.CARotationNodes(ctx); err == nil {
 		m.nodes = nodes
+		m.doubt = nil
 	}
 	m.setState(s)
 	m.nmu.Unlock()
@@ -733,6 +738,29 @@ func (m *Manager) Observe(ctx context.Context, node string, trusts [][32]byte, s
 	}
 	n := store.CARotationNode{NodeID: node, OldBuild: !sent, Trusts: sent && slices.Contains(trusts, toFP),
 		Renewed: old.Renewed || root == toFP}
+	// A request a node sent before it took the new CA can come after one it
+	// sent since: a long poll that fails over to another server when its
+	// own stops goes with the headers it started with. So a node that
+	// trusts the new CA stops counting as trusting it only once a second
+	// request without it comes trustDoubt or more after the first, with
+	// none that lists it between.
+	if n.Trusts {
+		delete(m.doubt, node)
+	} else if seen && old.Trusts && sent && n.Renewed == old.Renewed {
+		now := m.now()
+		first, doubted := m.doubt[node]
+		if !doubted {
+			if m.doubt == nil {
+				m.doubt = map[string]time.Time{}
+			}
+			m.doubt[node] = now
+			return nil
+		}
+		if now.Sub(first) < trustDoubt {
+			return nil
+		}
+		delete(m.doubt, node)
+	}
 	if seen && n.Trusts == old.Trusts && n.Renewed == old.Renewed && n.OldBuild == old.OldBuild {
 		return nil
 	}
