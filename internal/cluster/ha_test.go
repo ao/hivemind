@@ -118,10 +118,12 @@ func (fx *fixture) joinServer(req nodeapi.JoinServerRequest) (int, string) {
 }
 
 // TestServerJoinChecks: a server's join takes a server's token only, and
-// refuses a worker's; a worker's join refuses a server's token; a joining
-// server whose build does not run the store's schema version (here a
-// request of 2.3.0, which runs 18 alone), or with an address no other machine can
-// reach, is refused before the token is used.
+// refuses a worker's; a worker's join refuses a server's token; each
+// refusal of a token of the other role says what the token is and which
+// to use, and leaves it unused; a joining server whose build does not run
+// the store's schema version (here a request of 2.3.0, which runs 18
+// alone), or with an address no other machine can reach, is refused
+// before the token is used.
 func TestServerJoinChecks(t *testing.T) {
 	fx, tokens, admitted := joinServerFixture(t, "v2.3.0")
 	serverTok, _, err := tokens.Issue(fx.ca.Fingerprint(), time.Hour)
@@ -129,11 +131,20 @@ func TestServerJoinChecks(t *testing.T) {
 		t.Fatal(err)
 	}
 	workerTok := fx.issue(time.Hour)
-	if code, msg := fx.joinServer(nodeapi.JoinServerRequest{Token: workerTok, Advertise: "10.0.0.6", NodePort: 4484, Version: "v2.4.0", SchemaOldest: store.SchemaOldest, SchemaNewest: store.SchemaVersion}); code != http.StatusUnauthorized {
+	if code, msg := fx.joinServer(nodeapi.JoinServerRequest{Token: workerTok, Advertise: "10.0.0.6", NodePort: 4484, Version: "v2.4.0", SchemaOldest: store.SchemaOldest, SchemaNewest: store.SchemaVersion}); code != http.StatusUnauthorized ||
+		msg != "the join token is a worker's: a server joins with a token from hivemind join-token --role server" {
 		t.Fatalf("a server join with a worker's token: %d %s", code, msg)
 	}
-	if _, _, code, _ := fx.tryJoin(serverTok); code != http.StatusUnauthorized {
-		t.Fatalf("a worker join with a server's token: %d", code)
+	if _, _, code, msg := fx.tryJoin(serverTok); code != http.StatusUnauthorized ||
+		msg != "the join token is a server's: join this machine as a server with hivemind join --role server, or as a worker with a token from hivemind join-token" {
+		t.Fatalf("a worker join with a server's token: %d %s", code, msg)
+	}
+	// The server's join that was refused did not use the worker's token.
+	if _, _, code, msg := fx.tryJoin(workerTok); code != http.StatusOK {
+		t.Fatalf("a worker join with the worker's token a server's join was refused: %d %s", code, msg)
+	}
+	if _, _, code, msg := fx.tryJoin(workerTok); code != http.StatusUnauthorized || msg != errJoinRefused {
+		t.Fatalf("a worker's token used twice: %d %s, want the message for a used token", code, msg)
 	}
 	if code, msg := fx.joinServer(nodeapi.JoinServerRequest{Token: serverTok, Advertise: "10.0.0.6", NodePort: 4484, Version: "v2.3.0"}); code != http.StatusConflict ||
 		!strings.Contains(msg, fmt.Sprintf("store is at schema version %d", store.SchemaVersion)) {

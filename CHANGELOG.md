@@ -23,6 +23,12 @@ A cluster of one migrates its store on its first start, from schema version 18 t
 - An agent skips its lease renewal of every 5 s when a report went through within the last 5 s, after its first renewal.
 - `hivemind ca rotate start` with several servers is refused only while the store is below schema version 19, and while a server is a non-voter catching up. In a cluster of one at 19, `start` records the rotation before it writes the new CA's files, which a server that stops in between writes at its next start.
 
+### Fixed
+
+What the fifth acceptance run found that 2.3.0 left:
+
+- A join with a token of the other kind, a worker's token for `join --role server` or a server's for a worker's join, was refused as `the join token is invalid, used or expired`, the message of an unknown or expired token, so neither the user nor the operator could tell the mistake. It now says which kind the token is and which to use, as in `the join token is a worker's: a server joins with a token from hivemind join-token --role server`, and the token stays unused. Every other refused token keeps the one message.
+
 ## [2.3.1] - 2026-11-23
 
 The first published release of the 2.2 and 2.3 work. The `v2.2.0` and `v2.3.0` tags exist, but their release workflows failed in GitHub Actions on tests that depended on the speed of the machine and on running as root, so neither was published. 2.3.1 is 2.3.0 with those fixed. Everything in 2.3.0 and 2.2.0 is in it ([the changelog](https://github.com/ao/hivemind/blob/v2.3.1/CHANGELOG.md) has both), and the upgrade notes there apply: from 2.0.0, see 2.2.0's; from a cluster of one server, see 2.3.0's.

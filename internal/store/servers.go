@@ -127,7 +127,7 @@ func (s *Store) ReplicasToMove(ctx context.Context, node string) (int, error) {
 // ServerJoinTokens returns the join tokens for servers as a
 // pki.TokenStore. They are rows of the join-token table with the server
 // role: a server's token is refused for a worker's join, and a worker's
-// for a server's, as an unknown token is.
+// for a server's, with a *TokenRoleError, and is left unused.
 func (s *Store) ServerJoinTokens() pki.TokenStore { return joinTokens{s: s, role: roleServer} }
 
 // Join token roles.

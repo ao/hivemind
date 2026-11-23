@@ -27,7 +27,8 @@ the joining machine only trusts this cluster's CA.
 on a machine that is to be another server of the cluster (docs/ha.md). It
 expires after 1h by default, at most 24h: the joining server receives the
 cluster CA's private key. A worker's join refuses it, and a server's join
-refuses a worker's token. A cluster of two servers needs both for a write,
+refuses a worker's token, each saying which kind the token is and leaving
+it unused. A cluster of two servers needs both for a write,
 so the command warns when the token would make two; use three or five.
 
 The token goes to standard output alone, so scripts can capture it. The
