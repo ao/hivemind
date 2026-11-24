@@ -666,6 +666,14 @@ func (p *proxy) serveH2C(w http.ResponseWriter, r *http.Request, info reqInfo) {
 	defer cancel()
 	rc := http.NewResponseController(w)
 	_ = rc.SetReadDeadline(time.Time{})
+	// Go's HTTP/1 server reads the rest of a request body away when the
+	// reply starts, so a replica that answered before the router had sent
+	// it the whole body, as a stream does, got its stream reset and the
+	// client a cut reply. HTTP/2 needs nothing: its body and reply are
+	// independent.
+	if r.ProtoMajor == 1 {
+		_ = rc.EnableFullDuplex()
+	}
 	body := r.Body
 	if p.upgradeIdle > 0 {
 		// Go's HTTP/2 transport does not see the context end while it

@@ -606,3 +606,60 @@ func TestH2CEndpointsAndBackoff(t *testing.T) {
 		t.Fatalf("after the change to http: http endpoint %v, h2c endpoint %v", stays, h2cStays)
 	}
 }
+
+// A client on HTTP/1.1 whose request is still sending when the replica
+// answers, as a bidirectional gRPC stream is: the replica's first message
+// reaches the client before the client sends its own, and the client's
+// message then reaches the replica. Go's HTTP/1 server reads the rest of a
+// request body away once a reply starts, unless the handler asks for full
+// duplex; then the router's copy of the body to the replica failed, and the
+// reply was cut.
+func TestH2CFullDuplexOverHTTP1(t *testing.T) {
+	h := func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/grpc")
+		if err := sendFrame(w, "hello"); err != nil {
+			return
+		}
+		msg, err := readFrame(r.Body)
+		if err != nil {
+			return
+		}
+		_ = sendFrame(w, "echo "+msg)
+		grpcStatus(w, 0, "")
+	}
+	tr := newTestRouter(t, Table{"api.example.com": h2c(h2cServer(t, h))})
+	c := tr.client(true)
+	pr, pw := io.Pipe()
+	defer pw.Close()
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	// Without full duplex the reply waits for the body's end, and the
+	// client for its reply: the deadline ends the body, so the test fails
+	// rather than hangs.
+	stop := context.AfterFunc(ctx, func() { pw.CloseWithError(ctx.Err()) })
+	defer stop()
+	resp, err := c.Do(grpcRequest(ctx, "api.example.com", "Bidi", pr))
+	if err != nil {
+		t.Fatalf("the reply did not start while the client's body was open: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.ProtoMajor != 1 {
+		t.Fatalf("the client spoke %s, want HTTP/1.1", resp.Proto)
+	}
+	if msg, err := readFrame(resp.Body); err != nil || msg != "hello" {
+		t.Fatalf("the replica's first message, before the client sent anything: %q, %v", msg, err)
+	}
+	if _, err := pw.Write(grpcFrame("ping")); err != nil {
+		t.Fatal(err)
+	}
+	if msg, err := readFrame(resp.Body); err != nil || msg != "echo ping" {
+		t.Fatalf("the reply to the client's message: %q, %v", msg, err)
+	}
+	pw.Close()
+	if _, err := io.Copy(io.Discard, resp.Body); err != nil {
+		t.Fatal(err)
+	}
+	if s := resp.Trailer.Get("Grpc-Status"); s != "0" {
+		t.Fatalf("Grpc-Status %q, want 0", s)
+	}
+}
