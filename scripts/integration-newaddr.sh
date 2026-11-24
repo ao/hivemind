@@ -342,7 +342,7 @@ check_back() {
 	[ "$(docker exec "$S" hivemind nodes --json | grep -cF "\"dials\": \"$dials\"")" -eq 2 ] ||
 		cl_fail "nodes --json does not show both workers dialling $dials: $(docker exec "$S" hivemind nodes --json | tr '\n' ' ')"
 	if [ -n "${CL_ADVERTISE:-}" ]; then
-		docker exec "$S" hivemind nodes | awk '$3 == "server"' | grep -qF "$NEW_IP ($CL_ADVERTISE)" ||
+		docker exec "$S" hivemind nodes | awk '$3 == "server"' | has -F "$NEW_IP ($CL_ADVERTISE)" ||
 			cl_fail "hivemind nodes does not show the server as $NEW_IP ($CL_ADVERTISE): $(docker exec "$S" hivemind nodes | tr '\n' ';')"
 	fi
 	cl_note "apps converged, no replica twice, no node lost, the workers' containers kept; hivemind nodes: server at $NEW_IP${CL_ADVERTISE:+ ($CL_ADVERTISE)}, both workers dial $dials"
@@ -382,7 +382,7 @@ by_name() {
 	cl_note "20 s after the start both workers are waiting: $(docker exec "$S" hivemind nodes | awk -v a="$W1_ID" '$1 == a' | tr -s ' ')"
 	# hivemind status and nodes say why the workers' replicas are unknown.
 	for c in status nodes; do
-		docker exec "$S" hivemind "$c" | grep -q "^2 workers are waiting for their first report since the server started (start grace: .* left); their replicas show as unknown until they report.$" ||
+		docker exec "$S" hivemind "$c" | has "^2 workers are waiting for their first report since the server started (start grace: .* left); their replicas show as unknown until they report.$" ||
 			cl_fail "hivemind $c does not say that two workers wait: $(docker exec "$S" hivemind "$c" | tr '\n' ';')"
 	done
 	cl_note "hivemind status and nodes: $(docker exec "$S" hivemind status | grep "^2 workers are waiting")"
@@ -459,7 +459,7 @@ by_name() {
 	cl_note "both workers report to the restored server $(($(date +%s) - SERVED_AT)) s after its API answered, with the old server still up"
 	for c in "$W1" "$W2"; do
 		[ "$(refusals "$c")" = 1 ] || cl_fail "$c logged the refusal $(refusals "$c") times, not once"
-		if since "$c" | grep -q 'this worker talks to it again'; then
+		if since "$c" | has 'this worker talks to it again'; then
 			cl_fail "$c logged that it talks to a server again, though it never refused the restored server's address: $(since "$c" | grep 'talks to it again')"
 		fi
 	done
@@ -492,9 +492,9 @@ old_server_holds() {
 	local left c
 	left=$((OLD_AT + 25 - $(date +%s)))
 	[ "$left" -le 0 ] || sleep "$left"
-	held_logged() { since "$OLD_S" | grep -q 'level=ERROR msg="no worker has reported to this server since it started, and its start grace has ended'; }
+	held_logged() { since "$OLD_S" | has 'level=ERROR msg="no worker has reported to this server since it started, and its start grace has ended'; }
 	wait_for 30 held_logged || cl_fail "the old server did not say that no worker has reported since it started: $(since "$OLD_S" | tail -n 5)"
-	since "$OLD_S" | grep -q 'hivemind node remove <id>' || cl_fail "the old server's line does not name hivemind node remove"
+	since "$OLD_S" | has 'hivemind node remove <id>' || cl_fail "the old server's line does not name hivemind node remove"
 	if since "$OLD_S" | grep 'node lost'; then
 		cl_fail "the old server, on its own past its start grace, marked a worker lost"
 	fi
@@ -503,7 +503,7 @@ old_server_holds() {
 	[ "$(old_replica_rows)" = "$OLD_ROWS" ] ||
 		cl_fail "the old server placed replicas again past its grace: $(tr '\n' ';' <<<"$OLD_ROWS")before, $(old_replica_rows | tr '\n' ';')now"
 	for c in status nodes; do
-		docker exec "$OLD_S" hivemind "$c" | grep -q '^2 workers are waiting: none of them has reported since the server started, and its start grace has ended, so the server keeps them waiting' ||
+		docker exec "$OLD_S" hivemind "$c" | has '^2 workers are waiting: none of them has reported since the server started, and its start grace has ended, so the server keeps them waiting' ||
 			cl_fail "hivemind $c on the old server does not say that it keeps the workers waiting: $(docker exec "$OLD_S" hivemind "$c" | tr '\n' ';')"
 	done
 	cl_note "the old server alone, $(($(date +%s) - OLD_AT)) s after its start and past its 15 s grace: both workers waiting, none lost, no replica placed again, and it says so: $(since "$OLD_S" | grep -o 'level=ERROR msg="no worker has reported[^:]*')"
@@ -551,7 +551,7 @@ by_ip() {
 	# own, so the CLI on the node still finds the restored server's later.
 	docker exec "$S" hivemind init --data-dir /root/other --client-config /root/other-client.yaml >/dev/null
 	docker exec -d "$S" sh -c "exec hivemind serve --data-dir /root/other --advertise $NEW_IP --api-addr 127.0.0.1:4493 >>/var/log/other.log 2>&1"
-	other_up() { cl_listeners "$S" | grep -qx "$(cl_hexip "$NEW_IP"):1184"; }
+	other_up() { cl_listeners "$S" | has -x "$(cl_hexip "$NEW_IP"):1184"; }
 	wait_for 30 other_up || cl_fail "the other cluster's server did not listen on $NEW_IP:4484"
 	docker exec "$W1" pkill -TERM -x hivemind || true
 	wait_for 30 worker_stopped "$W1" || cl_fail "the worker on $W1 did not stop"

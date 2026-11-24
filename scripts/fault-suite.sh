@@ -458,7 +458,7 @@ same_containers() {
 }
 
 # state_is ID STATE: the node's row in the server's hivemind nodes has STATE.
-state_is() { docker exec "$S" hivemind nodes | awk -v id="$1" '$1 == id' | grep -q " $2 "; }
+state_is() { docker exec "$S" hivemind nodes | awk -v id="$1" '$1 == id' | has " $2 "; }
 
 # all_state STATE ID...: every node named has STATE.
 all_state() {
@@ -680,7 +680,7 @@ scenario_start_hold_late() {
 	# Past the 30 s grace, with no report: the hold.
 	at_since_served 40
 	all_state waiting "${ids[@]}" || cl_fail "$what: past the grace the workers are not all waiting: $(docker exec "$S" hivemind nodes | tr '\n' ';')"
-	docker exec "$S" hivemind nodes | grep -q 'none of them has reported since the server started' ||
+	docker exec "$S" hivemind nodes | has 'none of them has reported since the server started' ||
 		cl_fail "$what: hivemind nodes does not say the server holds the workers: $(docker exec "$S" hivemind nodes | tr '\n' ';')"
 	[ "$(log_count 'no worker has reported to this server since it started')" -gt "$errors0" ] ||
 		cl_fail "$what: serve did not log the hold at error"
@@ -699,7 +699,7 @@ scenario_start_hold_late() {
 		all_state waiting "${rest_ids[@]}" || cl_fail "$what: 12 s after the first heal the others are not waiting: $(docker exec "$S" hivemind nodes | tr '\n' ';')"
 		[ "$(log_count "which ends the start grace")" -gt "$ended0" ] ||
 			cl_fail "$what: serve did not log the end of the hold: $(docker exec "$S" tail -n 5 /var/log/hivemind.log | tr '\n' ';')"
-		docker exec "$S" grep "which ends the start grace" /var/log/hivemind.log | tail -n 1 | grep -q "waiting=${#rest[@]} " ||
+		docker exec "$S" grep "which ends the start grace" /var/log/hivemind.log | tail -n 1 | has "waiting=${#rest[@]} " ||
 			cl_fail "$what: the end of the hold does not name ${#rest[@]} workers waiting: $(docker exec "$S" grep "ends the start grace's hold" /var/log/hivemind.log | tail -n 1)"
 		for c in "${rest[@]}"; do
 			docker exec "$c" iptables -D OUTPUT -p tcp --dport 4484 -j DROP || cl_fail "$what: heal: iptables in $c"

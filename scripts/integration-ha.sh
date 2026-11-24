@@ -667,7 +667,7 @@ grep -q "of node ${SID[$K]}," <<<"$out" || cl_fail "the restore does not run as 
 docker exec -d "${S[$TI]}" sh -c "hivemind serve --data-dir /var/lib/hm-restored >/var/log/hm-restored.log 2>&1; echo \$? >/tmp/restored.rc"
 restored_serves() {
 	docker exec -e "HIVEMIND_TOKEN=$TOKEN" -e HIVEMIND_SERVER=http://127.0.0.1:4483 "${S[$TI]}" hivemind servers 2>/dev/null |
-		grep -q "^${SID[$K]} .*leader" && docker exec -e "HIVEMIND_TOKEN=$TOKEN" -e HIVEMIND_SERVER=http://127.0.0.1:4483 "${S[$TI]}" hivemind status 2>/dev/null | grep -q '^app0 '
+		grep -q "^${SID[$K]} .*leader" && docker exec -e "HIVEMIND_TOKEN=$TOKEN" -e HIVEMIND_SERVER=http://127.0.0.1:4483 "${S[$TI]}" hivemind status 2>/dev/null | has '^app0 '
 }
 wait_for 60 restored_serves ||
 	cl_fail "the restored server does not serve as ${SID[$K]}: $(docker exec "${S[$TI]}" sh -c 'tail -n 10 /var/log/hm-restored.log; cat /tmp/restored.rc 2>/dev/null')"

@@ -209,7 +209,7 @@ ready_nodes() { # ready_nodes ID...: every node is ready in hivemind nodes
 	local id rows
 	rows=$(docker exec "$S" hivemind nodes)
 	for id in "$@"; do
-		awk -v id="$id" '$1 == id && / ready /' <<<"$rows" | grep -q . || return 1
+		awk -v id="$id" '$1 == id && / ready /' <<<"$rows" | has . || return 1
 	done
 }
 rotate() { # rotate STEP [--force]: one step; fails the run if it fails
@@ -294,7 +294,7 @@ cl_note "rotation 1: every node has the new CA alone, nobody joined again, the l
 # 2. A worker offline during a rotation.
 OFF_ID=${CL_IDS[2]}
 stop_hivemind "$W2"
-lost() { docker exec "$S" hivemind nodes | awk -v id="$OFF_ID" '$1 == id' | grep -q ' lost '; }
+lost() { docker exec "$S" hivemind nodes | awk -v id="$OFF_ID" '$1 == id' | has ' lost '; }
 rotate start
 wait_for 60 lost || cl_fail "$W2 is not lost: $(docker exec "$S" hivemind nodes | tr '\n' ';')"
 wait_for 90 waiting_none || cl_fail "renew waits for more than the live nodes: $(ca_json)"

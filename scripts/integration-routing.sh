@@ -267,7 +267,7 @@ on_two_nodes() { # on_two_nodes GEN
 	rows=$(who_rows)
 	[ "$(awk -v g="$1" '$3 == g && $4 == "running"' <<<"$rows" | wc -l)" -eq 2 ] &&
 		[ "$(awk -v g="$1" '$3 == g && $4 == "running" { print $2 }' <<<"$rows" | sort -u | wc -l)" -eq 2 ] &&
-		! docker exec "$S" hivemind status who | grep -q "rolling out"
+		! docker exec "$S" hivemind status who | has "rolling out"
 }
 wait_for 120 on_two_nodes 1 || cl_fail "who did not run two replicas on two nodes: $(who_rows | tr '\n' ';')"
 cl_note "who runs two replicas on two nodes"
@@ -367,7 +367,7 @@ server_metrics() {
 	docker exec "$S" sh -c 'wget -qO- --header "Authorization: Bearer $(cat /var/lib/hivemind/admin.token)" http://127.0.0.1:4483/metrics'
 }
 router_reported() { # router_reported NODE_ID: /metrics has 200s for $HOST from the node's router
-	server_metrics | grep -qE "^hivemind_router_requests_total\{node=\"$1\",host=\"${HOST//./\\.}\",code=\"200\"\} [1-9]"
+	server_metrics | has -E "^hivemind_router_requests_total\{node=\"$1\",host=\"${HOST//./\\.}\",code=\"200\"\} [1-9]"
 }
 for i in 0 1 2; do
 	wait_for 45 router_reported "${CL_IDS[$i]}" ||
@@ -376,7 +376,7 @@ done
 # The 200s above may come from a push before the request for an unknown
 # host: its 404 comes with the next one, within 15 s.
 router_404() {
-	server_metrics | grep -qE "^hivemind_router_requests_total\{node=\"${CL_IDS[2]}\",host=\"unknown\",code=\"404\"\} [1-9]"
+	server_metrics | has -E "^hivemind_router_requests_total\{node=\"${CL_IDS[2]}\",host=\"unknown\",code=\"404\"\} [1-9]"
 }
 wait_for 45 router_404 ||
 	cl_fail "/metrics does not have ${CL_IDS[2]}'s 404 for an unknown host: $(server_metrics | grep '^hivemind_router_requests_total' | tr '\n' ';')"
@@ -447,7 +447,7 @@ app_rows() { # app_rows APP: "index node generation state" for each replica
 }
 rolled() { # rolled APP GEN: two replicas run at GEN, and no rollout is in flight
 	[ "$(app_rows "$1" | awk -v g="$2" '$3 == g && $4 == "running"' | wc -l)" -eq 2 ] &&
-		! docker exec "$S" hivemind status "$1" | grep -q "rolling out"
+		! docker exec "$S" hivemind status "$1" | has "rolling out"
 }
 deploy_api 1 || cl_fail "deploy api"
 wait_for 120 rolled api 1 || cl_fail "api did not run two replicas: $(app_rows api | tr '\n' ';')"
@@ -789,7 +789,7 @@ wait_for 60 rolled grpc 2 || cl_fail "grpc did not go back to two replicas: $(ap
 victim=""
 rows=$(who_rows)
 for i in 1 2; do
-	if awk -v n="${CL_IDS[$i]}" '$2 == n && $4 == "running"' <<<"$rows" | grep -q .; then
+	if awk -v n="${CL_IDS[$i]}" '$2 == n && $4 == "running"' <<<"$rows" | has .; then
 		victim=$i
 		break
 	fi
@@ -809,7 +809,7 @@ replaced() { # two replicas run, none on the killed node
 	local rows
 	rows=$(who_rows)
 	[ "$(awk '$4 == "running"' <<<"$rows" | wc -l)" -eq 2 ] &&
-		! awk -v n="${CL_IDS[$victim]}" '$2 == n' <<<"$rows" | grep -q .
+		! awk -v n="${CL_IDS[$victim]}" '$2 == n' <<<"$rows" | has .
 }
 wait_for 120 replaced || cl_fail "the replica on $VC was not placed again: $(who_rows | tr '\n' ';')"
 cl_note "the replica moved off $VC $(($(date +%s) - KILLED_AT)) s after the kill"

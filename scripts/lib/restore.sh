@@ -149,7 +149,7 @@ old_server_returns() {
 	reconnect "$OLD_S" "$OLD_IP" ${OLD_NET_ARGS:-}
 	wait_for 90 docker exec "$OLD_S" docker info || cl_fail "the Docker daemon in $OLD_S did not start again"
 	docker exec -d "$OLD_S" sh -c "exec hivemind serve $* >>/var/log/hivemind.log 2>&1"
-	old_listens() { cl_listeners "$OLD_S" | grep -qx "$(cl_hexip "$OLD_IP"):1184"; }
+	old_listens() { cl_listeners "$OLD_S" | has -x "$(cl_hexip "$OLD_IP"):1184"; }
 	wait_for 30 old_listens || cl_fail "the old server did not listen on $OLD_IP:4484"
 	OLD_AT=$(date +%s)
 	cl_note "the old server is back at $OLD_IP, with its old store: serve $*"
@@ -166,7 +166,7 @@ refused_old() { [ "$(refusals "$1")" -ge 1 ]; }
 # again: S has it ready. A worker logs "... this worker talks to it again"
 # only for an address it refused, so a worker whose name leads to another
 # machine again, the restored server, takes it without that line.
-talks_again() { docker exec "$S" hivemind nodes | awk -v id="$(cl_node_id_of "$1")" '$1 == id' | grep -q ' ready '; }
+talks_again() { docker exec "$S" hivemind nodes | awk -v id="$(cl_node_id_of "$1")" '$1 == id' | has ' ready '; }
 
 # workers_refuse_old: every worker refuses the old server, and logs it once;
 # the old server says a newer copy of the cluster exists; for 20 s nothing
@@ -194,7 +194,7 @@ workers_refuse_old() {
 		id=${CL_IDS[$i]}
 		want=waiting
 		case " ${RS_DOWN_IDS:-} " in *" $id "*) want=lost ;; esac
-		awk -v id="$id" '$1 == id' <<<"$rows" | grep -q " $want " ||
+		awk -v id="$id" '$1 == id' <<<"$rows" | has " $want " ||
 			cl_fail "$id is not $want on the old server, so it had a report from it: $(tr '\n' ';' <<<"$rows")"
 	done
 	cl_note "$(($(date +%s) - OLD_AT)) s with the old server up: each worker logged the refusal once, kept its containers, and sent it no report"

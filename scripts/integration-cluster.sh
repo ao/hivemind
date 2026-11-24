@@ -218,7 +218,7 @@ wait_for 30 docker exec "$W2" sh -c "wget -q -O - http://$W2_IP:8081/ | grep -q 
 cl_note "after a deploy on $W2_IP:8081, pinned runs on $W2_ID"
 NOWHERE_IP=192.0.2.10
 docker exec "$S" hivemind deploy --name nowhere --image nginx:alpine --port "$NOWHERE_IP:8082:80" >/dev/null || cl_fail "deploy nowhere"
-nowhere_pending() { app_rows nowhere | awk '$3 == "pending"' | grep -q "no node has address $NOWHERE_IP"; }
+nowhere_pending() { app_rows nowhere | awk '$3 == "pending"' | has "no node has address $NOWHERE_IP"; }
 wait_for 20 nowhere_pending || cl_fail "nowhere, bound to $NOWHERE_IP, is not pending with the address in its reason: $(app_rows nowhere | tr '\n' ';')"
 [ -z "$(containers_of nowhere)" ] || cl_fail "nowhere has containers: $(containers_of nowhere | tr '\n' ';')"
 cl_note "nowhere, bound to $NOWHERE_IP, is pending: $(app_rows nowhere | tr '\n' ';')"
@@ -341,7 +341,7 @@ cl_note "drain output: $(tr '\n' ';' <<<"$out")"
 
 w2_empty() { [ -z "$(docker exec "$W2" docker ps -aq --filter label=hivemind.app)" ]; }
 wait_for 30 w2_empty || cl_fail "$W2 still has hivemind containers after the drain: $(docker exec "$W2" docker ps -a --filter label=hivemind.app --format '{{.Names}} {{.State}}' | tr '\n' ';')"
-docker exec "$S" hivemind nodes | awk -v n="$W2_ID" '$1 == n' | grep -q " drained " ||
+docker exec "$S" hivemind nodes | awk -v n="$W2_ID" '$1 == n' | has " drained " ||
 	cl_fail "hivemind nodes does not show $W2_ID as drained: $(docker exec "$S" hivemind nodes | tr '\n' ';')"
 [ "$(count_running calm)" -eq 3 ] || cl_fail "calm is not at three running replicas after the drain: $(app_rows calm | tr '\n' ';')"
 rows=$(app_rows web)
@@ -373,7 +373,7 @@ for c in "$W1" "$W2"; do
 	fi
 done
 for id in "$W1_ID" "$W2_ID"; do
-	docker exec "$S" grep "node certificate renewed" /var/log/hivemind.log | grep -q "node=$id" ||
+	docker exec "$S" grep "node certificate renewed" /var/log/hivemind.log | has "node=$id" ||
 		cl_fail "the server did not log a renewal for $id"
 done
 docker exec "$S" grep -q "server certificate renewed" /var/log/hivemind.log || cl_fail "the server did not renew its own certificate"
@@ -532,7 +532,7 @@ done
 slowstop_gone() { [ -z "$(containers_of slowstop)" ]; }
 gone_at="" rolled_at=""
 while [ -z "$gone_at" ] || [ -z "$rolled_at" ]; do
-	if docker exec "$S" hivemind nodes | grep -q ' lost '; then
+	if docker exec "$S" hivemind nodes | has ' lost '; then
 		cl_fail "a node was lost while its agent removed slowstop's containers, $(($(date +%s) - deleted_at)) s after the delete: $(docker exec "$S" hivemind nodes | tr '\n' ';')"
 	fi
 	if paused=$(docker exec "$S" hivemind status | grep '^hc-[0-9]*: rollout to generation .* stopped'); then
@@ -693,7 +693,7 @@ cl_note "spread moved off $W1_ID within $(($(date +%s) - removed_at)) s"
 rows=$(app_rows web)
 [ "$(awk '$3 == "running"' <<<"$rows" | wc -l)" -eq 2 ] && [ "$(awk '$3 == "pending" && /in use/' <<<"$rows" | wc -l)" -eq 2 ] ||
 	cl_fail "web is not at two running and two pending on the host port after the removal: $(tr '\n' ';' <<<"$rows")"
-if docker exec "$S" hivemind nodes | grep -q "$W1_ID"; then
+if docker exec "$S" hivemind nodes | has "$W1_ID"; then
 	cl_fail "hivemind nodes still lists $W1_ID: $(docker exec "$S" hivemind nodes | tr '\n' ';')"
 fi
 

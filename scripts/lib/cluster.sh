@@ -16,6 +16,12 @@ CL_SOCK=/var/run/docker.sock
 
 cl_note() { echo "cluster: $*"; }
 
+# has ARGS...: grep ARGS on stdin, quietly, for the end of a pipeline. It
+# reads all of its input, where grep -q stops at the first match: with
+# pipefail, the command before it, cut off with SIGPIPE, would then fail the
+# pipeline though the line was there.
+has() { grep "$@" >/dev/null; }
+
 cl_fail() {
 	echo "cluster: FAIL: $*" >&2
 	cl_dump_logs

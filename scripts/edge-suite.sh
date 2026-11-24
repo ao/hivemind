@@ -308,7 +308,7 @@ scenario_docker_restart() {
 			fail "$mode-volume" "volume data: first $first0 -> $first1, boot count $vol0 -> $vol1"
 		fi
 		vol0=$vol1
-		if docker exec "$s" wget -qO- http://127.0.0.1:8080/ 2>/dev/null | grep -q edge; then pass "$mode-web" "web answers on 8080 again"; else fail "$mode-web" "web does not answer on 8080"; fi
+		if docker exec "$s" wget -qO- http://127.0.0.1:8080/ 2>/dev/null | has edge; then pass "$mode-web" "web answers on 8080 again"; else fail "$mode-web" "web does not answer on 8080"; fi
 		r=$(replica_field "$s" multi 0 .restarts)
 		note "$mode: restart count of multi/0 after the daemon restart: $r; 'reconcile pass failed' lines so far: $fails"
 	done
@@ -692,7 +692,7 @@ scenario_logs_restart() {
 				el=$(($(now) - t0))
 				err=$(docker exec "$s" sh -c "tail -n 3 /tmp/logs-$i.err | tr '\n' ' '")
 				echo "$mode $where replica $i: exit ${rc% *} after ~${el} s; stderr: $err" >>"$EDGE_OUT/logs-restart.txt"
-				if [ "${rc% *}" != 0 ] && echo "$err" | grep -qi "server\|connection"; then
+				if [ "${rc% *}" != 0 ] && echo "$err" | has -i "server\|connection"; then
 					pass "$mode-$where" "logs -f ended with exit ${rc% *} within ${el} s: $err"
 				else
 					fail "$mode-$where" "logs -f ended with exit ${rc% *} and stderr '$err': the stream end is not reported"
@@ -744,7 +744,7 @@ scenario_datadir() {
 		out=$(docker exec "$w" timeout 20 hivemind serve --role worker 2>&1) || rc=$?
 		out=$(echo "$out" | tail -n 3 | tr '\n' ' ')
 		echo "$what: exit $rc: $out" >>"$EDGE_OUT/datadir.txt"
-		if [ "$rc" != 0 ] && [ "$rc" != 124 ] && [ "$rc" != 143 ] && echo "$out" | grep -qi 'join\|restore\|backup'; then
+		if [ "$rc" != 0 ] && [ "$rc" != 124 ] && [ "$rc" != 143 ] && echo "$out" | has -i 'join\|restore\|backup'; then
 			pass "$what" "exit $rc: $out"
 		else
 			fail "$what" "exit $rc: $out"

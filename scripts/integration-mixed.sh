@@ -136,8 +136,8 @@ for c in "${CL_NAMES[@]}"; do
 done
 S=${CL_NAMES[0]} W1=${CL_NAMES[1]} W2=${CL_NAMES[2]}
 S_IP=$(cl_ip_of "$S") W1_IP=$(cl_ip_of "$W1")
-docker exec "$S" hivemind-2.0.0 version | grep -q "^hivemind $OLD_VERSION " || cl_fail "the old binary is not $OLD_VERSION"
-docker exec "$S" hivemind version | grep -q "^hivemind $NEW_VERSION " || cl_fail "the new binary is not $NEW_VERSION"
+docker exec "$S" hivemind-2.0.0 version | has "^hivemind $OLD_VERSION " || cl_fail "the old binary is not $OLD_VERSION"
+docker exec "$S" hivemind version | has "^hivemind $NEW_VERSION " || cl_fail "the new binary is not $NEW_VERSION"
 
 # The 2.0.0 server, and a worker of each version.
 S_ID=$(docker exec "$S" hivemind-2.0.0 init | sed -n 's/.*(node \(node-[0-9a-f]*\)).*/\1/p')
@@ -168,14 +168,14 @@ IDX_W1=$(replica_on spread "$W1_ID") IDX_W2=$(replica_on spread "$W2_ID")
 # This build's CLI against the 2.0.0 server.
 nodes_json=$(docker exec "$S" hivemind nodes --json)
 [ "$(grep -c '"eligible": null' <<<"$nodes_json")" -eq 3 ] || cl_fail "nodes --json from 2.0.0 does not leave eligible unknown: $nodes_json"
-if docker exec "$S" hivemind nodes | grep -q ineligible; then
+if docker exec "$S" hivemind nodes | has ineligible; then
 	cl_fail "nodes shows a 2.0.0 server's nodes as ineligible: $(docker exec "$S" hivemind nodes | tr '\n' ';')"
 fi
 if out=$(docker exec "$S" hivemind node drain "$W2_ID" 2>&1); then
 	cl_fail "node drain against 2.0.0 succeeded: $out"
 fi
 grep -qF "the server is older than 2.2 and has no node drain; upgrade the server" <<<"$out" || cl_fail "node drain against 2.0.0: $out"
-docker exec "$S" hivemind version | grep -qF "server http://127.0.0.1:4483: older than 2.2, which reports no version" ||
+docker exec "$S" hivemind version | has -F "server http://127.0.0.1:4483: older than 2.2, which reports no version" ||
 	cl_fail "hivemind version against 2.0.0: $(docker exec "$S" hivemind version | tr '\n' ';')"
 cl_note "the CLI against 2.0.0: eligibility unknown, node drain says the server is older"
 
@@ -209,7 +209,7 @@ fi
 grep -q "another hivemind (pid [0-9]*) runs on the data directory /var/lib/hivemind" <<<"$out" || cl_fail "a second serve: $out"
 cl_note "the migration logged $steps steps, 6 to $last_to; a second serve is refused: $out"
 
-has_address() { docker exec "$S" hivemind nodes --json | grep -qF "\"address\": \"$W1_IP\""; }
+has_address() { docker exec "$S" hivemind nodes --json | has -F "\"address\": \"$W1_IP\""; }
 wait_for 60 has_address || cl_fail "$W1 did not register its address after the upgrade: $(docker exec "$S" hivemind nodes | tr '\n' ';')"
 [ "$(count "$W1" "the server took this node's address")" -eq 1 ] || cl_fail "$W1 did not log that the server took its address"
 two_versions() { [ "$(docker exec "$S" hivemind nodes --json | grep -cF "\"version\": \"$NEW_VERSION\"")" -eq 2 ]; }
@@ -217,7 +217,7 @@ wait_for 30 two_versions || cl_fail "nodes does not show $NEW_VERSION for the se
 row() { docker exec "$S" hivemind nodes | awk -v n="$1" '$1 == n { print $4, $5 }'; }
 [ "$(row "$W1_ID")" = "$W1_IP $NEW_VERSION" ] || cl_fail "the nodes row of $W1_ID: $(row "$W1_ID")"
 [ "$(row "$W2_ID")" = "- -" ] || cl_fail "the nodes row of $W2_ID, on 2.0.0: $(row "$W2_ID")"
-docker exec "$S" hivemind version | grep -qF "server http://127.0.0.1:4483: hivemind $NEW_VERSION" ||
+docker exec "$S" hivemind version | has -F "server http://127.0.0.1:4483: hivemind $NEW_VERSION" ||
 	cl_fail "hivemind version against the upgraded server: $(docker exec "$S" hivemind version | tr '\n' ';')"
 cl_note "after the upgrade: $W1 registered its address in $(($(date +%s) - up)) s without a restart; versions shown"
 
@@ -266,10 +266,11 @@ grep -qF '"host":"www.mixed.test","path":"/api"' <<<"$new_table" || cl_fail "a r
 # log, hivemind routes and the status of each app on the host.
 node_routes "" >/dev/null || cl_fail "GET routes as W1"
 # Other routers before paths may warn first: wait for the line that names W1.
-warned() { docker exec "$S" grep -F "is of a build before path routes" /var/log/hivemind.log | grep -qF "node=$W1_ID"; }
-wait_for 10 warned || cl_fail "the server did not log a warning about the router before paths"
-docker exec "$S" grep -F "is of a build before path routes" /var/log/hivemind.log | grep -qF "node=$W1_ID" ||
-	cl_fail "the server's warning does not name $W1_ID: $(docker exec "$S" grep -F 'before path routes' /var/log/hivemind.log)"
+# The last grep reads all its input: grep -q would end at the first match,
+# and with pipefail the docker exec it cut off would fail the pipeline.
+warned() { docker exec "$S" grep -F "is of a build before path routes" /var/log/hivemind.log | grep -F "node=$W1_ID" >/dev/null; }
+wait_for 10 warned ||
+	cl_fail "the server did not log a warning about the router before paths that names $W1_ID: $(docker exec "$S" grep -F 'before path routes' /var/log/hivemind.log)"
 routes_err=$(docker exec "$S" hivemind routes 2>&1 >/dev/null)
 grep -qF "warning: the router on node $W1_ID (v2.2.0-before-paths) is of a build before path routes, and answers 503 for www.mixed.test" <<<"$routes_err" ||
 	cl_fail "hivemind routes does not warn about $W1_ID's router: $routes_err"
@@ -314,14 +315,13 @@ for want in '"host":"grpc.mixed.test","protocol":"h2c"' '"host":"www.mixed.test"
 	grep -qF "$want" <<<"$new_table" || cl_fail "a router of this build did not get $want: $new_table"
 done
 node_routes "?paths=1" "$before" >/dev/null || cl_fail "GET routes?paths=1 as W1"
-warned() { docker exec "$S" grep -F "is of a build before route protocols" /var/log/hivemind.log | grep -F "node=$W1_ID" | grep -qF "version=$before"; }
-wait_for 10 warned || cl_fail "the server did not log a warning about the router before protocols"
-docker exec "$S" grep -F "is of a build before route protocols" /var/log/hivemind.log | grep -F "node=$W1_ID" | grep -qF "version=$before" ||
-	cl_fail "the server's warning does not name $W1_ID and $before: $(docker exec "$S" grep -F 'before route protocols' /var/log/hivemind.log)"
+warned() { docker exec "$S" grep -F "is of a build before route protocols" /var/log/hivemind.log | grep -F "node=$W1_ID" | grep -F "version=$before" >/dev/null; }
+wait_for 10 warned ||
+	cl_fail "the server did not log a warning about the router before protocols that names $W1_ID and $before: $(docker exec "$S" grep -F 'before route protocols' /var/log/hivemind.log)"
 routes_err=$(docker exec "$S" hivemind routes 2>&1 >/dev/null)
 grep -qF "warning: the router on node $W1_ID ($before) is of a build before route protocols, and answers 503 for the h2c routes grpc.mixed.test, www.mixed.test/echo.Echo; upgrade the node" <<<"$routes_err" ||
 	cl_fail "hivemind routes does not warn about $W1_ID's router: $routes_err"
-docker exec "$S" hivemind routes | grep -qE '^grpc\.mixed\.test +/ +grpc +50051 +h2c ' ||
+docker exec "$S" hivemind routes | has -E '^grpc\.mixed\.test +/ +grpc +50051 +h2c ' ||
 	cl_fail "hivemind routes does not show grpc.mixed.test as h2c: $(docker exec "$S" hivemind routes | tr '\n' ';')"
 status_out=$(docker exec "$S" hivemind status)
 grep -qF "grpc: warning: the router on node $W1_ID ($before) is of a build before route protocols" <<<"$status_out" ||
@@ -343,7 +343,7 @@ if out=$(docker exec "$S" hivemind logs spread "$IDX_W2" 2>&1); then
 fi
 grep -qF "worker $W2_ID runs a hivemind older than 2.1, which cannot stream logs; upgrade it" <<<"$out" ||
 	cl_fail "logs of the replica on $W2_ID: $out"
-w1_logs() { docker exec "$S" hivemind logs spread "$IDX_W1" --tail 3 2>/dev/null | grep -q tick; }
+w1_logs() { docker exec "$S" hivemind logs spread "$IDX_W1" --tail 3 2>/dev/null | has tick; }
 # The relay and the replica's next line can take a while on a slow machine.
 wait_for 30 w1_logs ||
 	cl_fail "logs of the replica on $W1_ID did not read: $(docker exec "$S" hivemind logs spread "$IDX_W1" --tail 3 2>&1)"
@@ -369,7 +369,7 @@ is_true() { [ "$(node_q "$1" "$2")" = true ]; } # is_true NODE-ID FIELD
 state_of() { docker exec "$S" hivemind nodes | awk -v n="$1" '$1 == n' | grep -oE ' (ready|lost|waiting) ' | tr -d ' '; }
 # names_old OUTPUT: OUTPUT has a line that names n2 as a build without
 # rotation.
-names_old() { grep -F "$W2_ID" <<<"$1" | grep -qF "is a build without CA rotation (older than 2.2): upgrade it, or remove it"; }
+names_old() { grep -F "$W2_ID" <<<"$1" | has -F "is a build without CA rotation (older than 2.2): upgrade it, or remove it"; }
 CA0=$(fsum "$S" "$DATA/ca.crt")
 W2_STATE=$(fsum "$W2" "$DATA/node.json")
 rotate start
@@ -379,7 +379,7 @@ wait_for 60 is_true "$W2_ID" old_build || cl_fail "the server did not mark $W2_I
 docker exec "$W1" grep -q "trusts a new cluster CA.*ca=$NEXT_FP" /var/log/hivemind.log || cl_fail "$W1 did not log the new CA's fingerprint $NEXT_FP"
 [ "$(ca_q '[.rotation.waiting[].node] | join(" ")')" = "$W2_ID" ] || cl_fail "renew does not wait for $W2_ID alone: $(ca_json)"
 ca_text=$(docker exec "$S" hivemind ca status)
-awk -v n="$W2_ID" '$1 == n' <<<"$ca_text" | grep -qF "no (old build)" || cl_fail "ca status does not show $W2_ID as an old build: $(tr '\n' ';' <<<"$ca_text")"
+awk -v n="$W2_ID" '$1 == n' <<<"$ca_text" | has -F "no (old build)" || cl_fail "ca status does not show $W2_ID as an old build: $(tr '\n' ';' <<<"$ca_text")"
 names_old "$ca_text" || cl_fail "ca status does not say renew waits for $W2_ID, a build without rotation: $(tr '\n' ';' <<<"$ca_text")"
 status_out=$(docker exec "$S" hivemind status)
 grep -qF "Cluster CA rotation, phase trust: hivemind ca rotate renew waits for:" <<<"$status_out" && names_old "$status_out" ||
@@ -404,7 +404,7 @@ docker exec "$S" hivemind node eligibility "$S_ID" --disable >/dev/null || cl_fa
 docker exec "$S" hivemind node eligibility "$W1_ID" --disable >/dev/null || cl_fail "making $W1_ID ineligible"
 docker exec "$S" hivemind deploy --name late --image busybox:stable --replicas 1 -- sleep 3600 >/dev/null || cl_fail "deploy late"
 late_on_w2() {
-	[ "$(replica_on late "$W2_ID")" = 0 ] && docker exec "$S" hivemind status late --json | grep -q '"state": "running"' &&
+	[ "$(replica_on late "$W2_ID")" = 0 ] && docker exec "$S" hivemind status late --json | has '"state": "running"' &&
 		[ -n "$(docker exec "$W2" docker ps -q --filter label=hivemind.app=late)" ]
 }
 wait_for 120 late_on_w2 || cl_fail "late did not run on $W2_ID: $(docker exec "$S" hivemind status late | tr '\n' ';')"
@@ -420,7 +420,7 @@ fi
 grep -qF "$W2_ID" <<<"$out" && grep -qF "is a build without CA rotation" <<<"$out" ||
 	cl_fail "finish's refusal does not name $W2_ID as a build without rotation: $out"
 [ "$(count "$S" "a node of a build without CA rotation is in the cluster")" -eq 1 ] &&
-	docker exec "$S" grep -F "a node of a build without CA rotation is in the cluster" /var/log/hivemind.log | grep -qF "node=$W2_ID" ||
+	docker exec "$S" grep -F "a node of a build without CA rotation is in the cluster" /var/log/hivemind.log | has -F "node=$W2_ID" ||
 	cl_fail "the server did not log once that $W2_ID is a build without rotation: $(docker exec "$S" grep -F 'without CA rotation' /var/log/hivemind.log | tr '\n' ';')"
 cl_note "renew --force: $W1 renewed, the server's certificate stays on the old CA, $W2_ID runs a new replica on it; finish refuses: $out"
 

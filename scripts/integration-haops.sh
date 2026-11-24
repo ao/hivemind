@@ -155,8 +155,8 @@ for c in "${CL_NAMES[@]}"; do
 	cl_ready_node "$c"
 	docker cp "$CL_WORK/hivemind-old" "$c:/usr/local/bin/hm-old"
 done
-docker exec "${S[0]}" hm-old version | grep -q "^hivemind $OLD_TAG " || cl_fail "the old binary is not $OLD_TAG: $(docker exec "${S[0]}" hm-old version)"
-docker exec "${S[0]}" hivemind version | grep -q "^hivemind $NEW_VERSION " || cl_fail "the new binary is not $NEW_VERSION"
+docker exec "${S[0]}" hm-old version | has "^hivemind $OLD_TAG " || cl_fail "the old binary is not $OLD_TAG: $(docker exec "${S[0]}" hm-old version)"
+docker exec "${S[0]}" hivemind version | has "^hivemind $NEW_VERSION " || cl_fail "the new binary is not $NEW_VERSION"
 W1_IP=$(cl_ip_of "$W1")
 W2_IP=$(cl_ip_of "$W2")
 cl_note "servers ${SIP[*]}; workers $W1_IP $W2_IP"
@@ -399,30 +399,43 @@ stop_load() {
 	docker exec "$CLIENT" touch /tmp/rt.stop
 	sleep 2
 }
-# check_writes LABEL: every server's own store has every acknowledged
-# write, and none an acknowledged logout took out; the three stores have
-# the same registries.
-store_has_writes() {
-	local list miss=0 h i
-	list=$(local_get "$1" /v1/registries) || return 1
+# snapshot_writes: the hosts every writer has had acknowledged so far, in
+# W_EXP, and those an acknowledged logout took out, in W_GONE. A store is
+# read after the snapshot, and checked against it: the writers go on while
+# a check waits, and a write acknowledged after the store was read is not
+# there yet (it was missed that way when the store was read first).
+snapshot_writes() {
+	local i
+	W_EXP=""
+	W_GONE=""
 	for i in 0 1 2; do
-		for h in $(expected "$i"); do grep -q "\"$h\"" <<<"$list" || miss=$((miss + 1)); done
-		for h in $(gone "$i"); do grep -q "\"$h\"" <<<"$list" && miss=$((miss + 1)); done
+		W_EXP="$W_EXP $(expected "$i")"
+		W_GONE="$W_GONE $(gone "$i")"
 	done
-	[ "$miss" -eq 0 ]
+}
+store_has_writes() {
+	local list h
+	list=$(local_get "$1" /v1/registries) || return 1
+	for h in $W_EXP; do grep -q "\"$h\"" <<<"$list" || return 1; done
+	for h in $W_GONE; do grep -q "\"$h\"" <<<"$list" && return 1; done
+	return 0
+}
+# wait_writes I SECONDS: server I's store has, within SECONDS, every write
+# acknowledged when it is called.
+wait_writes() {
+	snapshot_writes
+	wait_for "$2" store_has_writes "$1"
 }
 # missing_writes I: what store_has_writes finds wrong in server I's store,
 # for a failure's message.
 missing_writes() {
-	local list h i out=""
+	local list h out=""
 	list=$(local_get "$1" /v1/registries 2>&1) || {
 		echo "its store cannot be read: ${list:0:300}"
 		return
 	}
-	for i in 0 1 2; do
-		for h in $(expected "$i"); do grep -q "\"$h\"" <<<"$list" || out="$out missing:$h"; done
-		for h in $(gone "$i"); do grep -q "\"$h\"" <<<"$list" && out="$out logged-out-but-present:$h"; done
-	done
+	for h in $W_EXP; do grep -q "\"$h\"" <<<"$list" || out="$out missing:$h"; done
+	for h in $W_GONE; do grep -q "\"$h\"" <<<"$list" && out="$out logged-out-but-present:$h"; done
 	echo "${out:0:1500}"
 }
 stores_agree() {
@@ -430,10 +443,13 @@ stores_agree() {
 	a=$(local_get 0 /v1/registries) && b=$(local_get 1 /v1/registries) && c=$(local_get 2 /v1/registries) || return 1
 	[ "$a" = "$b" ] && [ "$b" = "$c" ]
 }
+# check_writes LABEL: every server's own store has every acknowledged
+# write, and none an acknowledged logout took out; the three stores have
+# the same registries.
 check_writes() {
 	local i ok=0 fail=0
 	for i in 0 1 2; do
-		wait_for 30 store_has_writes "$i" || cl_fail "$1: ${S[$i]}'s store lacks acknowledged writes, or has one a logout took out: $(missing_writes "$i")"
+		wait_writes "$i" 30 || cl_fail "$1: ${S[$i]}'s store lacks acknowledged writes, or has one a logout took out: $(missing_writes "$i")"
 		ok=$((ok + $(docker exec "${S[$i]}" grep -c '^ok ' /tmp/w.out || true)))
 		fail=$((fail + $(docker exec "${S[$i]}" grep -c '^fail ' /tmp/w.out || true)))
 	done
@@ -476,7 +492,7 @@ upgrade() {
 	wait_for 90 voters_are "$(other_than "$i")" 3 || cl_fail "${S[$i]} is not a voter after its start on $2: $(roles "$(other_than "$i")" | tr '\n' ';')"
 	at_version() { [ "$(node_version "${SID[$i]}")" = "$want" ]; }
 	wait_for 60 at_version || cl_fail "${S[$i]}'s node does not report $want: $(node_version "${SID[$i]}")"
-	wait_for 30 store_has_writes "$i" || cl_fail "${S[$i]}, on $2, lacks acknowledged writes: $(missing_writes "$i")"
+	wait_writes "$i" 30 || cl_fail "${S[$i]}, on $2, lacks acknowledged writes: $(missing_writes "$i")"
 }
 # other_than I: a server other than I whose serve runs.
 other_than() {
@@ -500,7 +516,7 @@ upgrade "${F[0]}" hivemind
 [ "$(leader_of "$LI")" = "$L" ] || cl_fail "the leader changed when a follower was upgraded: $(roles "$LI" | tr '\n' ';')"
 [ "$(local_schema "${F[0]}")" = 18 ] || cl_fail "the upgraded follower's store is not at 18 under a 2.3.0 leader: $(local_schema "${F[0]}")"
 sleep 5
-wait_for 30 store_has_writes "${F[0]}" || cl_fail "the 2.4.0 follower does not apply what the 2.3.0 leader writes"
+wait_writes "${F[0]}" 30 || cl_fail "the 2.4.0 follower does not apply what the 2.3.0 leader writes"
 cl_note "a 2.3.0 leader with a 2.4.0 follower: ${S[${F[0]}]} applies what the leader writes, and its store stays at 18"
 upgrade "${F[1]}" hivemind
 
@@ -514,7 +530,7 @@ cl_note "the 2.3.0 leader handed the leadership to $NL, on $NEW_VERSION"
 serve_server "$LI"
 wait_for 90 voters_are "${F[0]}" 3 || cl_fail "the old leader, on 2.3.0 again, is not a voter: $(roles "${F[0]}" | tr '\n' ';')"
 sleep 15
-wait_for 30 store_has_writes "$LI" || cl_fail "the 2.3.0 server does not apply what the 2.4.0 leader writes"
+wait_writes "$LI" 30 || cl_fail "the 2.3.0 server does not apply what the 2.4.0 leader writes"
 for i in 0 1 2; do
 	[ "$i" -eq "$LI" ] && continue
 	[ "$(local_schema "$i")" = 18 ] || cl_fail "${S[$i]}'s store moved to $(local_schema "$i") with a 2.3.0 server in the cluster"
