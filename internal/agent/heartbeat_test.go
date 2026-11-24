@@ -14,10 +14,19 @@ import (
 type countingSource struct {
 	*failingSource
 	renewals atomic.Int64
+	// While watch is set, early counts the renewals that came within within
+	// of the last report, reported. Both are set before the agent runs.
+	reported func() time.Time
+	within   time.Duration
+	watch    atomic.Bool
+	early    atomic.Int64
 }
 
 func (c *countingSource) RenewLease(ctx context.Context, id string) error {
 	c.renewals.Add(1)
+	if c.watch.Load() && time.Since(c.reported()) < c.within {
+		c.early.Add(1)
+	}
 	return c.Store.RenewLease(ctx, id)
 }
 
@@ -98,6 +107,8 @@ func TestHeartbeatSkipsARenewalAfterAReport(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	src.reported = func() time.Time { return time.Unix(0, a.reported.Load()) }
+	src.within = 50 * time.Millisecond
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	done := make(chan error, 1)
@@ -109,9 +120,16 @@ func TestHeartbeatSkipsARenewalAfterAReport(t *testing.T) {
 	// The first tick renews though the passes report.
 	waitFor(t, func() bool { return a.reported.Load() != 0 && src.renewals.Load() >= 1 })
 	before := src.renewals.Load()
+	// A renewal is right when no report went through for a heartbeat, as
+	// when a pass stalls on a loaded machine (GitHub's runners, under the
+	// race detector); one that comes within half a heartbeat of a report
+	// should have been skipped.
+	src.watch.Store(true)
 	time.Sleep(450 * time.Millisecond)
-	if n := src.renewals.Load() - before; n != 0 {
-		t.Fatalf("%d lease renewals in 450 ms while every 20 ms pass reported, want none", n)
+	src.watch.Store(false)
+	if n := src.early.Load(); n != 0 {
+		t.Fatalf("%d lease renewals in 450 ms within 50 ms of a report, with a pass that reports every 20 ms; want none (%d renewals in all)",
+			n, src.renewals.Load()-before)
 	}
 	// The reports stop: the heartbeat renews on its own again.
 	a.reported.Store(time.Now().Add(-time.Hour).UnixNano())
