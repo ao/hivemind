@@ -400,10 +400,12 @@ stop_load() {
 	sleep 2
 }
 # snapshot_writes: the hosts every writer has had acknowledged so far, in
-# W_EXP, and those an acknowledged logout took out, in W_GONE. A store is
-# read after the snapshot, and checked against it: the writers go on while
-# a check waits, and a write acknowledged after the store was read is not
-# there yet (it was missed that way when the store was read first).
+# W_EXP, and those an acknowledged logout took out, in W_GONE. A check
+# reads a store after the snapshot, then the logouts the writers have
+# tried by then: the writers go on while it waits, so a host in W_EXP may
+# have been logged out since, and is not looked for. (Read first, the store
+# lacked the writes acknowledged after it; checked against the snapshot
+# alone, it lacked the hosts logged out since.)
 snapshot_writes() {
 	local i
 	W_EXP=""
@@ -413,15 +415,28 @@ snapshot_writes() {
 		W_GONE="$W_GONE $(gone "$i")"
 	done
 }
+# logouts_tried: every host a writer has tried to log out, acknowledged or
+# not, on one line with a space at each end.
+logouts_tried() {
+	local i
+	printf ' '
+	for i in 0 1 2; do
+		docker exec "${S[$i]}" awk -v w="$WPREFIX$i" '$2 == "logout" { printf "%s-%s.haops.test ", w, $3 }' /tmp/w.out
+	done
+}
 store_has_writes() {
-	local list h
+	local list h tried
 	list=$(local_get "$1" /v1/registries) || return 1
-	for h in $W_EXP; do grep -q "\"$h\"" <<<"$list" || return 1; done
+	tried=$(logouts_tried)
+	for h in $W_EXP; do
+		case "$tried" in *" $h "*) continue ;; esac
+		grep -q "\"$h\"" <<<"$list" || return 1
+	done
 	for h in $W_GONE; do grep -q "\"$h\"" <<<"$list" && return 1; done
 	return 0
 }
 # wait_writes I SECONDS: server I's store has, within SECONDS, every write
-# acknowledged when it is called.
+# acknowledged when it is called that no later logout may have taken out.
 wait_writes() {
 	snapshot_writes
 	wait_for "$2" store_has_writes "$1"
@@ -429,12 +444,16 @@ wait_writes() {
 # missing_writes I: what store_has_writes finds wrong in server I's store,
 # for a failure's message.
 missing_writes() {
-	local list h out=""
+	local list h tried out=""
 	list=$(local_get "$1" /v1/registries 2>&1) || {
 		echo "its store cannot be read: ${list:0:300}"
 		return
 	}
-	for h in $W_EXP; do grep -q "\"$h\"" <<<"$list" || out="$out missing:$h"; done
+	tried=$(logouts_tried)
+	for h in $W_EXP; do
+		case "$tried" in *" $h "*) continue ;; esac
+		grep -q "\"$h\"" <<<"$list" || out="$out missing:$h"
+	done
 	for h in $W_GONE; do grep -q "\"$h\"" <<<"$list" && out="$out logged-out-but-present:$h"; done
 	echo "${out:0:1500}"
 }
@@ -492,7 +511,17 @@ upgrade() {
 	wait_for 90 voters_are "$(other_than "$i")" 3 || cl_fail "${S[$i]} is not a voter after its start on $2: $(roles "$(other_than "$i")" | tr '\n' ';')"
 	at_version() { [ "$(node_version "${SID[$i]}")" = "$want" ]; }
 	wait_for 60 at_version || cl_fail "${S[$i]}'s node does not report $want: $(node_version "${SID[$i]}")"
-	wait_writes "$i" 30 || cl_fail "${S[$i]}, on $2, lacks acknowledged writes: $(missing_writes "$i")"
+	wait_writes "$i" 30 || cl_fail "${S[$i]}, on $2, lacks acknowledged writes: $(missing_writes "$i"); $(raft_lines)"
+}
+# raft_lines: each server's last Raft lines, and what its own store says of
+# the servers, for a failure's message.
+raft_lines() {
+	local j
+	for j in 0 1 2; do
+		echo "${S[$j]}'s store against the same writes: $(missing_writes "$j" | wc -w) wrong; registries: $(local_get "$j" /v1/registries 2>/dev/null | jq -r '.. | .host? // empty' 2>/dev/null | sort -t- -k2 -n | tr '\n' ' ' | head -c 700)"
+		echo "${S[$j]}'s raft lines: $(docker exec "${S[$j]}" grep -E 'component=raft|apply|refus' /var/log/hivemind.log 2>/dev/null | tail -n 12 | tr '\n' ';')"
+		echo "${S[$j]}'s own store: $(local_get "$j" /v1/servers 2>&1 | head -c 600 | tr '\n' ' ')"
+	done
 }
 # other_than I: a server other than I whose serve runs.
 other_than() {
@@ -516,7 +545,7 @@ upgrade "${F[0]}" hivemind
 [ "$(leader_of "$LI")" = "$L" ] || cl_fail "the leader changed when a follower was upgraded: $(roles "$LI" | tr '\n' ';')"
 [ "$(local_schema "${F[0]}")" = 18 ] || cl_fail "the upgraded follower's store is not at 18 under a 2.3.0 leader: $(local_schema "${F[0]}")"
 sleep 5
-wait_writes "${F[0]}" 30 || cl_fail "the 2.4.0 follower does not apply what the 2.3.0 leader writes"
+wait_writes "${F[0]}" 30 || cl_fail "the 2.4.0 follower does not apply what the 2.3.0 leader writes: $(missing_writes "${F[0]}"); $(raft_lines)"
 cl_note "a 2.3.0 leader with a 2.4.0 follower: ${S[${F[0]}]} applies what the leader writes, and its store stays at 18"
 upgrade "${F[1]}" hivemind
 
@@ -530,7 +559,7 @@ cl_note "the 2.3.0 leader handed the leadership to $NL, on $NEW_VERSION"
 serve_server "$LI"
 wait_for 90 voters_are "${F[0]}" 3 || cl_fail "the old leader, on 2.3.0 again, is not a voter: $(roles "${F[0]}" | tr '\n' ';')"
 sleep 15
-wait_writes "$LI" 30 || cl_fail "the 2.3.0 server does not apply what the 2.4.0 leader writes"
+wait_writes "$LI" 30 || cl_fail "the 2.3.0 server does not apply what the 2.4.0 leader writes: $(missing_writes "$LI"); $(raft_lines)"
 for i in 0 1 2; do
 	[ "$i" -eq "$LI" ] && continue
 	[ "$(local_schema "$i")" = 18 ] || cl_fail "${S[$i]}'s store moved to $(local_schema "$i") with a 2.3.0 server in the cluster"
